@@ -1,5 +1,14 @@
 # Photoslop — Development Plan
 
+> **Status (2026-08-19): M0–M5 complete.** Workspace + kernel + plugin
+> registry (M0); tiled canvas with pan/zoom and codecs (M1); full layer
+> model with all PSD blend modes and layers panel (M2); brush engine +
+> history (M3); selections, masks, clipboard, fill (M4); PSD/PSB reader
+> with round-trip preservation (M5). Verified end-to-end under Xvfb.
+> Known deferrals within M0–M5: rotate-view rendering, animated marching
+> ants (static outline for now), tablet pressure (mouse = 1.0), system
+> clipboard interop (internal clipboard only), magnetic lasso (planned M8).
+
 A GPU-accelerated, Photoshop-class raster/vector image editor written in Rust on **GPUI**
 (Zed's UI framework), with first-class **PSD** support, a **plugin-first architecture**
 (every feature — tools, filters, codecs, panels — is a plugin), full **layer** support,

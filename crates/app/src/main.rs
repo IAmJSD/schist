@@ -72,7 +72,15 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| Workspace::new(registry, cx)),
+            |_window, cx| {
+                cx.new(|cx| {
+                    let mut ws = Workspace::new(registry, cx);
+                    if let Some(path) = std::env::args().nth(1) {
+                        ws.load_file(path.into(), cx);
+                    }
+                    ws
+                })
+            },
         )
         .expect("failed to open window");
         cx.activate(true);
