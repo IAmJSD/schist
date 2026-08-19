@@ -1,6 +1,7 @@
 //! Photoslop — a plugin-first image editor on GPUI. See PLAN.md.
 
 mod actions;
+mod assets;
 mod keymap;
 mod panels;
 mod workspace;
@@ -64,25 +65,27 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let registry = build_registry();
 
-    Application::new().run(move |cx: &mut App| {
-        cx.bind_keys(keymap::build_bindings(&registry));
-        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_window, cx| {
-                cx.new(|cx| {
-                    let mut ws = Workspace::new(registry, cx);
-                    if let Some(path) = std::env::args().nth(1) {
-                        ws.load_file(path.into(), cx);
-                    }
-                    ws
-                })
-            },
-        )
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+    Application::new()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            cx.bind_keys(keymap::build_bindings(&registry));
+            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_window, cx| {
+                    cx.new(|cx| {
+                        let mut ws = Workspace::new(registry, cx);
+                        if let Some(path) = std::env::args().nth(1) {
+                            ws.load_file(path.into(), cx);
+                        }
+                        ws
+                    })
+                },
+            )
+            .expect("failed to open window");
+            cx.activate(true);
+        });
 }

@@ -156,4 +156,10 @@ impl History {
     pub fn entries(&self) -> &[Edit] {
         &self.undo_stack
     }
+
+    /// Redone-away entries, most-recently-undone LAST (so iterating in
+    /// reverse yields the order they would be re-applied by `redo`).
+    pub fn redo_entries(&self) -> &[Edit] {
+        &self.redo_stack
+    }
 }

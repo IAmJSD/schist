@@ -100,7 +100,7 @@ pub trait ToolPlugin: Send {
     /// Stable identifier, e.g. "brush".
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
-    /// Single-character icon used by the toolbar until real icons land.
+    /// Icon asset name (the app shell renders `icons/<name>.svg`).
     fn icon(&self) -> &'static str;
     /// Default activation key, e.g. "b". Registered into the keymap.
     fn shortcut(&self) -> Option<&'static str> {

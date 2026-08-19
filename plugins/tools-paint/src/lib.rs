@@ -240,9 +240,9 @@ impl ToolPlugin for PaintTool {
 
     fn icon(&self) -> &'static str {
         match self.mode {
-            PaintMode::Brush => "🖌",
-            PaintMode::Pencil => "✏",
-            PaintMode::Eraser => "◻",
+            PaintMode::Brush => "brush",
+            PaintMode::Pencil => "pencil",
+            PaintMode::Eraser => "eraser",
         }
     }
 

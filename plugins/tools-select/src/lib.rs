@@ -74,8 +74,8 @@ impl ToolPlugin for MarqueeTool {
 
     fn icon(&self) -> &'static str {
         match self.shape {
-            MarqueeShape::Rect => "▭",
-            MarqueeShape::Ellipse => "◯",
+            MarqueeShape::Rect => "marquee-rect",
+            MarqueeShape::Ellipse => "marquee-ellipse",
         }
     }
 
@@ -163,7 +163,7 @@ impl ToolPlugin for LassoTool {
         "Lasso"
     }
     fn icon(&self) -> &'static str {
-        "➰"
+        "lasso"
     }
     fn shortcut(&self) -> Option<&'static str> {
         Some("l")
@@ -264,7 +264,7 @@ impl ToolPlugin for WandTool {
         "Magic Wand"
     }
     fn icon(&self) -> &'static str {
-        "✨"
+        "wand"
     }
     fn shortcut(&self) -> Option<&'static str> {
         Some("w")

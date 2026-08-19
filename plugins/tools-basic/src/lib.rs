@@ -39,7 +39,7 @@ impl ToolPlugin for MoveTool {
         "Move"
     }
     fn icon(&self) -> &'static str {
-        "✥"
+        "move"
     }
     fn shortcut(&self) -> Option<&'static str> {
         Some("v")
@@ -110,7 +110,7 @@ impl ToolPlugin for EyedropperTool {
         "Eyedropper"
     }
     fn icon(&self) -> &'static str {
-        "💧"
+        "eyedropper"
     }
     fn shortcut(&self) -> Option<&'static str> {
         Some("i")
@@ -165,8 +165,8 @@ macro_rules! viewport_tool {
     };
 }
 
-viewport_tool!(HandTool, "hand", "Hand", "✋", "h");
-viewport_tool!(ZoomTool, "zoom", "Zoom", "🔍", "z");
+viewport_tool!(HandTool, "hand", "Hand", "hand", "h");
+viewport_tool!(ZoomTool, "zoom", "Zoom", "zoom", "z");
 
 pub struct BasicToolsPlugin;
 

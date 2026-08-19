@@ -45,6 +45,22 @@ pub struct Workspace {
     space_held: bool,
     pointer_down: bool,
     pub status: SharedString,
+    /// Which transient popup (menu / dropdown) is open.
+    pub open_popup: Option<Popup>,
+    /// Live bounds of slider tracks, recorded each frame by their canvases.
+    slider_bounds: FxHashMap<&'static str, Bounds<Pixels>>,
+    /// Slider drag in progress: (slider id, value before the drag) — used
+    /// to commit layer-opacity drags as one undo step on release.
+    active_slider: Option<(&'static str, f32)>,
+    /// Layer thumbnails keyed by layer id, tagged with the doc revision
+    /// they were rendered at.
+    thumbs: FxHashMap<photoslop_core::LayerId, (u64, Arc<RenderImage>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Popup {
+    Menu(usize),
+    BlendModes,
 }
 
 #[derive(Default)]
@@ -75,6 +91,10 @@ impl Workspace {
             space_held: false,
             pointer_down: false,
             status: "Ready".into(),
+            open_popup: None,
+            slider_bounds: FxHashMap::default(),
+            active_slider: None,
+            thumbs: FxHashMap::default(),
         };
         ws.new_document();
         ws
@@ -391,6 +411,199 @@ impl Workspace {
             tool.on_cancel(&mut ctx);
         }
         self.after_change(cx);
+    }
+
+    // ----- UI support: popups, sliders, thumbnails, history -----
+
+    pub fn toggle_popup(&mut self, popup: Popup, cx: &mut Context<Self>) {
+        self.open_popup = if self.open_popup == Some(popup) {
+            None
+        } else {
+            Some(popup)
+        };
+        cx.notify();
+    }
+
+    pub fn close_popup(&mut self, cx: &mut Context<Self>) {
+        if self.open_popup.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn record_slider_bounds(&mut self, id: &'static str, bounds: Bounds<Pixels>) {
+        self.slider_bounds.insert(id, bounds);
+    }
+
+    /// 0..=1 ratio of a window position along a slider's recorded track.
+    pub fn slider_ratio(&self, id: &'static str, window_pos: Point<Pixels>) -> Option<f32> {
+        let b = self.slider_bounds.get(id)?;
+        let w = f32::from(b.size.width);
+        if w <= 0.0 {
+            return None;
+        }
+        Some(((f32::from(window_pos.x) - f32::from(b.origin.x)) / w).clamp(0.0, 1.0))
+    }
+
+    pub fn begin_slider(&mut self, id: &'static str, before: f32) {
+        self.active_slider = Some((id, before));
+    }
+
+    pub fn dragging_slider(&self, id: &'static str) -> bool {
+        matches!(self.active_slider, Some((s, _)) if s == id)
+    }
+
+    /// End a slider drag, returning the value it started at.
+    pub fn end_slider(&mut self, id: &'static str) -> Option<f32> {
+        match self.active_slider {
+            Some((s, before)) if s == id => {
+                self.active_slider = None;
+                Some(before)
+            }
+            _ => None,
+        }
+    }
+
+    /// Live (history-free) layer opacity update during a slider drag; the
+    /// drag commits one undo step on release via `commit_layer_opacity`.
+    pub fn set_layer_opacity_live(&mut self, id: photoslop_core::LayerId, value: f32) {
+        if let Some(doc) = &mut self.doc {
+            let mut bounds = IntRect::EMPTY;
+            if let Some(layer) = doc.tree.find_mut(id) {
+                layer.opacity = value;
+                bounds = layer.content_bounds();
+            }
+            doc.add_damage(bounds);
+        }
+    }
+
+    pub fn commit_layer_opacity(
+        &mut self,
+        id: photoslop_core::LayerId,
+        before: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = &mut self.doc {
+            let after = doc.tree.find(id).map(|l| l.opacity).unwrap_or(before);
+            if (after - before).abs() < 1e-4 {
+                return;
+            }
+            // Rewind silently so the edit records the true before state.
+            if let Some(layer) = doc.tree.find_mut(id) {
+                layer.opacity = before;
+            }
+            let mut edit = doc.begin_edit("Layer Opacity");
+            edit.change_props(id, |l| l.opacity = after);
+            edit.commit();
+        }
+        self.after_change(cx);
+    }
+
+    pub fn set_blend_mode(
+        &mut self,
+        id: photoslop_core::LayerId,
+        mode: photoslop_core::BlendMode,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = &mut self.doc {
+            let mut edit = doc.begin_edit("Blend Mode");
+            edit.change_props(id, |l| l.blend = mode);
+            edit.commit();
+        }
+        self.after_change(cx);
+    }
+
+    /// Jump in history: negative = undo n steps, positive = redo n steps.
+    pub fn history_jump(&mut self, steps: i32, cx: &mut Context<Self>) {
+        if let Some(doc) = &mut self.doc {
+            if steps < 0 {
+                for _ in 0..(-steps) {
+                    if doc.undo().is_none() {
+                        break;
+                    }
+                }
+            } else {
+                for _ in 0..steps {
+                    if doc.redo().is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        self.after_change(cx);
+    }
+
+    /// 36x28 thumbnail of a raster layer over a checkerboard, cached per
+    /// document revision.
+    pub fn layer_thumbnail(&mut self, id: photoslop_core::LayerId) -> Option<Arc<RenderImage>> {
+        const TW: usize = 36;
+        const TH: usize = 28;
+        let doc = self.doc.as_ref()?;
+        if let Some((rev, img)) = self.thumbs.get(&id) {
+            if *rev == doc.revision {
+                return Some(img.clone());
+            }
+        }
+        let layer = doc.tree.find(id)?;
+        let raster = layer.as_raster()?;
+        let bounds = {
+            let b = layer.content_bounds().intersect(&doc.canvas_rect());
+            if b.is_empty() {
+                doc.canvas_rect()
+            } else {
+                b
+            }
+        };
+        if bounds.is_empty() {
+            return None;
+        }
+        let scale = (bounds.width() as f32 / TW as f32).max(bounds.height() as f32 / TH as f32);
+        let (w, h) = (
+            ((bounds.width() as f32 / scale) as usize).clamp(1, TW),
+            ((bounds.height() as f32 / scale) as usize).clamp(1, TH),
+        );
+        let mut bgra = vec![0u8; w * h * 4];
+        for ty in 0..h {
+            for tx in 0..w {
+                let sx = bounds.left + ((tx as f32 + 0.5) * scale) as i32;
+                let sy = bounds.top + ((ty as f32 + 0.5) * scale) as i32;
+                let px = raster.tiles.pixel(sx, sy).to_u8();
+                let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
+                let bg = if ((tx >> 2) + (ty >> 2)) & 1 == 0 {
+                    0xE0u32
+                } else {
+                    0xB0u32
+                };
+                let inv = 255 - a;
+                let d = (ty * w + tx) * 4;
+                bgra[d] = ((b * a + bg * inv) / 255) as u8;
+                bgra[d + 1] = ((g * a + bg * inv) / 255) as u8;
+                bgra[d + 2] = ((r * a + bg * inv) / 255) as u8;
+                bgra[d + 3] = 255;
+            }
+        }
+        let buffer = image::RgbaImage::from_raw(w as u32, h as u32, bgra)?;
+        let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
+        let rev = doc.revision;
+        self.thumbs.insert(id, (rev, img.clone()));
+        // Drop cache entries for layers that no longer exist.
+        if self.thumbs.len() > 64 {
+            if let Some(doc) = self.doc.as_ref() {
+                self.thumbs.retain(|lid, _| doc.tree.find(*lid).is_some());
+            }
+        }
+        Some(img)
+    }
+
+    /// Toggle a group's expanded state (pure UI state, not undoable).
+    pub fn toggle_group_open(&mut self, id: photoslop_core::LayerId, cx: &mut Context<Self>) {
+        if let Some(doc) = &mut self.doc {
+            if let Some(layer) = doc.tree.find_mut(id) {
+                if let photoslop_core::LayerKind::Group(g) = &mut layer.kind {
+                    g.open = !g.open;
+                }
+            }
+        }
+        cx.notify();
     }
 
     // ----- painting -----
@@ -798,6 +1011,8 @@ impl Render for Workspace {
                 ws.cancel_gesture(cx);
             }))
             .on_action(|_: &Quit, _w, cx| cx.quit())
+            .child(panels::menu_bar(self, cx))
+            .child(panels::tool_options_bar(self, cx))
             .child(
                 div()
                     .flex()
