@@ -125,8 +125,17 @@ impl Document {
 
     fn apply_op(&mut self, op: &EditOp, dir: Direction) {
         match op {
-            EditOp::TileWrite { layer, coord, before, after } => {
-                let target = if dir == Direction::Undo { before } else { after };
+            EditOp::TileWrite {
+                layer,
+                coord,
+                before,
+                after,
+            } => {
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
                 if let Some(l) = self.tree.find_mut(*layer) {
                     if let Some(raster) = l.as_raster_mut() {
                         match target {
@@ -139,8 +148,17 @@ impl Document {
                 }
                 self.add_damage(coord.rect());
             }
-            EditOp::MaskTileWrite { layer, coord, before, after } => {
-                let target = if dir == Direction::Undo { before } else { after };
+            EditOp::MaskTileWrite {
+                layer,
+                coord,
+                before,
+                after,
+            } => {
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
                 if let Some(l) = self.tree.find_mut(*layer) {
                     if let Some(mask) = &mut l.mask {
                         match target {
@@ -184,7 +202,11 @@ impl Document {
                 self.structure_changed();
             }
             EditOp::LayerMove { from, to } => {
-                let (src, dst) = if dir == Direction::Redo { (from, to) } else { (to, from) };
+                let (src, dst) = if dir == Direction::Redo {
+                    (from, to)
+                } else {
+                    (to, from)
+                };
                 if let Some(layer) = self.tree.remove_at(src) {
                     let bounds = layer.content_bounds();
                     self.tree.insert_at(dst, layer);
@@ -193,11 +215,23 @@ impl Document {
                 self.structure_changed();
             }
             EditOp::LayerTranslate { layer, dx, dy } => {
-                let (dx, dy) = if dir == Direction::Undo { (-dx, -dy) } else { (*dx, *dy) };
+                let (dx, dy) = if dir == Direction::Undo {
+                    (-dx, -dy)
+                } else {
+                    (*dx, *dy)
+                };
                 self.translate_layer_content(*layer, dx, dy);
             }
-            EditOp::LayerProps { layer, before, after } => {
-                let props = if dir == Direction::Undo { before } else { after };
+            EditOp::LayerProps {
+                layer,
+                before,
+                after,
+            } => {
+                let props = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
                 let mut bounds = IntRect::EMPTY;
                 if let Some(l) = self.tree.find_mut(*layer) {
                     props.apply_to(l);
@@ -206,8 +240,16 @@ impl Document {
                 self.add_damage(bounds);
                 self.structure_changed();
             }
-            EditOp::MaskSet { layer, before, after } => {
-                let target = if dir == Direction::Undo { before } else { after };
+            EditOp::MaskSet {
+                layer,
+                before,
+                after,
+            } => {
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
                 let mut bounds = IntRect::EMPTY;
                 if let Some(l) = self.tree.find_mut(*layer) {
                     l.mask = target.as_deref().cloned();
@@ -217,7 +259,11 @@ impl Document {
                 self.structure_changed();
             }
             EditOp::SelectionSet { before, after } => {
-                let target = if dir == Direction::Undo { before } else { after };
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
                 self.selection = (**target).clone();
                 self.revision += 1;
             }
@@ -302,7 +348,12 @@ impl<'a> EditBuilder<'a> {
         let raster = layer.as_raster_mut()?;
         if !self.recorded_tiles.contains_key(&entry_key) {
             let before = raster.tiles.snapshot(coord);
-            self.ops.push(EditOp::TileWrite { layer: layer_id, coord, before, after: None });
+            self.ops.push(EditOp::TileWrite {
+                layer: layer_id,
+                coord,
+                before,
+                after: None,
+            });
             self.recorded_tiles.insert(entry_key, self.ops.len() - 1);
         }
         self.damage = self.damage.union(&coord.rect());
@@ -320,8 +371,14 @@ impl<'a> EditBuilder<'a> {
         let mask = layer.mask.as_mut()?;
         if !self.recorded_mask_tiles.contains_key(&entry_key) {
             let before = mask.tiles.get(coord).cloned();
-            self.ops.push(EditOp::MaskTileWrite { layer: layer_id, coord, before, after: None });
-            self.recorded_mask_tiles.insert(entry_key, self.ops.len() - 1);
+            self.ops.push(EditOp::MaskTileWrite {
+                layer: layer_id,
+                coord,
+                before,
+                after: None,
+            });
+            self.recorded_mask_tiles
+                .insert(entry_key, self.ops.len() - 1);
         }
         self.damage = self.damage.union(&coord.rect());
         Some(mask.tiles.get_mut_or_insert(coord))
@@ -332,17 +389,25 @@ impl<'a> EditBuilder<'a> {
         let id = layer.id;
         self.damage = self.damage.union(&layer.content_bounds());
         self.doc.tree.insert_at(&path, layer.clone());
-        self.ops.push(EditOp::LayerInsert { path, layer: Box::new(layer) });
+        self.ops.push(EditOp::LayerInsert {
+            path,
+            layer: Box::new(layer),
+        });
         id
     }
 
     pub fn remove_layer(&mut self, id: LayerId) -> bool {
-        let Some((path, layer)) = self.doc.tree.remove(id) else { return false };
+        let Some((path, layer)) = self.doc.tree.remove(id) else {
+            return false;
+        };
         self.damage = self.damage.union(&layer.content_bounds());
         if self.doc.active_layer == Some(id) {
             self.doc.active_layer = None;
         }
-        self.ops.push(EditOp::LayerRemove { path, layer: Box::new(layer) });
+        self.ops.push(EditOp::LayerRemove {
+            path,
+            layer: Box::new(layer),
+        });
         true
     }
 
@@ -375,7 +440,11 @@ impl<'a> EditBuilder<'a> {
             let bounds = layer.content_bounds();
             if before != after {
                 self.damage = self.damage.union(&bounds);
-                self.ops.push(EditOp::LayerProps { layer: id, before, after });
+                self.ops.push(EditOp::LayerProps {
+                    layer: id,
+                    before,
+                    after,
+                });
             }
         }
     }
@@ -412,7 +481,12 @@ impl<'a> EditBuilder<'a> {
         // Fill in `after` snapshots for tile ops now that mutation is done.
         for op in &mut self.ops {
             match op {
-                EditOp::TileWrite { layer, coord, after, .. } => {
+                EditOp::TileWrite {
+                    layer,
+                    coord,
+                    after,
+                    ..
+                } => {
                     *after = self
                         .doc
                         .tree
@@ -420,7 +494,12 @@ impl<'a> EditBuilder<'a> {
                         .and_then(|l| l.as_raster())
                         .and_then(|r| r.tiles.snapshot(*coord));
                 }
-                EditOp::MaskTileWrite { layer, coord, after, .. } => {
+                EditOp::MaskTileWrite {
+                    layer,
+                    coord,
+                    after,
+                    ..
+                } => {
                     *after = self
                         .doc
                         .tree
@@ -432,7 +511,10 @@ impl<'a> EditBuilder<'a> {
             }
         }
         let damage = self.damage;
-        self.doc.history.push(Edit { name: self.name, ops: self.ops });
+        self.doc.history.push(Edit {
+            name: self.name,
+            ops: self.ops,
+        });
         self.doc.add_damage(damage);
         self.doc.revision += 1;
         self.doc.dirty = true;
@@ -464,7 +546,10 @@ type Arc2<T> = std::sync::Arc<T>;
 
 impl StrokeEdit {
     pub fn new(name: impl Into<String>) -> StrokeEdit {
-        StrokeEdit { name: name.into(), ..Default::default() }
+        StrokeEdit {
+            name: name.into(),
+            ..Default::default()
+        }
     }
 
     /// Call before (or while) mutating a layer tile; captures the pre-stroke
@@ -541,7 +626,12 @@ impl StrokeEdit {
                 .find(layer)
                 .and_then(|l| l.as_raster())
                 .and_then(|r| r.tiles.snapshot(coord));
-            ops.push(EditOp::TileWrite { layer, coord, before, after });
+            ops.push(EditOp::TileWrite {
+                layer,
+                coord,
+                before,
+                after,
+            });
         }
         for ((layer, coord), before) in self.mask_befores {
             let after = doc
@@ -549,9 +639,17 @@ impl StrokeEdit {
                 .find(layer)
                 .and_then(|l| l.mask.as_ref())
                 .and_then(|m| m.tiles.get(coord).cloned());
-            ops.push(EditOp::MaskTileWrite { layer, coord, before, after });
+            ops.push(EditOp::MaskTileWrite {
+                layer,
+                coord,
+                before,
+                after,
+            });
         }
-        doc.history.push(Edit { name: self.name, ops });
+        doc.history.push(Edit {
+            name: self.name,
+            ops,
+        });
         doc.add_damage(self.damage);
         doc.dirty = true;
         true
@@ -589,7 +687,10 @@ impl StrokeEdit {
 /// (importer/test convenience; not undoable).
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
     use crate::tile::TILE_SIZE;
-    assert_eq!(rgba.len(), rect.width() as usize * rect.height() as usize * 4);
+    assert_eq!(
+        rgba.len(),
+        rect.width() as usize * rect.height() as usize * 4
+    );
     let w = rect.width() as usize;
     for coord in TileCoord::covering(&rect) {
         let trect = coord.rect();
@@ -605,12 +706,8 @@ pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8])
                 let sx = (x - rect.left) as usize;
                 let lx = (x - trect.left) as usize;
                 let s = (sy * w + sx) * 4;
-                let px = photoslop_color::Rgba::from_u8(
-                    rgba[s],
-                    rgba[s + 1],
-                    rgba[s + 2],
-                    rgba[s + 3],
-                );
+                let px =
+                    photoslop_color::Rgba::from_u8(rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]);
                 buf.set(ly * TILE_SIZE as usize + lx, px);
             }
         }
@@ -705,7 +802,14 @@ mod tests {
         let mut edit = doc.begin_edit("Paint");
         edit.writable_tile(id, coord).unwrap().set(0, Rgba::WHITE);
         edit.cancel();
-        let px = doc.tree.find(id).unwrap().as_raster().unwrap().tiles.pixel(0, 0);
+        let px = doc
+            .tree
+            .find(id)
+            .unwrap()
+            .as_raster()
+            .unwrap()
+            .tiles
+            .pixel(0, 0);
         assert_eq!(px, Rgba::TRANSPARENT);
         assert!(!doc.history.can_undo());
     }
@@ -723,7 +827,10 @@ mod tests {
         let (mut doc, _) = doc_with_layer();
         let mut edit = doc.begin_edit("Select");
         edit.change_selection(|sel, _| {
-            sel.select_rect(IntRect::from_xywh(0, 0, 10, 10), crate::selection::SelectOp::Replace)
+            sel.select_rect(
+                IntRect::from_xywh(0, 0, 10, 10),
+                crate::selection::SelectOp::Replace,
+            )
         });
         edit.commit();
         assert!(!doc.selection.is_empty());

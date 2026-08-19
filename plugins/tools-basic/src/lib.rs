@@ -46,8 +46,12 @@ impl ToolPlugin for MoveTool {
     }
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
-        let Some(id) = ctx.doc.active_layer else { return };
-        let Some(layer) = ctx.doc.tree.find(id) else { return };
+        let Some(id) = ctx.doc.active_layer else {
+            return;
+        };
+        let Some(layer) = ctx.doc.tree.find(id) else {
+            return;
+        };
         if layer.locked {
             return;
         }
@@ -118,7 +122,8 @@ impl ToolPlugin for EyedropperTool {
         if !ctx.doc.canvas_rect().contains(x, y) {
             return;
         }
-        let px = photoslop_compositor::composite_region_rgba8(ctx.doc, IntRect::from_xywh(x, y, 1, 1));
+        let px =
+            photoslop_compositor::composite_region_rgba8(ctx.doc, IntRect::from_xywh(x, y, 1, 1));
         let color = Rgba::from_u8(px[0], px[1], px[2], 255);
         if input.modifiers.alt {
             ctx.state.background = color;
@@ -186,13 +191,18 @@ mod tests {
     use photoslop_plugin_api::Modifiers;
 
     fn input(x: f32, y: f32) -> PointerInput {
-        PointerInput { x, y, pressure: 1.0, modifiers: Modifiers::default() }
+        PointerInput {
+            x,
+            y,
+            pressure: 1.0,
+            modifiers: Modifiers::default(),
+        }
     }
 
     fn red_square_doc() -> Document {
         let mut doc = Document::new("t", 256, 256, Depth::Eight);
         let mut layer = Layer::new_raster("sq");
-        let buf = vec![255u8, 0, 0, 255].repeat(32 * 32);
+        let buf = [255u8, 0, 0, 255].repeat(32 * 32);
         blit_rgba8(
             &mut layer.as_raster_mut().unwrap().tiles,
             Depth::Eight,
@@ -209,13 +219,23 @@ mod tests {
         let id = doc.active_layer.unwrap();
         let mut state = EditorState::default();
         let mut tool = MoveTool::new();
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
         tool.on_pointer_move(&mut ctx, input(120.0, 70.0));
         tool.on_pointer_up(&mut ctx, input(120.0, 70.0));
 
         let px = |doc: &Document, x, y| {
-            doc.tree.find(id).unwrap().as_raster().unwrap().tiles.pixel(x, y).to_u8()
+            doc.tree
+                .find(id)
+                .unwrap()
+                .as_raster()
+                .unwrap()
+                .tiles
+                .pixel(x, y)
+                .to_u8()
         };
         assert_eq!(px(&doc, 15, 15)[3], 0, "old spot empty");
         assert_eq!(px(&doc, 115, 65), [255, 0, 0, 255], "moved by (100,50)");
@@ -232,7 +252,10 @@ mod tests {
         let id = doc.active_layer.unwrap();
         let mut state = EditorState::default();
         let mut tool = MoveTool::new();
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(0.0, 0.0));
         tool.on_pointer_up(&mut ctx, input(3.0, 7.0));
         let tiles = &doc.tree.find(id).unwrap().as_raster().unwrap().tiles;
@@ -245,7 +268,10 @@ mod tests {
         let mut doc = red_square_doc();
         let mut state = EditorState::default();
         let mut tool = EyedropperTool;
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
         assert_eq!(state.foreground.to_u8(), [255, 0, 0, 255]);
     }

@@ -14,18 +14,38 @@ pub struct IntRect {
 }
 
 impl IntRect {
-    pub const EMPTY: IntRect = IntRect { left: 0, top: 0, right: 0, bottom: 0 };
+    pub const EMPTY: IntRect = IntRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
 
     pub fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
-        IntRect { left, top, right, bottom }
+        IntRect {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     pub fn from_size(width: u32, height: u32) -> Self {
-        IntRect { left: 0, top: 0, right: width as i32, bottom: height as i32 }
+        IntRect {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        }
     }
 
     pub fn from_xywh(x: i32, y: i32, w: u32, h: u32) -> Self {
-        IntRect { left: x, top: y, right: x + w as i32, bottom: y + h as i32 }
+        IntRect {
+            left: x,
+            top: y,
+            right: x + w as i32,
+            bottom: y + h as i32,
+        }
     }
 
     pub fn width(&self) -> i32 {

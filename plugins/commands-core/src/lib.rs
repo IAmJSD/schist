@@ -2,9 +2,8 @@
 //! (all/deselect/inverse), and layer operations — with their default
 //! Photoshop keybindings.
 
-use photoslop_color::Depth;
 use photoslop_core::{
-    blit_rgba8, Document, IntRect, Layer, LayerId, LayerKind, LayerPath, SelectOp, TileCoord,
+    blit_rgba8, Document, IntRect, Layer, LayerId, LayerKind, LayerPath, TileCoord,
     TILE_SIZE,
 };
 use photoslop_plugin_api::{
@@ -18,7 +17,12 @@ fn cmd(
     keybind: Option<&'static str>,
     run: impl Fn(&mut CommandCtx) + Send + 'static,
 ) -> Command {
-    Command { id, title, keybind, run: Box::new(run) }
+    Command {
+        id,
+        title,
+        keybind,
+        run: Box::new(run),
+    }
 }
 
 /// Path just above the active layer (or top of stack).
@@ -59,7 +63,9 @@ fn copy_pixels(doc: &Document, merged: bool) -> Option<ClipboardImage> {
         photoslop_compositor::composite_region_rgba8(doc, bounds)
     } else {
         let layer = doc.active_layer.and_then(|id| doc.tree.find(id))?;
-        let LayerKind::Raster(raster) = &layer.kind else { return None };
+        let LayerKind::Raster(raster) = &layer.kind else {
+            return None;
+        };
         let mut buf = vec![0u8; w * h * 4];
         for y in 0..h {
             for x in 0..w {
@@ -76,7 +82,9 @@ fn copy_pixels(doc: &Document, merged: bool) -> Option<ClipboardImage> {
     if !doc.selection.is_empty() {
         for y in 0..h {
             for x in 0..w {
-                let c = doc.selection.coverage(bounds.left + x as i32, bounds.top + y as i32);
+                let c = doc
+                    .selection
+                    .coverage(bounds.left + x as i32, bounds.top + y as i32);
                 let a = &mut rgba[(y * w + x) * 4 + 3];
                 *a = ((*a as u16 * c as u16) / 255) as u8;
             }
@@ -87,7 +95,9 @@ fn copy_pixels(doc: &Document, merged: bool) -> Option<ClipboardImage> {
 
 /// Clear the selected region of the active layer (used by Cut).
 fn clear_selection(ctx: &mut CommandCtx) {
-    let Some(id) = ctx.doc.active_layer else { return };
+    let Some(id) = ctx.doc.active_layer else {
+        return;
+    };
     let canvas = ctx.doc.canvas_rect();
     let bounds = if ctx.doc.selection.is_empty() {
         canvas
@@ -102,7 +112,9 @@ fn clear_selection(ctx: &mut CommandCtx) {
     for coord in TileCoord::covering(&bounds) {
         let trect = coord.rect();
         let clip = trect.intersect(&bounds);
-        let Some(tile) = edit.writable_tile(id, coord) else { break };
+        let Some(tile) = edit.writable_tile(id, coord) else {
+            break;
+        };
         for y in clip.top..clip.bottom {
             for x in clip.left..clip.right {
                 let c = selection.coverage(x, y) as f32 / 255.0;
@@ -120,8 +132,12 @@ fn clear_selection(ctx: &mut CommandCtx) {
 }
 
 fn merge_down(ctx: &mut CommandCtx) {
-    let Some(id) = ctx.doc.active_layer else { return };
-    let Some(path) = ctx.doc.tree.path_of(id) else { return };
+    let Some(id) = ctx.doc.active_layer else {
+        return;
+    };
+    let Some(path) = ctx.doc.tree.path_of(id) else {
+        return;
+    };
     let ix = *path.0.last().unwrap();
     if ix == 0 {
         return; // nothing below
@@ -185,11 +201,22 @@ fn merge_visible(ctx: &mut CommandCtx) {
     let canvas = ctx.doc.canvas_rect();
     let rgba = photoslop_compositor::composite_region_rgba8(ctx.doc, canvas);
     let mut merged = Layer::new_raster("Merged");
-    blit_rgba8(&mut merged.as_raster_mut().unwrap().tiles, ctx.doc.depth, canvas, &rgba);
+    blit_rgba8(
+        &mut merged.as_raster_mut().unwrap().tiles,
+        ctx.doc.depth,
+        canvas,
+        &rgba,
+    );
     let merged_id = merged.id;
 
-    let visible_ids: Vec<LayerId> =
-        ctx.doc.tree.layers.iter().filter(|l| l.visible).map(|l| l.id).collect();
+    let visible_ids: Vec<LayerId> = ctx
+        .doc
+        .tree
+        .layers
+        .iter()
+        .filter(|l| l.visible)
+        .map(|l| l.id)
+        .collect();
     let mut edit = ctx.doc.begin_edit("Merge Visible");
     for vid in visible_ids {
         edit.remove_layer(vid);
@@ -201,7 +228,9 @@ fn merge_visible(ctx: &mut CommandCtx) {
 }
 
 fn paste(ctx: &mut CommandCtx, in_place: bool) {
-    let Some(clip) = ctx.state.clipboard.clone() else { return };
+    let Some(clip) = ctx.state.clipboard.clone() else {
+        return;
+    };
     let rect = if in_place {
         clip.rect
     } else {
@@ -216,7 +245,12 @@ fn paste(ctx: &mut CommandCtx, in_place: bool) {
         )
     };
     let mut layer = Layer::new_raster("Pasted Layer");
-    blit_rgba8(&mut layer.as_raster_mut().unwrap().tiles, ctx.doc.depth, rect, &clip.rgba);
+    blit_rgba8(
+        &mut layer.as_raster_mut().unwrap().tiles,
+        ctx.doc.depth,
+        rect,
+        &clip.rgba,
+    );
     let id = layer.id;
     let path = insert_path_above_active(ctx.doc);
     let mut edit = ctx.doc.begin_edit("Paste");
@@ -226,8 +260,14 @@ fn paste(ctx: &mut CommandCtx, in_place: bool) {
 }
 
 fn fill_selection(ctx: &mut CommandCtx, background: bool) {
-    let Some(id) = ctx.doc.active_layer else { return };
-    let color = if background { ctx.state.background } else { ctx.state.foreground };
+    let Some(id) = ctx.doc.active_layer else {
+        return;
+    };
+    let color = if background {
+        ctx.state.background
+    } else {
+        ctx.state.foreground
+    };
     let canvas = ctx.doc.canvas_rect();
     let bounds = if ctx.doc.selection.is_empty() {
         canvas
@@ -242,7 +282,9 @@ fn fill_selection(ctx: &mut CommandCtx, background: bool) {
     for coord in TileCoord::covering(&bounds) {
         let trect = coord.rect();
         let clip = trect.intersect(&bounds);
-        let Some(tile) = edit.writable_tile(id, coord) else { break };
+        let Some(tile) = edit.writable_tile(id, coord) else {
+            break;
+        };
         for y in clip.top..clip.bottom {
             for x in clip.left..clip.right {
                 let c = selection.coverage(x, y) as f32 / 255.0;
@@ -276,27 +318,43 @@ impl CommandPlugin for CoreCommandsPlugin {
                     ctx.state.clipboard = Some(Arc::new(clip));
                 }
             }),
-            cmd("edit.copy_merged", "Copy Merged", Some("cmd-shift-c"), |ctx| {
-                if let Some(clip) = copy_pixels(ctx.doc, true) {
-                    ctx.state.clipboard = Some(Arc::new(clip));
-                }
-            }),
+            cmd(
+                "edit.copy_merged",
+                "Copy Merged",
+                Some("cmd-shift-c"),
+                |ctx| {
+                    if let Some(clip) = copy_pixels(ctx.doc, true) {
+                        ctx.state.clipboard = Some(Arc::new(clip));
+                    }
+                },
+            ),
             cmd("edit.cut", "Cut", Some("cmd-x"), |ctx| {
                 if let Some(clip) = copy_pixels(ctx.doc, false) {
                     ctx.state.clipboard = Some(Arc::new(clip));
                     clear_selection(ctx);
                 }
             }),
-            cmd("edit.paste", "Paste", Some("cmd-v"), |ctx| paste(ctx, false)),
-            cmd("edit.paste_in_place", "Paste in Place", Some("cmd-shift-v"), |ctx| {
-                paste(ctx, true)
+            cmd("edit.paste", "Paste", Some("cmd-v"), |ctx| {
+                paste(ctx, false)
             }),
-            cmd("edit.fill_foreground", "Fill with Foreground", Some("alt-backspace"), |ctx| {
-                fill_selection(ctx, false)
-            }),
-            cmd("edit.fill_background", "Fill with Background", Some("cmd-backspace"), |ctx| {
-                fill_selection(ctx, true)
-            }),
+            cmd(
+                "edit.paste_in_place",
+                "Paste in Place",
+                Some("cmd-shift-v"),
+                |ctx| paste(ctx, true),
+            ),
+            cmd(
+                "edit.fill_foreground",
+                "Fill with Foreground",
+                Some("alt-backspace"),
+                |ctx| fill_selection(ctx, false),
+            ),
+            cmd(
+                "edit.fill_background",
+                "Fill with Background",
+                Some("cmd-backspace"),
+                |ctx| fill_selection(ctx, true),
+            ),
             // --- Select ---
             cmd("select.all", "Select All", Some("cmd-a"), |ctx| {
                 let mut edit = ctx.doc.begin_edit("Select All");
@@ -308,11 +366,16 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.change_selection(|sel, _| sel.deselect());
                 edit.commit();
             }),
-            cmd("select.inverse", "Select Inverse", Some("cmd-shift-i"), |ctx| {
-                let mut edit = ctx.doc.begin_edit("Select Inverse");
-                edit.change_selection(|sel, canvas| sel.invert(canvas));
-                edit.commit();
-            }),
+            cmd(
+                "select.inverse",
+                "Select Inverse",
+                Some("cmd-shift-i"),
+                |ctx| {
+                    let mut edit = ctx.doc.begin_edit("Select Inverse");
+                    edit.change_selection(|sel, canvas| sel.invert(canvas));
+                    edit.commit();
+                },
+            ),
             // --- Layer ---
             cmd("layer.new", "New Layer", Some("cmd-shift-n"), |ctx| {
                 let path = insert_path_above_active(ctx.doc);
@@ -326,8 +389,12 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.active_layer = Some(id);
             }),
             cmd("layer.duplicate", "Duplicate Layer", Some("cmd-j"), |ctx| {
-                let Some(id) = ctx.doc.active_layer else { return };
-                let Some(src) = ctx.doc.tree.find(id) else { return };
+                let Some(id) = ctx.doc.active_layer else {
+                    return;
+                };
+                let Some(src) = ctx.doc.tree.find(id) else {
+                    return;
+                };
                 let mut copy = src.clone();
                 copy.name = format!("{} copy", copy.name);
                 reid(&mut copy);
@@ -339,7 +406,9 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.active_layer = Some(new_id);
             }),
             cmd("layer.delete", "Delete Layer", None, |ctx| {
-                let Some(id) = ctx.doc.active_layer else { return };
+                let Some(id) = ctx.doc.active_layer else {
+                    return;
+                };
                 let mut edit = ctx.doc.begin_edit("Delete Layer");
                 edit.remove_layer(id);
                 edit.commit();
@@ -347,8 +416,12 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd("layer.group", "Group Layer", Some("cmd-g"), |ctx| {
                 // Wraps the active layer in a group (multi-select lands
                 // with the layers-panel selection model).
-                let Some(id) = ctx.doc.active_layer else { return };
-                let Some(path) = ctx.doc.tree.path_of(id) else { return };
+                let Some(id) = ctx.doc.active_layer else {
+                    return;
+                };
+                let Some(path) = ctx.doc.tree.path_of(id) else {
+                    return;
+                };
                 let mut group = Layer::new_group("Group");
                 let group_id = group.id;
                 let mut edit = ctx.doc.begin_edit("Group Layer");
@@ -364,7 +437,12 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.active_layer = Some(group_id);
             }),
             cmd("layer.merge_down", "Merge Down", Some("cmd-e"), merge_down),
-            cmd("layer.merge_visible", "Merge Visible", Some("cmd-shift-e"), merge_visible),
+            cmd(
+                "layer.merge_visible",
+                "Merge Visible",
+                Some("cmd-shift-e"),
+                merge_visible,
+            ),
         ]
     }
 }
@@ -372,10 +450,7 @@ impl CommandPlugin for CoreCommandsPlugin {
 /// Remove a layer through the builder but get the removed value back
 /// (EditBuilder::remove_layer records the op; we reconstruct the layer from
 /// the document *before* removal).
-fn ctx_remove(
-    edit: &mut photoslop_core::EditBuilder<'_>,
-    id: LayerId,
-) -> Option<Layer> {
+fn ctx_remove(edit: &mut photoslop_core::EditBuilder<'_>, id: LayerId) -> Option<Layer> {
     let layer = edit.doc().tree.find(id)?.clone();
     if edit.remove_layer(id) {
         let mut l = layer;
@@ -399,14 +474,15 @@ impl PluginManifest for CoreCommandsPlugin {
 }
 
 #[allow(unused_imports)]
-use photoslop_color as _;
-#[allow(unused_imports)]
 use anyhow as _;
+#[allow(unused_imports)]
+use photoslop_color as _;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Rgba;
+    use photoslop_color::{Depth, Rgba};
+    use photoslop_core::SelectOp;
     use photoslop_plugin_api::EditorState;
 
     fn registry() -> PluginRegistry {
@@ -423,7 +499,7 @@ mod tests {
     fn doc_with_pixels() -> Document {
         let mut doc = Document::new("t", 100, 100, Depth::Eight);
         let mut layer = Layer::new_raster("bg");
-        let buf = vec![10u8, 20, 30, 255].repeat(100 * 100);
+        let buf = [10u8, 20, 30, 255].repeat(100 * 100);
         blit_rgba8(
             &mut layer.as_raster_mut().unwrap().tiles,
             Depth::Eight,
@@ -468,7 +544,8 @@ mod tests {
         let reg = registry();
         let mut doc = doc_with_pixels();
         let mut state = EditorState::default();
-        doc.selection.select_rect(IntRect::from_xywh(10, 10, 20, 20), SelectOp::Replace);
+        doc.selection
+            .select_rect(IntRect::from_xywh(10, 10, 20, 20), SelectOp::Replace);
         run(&reg, "edit.copy", &mut doc, &mut state);
         let clip = state.clipboard.as_ref().expect("clipboard filled");
         assert_eq!(clip.rect.width(), 20);
@@ -489,10 +566,15 @@ mod tests {
         let reg = registry();
         let mut doc = doc_with_pixels();
         let mut state = EditorState::default();
-        doc.selection.select_rect(IntRect::from_xywh(10, 10, 20, 20), SelectOp::Replace);
+        doc.selection
+            .select_rect(IntRect::from_xywh(10, 10, 20, 20), SelectOp::Replace);
         run(&reg, "edit.cut", &mut doc, &mut state);
         let layer = doc.tree.layers.first().unwrap();
-        assert_eq!(layer.as_raster().unwrap().tiles.pixel(15, 15).to_u8()[3], 0, "cut area cleared");
+        assert_eq!(
+            layer.as_raster().unwrap().tiles.pixel(15, 15).to_u8()[3],
+            0,
+            "cut area cleared"
+        );
         assert_eq!(
             layer.as_raster().unwrap().tiles.pixel(50, 50).to_u8(),
             [10, 20, 30, 255],
@@ -508,11 +590,18 @@ mod tests {
             foreground: Rgba::new(1.0, 0.0, 0.0, 1.0),
             ..Default::default()
         };
-        doc.selection.select_rect(IntRect::from_xywh(0, 0, 10, 10), SelectOp::Replace);
+        doc.selection
+            .select_rect(IntRect::from_xywh(0, 0, 10, 10), SelectOp::Replace);
         run(&reg, "edit.fill_foreground", &mut doc, &mut state);
         let layer = doc.tree.layers.first().unwrap();
-        assert_eq!(layer.as_raster().unwrap().tiles.pixel(5, 5).to_u8(), [255, 0, 0, 255]);
-        assert_eq!(layer.as_raster().unwrap().tiles.pixel(50, 50).to_u8(), [10, 20, 30, 255]);
+        assert_eq!(
+            layer.as_raster().unwrap().tiles.pixel(5, 5).to_u8(),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            layer.as_raster().unwrap().tiles.pixel(50, 50).to_u8(),
+            [10, 20, 30, 255]
+        );
     }
 
     #[test]
@@ -522,7 +611,7 @@ mod tests {
         let mut state = EditorState::default();
         // Add a half-transparent red layer on top.
         let mut top = Layer::new_raster("red");
-        let buf = vec![255u8, 0, 0, 128].repeat(100 * 100);
+        let buf = [255u8, 0, 0, 128].repeat(100 * 100);
         blit_rgba8(
             &mut top.as_raster_mut().unwrap().tiles,
             Depth::Eight,
@@ -534,7 +623,12 @@ mod tests {
 
         run(&reg, "layer.merge_down", &mut doc, &mut state);
         assert_eq!(doc.tree.layers.len(), 1, "two became one");
-        let px = doc.tree.layers[0].as_raster().unwrap().tiles.pixel(50, 50).to_u8();
+        let px = doc.tree.layers[0]
+            .as_raster()
+            .unwrap()
+            .tiles
+            .pixel(50, 50)
+            .to_u8();
         assert!(px[0] > 120 && px[0] < 150, "blended red: {px:?}");
         run(&reg, "edit.undo", &mut doc, &mut state);
         assert_eq!(doc.tree.layers.len(), 2, "merge undoes");

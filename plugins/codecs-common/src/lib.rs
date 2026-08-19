@@ -75,7 +75,14 @@ macro_rules! simple_codec {
     };
 }
 
-simple_codec!(PngCodec, "codec.png", "PNG", ImageFormat::Png, &["png"], &[b"\x89PNG"]);
+simple_codec!(
+    PngCodec,
+    "codec.png",
+    "PNG",
+    ImageFormat::Png,
+    &["png"],
+    &[b"\x89PNG"]
+);
 simple_codec!(
     JpegCodec,
     "codec.jpeg",
@@ -141,7 +148,12 @@ mod tests {
 
         let out = codec.export(&doc).unwrap();
         let doc2 = codec.import(&out).unwrap();
-        let px2 = doc2.tree.layers[0].as_raster().unwrap().tiles.pixel(3, 0).to_u8();
+        let px2 = doc2.tree.layers[0]
+            .as_raster()
+            .unwrap()
+            .tiles
+            .pixel(3, 0)
+            .to_u8();
         assert_eq!(px2, [30, 100, 200, 255]);
     }
 
@@ -149,8 +161,14 @@ mod tests {
     fn registry_probe_dispatch() {
         let mut reg = PluginRegistry::new();
         CommonCodecsPlugin.register(&mut reg);
-        assert_eq!(reg.codec_for(b"\x89PNG....", None).unwrap().id(), "codec.png");
-        assert_eq!(reg.codec_for(b"\xFF\xD8\xFF\xE0", None).unwrap().id(), "codec.jpeg");
+        assert_eq!(
+            reg.codec_for(b"\x89PNG....", None).unwrap().id(),
+            "codec.png"
+        );
+        assert_eq!(
+            reg.codec_for(b"\xFF\xD8\xFF\xE0", None).unwrap().id(),
+            "codec.jpeg"
+        );
         assert_eq!(reg.codec_for(b"", Some("tiff")).unwrap().id(), "codec.tiff");
         assert!(reg.codec_for(b"garbage", Some("xyz")).is_none());
     }

@@ -49,7 +49,11 @@ pub struct MarqueeTool {
 
 impl MarqueeTool {
     fn new(shape: MarqueeShape) -> Self {
-        MarqueeTool { shape, anchor: None, current: None }
+        MarqueeTool {
+            shape,
+            anchor: None,
+            current: None,
+        }
     }
 }
 
@@ -98,7 +102,9 @@ impl ToolPlugin for MarqueeTool {
     }
 
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
-        let Some((ax, ay, m)) = self.anchor.take() else { return };
+        let Some((ax, ay, m)) = self.anchor.take() else {
+            return;
+        };
         let rect = self
             .current
             .take()
@@ -142,7 +148,10 @@ pub struct LassoTool {
 
 impl LassoTool {
     fn new() -> Self {
-        LassoTool { points: Vec::new(), modifiers: Modifiers::default() }
+        LassoTool {
+            points: Vec::new(),
+            modifiers: Modifiers::default(),
+        }
     }
 }
 
@@ -209,7 +218,9 @@ impl WandTool {
 
 fn wand_select(doc: &Document, x: i32, y: i32, tolerance: u8) -> Option<Vec<(i32, i32)>> {
     let layer = doc.active_layer.and_then(|id| doc.tree.find(id))?;
-    let LayerKind::Raster(raster) = &layer.kind else { return None };
+    let LayerKind::Raster(raster) = &layer.kind else {
+        return None;
+    };
     let canvas = doc.canvas_rect();
     if !canvas.contains(x, y) {
         return None;
@@ -262,7 +273,9 @@ impl ToolPlugin for WandTool {
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         let x = input.x.floor() as i32;
         let y = input.y.floor() as i32;
-        let Some(pixels) = wand_select(ctx.doc, x, y, self.tolerance) else { return };
+        let Some(pixels) = wand_select(ctx.doc, x, y, self.tolerance) else {
+            return;
+        };
         let op = op_from(input.modifiers);
         let mut edit = ctx.doc.begin_edit("Magic Wand");
         edit.change_selection(|sel, _| {
@@ -270,7 +283,11 @@ impl ToolPlugin for WandTool {
                 sel.deselect();
             }
             // Write matched pixels directly into the mask.
-            let effective = if op == SelectOp::Replace { SelectOp::Add } else { op };
+            let effective = if op == SelectOp::Replace {
+                SelectOp::Add
+            } else {
+                op
+            };
             for &(px, py) in &pixels {
                 let coord = TileCoord::containing(px, py);
                 let buf = sel.mask.get_mut_or_insert(coord);
@@ -336,10 +353,21 @@ mod tests {
     use photoslop_core::{blit_rgba8, Layer};
 
     fn input(x: f32, y: f32, m: Modifiers) -> PointerInput {
-        PointerInput { x, y, pressure: 1.0, modifiers: m }
+        PointerInput {
+            x,
+            y,
+            pressure: 1.0,
+            modifiers: m,
+        }
     }
 
-    fn drag(tool: &mut dyn ToolPlugin, ctx: &mut ToolCtx, from: (f32, f32), to: (f32, f32), m: Modifiers) {
+    fn drag(
+        tool: &mut dyn ToolPlugin,
+        ctx: &mut ToolCtx,
+        from: (f32, f32),
+        to: (f32, f32),
+        m: Modifiers,
+    ) {
         tool.on_pointer_down(ctx, input(from.0, from.1, m));
         tool.on_pointer_move(ctx, input(to.0, to.1, m));
         tool.on_pointer_up(ctx, input(to.0, to.1, m));
@@ -350,19 +378,46 @@ mod tests {
         let mut doc = Document::new("t", 200, 200, Depth::Eight);
         let mut state = EditorState::default();
         let mut tool = MarqueeTool::new(MarqueeShape::Rect);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
 
-        drag(&mut tool, &mut ctx, (10.0, 10.0), (50.0, 50.0), Modifiers::default());
+        drag(
+            &mut tool,
+            &mut ctx,
+            (10.0, 10.0),
+            (50.0, 50.0),
+            Modifiers::default(),
+        );
         assert_eq!(ctx.doc.selection.coverage(20, 20), 255);
         assert_eq!(ctx.doc.selection.coverage(60, 60), 0);
 
         // Shift-drag adds.
-        drag(&mut tool, &mut ctx, (100.0, 100.0), (150.0, 150.0), Modifiers { shift: true, ..Default::default() });
+        drag(
+            &mut tool,
+            &mut ctx,
+            (100.0, 100.0),
+            (150.0, 150.0),
+            Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(ctx.doc.selection.coverage(20, 20), 255, "kept");
         assert_eq!(ctx.doc.selection.coverage(120, 120), 255, "added");
 
         // Alt-drag subtracts.
-        drag(&mut tool, &mut ctx, (10.0, 10.0), (30.0, 30.0), Modifiers { alt: true, ..Default::default() });
+        drag(
+            &mut tool,
+            &mut ctx,
+            (10.0, 10.0),
+            (30.0, 30.0),
+            Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(ctx.doc.selection.coverage(20, 20), 0, "subtracted");
         assert_eq!(ctx.doc.selection.coverage(40, 40), 255, "rest kept");
 
@@ -376,8 +431,17 @@ mod tests {
         let mut doc = Document::new("t", 100, 100, Depth::Eight);
         let mut state = EditorState::default();
         let mut tool = MarqueeTool::new(MarqueeShape::Rect);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
-        drag(&mut tool, &mut ctx, (10.0, 10.0), (50.0, 50.0), Modifiers::default());
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        drag(
+            &mut tool,
+            &mut ctx,
+            (10.0, 10.0),
+            (50.0, 50.0),
+            Modifiers::default(),
+        );
         assert!(!ctx.doc.selection.is_empty());
         // Plain click.
         tool.on_pointer_down(&mut ctx, input(80.0, 80.0, Modifiers::default()));
@@ -390,7 +454,10 @@ mod tests {
         let mut doc = Document::new("t", 100, 100, Depth::Eight);
         let mut state = EditorState::default();
         let mut tool = LassoTool::new();
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(10.0, 10.0, Modifiers::default()));
         for p in [(90.0, 10.0), (90.0, 90.0), (10.0, 90.0)] {
             tool.on_pointer_move(&mut ctx, input(p.0, p.1, Modifiers::default()));
@@ -426,9 +493,16 @@ mod tests {
 
         let mut state = EditorState::default();
         let mut tool = WandTool::new();
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(10.0, 10.0, Modifiers::default()));
         assert_eq!(ctx.doc.selection.coverage(20, 30), 255, "red side selected");
-        assert_eq!(ctx.doc.selection.coverage(40, 30), 0, "blue side not selected");
+        assert_eq!(
+            ctx.doc.selection.coverage(40, 30),
+            0,
+            "blue side not selected"
+        );
     }
 }

@@ -109,7 +109,11 @@ pub struct History {
 
 impl History {
     pub fn new() -> History {
-        History { undo_stack: Vec::new(), redo_stack: Vec::new(), limit: 200 }
+        History {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            limit: 200,
+        }
     }
 
     pub fn push(&mut self, edit: Edit) {

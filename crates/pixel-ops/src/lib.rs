@@ -256,7 +256,11 @@ pub fn blend_buffer(
     origin: (i32, i32),
 ) {
     debug_assert_eq!(top.len(), bottom.len());
-    for (i, (t, b)) in top.chunks_exact(4).zip(bottom.chunks_exact_mut(4)).enumerate() {
+    for (i, (t, b)) in top
+        .chunks_exact(4)
+        .zip(bottom.chunks_exact_mut(4))
+        .enumerate()
+    {
         let x = origin.0 + (i % width) as i32;
         let y = origin.1 + (i / width) as i32;
         let out = blend_pixel(
@@ -296,7 +300,13 @@ mod tests {
 
     #[test]
     fn multiply_of_halves() {
-        let out = blend_pixel(Multiply, px(0.5, 0.5, 0.5, 1.0), px(0.5, 0.5, 0.5, 1.0), 0, 0);
+        let out = blend_pixel(
+            Multiply,
+            px(0.5, 0.5, 0.5, 1.0),
+            px(0.5, 0.5, 0.5, 1.0),
+            0,
+            0,
+        );
         assert_close(out, px(0.25, 0.25, 0.25, 1.0), 1e-6, "multiply");
     }
 
@@ -350,7 +360,13 @@ mod tests {
 
     #[test]
     fn hard_mix_posterizes() {
-        let out = blend_pixel(HardMix, px(0.6, 0.1, 0.5, 1.0), px(0.6, 0.1, 0.5, 1.0), 0, 0);
+        let out = blend_pixel(
+            HardMix,
+            px(0.6, 0.1, 0.5, 1.0),
+            px(0.6, 0.1, 0.5, 1.0),
+            0,
+            0,
+        );
         assert_close(out, px(1.0, 0.0, 1.0, 1.0), 1e-6, "hard mix");
     }
 
@@ -361,7 +377,10 @@ mod tests {
         let a = blend_pixel(Dissolve, top, bottom, 10, 20);
         let b = blend_pixel(Dissolve, top, bottom, 10, 20);
         assert_eq!(a, b, "deterministic");
-        assert!(a == px(1.0, 0.0, 0.0, 1.0) || a == bottom, "binary outcome: {a:?}");
+        assert!(
+            a == px(1.0, 0.0, 0.0, 1.0) || a == bottom,
+            "binary outcome: {a:?}"
+        );
         // Roughly half of a large region should show the source.
         let mut hits = 0;
         for y in 0..100 {
@@ -386,10 +405,32 @@ mod tests {
     fn buffer_blend_matches_pixel_blend() {
         let top = [0.5f32, 0.2, 0.8, 0.9, 0.1, 0.9, 0.3, 0.4];
         let mut bottom = [0.3f32, 0.3, 0.3, 1.0, 0.6, 0.6, 0.6, 0.5];
-        let expect0 = blend_pixel(Overlay, px(0.5, 0.2, 0.8, 0.9), px(0.3, 0.3, 0.3, 1.0), 0, 0);
-        let expect1 = blend_pixel(Overlay, px(0.1, 0.9, 0.3, 0.4), px(0.6, 0.6, 0.6, 0.5), 1, 0);
+        let expect0 = blend_pixel(
+            Overlay,
+            px(0.5, 0.2, 0.8, 0.9),
+            px(0.3, 0.3, 0.3, 1.0),
+            0,
+            0,
+        );
+        let expect1 = blend_pixel(
+            Overlay,
+            px(0.1, 0.9, 0.3, 0.4),
+            px(0.6, 0.6, 0.6, 0.5),
+            1,
+            0,
+        );
         blend_buffer(Overlay, &top, &mut bottom, 2, (0, 0));
-        assert_close(px(bottom[0], bottom[1], bottom[2], bottom[3]), expect0, 1e-6, "px0");
-        assert_close(px(bottom[4], bottom[5], bottom[6], bottom[7]), expect1, 1e-6, "px1");
+        assert_close(
+            px(bottom[0], bottom[1], bottom[2], bottom[3]),
+            expect0,
+            1e-6,
+            "px0",
+        );
+        assert_close(
+            px(bottom[4], bottom[5], bottom[6], bottom[7]),
+            expect1,
+            1e-6,
+            "px1",
+        );
     }
 }

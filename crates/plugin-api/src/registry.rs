@@ -1,6 +1,6 @@
 //! Plugin registries — the kernel's catalog of everything installed.
 
-use crate::{Command, CommandPlugin, CodecPlugin, FilterPlugin, ToolPlugin};
+use crate::{CodecPlugin, Command, CommandPlugin, FilterPlugin, ToolPlugin};
 
 /// All registered plugins, assembled at startup by the app shell from each
 /// enabled `PluginManifest`.
@@ -61,7 +61,9 @@ impl PluginRegistry {
             .find(|c| c.probe(bytes))
             .or_else(|| {
                 let ext = extension?.to_ascii_lowercase();
-                self.codecs.iter().find(|c| c.extensions().contains(&ext.as_str()))
+                self.codecs
+                    .iter()
+                    .find(|c| c.extensions().contains(&ext.as_str()))
             })
             .map(|c| c.as_ref())
     }

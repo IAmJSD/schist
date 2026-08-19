@@ -6,9 +6,7 @@
 //! same spot at 50% opacity stays 50%, but two separate strokes darken.
 
 use photoslop_color::Rgba;
-use photoslop_core::{
-    Document, IntRect, LayerId, LayerKind, StrokeEdit, TileCoord, TILE_SIZE,
-};
+use photoslop_core::{Document, IntRect, LayerId, LayerKind, StrokeEdit, TileCoord, TILE_SIZE};
 use photoslop_plugin_api::{
     EditorState, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolPlugin,
 };
@@ -54,7 +52,11 @@ impl Stroke {
             color,
             opacity: ctx.state.tool_opacity,
             size: ctx.state.brush_size,
-            hardness: if mode == PaintMode::Pencil { 1.0 } else { ctx.state.brush_hardness },
+            hardness: if mode == PaintMode::Pencil {
+                1.0
+            } else {
+                ctx.state.brush_hardness
+            },
             mode,
         };
         stroke.dab(ctx.doc, input.x, input.y, input.pressure);
@@ -144,7 +146,9 @@ impl Stroke {
             // Ensure before-capture happens (and get write access).
             let cov = self.coverage.get(&coord).unwrap();
             let (mode, color, opacity) = (self.mode, self.color, self.opacity);
-            let Some(tile) = self.edit.writable_tile(doc, self.layer, coord) else { continue };
+            let Some(tile) = self.edit.writable_tile(doc, self.layer, coord) else {
+                continue;
+            };
             for y in clip.top..clip.bottom {
                 for x in clip.left..clip.right {
                     let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
@@ -157,12 +161,15 @@ impl Stroke {
                         None => Rgba::TRANSPARENT,
                     };
                     let out = match mode {
-                        PaintMode::Eraser => {
-                            Rgba { a: orig.a * (1.0 - c * opacity), ..orig }
+                        PaintMode::Eraser => Rgba {
+                            a: orig.a * (1.0 - c * opacity),
+                            ..orig
+                        },
+                        _ => Rgba {
+                            a: c * opacity,
+                            ..color
                         }
-                        _ => {
-                            Rgba { a: c * opacity, ..color }.over(orig)
-                        }
+                        .over(orig),
                     };
                     tile.set(ix, out);
                 }
@@ -206,7 +213,11 @@ pub struct PaintTool {
 
 impl PaintTool {
     fn new(mode: PaintMode) -> Self {
-        PaintTool { mode, stroke: None, cursor: None }
+        PaintTool {
+            mode,
+            stroke: None,
+            cursor: None,
+        }
     }
 }
 
@@ -270,7 +281,11 @@ impl ToolPlugin for PaintTool {
     fn overlays(&self, _doc: &Document, state: &EditorState) -> Vec<Overlay> {
         match self.cursor {
             Some((cx, cy)) => {
-                vec![Overlay::Circle { cx, cy, r: state.brush_size / 2.0 }]
+                vec![Overlay::Circle {
+                    cx,
+                    cy,
+                    r: state.brush_size / 2.0,
+                }]
             }
             None => Vec::new(),
         }
@@ -310,19 +325,35 @@ mod tests {
     }
 
     fn input(x: f32, y: f32) -> PointerInput {
-        PointerInput { x, y, pressure: 1.0, modifiers: Modifiers::default() }
+        PointerInput {
+            x,
+            y,
+            pressure: 1.0,
+            modifiers: Modifiers::default(),
+        }
     }
 
     fn pixel(doc: &Document, x: i32, y: i32) -> [u8; 4] {
-        doc.tree.layers[0].as_raster().unwrap().tiles.pixel(x, y).to_u8()
+        doc.tree.layers[0]
+            .as_raster()
+            .unwrap()
+            .tiles
+            .pixel(x, y)
+            .to_u8()
     }
 
     #[test]
     fn brush_paints_and_undoes() {
         let mut doc = doc_with_layer();
-        let mut state = EditorState { foreground: Rgba::new(1.0, 0.0, 0.0, 1.0), ..Default::default() };
+        let mut state = EditorState {
+            foreground: Rgba::new(1.0, 0.0, 0.0, 1.0),
+            ..Default::default()
+        };
         let mut tool = PaintTool::new(PaintMode::Brush);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(30.0, 30.0));
         tool.on_pointer_move(&mut ctx, input(70.0, 30.0));
         tool.on_pointer_up(&mut ctx, input(70.0, 30.0));
@@ -347,7 +378,10 @@ mod tests {
             ..Default::default()
         };
         let mut tool = PaintTool::new(PaintMode::Brush);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(40.0, 40.0));
         // Scribble back and forth over the same spot.
         for _ in 0..5 {
@@ -369,7 +403,10 @@ mod tests {
         };
         let mut tool = PaintTool::new(PaintMode::Brush);
         for _ in 0..2 {
-            let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
             tool.on_pointer_down(&mut ctx, input(50.0, 40.0));
             tool.on_pointer_up(&mut ctx, input(50.0, 40.0));
         }
@@ -380,15 +417,24 @@ mod tests {
     #[test]
     fn eraser_clears() {
         let mut doc = doc_with_layer();
-        let mut state = EditorState { foreground: Rgba::BLACK, ..Default::default() };
+        let mut state = EditorState {
+            foreground: Rgba::BLACK,
+            ..Default::default()
+        };
         let mut brush = PaintTool::new(PaintMode::Brush);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         brush.on_pointer_down(&mut ctx, input(50.0, 50.0));
         brush.on_pointer_up(&mut ctx, input(50.0, 50.0));
         assert!(pixel(&doc, 50, 50)[3] > 0);
 
         let mut eraser = PaintTool::new(PaintMode::Eraser);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         eraser.on_pointer_down(&mut ctx, input(50.0, 50.0));
         eraser.on_pointer_up(&mut ctx, input(50.0, 50.0));
         assert_eq!(pixel(&doc, 50, 50)[3], 0, "erased");
@@ -398,10 +444,17 @@ mod tests {
     fn selection_confines_painting() {
         use photoslop_core::SelectOp;
         let mut doc = doc_with_layer();
-        doc.selection.select_rect(IntRect::from_xywh(0, 0, 45, 128), SelectOp::Replace);
-        let mut state = EditorState { foreground: Rgba::BLACK, ..Default::default() };
+        doc.selection
+            .select_rect(IntRect::from_xywh(0, 0, 45, 128), SelectOp::Replace);
+        let mut state = EditorState {
+            foreground: Rgba::BLACK,
+            ..Default::default()
+        };
         let mut tool = PaintTool::new(PaintMode::Brush);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(30.0, 30.0));
         tool.on_pointer_move(&mut ctx, input(80.0, 30.0));
         tool.on_pointer_up(&mut ctx, input(80.0, 30.0));
@@ -414,7 +467,10 @@ mod tests {
         let mut doc = doc_with_layer();
         let mut state = EditorState::default();
         let mut tool = PaintTool::new(PaintMode::Brush);
-        let mut ctx = ToolCtx { doc: &mut doc, state: &mut state };
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
         tool.on_pointer_down(&mut ctx, input(50.0, 50.0));
         tool.on_cancel(&mut ctx);
         assert_eq!(pixel(&doc, 50, 50)[3], 0);

@@ -23,12 +23,20 @@ pub struct TileCoord {
 
 impl TileCoord {
     pub fn containing(x: i32, y: i32) -> TileCoord {
-        TileCoord { tx: x.div_euclid(TILE_SIZE), ty: y.div_euclid(TILE_SIZE) }
+        TileCoord {
+            tx: x.div_euclid(TILE_SIZE),
+            ty: y.div_euclid(TILE_SIZE),
+        }
     }
 
     /// Document-space rect covered by this tile.
     pub fn rect(&self) -> IntRect {
-        IntRect::from_xywh(self.tx * TILE_SIZE, self.ty * TILE_SIZE, TILE_SIZE as u32, TILE_SIZE as u32)
+        IntRect::from_xywh(
+            self.tx * TILE_SIZE,
+            self.ty * TILE_SIZE,
+            TILE_SIZE as u32,
+            TILE_SIZE as u32,
+        )
     }
 
     /// All tile coords intersecting a document-space rect.
@@ -255,7 +263,13 @@ impl TileMap {
         if dx.rem_euclid(TILE_SIZE) == 0 && dy.rem_euclid(TILE_SIZE) == 0 {
             let (tdx, tdy) = (dx.div_euclid(TILE_SIZE), dy.div_euclid(TILE_SIZE));
             for (coord, buf) in self.iter() {
-                out.insert(TileCoord { tx: coord.tx + tdx, ty: coord.ty + tdy }, buf.clone());
+                out.insert(
+                    TileCoord {
+                        tx: coord.tx + tdx,
+                        ty: coord.ty + tdy,
+                    },
+                    buf.clone(),
+                );
             }
             return out;
         }
@@ -355,7 +369,13 @@ impl MaskTileMap {
         if dx.rem_euclid(TILE_SIZE) == 0 && dy.rem_euclid(TILE_SIZE) == 0 {
             let (tdx, tdy) = (dx.div_euclid(TILE_SIZE), dy.div_euclid(TILE_SIZE));
             for (coord, buf) in self.iter() {
-                out.insert(TileCoord { tx: coord.tx + tdx, ty: coord.ty + tdy }, buf.clone());
+                out.insert(
+                    TileCoord {
+                        tx: coord.tx + tdx,
+                        ty: coord.ty + tdy,
+                    },
+                    buf.clone(),
+                );
             }
             return out;
         }
@@ -375,8 +395,7 @@ impl MaskTileMap {
                     for x in clip.left..clip.right {
                         let sx = (x - dx - src_rect.left) as usize;
                         let lx = (x - drect.left) as usize;
-                        dst[ly * TILE_SIZE as usize + lx] =
-                            buf[sy * TILE_SIZE as usize + sx];
+                        dst[ly * TILE_SIZE as usize + lx] = buf[sy * TILE_SIZE as usize + sx];
                     }
                 }
             }
@@ -401,7 +420,10 @@ mod tests {
     fn covering_spans_partial_tiles() {
         let rect = IntRect::from_xywh(-10, 0, 20, 10);
         let coords: Vec<_> = TileCoord::covering(&rect).collect();
-        assert_eq!(coords, vec![TileCoord { tx: -1, ty: 0 }, TileCoord { tx: 0, ty: 0 }]);
+        assert_eq!(
+            coords,
+            vec![TileCoord { tx: -1, ty: 0 }, TileCoord { tx: 0, ty: 0 }]
+        );
     }
 
     #[test]
@@ -413,9 +435,11 @@ mod tests {
     fn cow_write_does_not_affect_snapshot() {
         let mut map = TileMap::new();
         let coord = TileCoord { tx: 0, ty: 0 };
-        map.get_mut_or_insert(coord, Depth::Eight).set(0, Rgba::WHITE);
+        map.get_mut_or_insert(coord, Depth::Eight)
+            .set(0, Rgba::WHITE);
         let snap = map.snapshot(coord).unwrap();
-        map.get_mut_or_insert(coord, Depth::Eight).set(0, Rgba::BLACK);
+        map.get_mut_or_insert(coord, Depth::Eight)
+            .set(0, Rgba::BLACK);
         assert_eq!(snap.get(0), Rgba::WHITE);
         assert_eq!(map.get(coord).unwrap().get(0), Rgba::BLACK);
     }

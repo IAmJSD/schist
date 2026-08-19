@@ -15,3 +15,17 @@ log.workspace = true
 env_logger.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+image.workspace = true
+smallvec.workspace = true
+rustc-hash.workspace = true
+
+photoslop-core.workspace = true
+photoslop-color.workspace = true
+photoslop-plugin-api.workspace = true
+photoslop-compositor.workspace = true
+photoslop-codec-psd.workspace = true
+photoslop-codecs-common.workspace = true
+photoslop-tools-basic.workspace = true
+photoslop-tools-paint.workspace = true
+photoslop-tools-select.workspace = true
+photoslop-commands-core.workspace = true

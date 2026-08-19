@@ -81,8 +81,7 @@ fn composite_layers(doc: &Document, layers: &[Layer], coord: TileCoord, dst: &mu
             // layers to base alpha, then blend the lot with base's mode.
             let mut group_buf = blank_tile();
             render_single_layer(doc, layer, coord, &mut group_buf, 1.0);
-            let base_alpha: Vec<f32> =
-                group_buf.chunks_exact(4).map(|p| p[3]).collect();
+            let base_alpha: Vec<f32> = group_buf.chunks_exact(4).map(|p| p[3]).collect();
             for clip_layer in &layers[i + 1..clip_end] {
                 if !clip_layer.visible {
                     continue;
@@ -284,8 +283,11 @@ impl TileCache {
 
     /// Composite several tiles in parallel ahead of `get` calls.
     pub fn prewarm(&mut self, doc: &Document, coords: &[TileCoord]) {
-        let missing: Vec<TileCoord> =
-            coords.iter().copied().filter(|c| !self.tiles.contains_key(c)).collect();
+        let missing: Vec<TileCoord> = coords
+            .iter()
+            .copied()
+            .filter(|c| !self.tiles.contains_key(c))
+            .collect();
         let computed: Vec<(TileCoord, Vec<u8>)> = missing
             .into_par_iter()
             .map(|c| {
@@ -330,14 +332,22 @@ mod tests {
     #[test]
     fn single_opaque_layer() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("red", IntRect::from_xywh(0, 0, 64, 64), [255, 0, 0, 255]));
+        doc.push_layer(solid_layer(
+            "red",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [255, 0, 0, 255],
+        ));
         assert_eq!(px(&doc, 10, 10), [255, 0, 0, 255]);
     }
 
     #[test]
     fn multiply_layers() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("a", IntRect::from_xywh(0, 0, 64, 64), [128, 128, 128, 255]));
+        doc.push_layer(solid_layer(
+            "a",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [128, 128, 128, 255],
+        ));
         let mut top = solid_layer("b", IntRect::from_xywh(0, 0, 64, 64), [128, 128, 128, 255]);
         top.blend = BlendMode::Multiply;
         doc.push_layer(top);
@@ -349,7 +359,11 @@ mod tests {
     #[test]
     fn half_opacity_over_white() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("w", IntRect::from_xywh(0, 0, 64, 64), [255, 255, 255, 255]));
+        doc.push_layer(solid_layer(
+            "w",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [255, 255, 255, 255],
+        ));
         let mut top = solid_layer("b", IntRect::from_xywh(0, 0, 64, 64), [0, 0, 0, 255]);
         top.opacity = 0.5;
         doc.push_layer(top);
@@ -360,7 +374,11 @@ mod tests {
     #[test]
     fn hidden_layer_skipped() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("a", IntRect::from_xywh(0, 0, 64, 64), [0, 255, 0, 255]));
+        doc.push_layer(solid_layer(
+            "a",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [0, 255, 0, 255],
+        ));
         let mut top = solid_layer("b", IntRect::from_xywh(0, 0, 64, 64), [255, 0, 0, 255]);
         top.visible = false;
         doc.push_layer(top);
@@ -370,7 +388,11 @@ mod tests {
     #[test]
     fn layer_mask_hides_pixels() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("bg", IntRect::from_xywh(0, 0, 64, 64), [0, 0, 255, 255]));
+        doc.push_layer(solid_layer(
+            "bg",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [0, 0, 255, 255],
+        ));
         let mut top = solid_layer("fg", IntRect::from_xywh(0, 0, 64, 64), [255, 0, 0, 255]);
         // Mask: reveal only left half.
         let mut mask = LayerMask::new_revealing();
@@ -396,24 +418,43 @@ mod tests {
         // Group of [opaque red] at 50% group opacity over white:
         // must be pink (127-ish), not double-faded.
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("bg", IntRect::from_xywh(0, 0, 64, 64), [255, 255, 255, 255]));
+        doc.push_layer(solid_layer(
+            "bg",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [255, 255, 255, 255],
+        ));
         let mut group = Layer::new_group("g");
         group.opacity = 0.5;
         group.blend = BlendMode::Normal;
         if let LayerKind::Group(g) = &mut group.kind {
-            g.children.push(solid_layer("red", IntRect::from_xywh(0, 0, 64, 64), [255, 0, 0, 255]));
+            g.children.push(solid_layer(
+                "red",
+                IntRect::from_xywh(0, 0, 64, 64),
+                [255, 0, 0, 255],
+            ));
         }
         doc.push_layer(group);
         let p = px(&doc, 5, 5);
-        assert!((p[0] as i32 - 255).abs() <= 1 && (p[1] as i32 - 128).abs() <= 1, "{p:?}");
+        assert!(
+            (p[0] as i32 - 255).abs() <= 1 && (p[1] as i32 - 128).abs() <= 1,
+            "{p:?}"
+        );
     }
 
     #[test]
     fn clipping_layer_confined_to_base_alpha() {
         let mut doc = Document::new("t", 128, 64, Depth::Eight);
-        doc.push_layer(solid_layer("bg", IntRect::from_xywh(0, 0, 128, 64), [255, 255, 255, 255]));
+        doc.push_layer(solid_layer(
+            "bg",
+            IntRect::from_xywh(0, 0, 128, 64),
+            [255, 255, 255, 255],
+        ));
         // Base occupies left half only.
-        doc.push_layer(solid_layer("base", IntRect::from_xywh(0, 0, 64, 64), [0, 0, 255, 255]));
+        doc.push_layer(solid_layer(
+            "base",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [0, 0, 255, 255],
+        ));
         // Clipped green covers everything but must show only over base.
         let mut clip = solid_layer("clip", IntRect::from_xywh(0, 0, 128, 64), [0, 255, 0, 255]);
         clip.clipping = true;
@@ -425,8 +466,11 @@ mod tests {
     #[test]
     fn cache_invalidation() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        let id =
-            doc.push_layer(solid_layer("a", IntRect::from_xywh(0, 0, 64, 64), [10, 20, 30, 255]));
+        let id = doc.push_layer(solid_layer(
+            "a",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [10, 20, 30, 255],
+        ));
         let mut cache = TileCache::new();
         let coord = TileCoord { tx: 0, ty: 0 };
         let before = cache.get(&doc, coord);
@@ -445,8 +489,13 @@ mod tests {
     #[test]
     fn selection_does_not_affect_composite() {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);
-        doc.push_layer(solid_layer("a", IntRect::from_xywh(0, 0, 64, 64), [5, 6, 7, 255]));
-        doc.selection.select_rect(IntRect::from_xywh(0, 0, 8, 8), SelectOp::Replace);
+        doc.push_layer(solid_layer(
+            "a",
+            IntRect::from_xywh(0, 0, 64, 64),
+            [5, 6, 7, 255],
+        ));
+        doc.selection
+            .select_rect(IntRect::from_xywh(0, 0, 8, 8), SelectOp::Replace);
         assert_eq!(px(&doc, 20, 20), [5, 6, 7, 255]);
     }
 }

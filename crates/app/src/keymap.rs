@@ -1,0 +1,164 @@
+//! Keymap assembly and file dialogs.
+//!
+//! Defaults come from the plugin registry (each command/tool declares its
+//! own binding, PLAN.md §5); a user keymap file overlays them. "cmd-" in
+//! plugin bindings means the platform primary modifier and is rewritten to
+//! "ctrl-" on Linux/Windows.
+
+use crate::actions::*;
+use crate::workspace::Workspace;
+use gpui::{Context, KeyBinding, PathPromptOptions, Window};
+use photoslop_plugin_api::PluginRegistry;
+use std::path::PathBuf;
+
+const CONTEXT: Option<&str> = Some("Workspace");
+
+fn translate(binding: &str) -> String {
+    if cfg!(target_os = "macos") {
+        binding.to_string()
+    } else {
+        binding.replace("cmd-", "ctrl-")
+    }
+}
+
+pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
+
+    // Plugin-declared command keybinds.
+    for command in registry.commands() {
+        if let Some(kb) = command.keybind {
+            bindings.push(KeyBinding::new(
+                &translate(kb),
+                RunCommand { id: command.id.to_string() },
+                CONTEXT,
+            ));
+        }
+    }
+    // Tool activation keys.
+    for tool in registry.tools() {
+        if let Some(key) = tool.shortcut() {
+            bindings.push(KeyBinding::new(
+                key,
+                ActivateTool { id: tool.id().to_string() },
+                CONTEXT,
+            ));
+        }
+    }
+    // App-level bindings.
+    let app_bindings: &[(&str, &dyn gpui::Action)] = &[];
+    let _ = app_bindings;
+    bindings.extend([
+        KeyBinding::new(&translate("cmd-n"), NewFile, CONTEXT),
+        KeyBinding::new(&translate("cmd-o"), OpenFile, CONTEXT),
+        KeyBinding::new(&translate("cmd-shift-s"), SaveFileAs, CONTEXT),
+        KeyBinding::new(&translate("cmd-s"), SaveFileAs, CONTEXT), // until M6 in-place save
+        KeyBinding::new(&translate("cmd-="), ZoomIn, CONTEXT),
+        KeyBinding::new(&translate("cmd--"), ZoomOut, CONTEXT),
+        KeyBinding::new(&translate("cmd-0"), ZoomFit, CONTEXT),
+        KeyBinding::new(&translate("cmd-1"), ZoomActual, CONTEXT),
+        KeyBinding::new("[", BrushSmaller, CONTEXT),
+        KeyBinding::new("]", BrushLarger, CONTEXT),
+        KeyBinding::new("x", SwapColors, CONTEXT),
+        KeyBinding::new("d", DefaultColors, CONTEXT),
+        KeyBinding::new("escape", CancelGesture, CONTEXT),
+        KeyBinding::new(&translate("cmd-q"), Quit, CONTEXT),
+    ]);
+    // Digit keys -> tool opacity (1 = 10% … 0 = 100%).
+    for digit in 0..=9u32 {
+        let percent = if digit == 0 { 100 } else { digit * 10 };
+        bindings.push(KeyBinding::new(
+            &digit.to_string(),
+            SetToolOpacity { percent },
+            CONTEXT,
+        ));
+    }
+
+    // User overrides: ~/.config/photoslop/keymap.json
+    // Format: { "<keystroke>": "command:<id>" | "tool:<id>" }
+    if let Some(user) = load_user_keymap() {
+        for (keystroke, target) in user {
+            if let Some(id) = target.strip_prefix("command:") {
+                bindings.push(KeyBinding::new(
+                    &keystroke,
+                    RunCommand { id: id.to_string() },
+                    CONTEXT,
+                ));
+            } else if let Some(id) = target.strip_prefix("tool:") {
+                bindings.push(KeyBinding::new(
+                    &keystroke,
+                    ActivateTool { id: id.to_string() },
+                    CONTEXT,
+                ));
+            } else {
+                log::warn!("keymap: unknown target {target:?} for {keystroke:?}");
+            }
+        }
+    }
+    bindings
+}
+
+fn load_user_keymap() -> Option<Vec<(String, String)>> {
+    let path = dirs_config()?.join("photoslop/keymap.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<std::collections::BTreeMap<String, String>>(&text) {
+        Ok(map) => Some(map.into_iter().collect()),
+        Err(err) => {
+            log::error!("invalid user keymap: {err}");
+            None
+        }
+    }
+}
+
+fn dirs_config() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config"))
+}
+
+pub fn open_file_dialog(
+    _ws: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let rx = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: Some("Open".into()),
+    });
+    cx.spawn_in(window, async move |this, cx| {
+        if let Ok(Ok(Some(mut paths))) = rx.await {
+            if let Some(path) = paths.pop() {
+                this.update_in(cx, |ws, _window, cx| ws.load_file(path, cx)).ok();
+            }
+        }
+    })
+    .detach();
+}
+
+pub fn save_file_dialog(
+    ws: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let dir = ws
+        .doc
+        .as_ref()
+        .and_then(|d| d.path.as_ref())
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let suggested = ws
+        .doc
+        .as_ref()
+        .map(|d| format!("{}.png", d.title.trim_end_matches(".png")))
+        .unwrap_or_else(|| "untitled.png".into());
+    let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+    cx.spawn_in(window, async move |this, cx| {
+        if let Ok(Ok(Some(path))) = rx.await {
+            this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx)).ok();
+        }
+    })
+    .detach();
+}

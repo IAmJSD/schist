@@ -3830,9 +3830,22 @@ dependencies = [
  "anyhow",
  "env_logger",
  "gpui",
+ "image",
  "log",
+ "photoslop-codec-psd",
+ "photoslop-codecs-common",
+ "photoslop-color",
+ "photoslop-commands-core",
+ "photoslop-compositor",
+ "photoslop-core",
+ "photoslop-plugin-api",
+ "photoslop-tools-basic",
+ "photoslop-tools-paint",
+ "photoslop-tools-select",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

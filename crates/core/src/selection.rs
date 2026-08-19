@@ -62,7 +62,9 @@ impl Selection {
             let trect = coord.rect();
             for ly in 0..TILE_SIZE {
                 let row = &buf[(ly * TILE_SIZE) as usize..((ly + 1) * TILE_SIZE) as usize];
-                let Some(first) = row.iter().position(|&v| v != 0) else { continue };
+                let Some(first) = row.iter().position(|&v| v != 0) else {
+                    continue;
+                };
                 let last = row.iter().rposition(|&v| v != 0).unwrap();
                 let y = trect.top + ly;
                 bounds = bounds.union(&IntRect::new(
@@ -99,7 +101,11 @@ impl Selection {
                         let x = trect.left + lx;
                         let y = trect.top + ly;
                         let ix = (ly * TILE_SIZE + lx) as usize;
-                        let shape = if rect.contains(x, y) { coverage_fn(x, y) } else { 0 };
+                        let shape = if rect.contains(x, y) {
+                            coverage_fn(x, y)
+                        } else {
+                            0
+                        };
                         let old = buf[ix];
                         buf[ix] = ((old as u16 * shape as u16) / 255) as u8;
                     }
@@ -126,9 +132,7 @@ impl Selection {
                     }
                     buf[ix] = match op {
                         SelectOp::Replace | SelectOp::Add => buf[ix].max(shape),
-                        SelectOp::Subtract => {
-                            buf[ix].saturating_sub(shape)
-                        }
+                        SelectOp::Subtract => buf[ix].saturating_sub(shape),
                         SelectOp::Intersect => unreachable!(),
                     };
                 }
@@ -181,7 +185,12 @@ impl Selection {
         }
         let mut rect = IntRect::EMPTY;
         for &(x, y) in points {
-            rect = rect.union(&IntRect::from_xywh(x.floor() as i32, y.floor() as i32, 2, 2));
+            rect = rect.union(&IntRect::from_xywh(
+                x.floor() as i32,
+                y.floor() as i32,
+                2,
+                2,
+            ));
         }
         let pts: Vec<(f64, f64)> = points.iter().map(|&(x, y)| (x as f64, y as f64)).collect();
         let inside = move |px: f64, py: f64| {
@@ -257,8 +266,7 @@ impl Selection {
         let mut a = vec![0f32; w * h];
         for y in 0..h {
             for x in 0..w {
-                a[y * w + x] =
-                    self.mask.value(work.left + x as i32, work.top + y as i32) as f32;
+                a[y * w + x] = self.mask.value(work.left + x as i32, work.top + y as i32) as f32;
             }
         }
         let r = (radius / (3f32).sqrt()).max(0.5);
@@ -312,12 +320,12 @@ fn box_blur_h(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: f32) {
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
         let mut acc: f32 = row[0] * (ir + 1) as f32;
-        for x in 0..ir.min(w) {
-            acc += row[x];
+        for &v in &row[..ir.min(w)] {
+            acc += v;
         }
         for x in 0..w {
             let add = row[(x + ir).min(w - 1)];
-            let sub = if x >= ir + 1 { row[x - ir - 1] } else { row[0] };
+            let sub = if x > ir { row[x - ir - 1] } else { row[0] };
             acc += add - sub;
             dst[y * w + x] = acc * norm;
         }
@@ -334,7 +342,11 @@ fn box_blur_v(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: f32) {
         }
         for y in 0..h {
             let add = src[(y + ir).min(h - 1) * w + x];
-            let sub = if y >= ir + 1 { src[(y - ir - 1) * w + x] } else { src[x] };
+            let sub = if y > ir {
+                src[(y - ir - 1) * w + x]
+            } else {
+                src[x]
+            };
             acc += add - sub;
             dst[y * w + x] = acc * norm;
         }

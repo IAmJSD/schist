@@ -43,9 +43,24 @@ pub struct Rgba {
 }
 
 impl Rgba {
-    pub const TRANSPARENT: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-    pub const BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const WHITE: Rgba = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    pub const TRANSPARENT: Rgba = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+    pub const BLACK: Rgba = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const WHITE: Rgba = Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
 
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Rgba { r, g, b, a }
@@ -75,9 +90,8 @@ impl Rgba {
         if a <= f32::EPSILON {
             return Rgba::TRANSPARENT;
         }
-        let blend = |top_c: f32, bot_c: f32| {
-            (top_c * self.a + bot_c * bottom.a * (1.0 - self.a)) / a
-        };
+        let blend =
+            |top_c: f32, bot_c: f32| (top_c * self.a + bot_c * bottom.a * (1.0 - self.a)) / a;
         Rgba {
             r: blend(self.r, bottom.r),
             g: blend(self.g, bottom.g),

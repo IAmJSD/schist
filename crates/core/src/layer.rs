@@ -137,7 +137,10 @@ pub struct GroupLayer {
 
 impl Default for GroupLayer {
     fn default() -> Self {
-        GroupLayer { children: Vec::new(), open: true }
+        GroupLayer {
+            children: Vec::new(),
+            open: true,
+        }
     }
 }
 
@@ -305,7 +308,9 @@ impl LayerTree {
 
     /// Insert a layer at an explicit path position.
     pub fn insert_at(&mut self, path: &LayerPath, layer: Layer) -> bool {
-        let Some(&ix) = path.0.last() else { return false };
+        let Some(&ix) = path.0.last() else {
+            return false;
+        };
         match self.siblings_mut(path) {
             Some(vec) if ix <= vec.len() => {
                 vec.insert(ix, layer);
@@ -367,7 +372,9 @@ mod tests {
         if let LayerKind::Group(g) = &mut group.kind {
             g.children.push(inner);
         }
-        let tree = LayerTree { layers: vec![bottom, group] };
+        let tree = LayerTree {
+            layers: vec![bottom, group],
+        };
         (tree, b_id, i_id, g_id)
     }
 
