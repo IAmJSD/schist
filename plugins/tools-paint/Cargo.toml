@@ -1,0 +1,12 @@
+[package]
+name = "photoslop-tools-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-plugin-api.workspace = true
+photoslop-pixel-ops.workspace = true
+photoslop-color.workspace = true
+rustc-hash.workspace = true

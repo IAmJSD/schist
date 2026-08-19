@@ -1,0 +1,13 @@
+[package]
+name = "photoslop-codecs-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-plugin-api.workspace = true
+anyhow.workspace = true
+image.workspace = true
+photoslop-color.workspace = true
+photoslop-compositor.workspace = true

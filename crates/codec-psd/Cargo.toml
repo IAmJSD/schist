@@ -1,0 +1,13 @@
+[package]
+name = "photoslop-codec-psd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-color.workspace = true
+anyhow.workspace = true
+byteorder.workspace = true
+thiserror.workspace = true
+log.workspace = true
