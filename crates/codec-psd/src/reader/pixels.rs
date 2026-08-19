@@ -43,9 +43,15 @@ impl ColorPlanes {
     #[inline]
     fn pixel(&self, i: usize) -> Rgba {
         let get = |p: &Option<Vec<f32>>, default: f32| {
-            p.as_ref().map_or(default, |v| v.get(i).copied().unwrap_or(default))
+            p.as_ref()
+                .map_or(default, |v| v.get(i).copied().unwrap_or(default))
         };
-        Rgba::new(get(&self.r, 0.0), get(&self.g, 0.0), get(&self.b, 0.0), get(&self.a, 1.0))
+        Rgba::new(
+            get(&self.r, 0.0),
+            get(&self.g, 0.0),
+            get(&self.b, 0.0),
+            get(&self.a, 1.0),
+        )
     }
 }
 

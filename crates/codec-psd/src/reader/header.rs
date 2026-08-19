@@ -60,7 +60,9 @@ pub fn parse_header(cur: &mut Cursor) -> Result<Header, PsdError> {
     let mode_num = cur.u16()?;
 
     if !(1..=56).contains(&channels) {
-        return Err(PsdError::Corrupt(format!("channel count {channels} out of range 1..=56")));
+        return Err(PsdError::Corrupt(format!(
+            "channel count {channels} out of range 1..=56"
+        )));
     }
     // PSD caps dimensions at 30_000, PSB at 300_000.
     let max_dim: u32 = if psb { 300_000 } else { 30_000 };
@@ -94,7 +96,14 @@ pub fn parse_header(cur: &mut Cursor) -> Result<Header, PsdError> {
         m => return Err(PsdError::Corrupt(format!("unknown color mode {m}"))),
     };
 
-    Ok(Header { psb, channels, width, height, depth, mode })
+    Ok(Header {
+        psb,
+        channels,
+        width,
+        height,
+        depth,
+        mode,
+    })
 }
 
 fn unsupported_mode(name: &str) -> PsdError {

@@ -11,7 +11,7 @@ use gpui::{
     canvas, div, point, px, size, App, Bounds, Context, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Point, Render, RenderImage,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    ScrollWheelEvent, SharedString, Styled as _, Window,
 };
 use photoslop_color::Depth;
 use photoslop_compositor::TileCache;
@@ -138,7 +138,10 @@ impl Workspace {
 
     pub fn save_file_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let result = (|| -> anyhow::Result<()> {
-            let doc = self.doc.as_mut().ok_or_else(|| anyhow::anyhow!("no document"))?;
+            let doc = self
+                .doc
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("no document"))?;
             let ext = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -148,9 +151,7 @@ impl Workspace {
                 .registry
                 .codecs()
                 .find(|c| c.can_export() && c.extensions().contains(&ext.as_str()))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no exporter for .{ext} (PSD save lands in M6)")
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("no exporter for .{ext} (PSD save lands in M6)"))?;
             let bytes = codec.export(doc)?;
             std::fs::write(&path, bytes)?;
             doc.dirty = false;
@@ -242,7 +243,10 @@ impl Workspace {
     pub fn run_command(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_mut() else { return };
         if let Some(command) = self.registry.command(id) {
-            let mut ctx = CommandCtx { doc, state: &mut self.editor };
+            let mut ctx = CommandCtx {
+                doc,
+                state: &mut self.editor,
+            };
             (command.run)(&mut ctx);
             self.status = command.title.into();
         } else {
@@ -254,9 +258,11 @@ impl Workspace {
     pub fn activate_tool(&mut self, id: &str, cx: &mut Context<Self>) {
         let previous = self.editor.active_tool;
         if previous != id {
-            if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(previous))
-            {
-                let mut ctx = ToolCtx { doc, state: &mut self.editor };
+            if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(previous)) {
+                let mut ctx = ToolCtx {
+                    doc,
+                    state: &mut self.editor,
+                };
                 tool.on_deactivate(&mut ctx);
             }
         }
@@ -308,7 +314,10 @@ impl Workspace {
         let input = self.tool_input(local, ev.modifiers, 1.0);
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
-            let mut ctx = ToolCtx { doc, state: &mut self.editor };
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
             tool.on_pointer_down(&mut ctx, input);
         }
         self.after_change(cx);
@@ -328,7 +337,10 @@ impl Workspace {
         let input = self.tool_input(local, ev.modifiers, 1.0);
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
-            let mut ctx = ToolCtx { doc, state: &mut self.editor };
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
             tool.on_pointer_move(&mut ctx, input);
         }
         self.after_change(cx);
@@ -346,7 +358,10 @@ impl Workspace {
         let input = self.tool_input(local, ev.modifiers, 1.0);
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
-            let mut ctx = ToolCtx { doc, state: &mut self.editor };
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
             tool.on_pointer_up(&mut ctx, input);
         }
         self.after_change(cx);
@@ -369,7 +384,10 @@ impl Workspace {
         self.pan_last = None;
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
-            let mut ctx = ToolCtx { doc, state: &mut self.editor };
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
             tool.on_cancel(&mut ctx);
         }
         self.after_change(cx);
@@ -387,8 +405,7 @@ impl Workspace {
             let x = trect.left + (p as i32 % TILE_SIZE);
             let y = trect.top + (p as i32 / TILE_SIZE);
             let s = &rgba[p * 4..p * 4 + 4];
-            let (r, g, b, a) =
-                (s[0] as u32, s[1] as u32, s[2] as u32, s[3] as u32);
+            let (r, g, b, a) = (s[0] as u32, s[1] as u32, s[2] as u32, s[3] as u32);
             let bg = if canvas_rect.contains(x, y) {
                 // 8px checkerboard.
                 if ((x >> 3) + (y >> 3)) & 1 == 0 {
@@ -406,8 +423,7 @@ impl Workspace {
             d[2] = ((r * a + bg * inv) / 255) as u8;
             d[3] = 255;
         }
-        let buffer =
-            image::RgbaImage::from_raw(TILE_SIZE as u32, TILE_SIZE as u32, bgra).unwrap();
+        let buffer = image::RgbaImage::from_raw(TILE_SIZE as u32, TILE_SIZE as u32, bgra).unwrap();
         RenderImage::new(smallvec![image::Frame::new(buffer)])
     }
 
@@ -467,7 +483,11 @@ impl Workspace {
                         rgba[s + 2] as u32,
                         rgba[s + 3] as u32,
                     );
-                    let bg = if ((sx >> 3) + (sy >> 3)) & 1 == 0 { 0xFFu32 } else { 0xCCu32 };
+                    let bg = if ((sx >> 3) + (sy >> 3)) & 1 == 0 {
+                        0xFFu32
+                    } else {
+                        0xCCu32
+                    };
                     let inv = 255 - a;
                     let d = ((py as u32 * w + pxx as u32) * 4) as usize;
                     self.preview.buf[d] = ((b * a + bg * inv) / 255) as u8;
@@ -487,14 +507,27 @@ impl Workspace {
     fn prepare_paint(&mut self, bounds: Bounds<Pixels>) -> PaintJob {
         self.canvas_bounds = bounds;
         let mut job = PaintJob::default();
-        let Some(doc) = self.doc.as_ref() else { return job };
+        let Some(doc) = self.doc.as_ref() else {
+            return job;
+        };
         let canvas_rect = doc.canvas_rect();
         let zoom = self.zoom;
-        let to_screen = |x: f32, y: f32| -> Point<Pixels> {
-            point(
-                bounds.origin.x + self.offset.x + px(x * zoom),
-                bounds.origin.y + self.offset.y + px(y * zoom),
-            )
+        // Immutable-phase data, captured by value so the mutable phase
+        // below (preview/tile-image builds) doesn't fight the borrows.
+        let sel_bounds = (!doc.selection.is_empty() && !doc.selection.bounds().is_empty())
+            .then(|| doc.selection.bounds());
+        let tool_id = self.editor.active_tool;
+        let overlays = self
+            .registry
+            .tool_mut(tool_id)
+            .map(|t| t.overlays(doc, &self.editor))
+            .unwrap_or_default();
+        let origin = (
+            f32::from(bounds.origin.x) + f32::from(self.offset.x),
+            f32::from(bounds.origin.y) + f32::from(self.offset.y),
+        );
+        let to_screen = move |x: f32, y: f32| -> Point<Pixels> {
+            point(px(origin.0 + x * zoom), px(origin.1 + y * zoom))
         };
 
         if zoom <= PREVIEW_ZOOM_CUTOFF {
@@ -525,10 +558,7 @@ impl Workspace {
                 if let Some(img) = self.tile_image(coord) {
                     let trect = coord.rect();
                     let origin = to_screen(trect.left as f32, trect.top as f32);
-                    let sz = size(
-                        px(TILE_SIZE as f32 * zoom),
-                        px(TILE_SIZE as f32 * zoom),
-                    );
+                    let sz = size(px(TILE_SIZE as f32 * zoom), px(TILE_SIZE as f32 * zoom));
                     job.tiles.push((Bounds { origin, size: sz }, img));
                 }
             }
@@ -548,42 +578,32 @@ impl Workspace {
 
         // Selection marching-ants (static dashes for now: alternating
         // black/white nested outlines).
-        if !doc.selection.is_empty() && !doc.selection.bounds().is_empty() {
-            let b = doc.selection.bounds();
+        if let Some(b) = sel_bounds {
             let bounds_px = Bounds {
                 origin: to_screen(b.left as f32, b.top as f32),
-                size: size(
-                    px(b.width() as f32 * zoom),
-                    px(b.height() as f32 * zoom),
-                ),
+                size: size(px(b.width() as f32 * zoom), px(b.height() as f32 * zoom)),
             };
             job.outlines.push((bounds_px, gpui::rgb(0xFFFFFF).into()));
             job.outlines.push((
                 Bounds {
                     origin: point(bounds_px.origin.x - px(1.0), bounds_px.origin.y - px(1.0)),
-                    size: size(bounds_px.size.width + px(2.0), bounds_px.size.height + px(2.0)),
+                    size: size(
+                        bounds_px.size.width + px(2.0),
+                        bounds_px.size.height + px(2.0),
+                    ),
                 },
                 gpui::rgb(0x000000).into(),
             ));
         }
 
         // Active tool overlays.
-        let tool_id = self.editor.active_tool;
-        let overlays = self
-            .registry
-            .tool_mut(tool_id)
-            .map(|t| t.overlays(doc, &self.editor))
-            .unwrap_or_default();
         for overlay in overlays {
             match overlay {
                 Overlay::Rect(r) | Overlay::AntsRect(r) => {
                     job.outlines.push((
                         Bounds {
                             origin: to_screen(r.left as f32, r.top as f32),
-                            size: size(
-                                px(r.width() as f32 * zoom),
-                                px(r.height() as f32 * zoom),
-                            ),
+                            size: size(px(r.width() as f32 * zoom), px(r.height() as f32 * zoom)),
                         },
                         gpui::rgb(0x44AAFF).into(),
                     ));
@@ -594,7 +614,8 @@ impl Workspace {
                     job.polylines.push(pts);
                 }
                 Overlay::Line { x1, y1, x2, y2 } => {
-                    job.polylines.push(vec![to_screen(x1, y1), to_screen(x2, y2)]);
+                    job.polylines
+                        .push(vec![to_screen(x1, y1), to_screen(x2, y2)]);
                 }
                 Overlay::Circle { cx: ccx, cy, r } => {
                     let d = r * 2.0 * zoom;
@@ -617,11 +638,23 @@ impl Workspace {
             .overflow_hidden()
             .bg(gpui::rgb(0x262626))
             .track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|ws, ev, w, cx| ws.on_mouse_down(ev, w, cx)))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|ws, ev, w, cx| ws.on_mouse_down(ev, w, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, ev, w, cx| ws.on_mouse_down(ev, w, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|ws, ev, w, cx| ws.on_mouse_down(ev, w, cx)),
+            )
             .on_mouse_move(cx.listener(|ws, ev, w, cx| ws.on_mouse_move(ev, w, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|ws, ev, w, cx| ws.on_mouse_up(ev, w, cx)))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|ws, ev, w, cx| ws.on_mouse_up(ev, w, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|ws, ev, w, cx| ws.on_mouse_up(ev, w, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|ws, ev, w, cx| ws.on_mouse_up(ev, w, cx)),
+            )
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
                 if ev.keystroke.key == "space" && !ev.is_held {
@@ -638,21 +671,18 @@ impl Workspace {
             }))
             .child(
                 canvas(
-                    move |bounds, _window, cx| {
-                        entity.update(cx, |ws, _| ws.prepare_paint(bounds))
-                    },
+                    move |bounds, _window, cx| entity.update(cx, |ws, _| ws.prepare_paint(bounds)),
                     move |_bounds, job: PaintJob, window, _cx| {
                         for (bounds, img) in job.tiles {
-                            let _ = window.paint_image(
-                                bounds,
-                                gpui::Corners::default(),
-                                img,
-                                0,
-                                false,
-                            );
+                            let _ =
+                                window.paint_image(bounds, gpui::Corners::default(), img, 0, false);
                         }
                         for (bounds, color) in job.outlines {
-                            window.paint_quad(gpui::outline(bounds, color));
+                            window.paint_quad(gpui::outline(
+                                bounds,
+                                color,
+                                gpui::BorderStyle::Solid,
+                            ));
                         }
                         for pts in job.polylines {
                             if pts.len() < 2 {

@@ -63,7 +63,10 @@ pub fn unpack_channel(
     for (row, &count) in counts.iter().enumerate() {
         // Sub-cursor per row: a corrupt row can't consume its neighbors.
         let mut row_src = cur.sub(count)?;
-        unpack_row(&mut row_src, &mut out[row * row_bytes..(row + 1) * row_bytes])?;
+        unpack_row(
+            &mut row_src,
+            &mut out[row * row_bytes..(row + 1) * row_bytes],
+        )?;
         // Trailing pad bytes inside a row's declared count are legal; ignore.
     }
     Ok(out)
@@ -98,7 +101,10 @@ mod tests {
         let src = [3u8, 1, 2, 3, 4]; // 4 literals into a 2-byte row
         let mut cur = Cursor::new(&src);
         let mut out = [0u8; 2];
-        assert!(matches!(unpack_row(&mut cur, &mut out), Err(PsdError::Corrupt(_))));
+        assert!(matches!(
+            unpack_row(&mut cur, &mut out),
+            Err(PsdError::Corrupt(_))
+        ));
     }
 
     #[test]
@@ -106,7 +112,10 @@ mod tests {
         let src = [7u8, 1, 2]; // promises 8 literals, has 2
         let mut cur = Cursor::new(&src);
         let mut out = [0u8; 8];
-        assert!(matches!(unpack_row(&mut cur, &mut out), Err(PsdError::Truncated { .. })));
+        assert!(matches!(
+            unpack_row(&mut cur, &mut out),
+            Err(PsdError::Truncated { .. })
+        ));
     }
 
     #[test]

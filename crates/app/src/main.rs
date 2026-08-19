@@ -5,7 +5,7 @@ mod keymap;
 mod panels;
 mod workspace;
 
-use gpui::{px, size, App, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{px, size, App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions};
 use photoslop_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
 use workspace::Workspace;
 

@@ -18,10 +18,6 @@ impl<'a> Cursor<'a> {
         Cursor { data, pos: 0 }
     }
 
-    pub fn pos(&self) -> usize {
-        self.pos
-    }
-
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
@@ -31,7 +27,10 @@ impl<'a> Cursor<'a> {
     }
 
     fn truncated(&self, needed: usize) -> PsdError {
-        PsdError::Truncated { offset: self.pos, needed }
+        PsdError::Truncated {
+            offset: self.pos,
+            needed,
+        }
     }
 
     pub fn take(&mut self, n: usize) -> Result<&'a [u8], PsdError> {

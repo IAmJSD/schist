@@ -3,8 +3,7 @@
 //! Photoshop keybindings.
 
 use photoslop_core::{
-    blit_rgba8, Document, IntRect, Layer, LayerId, LayerKind, LayerPath, TileCoord,
-    TILE_SIZE,
+    blit_rgba8, Document, IntRect, Layer, LayerId, LayerKind, LayerPath, TileCoord, TILE_SIZE,
 };
 use photoslop_plugin_api::{
     ClipboardImage, Command, CommandCtx, CommandPlugin, PluginManifest, PluginRegistry,

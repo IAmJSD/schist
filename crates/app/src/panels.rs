@@ -7,7 +7,7 @@
 use crate::workspace::Workspace;
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    Styled as _,
+    StatefulInteractiveElement as _, Styled,
 };
 use photoslop_color::Rgba;
 use photoslop_core::{Layer, LayerId, LayerKind};
@@ -118,30 +118,37 @@ fn color_palette(cx: &mut Context<Workspace>) -> impl IntoElement {
         .p_2()
         .gap_1()
         .child(panel_title("Color"))
-        .child(div().flex().flex_row().flex_wrap().gap_1().children(PALETTE.map(|hex| {
+        .child(
             div()
-                .size(px(22.0))
-                .bg(gpui::rgb(hex))
-                .border_1()
-                .border_color(gpui::rgb(0x333333))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |ws, ev: &gpui::MouseDownEvent, _w, cx| {
-                        let color = Rgba::from_u8(
-                            ((hex >> 16) & 0xFF) as u8,
-                            ((hex >> 8) & 0xFF) as u8,
-                            (hex & 0xFF) as u8,
-                            255,
-                        );
-                        if ev.modifiers.alt {
-                            ws.editor.background = color;
-                        } else {
-                            ws.editor.foreground = color;
-                        }
-                        cx.notify();
-                    }),
-                )
-        })))
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap_1()
+                .children(PALETTE.map(|hex| {
+                    div()
+                        .size(px(22.0))
+                        .bg(gpui::rgb(hex))
+                        .border_1()
+                        .border_color(gpui::rgb(0x333333))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, ev: &gpui::MouseDownEvent, _w, cx| {
+                                let color = Rgba::from_u8(
+                                    ((hex >> 16) & 0xFF) as u8,
+                                    ((hex >> 8) & 0xFF) as u8,
+                                    (hex & 0xFF) as u8,
+                                    255,
+                                );
+                                if ev.modifiers.alt {
+                                    ws.editor.background = color;
+                                } else {
+                                    ws.editor.foreground = color;
+                                }
+                                cx.notify();
+                            }),
+                        )
+                })),
+        )
 }
 
 fn panel_title(name: &'static str) -> impl IntoElement {
@@ -186,13 +193,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .doc
         .as_ref()
         .and_then(|d| d.active_layer.and_then(|id| d.tree.find(id)))
-        .map(|l| {
-            format!(
-                "{} · {:.0}%",
-                l.blend.display_name(),
-                l.opacity * 100.0
-            )
-        })
+        .map(|l| format!("{} · {:.0}%", l.blend.display_name(), l.opacity * 100.0))
         .unwrap_or_default();
 
     div()
@@ -203,7 +204,12 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .p_2()
         .gap_1()
         .child(panel_title("Layers"))
-        .child(div().text_size(px(11.0)).text_color(gpui::rgb(0x9A9A9A)).child(opacity_line))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(0x9A9A9A))
+                .child(opacity_line),
+        )
         .child(
             div()
                 .id("layers-scroll")
@@ -211,54 +217,55 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                 .flex_col()
                 .flex_grow()
                 .overflow_y_scroll()
-                .children(rows.into_iter().map(|(id, depth, is_group, name, visible, active)| {
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .px_1()
-                        .h(px(24.0))
-                        .when_active(active)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |ws, _e, _w, cx| {
-                                if let Some(doc) = &mut ws.doc {
-                                    doc.active_layer = Some(id);
-                                }
-                                cx.notify();
-                            }),
-                        )
-                        .child(
-                            // Visibility eye.
+                .children(
+                    rows.into_iter()
+                        .map(|(id, depth, is_group, name, visible, active)| {
                             div()
-                                .w(px(18.0))
-                                .text_size(px(12.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .px_1()
+                                .h(px(24.0))
+                                .when_active(active)
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |ws, _e, _w, cx| {
                                         if let Some(doc) = &mut ws.doc {
-                                            let mut edit = doc.begin_edit("Toggle Visibility");
-                                            edit.change_props(id, |l| l.visible = !l.visible);
-                                            edit.commit();
+                                            doc.active_layer = Some(id);
                                         }
-                                        ws.after_change(cx);
-                                        cx.stop_propagation();
+                                        cx.notify();
                                     }),
                                 )
-                                .child(if visible { "👁" } else { " " }),
-                        )
-                        .child(
-                            div()
-                                .pl(px(depth as f32 * 12.0))
-                                .text_size(px(12.0))
-                                .child(format!(
-                                    "{}{}",
-                                    if is_group { "▸ " } else { "" },
-                                    name
-                                )),
-                        )
-                })),
+                                .child(
+                                    // Visibility eye.
+                                    div()
+                                        .w(px(18.0))
+                                        .text_size(px(12.0))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |ws, _e, _w, cx| {
+                                                if let Some(doc) = &mut ws.doc {
+                                                    let mut edit =
+                                                        doc.begin_edit("Toggle Visibility");
+                                                    edit.change_props(id, |l| {
+                                                        l.visible = !l.visible
+                                                    });
+                                                    edit.commit();
+                                                }
+                                                ws.after_change(cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .child(if visible { "👁" } else { " " }),
+                                )
+                                .child(
+                                    div().pl(px(depth as f32 * 12.0)).text_size(px(12.0)).child(
+                                        format!("{}{}", if is_group { "▸ " } else { "" }, name),
+                                    ),
+                                )
+                        }),
+                ),
         )
 }
 

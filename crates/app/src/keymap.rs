@@ -29,7 +29,9 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         if let Some(kb) = command.keybind {
             bindings.push(KeyBinding::new(
                 &translate(kb),
-                RunCommand { id: command.id.to_string() },
+                RunCommand {
+                    id: command.id.to_string(),
+                },
                 CONTEXT,
             ));
         }
@@ -39,14 +41,14 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         if let Some(key) = tool.shortcut() {
             bindings.push(KeyBinding::new(
                 key,
-                ActivateTool { id: tool.id().to_string() },
+                ActivateTool {
+                    id: tool.id().to_string(),
+                },
                 CONTEXT,
             ));
         }
     }
     // App-level bindings.
-    let app_bindings: &[(&str, &dyn gpui::Action)] = &[];
-    let _ = app_bindings;
     bindings.extend([
         KeyBinding::new(&translate("cmd-n"), NewFile, CONTEXT),
         KeyBinding::new(&translate("cmd-o"), OpenFile, CONTEXT),
@@ -113,14 +115,12 @@ fn dirs_config() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(dir));
     }
-    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config"))
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".config"))
 }
 
-pub fn open_file_dialog(
-    _ws: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
+pub fn open_file_dialog(_ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let rx = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
@@ -130,18 +130,15 @@ pub fn open_file_dialog(
     cx.spawn_in(window, async move |this, cx| {
         if let Ok(Ok(Some(mut paths))) = rx.await {
             if let Some(path) = paths.pop() {
-                this.update_in(cx, |ws, _window, cx| ws.load_file(path, cx)).ok();
+                this.update_in(cx, |ws, _window, cx| ws.load_file(path, cx))
+                    .ok();
             }
         }
     })
     .detach();
 }
 
-pub fn save_file_dialog(
-    ws: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
+pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let dir = ws
         .doc
         .as_ref()
@@ -157,7 +154,8 @@ pub fn save_file_dialog(
     let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
     cx.spawn_in(window, async move |this, cx| {
         if let Ok(Ok(Some(path))) = rx.await {
-            this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx)).ok();
+            this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx))
+                .ok();
         }
     })
     .detach();

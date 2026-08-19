@@ -70,7 +70,10 @@ pub fn parse_layer_and_mask_info(
     let sec_len = cur.checked_len(sec_len)?;
     let mut sec = cur.sub(sec_len)?;
     if sec_len == 0 {
-        return Ok(ParsedLayers { layers: Vec::new(), merged_alpha: false });
+        return Ok(ParsedLayers {
+            layers: Vec::new(),
+            merged_alpha: false,
+        });
     }
 
     // Layer Info sub-section: its own length (u32/u64 for PSB) + contents.
@@ -122,7 +125,10 @@ pub fn parse_layer_and_mask_info(
         }
     }
 
-    Ok(ParsedLayers { layers, merged_alpha })
+    Ok(ParsedLayers {
+        layers,
+        merged_alpha,
+    })
 }
 
 /// Layer Info: i16 layer count, layer records, then channel image data in
@@ -175,7 +181,9 @@ fn parse_layer_record(cur: &mut Cursor, header: &Header) -> Result<Rec, PsdError
 
     let channel_count = cur.u16()?;
     if channel_count > 64 {
-        return Err(PsdError::Corrupt(format!("layer channel count {channel_count} too large")));
+        return Err(PsdError::Corrupt(format!(
+            "layer channel count {channel_count} too large"
+        )));
     }
     let mut channels = Vec::with_capacity(channel_count as usize);
     for _ in 0..channel_count {
@@ -187,7 +195,9 @@ fn parse_layer_record(cur: &mut Cursor, header: &Header) -> Result<Rec, PsdError
 
     let sig = cur.sig4()?;
     if &sig != b"8BIM" {
-        return Err(PsdError::Corrupt("layer blend mode signature is not 8BIM".into()));
+        return Err(PsdError::Corrupt(
+            "layer blend mode signature is not 8BIM".into(),
+        ));
     }
     let blend = cur.sig4()?;
     let opacity = cur.u8()?;
@@ -250,7 +260,11 @@ fn parse_mask_block(extra: &mut Cursor) -> Result<Option<MaskInfo>, PsdError> {
     // background and rect, mask parameters — is consumed by the sub-cursor
     // bound above; the "real" mask channel (-3) is likewise skipped for now.
     let disabled = flags & 0b10 != 0;
-    Ok(Some(MaskInfo { rect, default_value, disabled }))
+    Ok(Some(MaskInfo {
+        rect,
+        default_value,
+        disabled,
+    }))
 }
 
 /// "Additional layer information" blocks at the end of a layer record.
@@ -310,9 +324,15 @@ fn parse_additional_blocks(
                 // payload. ('lyid' and every other key — interpreted or not
                 // — is ALSO preserved verbatim below for M6 round-trip.)
                 if let Some(kind) = AdjustmentKind::from_psd_key(&key) {
-                    rec.adjustment = Some(AdjustmentData { kind, raw: data.to_vec() });
+                    rec.adjustment = Some(AdjustmentData {
+                        kind,
+                        raw: data.to_vec(),
+                    });
                 }
-                rec.extras.push(RawBlock { key, data: data.to_vec() });
+                rec.extras.push(RawBlock {
+                    key,
+                    data: data.to_vec(),
+                });
             }
         }
     }
@@ -325,8 +345,10 @@ fn parse_unicode_name(data: &[u8]) -> Option<String> {
     let mut c = Cursor::new(data);
     let count = c.u32().ok()? as usize;
     let bytes = c.take(count.checked_mul(2)?).ok()?;
-    let units: Vec<u16> =
-        bytes.chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+        .collect();
     Some(String::from_utf16_lossy(&units))
 }
 
@@ -397,7 +419,11 @@ fn decode_layer_channels(
                     rec.name
                 )))
             }
-            c => return Err(PsdError::Corrupt(format!("unknown channel compression {c}"))),
+            c => {
+                return Err(PsdError::Corrupt(format!(
+                    "unknown channel compression {c}"
+                )))
+            }
         };
 
         match target {
@@ -456,11 +482,13 @@ fn fold_groups(parsed: Vec<(Rec, TileMap, Option<MaskTileMap>)>) -> Vec<Layer> {
                 let open = t == 1;
                 // The group's blend key may live in the lsct block itself;
                 // prefer it over the record's key.
-                let key =
-                    rec.lsct.as_ref().and_then(|l| l.blend).unwrap_or(rec.blend);
+                let key = rec.lsct.as_ref().and_then(|l| l.blend).unwrap_or(rec.blend);
                 let blend = blend_from_key(&key, &rec.name);
-                let mut group =
-                    make_layer(rec, mask_tiles, LayerKind::Group(GroupLayer { children, open }));
+                let mut group = make_layer(
+                    rec,
+                    mask_tiles,
+                    LayerKind::Group(GroupLayer { children, open }),
+                );
                 group.blend = blend;
                 push_to(&mut stack, &mut root, group);
             }
