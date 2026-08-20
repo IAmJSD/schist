@@ -116,6 +116,7 @@ enum AppItem {
     StrokeItem,
     FillItem,
     ContentAwareFill,
+    TransformSelection,
     PathFill,
     PathStroke,
     PathToSelection,
@@ -229,6 +230,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                         App("Feather…", SelectFeatherItem, None),
                     ],
                 ),
+                Sep,
+                App("Transform Selection", TransformSelection, None),
                 Sep,
                 Cmd("select.grow"),
                 Cmd("select.similar"),
@@ -564,6 +567,14 @@ fn run_app_item(
             cx,
         ),
         AppItem::ContentAwareFill => ws.content_aware_fill(cx),
+        AppItem::TransformSelection => {
+            if ws.doc.as_ref().is_some_and(|d| d.selection.is_empty()) {
+                ws.status = "Transform Selection needs a selection".into();
+                cx.notify();
+            } else {
+                ws.activate_tool("transform.selection", cx);
+            }
+        }
         AppItem::PathFill => ws.use_active_path(crate::workspace::PathOp::Fill, cx),
         AppItem::PathStroke => ws.use_active_path(crate::workspace::PathOp::Stroke, cx),
         AppItem::PathToSelection => ws.use_active_path(crate::workspace::PathOp::Select, cx),

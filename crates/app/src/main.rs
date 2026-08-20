@@ -3,6 +3,7 @@
 mod actions;
 mod assets;
 mod crash;
+mod curve_editor;
 mod dialogs;
 mod keymap;
 mod panels;

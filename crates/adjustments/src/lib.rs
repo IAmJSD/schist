@@ -31,6 +31,77 @@ impl Default for Curve {
 }
 
 impl Curve {
+    /// Insert a control point, keeping the list sorted by x.
+    ///
+    /// Points nearer than `merge` in x replace each other rather than
+    /// stacking, which is what stops a drag from leaving a pile of nearly
+    /// coincident points behind.
+    pub fn add_point(&mut self, x: f32, y: f32, merge: f32) -> usize {
+        let x = x.clamp(0.0, 1.0);
+        let y = y.clamp(0.0, 1.0);
+        if let Some(i) = self.points.iter().position(|p| (p.0 - x).abs() <= merge) {
+            self.points[i] = (x, y);
+            return i;
+        }
+        let i = self
+            .points
+            .iter()
+            .position(|p| p.0 > x)
+            .unwrap_or(self.points.len());
+        self.points.insert(i, (x, y));
+        i
+    }
+
+    /// Move an existing point, keeping the order and the endpoints pinned
+    /// to the ends of the range.
+    pub fn move_point(&mut self, index: usize, x: f32, y: f32) {
+        let n = self.points.len();
+        if index >= n {
+            return;
+        }
+        let y = y.clamp(0.0, 1.0);
+        // The first and last points define the ends of the curve, so they
+        // only move vertically.
+        let x = if index == 0 {
+            0.0
+        } else if index + 1 == n {
+            1.0
+        } else {
+            // Keep strictly between the neighbours, or the curve would
+            // fold back on itself.
+            let lo = self.points[index - 1].0 + 1e-3;
+            let hi = self.points[index + 1].0 - 1e-3;
+            x.clamp(lo.min(hi), hi.max(lo))
+        };
+        self.points[index] = (x, y);
+    }
+
+    /// Delete a point. The two endpoints cannot be removed.
+    pub fn remove_point(&mut self, index: usize) {
+        if index == 0 || index + 1 >= self.points.len() || self.points.len() <= 2 {
+            return;
+        }
+        self.points.remove(index);
+    }
+
+    /// The point within `radius` of (x, y), if any.
+    pub fn hit(&self, x: f32, y: f32, radius: f32) -> Option<usize> {
+        self.points
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| (p.0 - x).hypot(p.1 - y) <= radius)
+            .min_by(|a, b| {
+                let da = (a.1 .0 - x).hypot(a.1 .1 - y);
+                let db = (b.1 .0 - x).hypot(b.1 .1 - y);
+                da.total_cmp(&db)
+            })
+            .map(|(i, _)| i)
+    }
+
+    pub fn reset(&mut self) {
+        self.points = vec![(0.0, 0.0), (1.0, 1.0)];
+    }
+
     pub fn is_identity(&self) -> bool {
         self.points.len() == 2
             && (self.points[0].0 - self.points[0].1).abs() < 1e-4
@@ -138,6 +209,65 @@ pub struct Curves {
     pub red: Curve,
     pub green: Curve,
     pub blue: Curve,
+}
+
+/// Which curve the editor is showing. Not part of the adjustment's
+/// meaning, but it lives here so the dialog can round-trip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurveChannel {
+    #[default]
+    Rgb,
+    Red,
+    Green,
+    Blue,
+}
+
+impl CurveChannel {
+    pub const ALL: [CurveChannel; 4] = [
+        CurveChannel::Rgb,
+        CurveChannel::Red,
+        CurveChannel::Green,
+        CurveChannel::Blue,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CurveChannel::Rgb => "RGB",
+            CurveChannel::Red => "Red",
+            CurveChannel::Green => "Green",
+            CurveChannel::Blue => "Blue",
+        }
+    }
+
+    /// The colour to draw this channel's curve in.
+    pub fn tint(self) -> u32 {
+        match self {
+            CurveChannel::Rgb => 0xE0E0E0,
+            CurveChannel::Red => 0xE05050,
+            CurveChannel::Green => 0x50C050,
+            CurveChannel::Blue => 0x5080E0,
+        }
+    }
+}
+
+impl Curves {
+    pub fn channel(&self, ch: CurveChannel) -> &Curve {
+        match ch {
+            CurveChannel::Rgb => &self.rgb,
+            CurveChannel::Red => &self.red,
+            CurveChannel::Green => &self.green,
+            CurveChannel::Blue => &self.blue,
+        }
+    }
+
+    pub fn channel_mut(&mut self, ch: CurveChannel) -> &mut Curve {
+        match ch {
+            CurveChannel::Rgb => &mut self.rgb,
+            CurveChannel::Red => &mut self.red,
+            CurveChannel::Green => &mut self.green,
+            CurveChannel::Blue => &mut self.blue,
+        }
+    }
 }
 
 /// Everything an adjustment layer can do.
@@ -1450,6 +1580,9 @@ impl Params {
     pub fn creatable() -> &'static [AdjustmentKind] {
         &[
             AdjustmentKind::Levels,
+            // Curves needed a graph editor before it could be offered;
+            // now that there is one, it belongs here.
+            AdjustmentKind::Curves,
             AdjustmentKind::BrightnessContrast,
             AdjustmentKind::HueSaturation,
             AdjustmentKind::BlackWhite,
@@ -2095,5 +2228,109 @@ mod new_adjustment_tests {
             let back: Params = serde_json::from_str(&json).expect("deserialise");
             assert_eq!(back, p, "{kind:?} did not survive a JSON round trip");
         }
+    }
+}
+
+#[cfg(test)]
+mod curve_editing_tests {
+    use super::*;
+
+    #[test]
+    fn adding_points_keeps_the_list_sorted() {
+        let mut c = Curve::default();
+        c.add_point(0.5, 0.7, 0.02);
+        c.add_point(0.25, 0.2, 0.02);
+        let xs: Vec<f32> = c.points.iter().map(|p| p.0).collect();
+        assert_eq!(xs, vec![0.0, 0.25, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn a_click_near_an_existing_point_replaces_it() {
+        // Otherwise a drag leaves a pile of nearly coincident points.
+        let mut c = Curve::default();
+        c.add_point(0.5, 0.5, 0.02);
+        let before = c.points.len();
+        c.add_point(0.505, 0.9, 0.02);
+        assert_eq!(c.points.len(), before, "a duplicate point was added");
+        assert_eq!(c.points[1], (0.505, 0.9));
+    }
+
+    #[test]
+    fn moving_a_point_cannot_reorder_the_curve() {
+        let mut c = Curve::default();
+        c.add_point(0.3, 0.3, 0.02);
+        c.add_point(0.7, 0.7, 0.02);
+        // Drag the middle point far past its right-hand neighbour.
+        c.move_point(1, 0.99, 0.4);
+        let xs: Vec<f32> = c.points.iter().map(|p| p.0).collect();
+        assert!(
+            xs.windows(2).all(|w| w[0] < w[1]),
+            "curve folded back on itself: {xs:?}"
+        );
+        assert!(xs[1] < xs[2], "point passed its neighbour");
+    }
+
+    #[test]
+    fn the_endpoints_only_move_vertically() {
+        let mut c = Curve::default();
+        c.move_point(0, 0.4, 0.2);
+        assert_eq!(c.points[0], (0.0, 0.2), "left endpoint slid inwards");
+        c.move_point(1, 0.4, 0.8);
+        assert_eq!(c.points[1], (1.0, 0.8), "right endpoint slid inwards");
+    }
+
+    #[test]
+    fn the_endpoints_cannot_be_removed() {
+        let mut c = Curve::default();
+        c.add_point(0.5, 0.9, 0.02);
+        c.remove_point(0);
+        c.remove_point(2);
+        assert_eq!(c.points.len(), 3, "an endpoint was removed");
+        c.remove_point(1);
+        assert_eq!(c.points.len(), 2, "the middle point survived");
+    }
+
+    #[test]
+    fn hit_testing_picks_the_nearest_point() {
+        let mut c = Curve::default();
+        c.add_point(0.3, 0.3, 0.02);
+        c.add_point(0.6, 0.6, 0.02);
+        assert_eq!(c.hit(0.31, 0.29, 0.05), Some(1));
+        assert_eq!(c.hit(0.62, 0.61, 0.05), Some(2));
+        assert_eq!(c.hit(0.45, 0.1, 0.05), None, "hit nothing nearby");
+    }
+
+    #[test]
+    fn a_lifted_midpoint_brightens_the_midtones_only() {
+        let mut c = Curve::default();
+        c.add_point(0.5, 0.75, 0.02);
+        assert!((c.eval(0.0) - 0.0).abs() < 1e-4, "black point moved");
+        assert!((c.eval(1.0) - 1.0).abs() < 1e-4, "white point moved");
+        assert!(c.eval(0.5) > 0.7, "midtones were not lifted");
+    }
+
+    #[test]
+    fn reset_returns_the_identity() {
+        let mut c = Curve::default();
+        c.add_point(0.5, 0.9, 0.02);
+        assert!(!c.is_identity());
+        c.reset();
+        assert!(c.is_identity());
+    }
+
+    #[test]
+    fn channels_are_addressed_independently() {
+        let mut curves = Curves::default();
+        curves
+            .channel_mut(CurveChannel::Red)
+            .add_point(0.5, 0.9, 0.02);
+        assert!(!curves.channel(CurveChannel::Red).is_identity());
+        assert!(curves.channel(CurveChannel::Blue).is_identity());
+        assert!(curves.channel(CurveChannel::Rgb).is_identity());
+
+        let p = Params::Curves(curves);
+        let out = p.apply(Rgba::new(0.5, 0.5, 0.5, 1.0));
+        assert!(out.r > 0.7, "red curve did not apply");
+        assert!((out.b - 0.5).abs() < 0.01, "blue was changed too");
     }
 }

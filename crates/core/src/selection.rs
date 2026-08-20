@@ -304,6 +304,60 @@ impl Selection {
         self.recompute_bounds();
     }
 
+    /// Resample the mask through an affine transform (Select ▸ Transform
+    /// Selection).
+    ///
+    /// Sampled bilinearly from the original, so a rotated or scaled
+    /// selection keeps its soft edge rather than turning into a staircase.
+    pub fn transformed(&self, m: &crate::resample::Affine, canvas: IntRect) -> Selection {
+        let mut out = Selection::new();
+        if !self.active {
+            return out;
+        }
+        let Some(inv) = m.invert() else { return out };
+        let src = self.bounds();
+        if src.is_empty() {
+            return out;
+        }
+        // Where the old bounds land, rounded outwards.
+        let mut dst = IntRect::EMPTY;
+        for (x, y) in [
+            (src.left as f32, src.top as f32),
+            (src.right as f32, src.top as f32),
+            (src.right as f32, src.bottom as f32),
+            (src.left as f32, src.bottom as f32),
+        ] {
+            let (tx, ty) = m.apply(x, y);
+            dst = dst.union(&IntRect::new(
+                tx.floor() as i32 - 1,
+                ty.floor() as i32 - 1,
+                tx.ceil() as i32 + 1,
+                ty.ceil() as i32 + 1,
+            ));
+        }
+        let dst = dst.intersect(&canvas);
+        if dst.is_empty() {
+            return out;
+        }
+        out.active = true;
+        let sample = |fx: f32, fy: f32| -> u8 {
+            let (x0, y0) = (fx.floor(), fy.floor());
+            let (tx, ty) = (fx - x0, fy - y0);
+            let (x0, y0) = (x0 as i32, y0 as i32);
+            let at = |x: i32, y: i32| self.mask.value(x, y) as f32;
+            let v = at(x0, y0) * (1.0 - tx) * (1.0 - ty)
+                + at(x0 + 1, y0) * tx * (1.0 - ty)
+                + at(x0, y0 + 1) * (1.0 - tx) * ty
+                + at(x0 + 1, y0 + 1) * tx * ty;
+            v.round().clamp(0.0, 255.0) as u8
+        };
+        out.apply_shape(dst, SelectOp::Replace, |x, y| {
+            let (sx, sy) = inv.apply(x as f32 + 0.5, y as f32 + 0.5);
+            sample(sx - 0.5, sy - 0.5)
+        });
+        out
+    }
+
     /// Grow the selection outwards by `radius` pixels (Select ▸ Modify ▸
     /// Expand). Works on the thresholded shape, matching Photoshop, which
     /// hardens a feathered edge when you expand it.

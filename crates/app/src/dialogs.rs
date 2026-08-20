@@ -48,7 +48,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             layer,
             params,
             original,
-        } => adjustment_dialog(layer, params, original, cx).into_any_element(),
+        } => adjustment_dialog(ws, layer, params, original, cx).into_any_element(),
         Modal::LayerStyle {
             layer,
             style,
@@ -65,7 +65,9 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             kind,
             params,
             preview,
-        } => destructive_adjustment_dialog(&state, kind, *params, preview, cx).into_any_element(),
+        } => {
+            destructive_adjustment_dialog(ws, &state, kind, *params, preview, cx).into_any_element()
+        }
         Modal::Stroke { width, position } => {
             stroke_dialog(ws, &state, width, position, cx).into_any_element()
         }
@@ -535,6 +537,7 @@ fn filter_dialog(
 /// Image ▸ Adjustments: the same sliders as the adjustment layers, but
 /// previewing writes pixels and OK bakes them in.
 fn destructive_adjustment_dialog(
+    ws: &mut Workspace,
     _state: &DialogState,
     kind: photoslop_core::AdjustmentKind,
     params: photoslop_adjustments::Params,
@@ -542,13 +545,18 @@ fn destructive_adjustment_dialog(
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let specs = params.param_specs();
+    // Curves has no sliders: it needs a graph.
+    let curves = matches!(params, photoslop_adjustments::Params::Curves(_));
     let mut body = div()
         .id("destructive-adjust-body")
         .flex()
         .flex_col()
         .gap_1()
-        .max_h(px(360.0))
+        .max_h(px(430.0))
         .overflow_y_scroll();
+    if curves {
+        body = body.child(crate::curve_editor::render(ws, cx));
+    }
     for spec in specs {
         let key = spec.key;
         body = body.child(param_slider(
@@ -631,7 +639,12 @@ fn destructive_adjustment_dialog(
             },
             cx,
         ));
-    ui::modal_frame(kind.display_name(), 380.0, body, actions)
+    ui::modal_frame(
+        kind.display_name(),
+        if curves { 430.0 } else { 380.0 },
+        body,
+        actions,
+    )
 }
 
 /// Edit ▸ Stroke.
@@ -981,6 +994,7 @@ fn color_range_dialog(
 }
 
 fn adjustment_dialog(
+    ws: &mut Workspace,
     layer: photoslop_core::LayerId,
     params: photoslop_adjustments::Params,
     original: (Option<String>, Vec<u8>),
@@ -988,7 +1002,11 @@ fn adjustment_dialog(
 ) -> impl IntoElement {
     let specs = params.param_specs();
     let title = params.display_name().to_string();
+    let curves = matches!(params, photoslop_adjustments::Params::Curves(_));
     let mut body = div().flex().flex_col().gap_1();
+    if curves {
+        body = body.child(crate::curve_editor::render(ws, cx));
+    }
     for spec in specs {
         let key = spec.key;
         body = body.child(param_slider(
@@ -1042,7 +1060,7 @@ fn adjustment_dialog(
             },
             cx,
         ));
-    ui::modal_frame(title, 360.0, body, actions)
+    ui::modal_frame(title, if curves { 430.0 } else { 360.0 }, body, actions)
 }
 
 /// The third-party plugin manager: what loaded, what didn't and why, and

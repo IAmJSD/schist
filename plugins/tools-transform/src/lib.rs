@@ -79,10 +79,23 @@ impl Handle {
 }
 
 /// A transform in progress.
+/// Whether the tool is moving pixels or the selection outline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransformMode {
+    /// Free Transform: the layer's pixels.
+    #[default]
+    Layer,
+    /// Select ▸ Transform Selection: the mask, leaving pixels alone.
+    Selection,
+}
+
 struct Session {
+    mode: TransformMode,
     layer: LayerId,
     /// Untransformed pixels (cheap: tiles are reference-counted).
     original: TileMap,
+    /// Untransformed selection, for `TransformMode::Selection`.
+    original_selection: photoslop_core::Selection,
     /// Bounds of `original`, the box the handles frame.
     base: IntRect,
     /// Scale / rotation / skew accumulated so far.
@@ -166,8 +179,16 @@ impl Session {
         point_in_quad(x, y, &quad).then_some(Handle::Inside)
     }
 
-    /// Re-render the layer from the snapshot with the current matrix.
+    /// Re-render the layer (or the selection) from the snapshot with the
+    /// current matrix.
     fn render(&self, doc: &mut Document, filter: Filter) {
+        if self.mode == TransformMode::Selection {
+            let before = doc.selection.bounds();
+            let canvas = doc.canvas_rect();
+            doc.selection = self.original_selection.transformed(&self.matrix(), canvas);
+            doc.add_damage(before.union(&doc.selection.bounds()));
+            return;
+        }
         let clip = doc.canvas_rect().inflated(
             (self.base.width().max(self.base.height()) as f32
                 * self.scale.0.abs().max(self.scale.1.abs())) as i32,
@@ -201,6 +222,12 @@ impl Session {
     }
 
     fn restore(&self, doc: &mut Document) {
+        if self.mode == TransformMode::Selection {
+            let before = doc.selection.bounds();
+            doc.selection = self.original_selection.clone();
+            doc.add_damage(before.union(&self.base));
+            return;
+        }
         let before = doc
             .tree
             .find(self.layer)
@@ -234,7 +261,17 @@ fn point_in_quad(x: f32, y: f32, quad: &[(f32, f32); 4]) -> bool {
 
 #[derive(Default)]
 pub struct TransformTool {
+    mode: TransformMode,
     session: Option<Session>,
+}
+
+impl TransformTool {
+    pub fn new(mode: TransformMode) -> TransformTool {
+        TransformTool {
+            mode,
+            session: None,
+        }
+    }
 }
 
 impl TransformTool {
@@ -251,13 +288,19 @@ impl TransformTool {
         let LayerKind::Raster(raster) = &layer.kind else {
             return;
         };
-        let base = raster.tiles.content_bounds();
+        let base = match self.mode {
+            TransformMode::Layer => raster.tiles.content_bounds(),
+            // The handles frame the selection, not the artwork.
+            TransformMode::Selection => ctx.doc.selection.bounds(),
+        };
         if base.is_empty() {
             return;
         }
         self.session = Some(Session {
+            mode: self.mode,
             layer: id,
             original: raster.tiles.clone(),
+            original_selection: ctx.doc.selection.clone(),
             base,
             scale: (1.0, 1.0),
             rotation: 0.0,
@@ -270,10 +313,17 @@ impl TransformTool {
 
 impl ToolPlugin for TransformTool {
     fn id(&self) -> &'static str {
-        "transform"
+        match self.mode {
+            TransformMode::Layer => "transform",
+            TransformMode::Selection => "transform.selection",
+        }
     }
+
     fn name(&self) -> &'static str {
-        "Free Transform"
+        match self.mode {
+            TransformMode::Layer => "Free Transform",
+            TransformMode::Selection => "Transform Selection",
+        }
     }
     fn icon(&self) -> &'static str {
         "transform"
@@ -386,6 +436,18 @@ impl ToolPlugin for TransformTool {
             .doc
             .canvas_rect()
             .inflated(session.base.width().max(session.base.height()));
+        if session.mode == TransformMode::Selection {
+            // Only the mask moves; the pixels are untouched, so this is one
+            // selection edit rather than a tile rewrite.
+            session.restore(ctx.doc);
+            let canvas = ctx.doc.canvas_rect();
+            let matrix = session.matrix();
+            let base = session.original_selection.clone();
+            let mut edit = ctx.doc.begin_edit("Transform Selection");
+            edit.change_selection(|sel, _| *sel = base.transformed(&matrix, canvas));
+            edit.commit();
+            return;
+        }
         // A smart object composes the transform onto its own and
         // re-renders from its untouched source, so transforming it twice
         // costs no more quality than transforming it once.
@@ -586,7 +648,8 @@ impl PluginManifest for TransformToolsPlugin {
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
-        registry.register_tool(Box::new(TransformTool::default()));
+        registry.register_tool(Box::new(TransformTool::new(TransformMode::Layer)));
+        registry.register_tool(Box::new(TransformTool::new(TransformMode::Selection)));
         registry.register_tool(Box::new(CropTool::default()));
     }
 }

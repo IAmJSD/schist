@@ -81,6 +81,10 @@ pub struct Workspace {
     /// Path to the open submenu in the menu bar, e.g. [2, 4] for the fifth
     /// row of the third menu. Empty means none.
     pub open_submenu: Vec<usize>,
+    /// Which curve the Curves editor is showing.
+    pub curve_channel: photoslop_adjustments::CurveChannel,
+    /// Index of the control point being dragged in the curve editor.
+    pub curve_drag: Option<usize>,
     pub filter_preview: Option<FilterPreview>,
     /// Live bounds of slider tracks, recorded each frame by their canvases.
     slider_bounds: FxHashMap<&'static str, Bounds<Pixels>>,
@@ -484,6 +488,8 @@ impl Workspace {
             status: "Ready".into(),
             open_popup: None,
             open_submenu: Vec::new(),
+            curve_channel: Default::default(),
+            curve_drag: None,
             filter_preview: None,
             slider_bounds: FxHashMap::default(),
             active_slider: None,
@@ -2249,6 +2255,19 @@ impl Workspace {
 
     pub fn record_slider_bounds(&mut self, id: &'static str, bounds: Bounds<Pixels>) {
         self.slider_bounds.insert(id, bounds);
+    }
+
+    /// Position within a recorded box as a 0..=1 pair, with y measured
+    /// upwards so it matches how a curve is drawn.
+    pub fn box_position(&self, id: &'static str, window_pos: Point<Pixels>) -> Option<(f32, f32)> {
+        let b = self.slider_bounds.get(id)?;
+        let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let x = (f32::from(window_pos.x) - f32::from(b.origin.x)) / w;
+        let y = (f32::from(window_pos.y) - f32::from(b.origin.y)) / h;
+        Some((x.clamp(0.0, 1.0), (1.0 - y).clamp(0.0, 1.0)))
     }
 
     /// 0..=1 ratio of a window position along a slider's recorded track.
