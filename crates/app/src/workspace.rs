@@ -2202,6 +2202,29 @@ impl Workspace {
         self.after_change(cx);
     }
 
+    /// Apply an options-bar change to the active tool, then let it react
+    /// with the document available.
+    pub fn set_tool_option(
+        &mut self,
+        key: &'static str,
+        value: photoslop_plugin_api::OptionValue,
+        cx: &mut Context<Self>,
+    ) {
+        let tool_id = self.editor.active_tool;
+        let Some(tool) = self.registry.tool_mut(tool_id) else {
+            return;
+        };
+        tool.set_option(key, value);
+        if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
+            tool.on_option_changed(&mut ctx, key);
+        }
+        self.after_change(cx);
+    }
+
     // ----- input routing -----
 
     fn panning_tool(&self) -> bool {

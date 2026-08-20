@@ -35,6 +35,13 @@ impl Align {
 pub struct TextSpec {
     pub text: String,
     pub family: String,
+    /// Ask the font database for the bold face of `family`. Defaulted so
+    /// that text layers written before this existed still load.
+    #[serde(default)]
+    pub bold: bool,
+    /// Ask for the italic face.
+    #[serde(default)]
+    pub italic: bool,
     /// Size in pixels (em size).
     pub size: f32,
     pub align: Align,
@@ -51,6 +58,8 @@ impl Default for TextSpec {
         TextSpec {
             text: String::new(),
             family: default_family(),
+            bold: false,
+            italic: false,
             size: 48.0,
             align: Align::Left,
             line_height: 1.0,
@@ -147,6 +156,21 @@ pub fn families() -> Vec<String> {
     names
 }
 
+/// The installed families as a fixed list, for controls that need one.
+///
+/// The set cannot change while the process runs, so it is built once and
+/// leaked rather than re-collected -- the options bar asks for this on
+/// every frame it draws.
+pub fn family_names() -> &'static [&'static str] {
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        families()
+            .into_iter()
+            .map(|n| &*Box::leak(n.into_boxed_str()))
+            .collect()
+    })
+}
+
 /// A reasonable default family: whatever the database resolved as its
 /// sans-serif alias.
 pub fn default_family() -> String {
@@ -154,17 +178,31 @@ pub fn default_family() -> String {
 }
 
 /// Load and cache a parsed font by family name.
-fn load_font(family: &str) -> Option<Arc<fontdue::Font>> {
+fn load_font(family: &str, bold: bool, italic: bool) -> Option<Arc<fontdue::Font>> {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<fontdue::Font>>>>> = OnceLock::new();
+    // Keyed by the whole request: the bold face of a family is a different
+    // file from its regular one.
+    type Key = (String, bool, bool);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Option<Arc<fontdue::Font>>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().ok()?.get(family) {
+    let key = (family.to_string(), bold, italic);
+    if let Some(hit) = cache.lock().ok()?.get(&key) {
         return hit.clone();
     }
 
     let query = fontdb::Query {
         families: &[fontdb::Family::Name(family), fontdb::Family::SansSerif],
+        weight: if bold {
+            fontdb::Weight::BOLD
+        } else {
+            fontdb::Weight::NORMAL
+        },
+        style: if italic {
+            fontdb::Style::Italic
+        } else {
+            fontdb::Style::Normal
+        },
         ..Default::default()
     };
     let font = db().query(&query).and_then(|id| {
@@ -185,7 +223,7 @@ fn load_font(family: &str) -> Option<Arc<fontdue::Font>> {
         log::warn!("text-engine: no usable font for {family:?}");
     }
     if let Ok(mut c) = cache.lock() {
-        c.insert(family.to_string(), font.clone());
+        c.insert(key, font.clone());
     }
     font
 }
@@ -278,7 +316,7 @@ fn layout(spec: &TextSpec, font: &fontdue::Font) -> (Vec<PlacedGlyph>, f32) {
 /// Returns `None` when no font could be loaded; an empty string yields an
 /// empty raster rather than an error.
 pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
-    let font = load_font(&spec.family)?;
+    let font = load_font(&spec.family, spec.bold, spec.italic)?;
     if spec.text.is_empty() || spec.size <= 0.0 {
         return Some(TextRaster {
             bounds: IntRect::EMPTY,

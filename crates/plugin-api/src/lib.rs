@@ -183,6 +183,14 @@ pub trait ToolPlugin: Send {
     /// Apply a change made in the options bar. `key` is the one given in
     /// [`ToolOption`].
     fn set_option(&mut self, _key: &str, _value: OptionValue) {}
+
+    /// Called straight after `set_option`, with the document in hand.
+    ///
+    /// Most tools only need `set_option`, which stores the value for the
+    /// next gesture. A tool holding a live session -- the type tool with
+    /// an open text layer -- needs to re-render it here, or changing the
+    /// font size would do nothing visible until the next click.
+    fn on_option_changed(&mut self, _ctx: &mut ToolCtx, _key: &str) {}
 }
 
 /// A control the options bar should show for the active tool.

@@ -572,9 +572,32 @@ pub struct PenTool {
     anchors: Vec<((f32, f32), (f32, f32))>,
     dragging: bool,
     cursor: Option<(f32, f32)>,
+    /// Commit as a live shape layer rather than painting the fill in.
+    vector: bool,
+    /// Preview the segment from the last anchor to the cursor.
+    rubber_band: bool,
 }
 
 impl PenTool {
+    /// The anchors as an editable path, for the shape-layer commit. The
+    /// pen already stores a point and an outgoing handle per anchor, which
+    /// is exactly what a smooth anchor is.
+    fn vector_shape(&self, colour: Rgba) -> Option<photoslop_core::VectorShape> {
+        if self.anchors.len() < 3 {
+            return None;
+        }
+        let mut path = photoslop_core::VectorPath::new("Path");
+        path.subpaths.push(photoslop_core::SubPath {
+            anchors: self
+                .anchors
+                .iter()
+                .map(|((x, y), (hx, hy))| photoslop_core::Anchor::smooth(*x, *y, *hx, *hy))
+                .collect(),
+            closed: true,
+        });
+        Some(photoslop_core::VectorShape::new(path, colour))
+    }
+
     fn build_path(&self, close: bool) -> Path {
         let mut b = PathBuilder::new();
         if self.anchors.is_empty() {
@@ -656,11 +679,39 @@ impl ToolPlugin for PenTool {
             self.anchors.clear();
             return;
         }
+        let color = ctx.state.foreground;
+        if self.vector {
+            if let Some(shape) = self.vector_shape(color) {
+                self.anchors.clear();
+                self.dragging = false;
+                commit_shape_layer(ctx.doc, shape, "Path");
+                return;
+            }
+        }
         let path = self.build_path(true);
         self.anchors.clear();
         self.dragging = false;
-        let color = ctx.state.foreground;
         commit_shape(ctx.doc, &path, color, FillRule::NonZero, "Path Fill");
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::choice(
+                "pen-mode",
+                "Mode",
+                &["Shape", "Pixels"],
+                usize::from(!self.vector),
+            ),
+            ToolOption::toggle("pen-rubber-band", "Rubber Band", self.rubber_band),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "pen-mode" => self.vector = value.index() == 0,
+            "pen-rubber-band" => self.rubber_band = value.bool(),
+            _ => {}
+        }
     }
 
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
@@ -697,6 +748,9 @@ impl ToolPlugin for PenTool {
             }
         }
         // Rubber band to the cursor.
+        if !self.rubber_band {
+            return out;
+        }
         if let (Some(((lx, ly), _)), Some((cx, cy))) = (self.anchors.last(), self.cursor) {
             out.push(Overlay::Line {
                 x1: *lx,

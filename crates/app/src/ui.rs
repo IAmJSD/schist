@@ -185,7 +185,7 @@ pub struct Dropdown<T> {
 /// A dropdown button that opens its popup with the given options.
 pub fn dropdown<T: Clone + PartialEq + 'static>(
     spec: Dropdown<T>,
-    on_select: impl Fn(&mut Workspace, T) + Clone + 'static,
+    on_select: impl Fn(&mut Workspace, T, &mut Context<Workspace>) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let Dropdown {
@@ -234,7 +234,7 @@ pub fn dropdown<T: Clone + PartialEq + 'static>(
                         MouseButton::Left,
                         cx.listener(move |ws, _e, _w, cx| {
                             ws.close_popup(cx);
-                            on_select(ws, value.clone());
+                            on_select(ws, value.clone(), cx);
                             cx.notify();
                         }),
                     )

@@ -224,7 +224,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                         .map(|c| (SharedString::from(c.label()), *c))
                         .collect(),
                 },
-                |ws, c| ws.curve_channel = c,
+                |ws, c, _cx| ws.curve_channel = c,
                 cx,
             ),
         ))

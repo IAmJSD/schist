@@ -11,8 +11,8 @@ use photoslop_core::{
     Document, IntRect, Layer, LayerId, LayerPath, RawBlock, TileCoord, TileMap, TILE_SIZE,
 };
 use photoslop_plugin_api::{
-    EditorState, Modifiers, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
-    ToolPlugin,
+    EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
+    ToolCtx, ToolOption, ToolPlugin,
 };
 use photoslop_text_engine::{rasterize, Align, TextSpec};
 
@@ -114,9 +114,17 @@ struct Editing {
     dirty: bool,
 }
 
+/// The styles the options bar offers, in the order Photoshop lists them.
+const STYLES: &[&str] = &["Regular", "Bold", "Italic", "Bold Italic"];
+const ALIGNMENTS: &[&str] = &["Left", "Center", "Right"];
+
 #[derive(Default)]
 pub struct TypeTool {
     editing: Option<Editing>,
+    /// What new text starts as, and what the options bar shows when
+    /// nothing is being edited. Editing a layer adopts its spec, so the
+    /// bar always describes the text you are looking at.
+    spec: TextSpec,
 }
 
 impl TypeTool {
@@ -145,8 +153,8 @@ impl TypeTool {
     fn start_new(&mut self, ctx: &mut ToolCtx, x: f32, y: f32) {
         let stored = StoredText {
             spec: TextSpec {
-                size: (ctx.state.brush_size * 2.0).clamp(8.0, 400.0),
-                ..Default::default()
+                text: String::new(),
+                ..self.spec.clone()
             },
             origin: (x.round() as i32, y.round() as i32),
             color: ctx.state.foreground.to_u8(),
@@ -232,6 +240,11 @@ impl ToolPlugin for TypeTool {
                     .map(|r| r.tiles.clone())
                     .unwrap_or_default();
                 ctx.doc.active_layer = Some(layer);
+                // Show this layer's own type settings in the bar.
+                self.spec = TextSpec {
+                    text: String::new(),
+                    ..stored.spec.clone()
+                };
                 self.editing = Some(Editing {
                     layer,
                     stored,
@@ -290,6 +303,91 @@ impl ToolPlugin for TypeTool {
         // Swallow every plain keystroke while typing so letters don't
         // switch tools mid-word.
         true
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        let families = photoslop_text_engine::family_names();
+        let family = families
+            .iter()
+            .position(|f| *f == self.spec.family)
+            .unwrap_or(0);
+        vec![
+            ToolOption::choice("type-family", "Font", families, family),
+            ToolOption::choice(
+                "type-style",
+                "Style",
+                STYLES,
+                usize::from(self.spec.bold) | (usize::from(self.spec.italic) << 1),
+            ),
+            ToolOption::slider("type-size", "Size", self.spec.size, 6.0, 400.0, " px"),
+            ToolOption::choice(
+                "type-align",
+                "Align",
+                ALIGNMENTS,
+                match self.spec.align {
+                    Align::Left => 0,
+                    Align::Center => 1,
+                    Align::Right => 2,
+                },
+            ),
+            ToolOption::slider(
+                "type-leading",
+                "Leading",
+                self.spec.line_height,
+                0.5,
+                3.0,
+                "\u{d7}",
+            ),
+            ToolOption::slider(
+                "type-tracking",
+                "Tracking",
+                self.spec.tracking,
+                -20.0,
+                80.0,
+                " px",
+            ),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "type-family" => {
+                if let Some(name) = photoslop_text_engine::family_names().get(value.index()) {
+                    self.spec.family = (*name).to_string();
+                }
+            }
+            "type-style" => {
+                let i = value.index();
+                self.spec.bold = i & 1 != 0;
+                self.spec.italic = i & 2 != 0;
+            }
+            "type-size" => self.spec.size = value.num().clamp(6.0, 400.0),
+            "type-align" => {
+                self.spec.align = match value.index() {
+                    1 => Align::Center,
+                    2 => Align::Right,
+                    _ => Align::Left,
+                }
+            }
+            "type-leading" => self.spec.line_height = value.num().clamp(0.5, 3.0),
+            "type-tracking" => self.spec.tracking = value.num(),
+            _ => {}
+        }
+    }
+
+    /// Push the bar's settings onto the text being edited, so a font or
+    /// size change shows up immediately rather than on the next click.
+    fn on_option_changed(&mut self, ctx: &mut ToolCtx, _key: &str) {
+        let Some(session) = &mut self.editing else {
+            return;
+        };
+        let text = std::mem::take(&mut session.stored.spec.text);
+        session.stored.spec = TextSpec {
+            text,
+            ..self.spec.clone()
+        };
+        session.dirty = true;
+        self.refresh(ctx.doc);
     }
 
     fn on_commit(&mut self, ctx: &mut ToolCtx) {
@@ -471,6 +569,92 @@ mod tests {
             let key = if ch == ' ' { "space" } else { &text };
             tool.on_key(ctx, key, Some(&text), Modifiers::default());
         }
+    }
+
+    #[test]
+    fn the_options_bar_settings_reach_the_text() {
+        let mut d = doc();
+        let mut state = photoslop_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi");
+
+        // Size, alignment and style all land on the live session.
+        tool.set_option("type-size", OptionValue::Num(96.0));
+        tool.set_option("type-align", OptionValue::Choice(2));
+        tool.set_option("type-style", OptionValue::Choice(3));
+        tool.on_option_changed(&mut ctx, "type-size");
+
+        let session = tool.editing.as_ref().expect("still editing");
+        assert_eq!(session.stored.spec.size, 96.0);
+        assert_eq!(session.stored.spec.align, Align::Right);
+        assert!(session.stored.spec.bold && session.stored.spec.italic);
+        assert_eq!(session.stored.spec.text, "Hi", "the typing survives");
+    }
+
+    #[test]
+    fn a_bigger_size_renders_bigger_text() {
+        let render = |size: f32| {
+            let mut d = doc();
+            let mut state = photoslop_plugin_api::EditorState::default();
+            let mut tool = TypeTool::default();
+            tool.set_option("type-size", OptionValue::Num(size));
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 120.0));
+            type_text(&mut tool, &mut ctx, "AB");
+            let layer = tool.editing.as_ref().unwrap().layer;
+            d.tree.find(layer).unwrap().tight_bounds().width()
+        };
+        let small = render(16.0);
+        let large = render(64.0);
+        assert!(small > 0, "the small text drew something");
+        assert!(
+            large > small * 2,
+            "64px text should be far wider than 16px: {small} vs {large}"
+        );
+    }
+
+    #[test]
+    fn editing_an_existing_layer_adopts_its_settings() {
+        let mut d = doc();
+        let mut state = photoslop_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.set_option("type-size", OptionValue::Num(72.0));
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "X");
+            tool.on_commit(&mut ctx);
+
+            // A new layer somewhere else, at a different size.
+            tool.set_option("type-size", OptionValue::Num(20.0));
+            tool.on_pointer_down(&mut ctx, input(200.0, 160.0));
+            type_text(&mut tool, &mut ctx, "Y");
+            tool.on_commit(&mut ctx);
+
+            // Clicking back into the first one should show 72 again.
+            // Aim at the glyph itself: hit-testing uses the inked bounds,
+            // which sit below the origin you clicked to place the text.
+            tool.on_pointer_down(&mut ctx, input(40.0, 100.0));
+        }
+        let shown = tool
+            .options()
+            .into_iter()
+            .find(|o| o.key == "type-size")
+            .expect("a size option")
+            .value
+            .num();
+        assert_eq!(shown, 72.0, "the bar should describe the text you clicked");
     }
 
     fn ink(doc: &Document) -> usize {

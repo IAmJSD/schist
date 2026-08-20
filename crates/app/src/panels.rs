@@ -1109,15 +1109,11 @@ fn slider_get(ws: &Workspace, target: SliderTarget) -> f32 {
 
 fn slider_set(ws: &mut Workspace, target: SliderTarget, ratio: f32, cx: &mut Context<Workspace>) {
     match target {
-        SliderTarget::ToolOption { key, min, max } => {
-            let tool_id = ws.editor.active_tool;
-            if let Some(tool) = ws.registry.tool_mut(tool_id) {
-                tool.set_option(
-                    key,
-                    photoslop_plugin_api::OptionValue::Num(min + ratio * (max - min)),
-                );
-            }
-        }
+        SliderTarget::ToolOption { key, min, max } => ws.set_tool_option(
+            key,
+            photoslop_plugin_api::OptionValue::Num(min + ratio * (max - min)),
+            cx,
+        ),
         SliderTarget::BrushSize => ws.editor.brush_size = 1.0 + ratio * 299.0,
         SliderTarget::BrushHardness => ws.editor.brush_hardness = ratio,
         SliderTarget::ToolOpacity => ws.editor.tool_opacity = ratio,
@@ -1323,11 +1319,8 @@ fn tool_option_control(
             ui::checkbox(
                 opt.label,
                 on,
-                move |ws, _cx| {
-                    let tool_id = ws.editor.active_tool;
-                    if let Some(tool) = ws.registry.tool_mut(tool_id) {
-                        tool.set_option(key, photoslop_plugin_api::OptionValue::Bool(!on));
-                    }
+                move |ws, cx| {
+                    ws.set_tool_option(key, photoslop_plugin_api::OptionValue::Bool(!on), cx)
                 },
                 cx,
             )
@@ -1335,28 +1328,47 @@ fn tool_option_control(
         }
         OptionKind::Choice(labels) => {
             let current = opt.value.index().min(labels.len().saturating_sub(1));
-            ui::dropdown(
+            // Wide enough for the longest thing it can say, so a dropdown
+            // never has to truncate its own value.
+            let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            let width = (longest as f32 * 6.2 + 34.0).clamp(80.0, 210.0);
+            let control = ui::dropdown(
                 ui::Dropdown {
                     popup: Popup::Field(key),
                     is_open: ws.open_popup == Some(Popup::Field(key)),
                     current,
                     label: labels.get(current).copied().unwrap_or("").into(),
-                    width: 104.0,
+                    width,
                     options: labels
                         .iter()
                         .enumerate()
                         .map(|(i, l)| (SharedString::from(*l), i))
                         .collect(),
                 },
-                move |ws, i| {
-                    let tool_id = ws.editor.active_tool;
-                    if let Some(tool) = ws.registry.tool_mut(tool_id) {
-                        tool.set_option(key, photoslop_plugin_api::OptionValue::Choice(i));
-                    }
+                move |ws, i, cx| {
+                    ws.set_tool_option(key, photoslop_plugin_api::OptionValue::Choice(i), cx)
                 },
                 cx,
-            )
-            .into_any_element()
+            );
+            // Sliders carry their own label; a dropdown does not, and an
+            // unlabelled one reading "Point Sample" does not say what it
+            // is choosing.
+            if opt.label.is_empty() {
+                return control.into_any_element();
+            }
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(TEXT_DIM))
+                        .child(opt.label),
+                )
+                .child(control)
+                .into_any_element()
         }
     }
 }

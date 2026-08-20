@@ -4566,6 +4566,7 @@ name = "photoslop-tools-paint"
 version = "0.1.0"
 dependencies = [
  "photoslop-color",
+ "photoslop-compositor",
  "photoslop-core",
  "photoslop-pixel-ops",
  "photoslop-plugin-api",

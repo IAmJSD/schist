@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+photoslop-compositor.workspace = true
 photoslop-core.workspace = true
 photoslop-plugin-api.workspace = true
 photoslop-pixel-ops.workspace = true

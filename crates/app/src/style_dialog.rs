@@ -400,7 +400,7 @@ pub fn render(
                         .map(|m| (SharedString::from(m.display_name()), *m))
                         .collect(),
                 },
-                move |ws, m| {
+                move |ws, m, _cx| {
                     // Dropdowns fire without a context; the preview catches
                     // up on the next edit or on OK.
                     ws.update_modal(|md| {
@@ -489,7 +489,7 @@ pub fn render(
                             ("Center".into(), StrokePosition::Center),
                         ],
                     },
-                    move |ws, p| {
+                    move |ws, p, _cx| {
                         ws.update_modal(|md| {
                             if let Modal::LayerStyle { style, .. } = md {
                                 style.stroke.settings.position = p;
@@ -525,7 +525,7 @@ pub fn render(
                             ("Pillow Emboss".into(), BevelStyle_::PillowEmboss),
                         ],
                     },
-                    move |ws, v| {
+                    move |ws, v, _cx| {
                         ws.update_modal(|md| {
                             if let Modal::LayerStyle { style, .. } = md {
                                 style.bevel.settings.style = v;
@@ -559,7 +559,7 @@ pub fn render(
                                 ("Radial".into(), GradientShape::Radial),
                             ],
                         },
-                        move |ws, v| {
+                        move |ws, v, _cx| {
                             ws.update_modal(|md| {
                                 if let Modal::LayerStyle { style, .. } = md {
                                     style.gradient_overlay.settings.shape = v;

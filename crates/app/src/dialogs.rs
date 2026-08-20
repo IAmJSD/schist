@@ -216,7 +216,7 @@ fn image_size(
                     width: 150.0,
                     options: filter_options(),
                 },
-                |ws, value| {
+                |ws, value, _cx| {
                     ws.update_modal(|m| {
                         if let Modal::ImageSize { filter, .. } = m {
                             *filter = value;
@@ -948,7 +948,7 @@ fn stroke_dialog(
                         ("Outside".into(), StrokePosition::Outside),
                     ],
                 },
-                |ws, p| {
+                |ws, p, _cx| {
                     ws.update_modal(|m| {
                         if let Modal::Stroke { position, .. } = m {
                             *position = p;
@@ -1021,7 +1021,7 @@ fn fill_dialog(
                         .map(|s| (SharedString::from(s.label()), *s))
                         .collect(),
                 },
-                |ws, s| {
+                |ws, s, _cx| {
                     ws.update_modal(|m| {
                         if let Modal::Fill { source, .. } = m {
                             *source = s;
@@ -1454,7 +1454,7 @@ fn export_dialog(
                 width: 150.0,
                 options: codecs,
             },
-            |ws, value| {
+            |ws, value, _cx| {
                 ws.update_modal(|m| {
                     if let Modal::Export { codec, .. } = m {
                         *codec = value;
@@ -1560,7 +1560,7 @@ fn profile_dialog(
                     width: 150.0,
                     options,
                 },
-                |ws, value| {
+                |ws, value, _cx| {
                     ws.update_modal(|m| {
                         if let Modal::Profile { selected, .. } = m {
                             *selected = value;
@@ -1646,7 +1646,7 @@ fn preferences(
                         ("Light".into(), crate::workspace::Theme::Light),
                     ],
                 },
-                |ws, theme| ws.set_theme_quiet(theme),
+                |ws, theme, _cx| ws.set_theme_quiet(theme),
                 cx,
             ),
         ))
@@ -1694,7 +1694,7 @@ fn preferences(
                         .map(|i| (SharedString::from(i.display_name()), *i))
                         .collect(),
                 },
-                |ws, value| {
+                |ws, value, _cx| {
                     ws.color.intent = value;
                     ws.rebuild_color_transforms();
                 },

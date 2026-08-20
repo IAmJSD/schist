@@ -862,11 +862,55 @@ pub enum GradientKind {
     Radial,
 }
 
+/// The five shapes Photoshop's gradient tool can draw. Kept separate from
+/// [`GradientKind`], which is the tool's *identity*: the registry looks
+/// tools up by `id()`, so the two registered gradients must keep the ids
+/// they were registered under even when you change the style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientStyle {
+    Linear,
+    Radial,
+    Angle,
+    Reflected,
+    Diamond,
+}
+
+const GRADIENT_STYLES: &[&str] = &["Linear", "Radial", "Angle", "Reflected", "Diamond"];
+const GRADIENT_FILLS: &[&str] = &["Foreground to Background", "Foreground to Transparent"];
+
+impl GradientStyle {
+    fn from_index(i: usize) -> GradientStyle {
+        match i {
+            1 => GradientStyle::Radial,
+            2 => GradientStyle::Angle,
+            3 => GradientStyle::Reflected,
+            4 => GradientStyle::Diamond,
+            _ => GradientStyle::Linear,
+        }
+    }
+    fn index(self) -> usize {
+        match self {
+            GradientStyle::Linear => 0,
+            GradientStyle::Radial => 1,
+            GradientStyle::Angle => 2,
+            GradientStyle::Reflected => 3,
+            GradientStyle::Diamond => 4,
+        }
+    }
+}
+
 /// Gradient tool: drag to define the axis, release to fill.
 pub struct GradientTool {
     pub kind: GradientKind,
     /// Fade the foreground out instead of ending on the background colour.
     pub to_transparent: bool,
+    /// The shape drawn. Starts at whichever one this tool was registered
+    /// as, and follows the options bar after that.
+    style: GradientStyle,
+    /// Run the ramp backwards.
+    reverse: bool,
+    /// Break up the banding a long, shallow ramp shows in 8-bit.
+    dither: bool,
     anchor: Option<(f32, f32)>,
     current: Option<(f32, f32)>,
 }
@@ -876,6 +920,12 @@ impl GradientTool {
         GradientTool {
             kind,
             to_transparent: false,
+            style: match kind {
+                GradientKind::Linear => GradientStyle::Linear,
+                GradientKind::Radial => GradientStyle::Radial,
+            },
+            reverse: false,
+            dither: false,
             anchor: None,
             current: None,
         }
@@ -926,12 +976,51 @@ impl ToolPlugin for GradientTool {
         if (bx - ax).abs() < 0.5 && (by - ay).abs() < 0.5 {
             return;
         }
-        fill_gradient(ctx, self.kind, (ax, ay), (bx, by), self.to_transparent);
+        fill_gradient(
+            ctx,
+            GradientFill {
+                style: self.style,
+                to_transparent: self.to_transparent,
+                reverse: self.reverse,
+                dither: self.dither,
+            },
+            (ax, ay),
+            (bx, by),
+        );
     }
 
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
         self.anchor = None;
         self.current = None;
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::choice(
+                "gradient-fill",
+                "Gradient",
+                GRADIENT_FILLS,
+                usize::from(self.to_transparent),
+            ),
+            ToolOption::choice(
+                "gradient-style",
+                "Style",
+                GRADIENT_STYLES,
+                self.style.index(),
+            ),
+            ToolOption::toggle("gradient-reverse", "Reverse", self.reverse),
+            ToolOption::toggle("gradient-dither", "Dither", self.dither),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "gradient-fill" => self.to_transparent = value.index() == 1,
+            "gradient-style" => self.style = GradientStyle::from_index(value.index()),
+            "gradient-reverse" => self.reverse = value.bool(),
+            "gradient-dither" => self.dither = value.bool(),
+            _ => {}
+        }
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
@@ -947,13 +1036,21 @@ impl ToolPlugin for GradientTool {
     }
 }
 
-fn fill_gradient(
-    ctx: &mut ToolCtx,
-    kind: GradientKind,
-    from: (f32, f32),
-    to: (f32, f32),
+/// Everything the options bar contributes to one gradient.
+struct GradientFill {
+    style: GradientStyle,
     to_transparent: bool,
-) {
+    reverse: bool,
+    dither: bool,
+}
+
+fn fill_gradient(ctx: &mut ToolCtx, fill: GradientFill, from: (f32, f32), to: (f32, f32)) {
+    let GradientFill {
+        style,
+        to_transparent,
+        reverse,
+        dither,
+    } = fill;
     let Some(layer) = paintable_layer(ctx.doc) else {
         return;
     };
@@ -998,14 +1095,33 @@ fn fill_gradient(
                     continue;
                 }
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let t = match kind {
-                    GradientKind::Linear => {
-                        (((px - from.0) * dx + (py - from.1) * dy) / len_sq).clamp(0.0, 1.0)
+                let (ox, oy) = (px - from.0, py - from.1);
+                // Distance along the drag, and across it, in units of the
+                // drag's own length -- the frame every style works in.
+                let along = (ox * dx + oy * dy) / len_sq;
+                let across = (ox * -dy + oy * dx) / len_sq;
+                let mut t = match style {
+                    GradientStyle::Linear => along.clamp(0.0, 1.0),
+                    GradientStyle::Radial => (ox.hypot(oy) / radius).clamp(0.0, 1.0),
+                    // One full turn around the start point, measured from
+                    // the direction of the drag.
+                    GradientStyle::Angle => {
+                        (oy.atan2(ox) - dy.atan2(dx)).rem_euclid(std::f32::consts::TAU)
+                            / std::f32::consts::TAU
                     }
-                    GradientKind::Radial => {
-                        ((px - from.0).hypot(py - from.1) / radius).clamp(0.0, 1.0)
-                    }
+                    GradientStyle::Reflected => along.abs().clamp(0.0, 1.0),
+                    GradientStyle::Diamond => (along.abs() + across.abs()).clamp(0.0, 1.0),
                 };
+                if reverse {
+                    t = 1.0 - t;
+                }
+                if dither {
+                    // A pixel-stable ordered wobble of well under one
+                    // 8-bit step, which is enough to break up the banding
+                    // a shallow ramp shows without looking like noise.
+                    let n = (((x * 7 + y * 13) & 7) as f32 / 8.0 - 0.5) / 255.0;
+                    t = (t + n).clamp(0.0, 1.0);
+                }
                 let src = Rgba {
                     r: start.r + (end.r - start.r) * t,
                     g: start.g + (end.g - start.g) * t,
@@ -1026,11 +1142,21 @@ fn fill_gradient(
 pub struct BucketTool {
     /// 0..=255 per-channel tolerance.
     pub tolerance: u8,
+    /// Off fills every matching pixel in the layer, not just the region
+    /// joined to the one you clicked.
+    contiguous: bool,
+    /// Decide what matches from the composited image rather than from the
+    /// layer being painted. The paint still lands on the active layer.
+    all_layers: bool,
 }
 
 impl BucketTool {
     fn new() -> BucketTool {
-        BucketTool { tolerance: 32 }
+        BucketTool {
+            tolerance: 32,
+            contiguous: true,
+            all_layers: false,
+        }
     }
 }
 
@@ -1067,7 +1193,23 @@ impl ToolPlugin for BucketTool {
         else {
             return;
         };
-        let target = tiles.pixel(x, y).to_u8();
+        let w = canvas.width() as usize;
+        // What decides a match: the layer's own pixels, or everything you
+        // can see. Sampling the composite is what "All Layers" means --
+        // the paint still goes onto the active layer either way.
+        let composite = self
+            .all_layers
+            .then(|| photoslop_compositor::composite_region_rgba8(ctx.doc, canvas));
+        let sample = |px: i32, py: i32| -> [u8; 4] {
+            match &composite {
+                Some(buf) => {
+                    let i = ((py - canvas.top) as usize * w + (px - canvas.left) as usize) * 4;
+                    [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+                }
+                None => tiles.pixel(px, py).to_u8(),
+            }
+        };
+        let target = sample(x, y);
         let tol = self.tolerance as i32;
         let matches = |px: [u8; 4]| {
             px.iter()
@@ -1075,29 +1217,38 @@ impl ToolPlugin for BucketTool {
                 .all(|(&a, &b)| (a as i32 - b as i32).abs() <= tol)
         };
 
-        // 4-connected flood fill bounded by the canvas and the selection.
-        let w = canvas.width() as usize;
-        let mut visited = vec![false; w * canvas.height() as usize];
-        let mut filled: Vec<(i32, i32)> = Vec::new();
-        let mut stack = vec![(x, y)];
-        visited[y as usize * w + x as usize] = true;
         let selection = ctx.doc.selection.clone();
-        while let Some((cx, cy)) = stack.pop() {
-            if selection.coverage(cx, cy) == 0 {
-                continue;
+        let mut filled: Vec<(i32, i32)> = Vec::new();
+        if self.contiguous {
+            // 4-connected flood fill bounded by the canvas and the selection.
+            let mut visited = vec![false; w * canvas.height() as usize];
+            let mut stack = vec![(x, y)];
+            visited[(y - canvas.top) as usize * w + (x - canvas.left) as usize] = true;
+            while let Some((cx, cy)) = stack.pop() {
+                if selection.coverage(cx, cy) == 0 {
+                    continue;
+                }
+                filled.push((cx, cy));
+                for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                    if !canvas.contains(nx, ny) {
+                        continue;
+                    }
+                    let ix = (ny - canvas.top) as usize * w + (nx - canvas.left) as usize;
+                    if visited[ix] {
+                        continue;
+                    }
+                    visited[ix] = true;
+                    if matches(sample(nx, ny)) {
+                        stack.push((nx, ny));
+                    }
+                }
             }
-            filled.push((cx, cy));
-            for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
-                if !canvas.contains(nx, ny) {
-                    continue;
-                }
-                let ix = ny as usize * w + nx as usize;
-                if visited[ix] {
-                    continue;
-                }
-                visited[ix] = true;
-                if matches(tiles.pixel(nx, ny).to_u8()) {
-                    stack.push((nx, ny));
+        } else {
+            for py in canvas.top..canvas.bottom {
+                for px in canvas.left..canvas.right {
+                    if selection.coverage(px, py) != 0 && matches(sample(px, py)) {
+                        filled.push((px, py));
+                    }
                 }
             }
         }
@@ -1131,6 +1282,30 @@ impl ToolPlugin for BucketTool {
             }
         }
         edit.commit();
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::slider(
+                "bucket-tolerance",
+                "Tolerance",
+                self.tolerance as f32,
+                0.0,
+                255.0,
+                "",
+            ),
+            ToolOption::toggle("bucket-contiguous", "Contiguous", self.contiguous),
+            ToolOption::toggle("bucket-all-layers", "All Layers", self.all_layers),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "bucket-tolerance" => self.tolerance = value.num().clamp(0.0, 255.0) as u8,
+            "bucket-contiguous" => self.contiguous = value.bool(),
+            "bucket-all-layers" => self.all_layers = value.bool(),
+            _ => {}
+        }
     }
 
     fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
@@ -1198,7 +1373,7 @@ mod tests {
     use super::*;
     use photoslop_color::Depth;
     use photoslop_core::Layer;
-    use photoslop_plugin_api::Modifiers;
+    use photoslop_plugin_api::{EditorState, Modifiers, OptionValue};
 
     fn doc_with_layer() -> Document {
         let mut doc = Document::new("t", 128, 128, Depth::Eight);
@@ -1222,6 +1397,151 @@ mod tests {
             .tiles
             .pixel(x, y)
             .to_u8()
+    }
+
+    /// Two separated red squares. Contiguous fill reaches one; the
+    /// non-contiguous mode reaches both.
+    fn two_squares_doc() -> Document {
+        let mut doc = Document::new("t", 128, 128, Depth::Eight);
+        let mut layer = Layer::new_raster("sq");
+        let red = [255u8, 0, 0, 255].repeat(16 * 16);
+        for origin in [(8, 8), (80, 80)] {
+            photoslop_core::blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                Depth::Eight,
+                IntRect::from_xywh(origin.0, origin.1, 16, 16),
+                &red,
+            );
+        }
+        doc.push_layer(layer);
+        doc
+    }
+
+    #[test]
+    fn a_non_contiguous_bucket_reaches_the_far_square() {
+        for contiguous in [true, false] {
+            let mut doc = two_squares_doc();
+            let mut state = EditorState {
+                foreground: photoslop_color::Rgba::from_u8(0, 0, 255, 255),
+                ..EditorState::default()
+            };
+            let mut tool = BucketTool::new();
+            tool.set_option("bucket-contiguous", OptionValue::Bool(contiguous));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(12.0, 12.0));
+
+            assert_eq!(pixel(&doc, 12, 12)[2], 255, "the clicked square fills");
+            let far = pixel(&doc, 88, 88)[2];
+            if contiguous {
+                assert_eq!(far, 0, "a contiguous fill must not jump the gap");
+            } else {
+                assert_eq!(far, 255, "a non-contiguous fill takes every match");
+            }
+        }
+    }
+
+    #[test]
+    fn the_bucket_can_match_against_the_composite() {
+        // Red below, an empty layer above. Clicking on the empty layer
+        // matches its own transparency and floods everything; matching the
+        // composite instead confines the fill to the red square.
+        let mut doc = two_squares_doc();
+        doc.push_layer(Layer::new_raster("empty"));
+        let mut state = EditorState {
+            foreground: photoslop_color::Rgba::from_u8(0, 0, 255, 255),
+            ..EditorState::default()
+        };
+        let mut tool = BucketTool::new();
+        tool.set_option("bucket-all-layers", OptionValue::Bool(true));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(12.0, 12.0));
+
+        let top = doc.tree.layers.last().unwrap().as_raster().unwrap();
+        assert_eq!(top.tiles.pixel(12, 12).to_u8()[2], 255, "inside the square");
+        assert_eq!(
+            top.tiles.pixel(60, 60).to_u8()[3],
+            0,
+            "outside it, where the composite does not match"
+        );
+    }
+
+    #[test]
+    fn the_gradient_styles_are_not_all_the_same_picture() {
+        let sample = |style: usize, reverse: bool| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: photoslop_color::Rgba::from_u8(255, 255, 255, 255),
+                background: photoslop_color::Rgba::from_u8(0, 0, 0, 255),
+                ..EditorState::default()
+            };
+            let mut tool = GradientTool::new(GradientKind::Linear);
+            tool.set_option("gradient-style", OptionValue::Choice(style));
+            tool.set_option("gradient-reverse", OptionValue::Bool(reverse));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(32.0, 64.0));
+            tool.on_pointer_up(&mut ctx, input(96.0, 64.0));
+            // Three probes: before the start, at the midpoint, past the end.
+            [
+                pixel(&doc, 16, 64)[0],
+                pixel(&doc, 64, 64)[0],
+                pixel(&doc, 110, 64)[0],
+            ]
+        };
+
+        let linear = sample(0, false);
+        assert_eq!(
+            linear[0], 255,
+            "clamped to the start colour before the drag"
+        );
+        assert_eq!(linear[2], 0, "and to the end colour past it");
+        assert!(
+            linear[1] > 100 && linear[1] < 160,
+            "halfway along should be halfway between: {linear:?}"
+        );
+
+        // What makes reflected reflected: it is symmetric about the point
+        // the drag started from, where linear is flat on the near side.
+        let mirrored = |style: usize| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: photoslop_color::Rgba::from_u8(255, 255, 255, 255),
+                background: photoslop_color::Rgba::from_u8(0, 0, 0, 255),
+                ..EditorState::default()
+            };
+            let mut tool = GradientTool::new(GradientKind::Linear);
+            tool.set_option("gradient-style", OptionValue::Choice(style));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(64.0, 64.0));
+            tool.on_pointer_up(&mut ctx, input(112.0, 64.0));
+            // Pixel centres, so these two are genuinely equidistant from
+            // the start: 40.5 is 23.5 left of 64, and 87.5 is 23.5 right.
+            (pixel(&doc, 40, 64)[0], pixel(&doc, 87, 64)[0])
+        };
+        let (near, far) = mirrored(3);
+        assert_eq!(near, far, "reflected should mirror about the start point");
+        let (near, far) = mirrored(0);
+        assert_ne!(near, far, "linear should not");
+
+        for style in [1usize, 2, 4] {
+            assert_ne!(sample(style, false), linear, "style {style} matched linear");
+        }
+
+        // Reversing swaps the ends.
+        let rev = sample(0, true);
+        assert_eq!(rev[0], 0);
+        assert_eq!(rev[2], 255);
     }
 
     #[test]

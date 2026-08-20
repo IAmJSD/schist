@@ -8,7 +8,8 @@
 
 use photoslop_core::{Affine, Document, Filter, IntRect, LayerId, LayerKind, TileMap};
 use photoslop_plugin_api::{
-    EditorState, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolPlugin,
+    EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
+    ToolOption, ToolPlugin,
 };
 
 /// Which handle of the transform box is being dragged.
@@ -259,10 +260,21 @@ fn point_in_quad(x: f32, y: f32, quad: &[(f32, f32); 4]) -> bool {
     inside
 }
 
-#[derive(Default)]
+const INTERPOLATIONS: &[&str] = &["Nearest Neighbor", "Bilinear", "Bicubic"];
+
 pub struct TransformTool {
     mode: TransformMode,
     session: Option<Session>,
+    /// Mirrors `EditorState::resample`, which is what the commit actually
+    /// reads; `options()` has no editor state to consult, so the tool
+    /// keeps a copy and writes through when it changes.
+    resample: Filter,
+}
+
+impl Default for TransformTool {
+    fn default() -> Self {
+        TransformTool::new(TransformMode::Layer)
+    }
 }
 
 impl TransformTool {
@@ -270,6 +282,7 @@ impl TransformTool {
         TransformTool {
             mode,
             session: None,
+            resample: Filter::Bilinear,
         }
     }
 }
@@ -335,7 +348,38 @@ impl ToolPlugin for TransformTool {
     }
 
     fn on_activate(&mut self, ctx: &mut ToolCtx) {
+        // Adopt whatever the document is set to, so the bar opens showing
+        // the truth rather than this tool's last guess.
+        self.resample = ctx.state.resample;
         self.begin(ctx);
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![ToolOption::choice(
+            "transform-interpolation",
+            "Interpolation",
+            INTERPOLATIONS,
+            match self.resample {
+                Filter::Nearest => 0,
+                Filter::Bilinear => 1,
+                Filter::Bicubic => 2,
+            },
+        )]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        if key == "transform-interpolation" {
+            self.resample = match value.index() {
+                0 => Filter::Nearest,
+                2 => Filter::Bicubic,
+                _ => Filter::Bilinear,
+            };
+        }
+    }
+
+    fn on_option_changed(&mut self, ctx: &mut ToolCtx, _key: &str) {
+        // The commit reads it from here, not from the tool.
+        ctx.state.resample = self.resample;
     }
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
@@ -523,10 +567,69 @@ impl ToolPlugin for TransformTool {
 }
 
 /// Crop: drag a rectangle, Enter trims the canvas to it.
+/// Photoshop's crop ratio presets, and the width:height each locks to.
+const CROP_RATIOS: &[&str] = &["Unconstrained", "1:1", "4:3", "3:2", "16:9"];
+const CROP_ASPECTS: [Option<f32>; 5] = [
+    None,
+    Some(1.0),
+    Some(4.0 / 3.0),
+    Some(3.0 / 2.0),
+    Some(16.0 / 9.0),
+];
+
 #[derive(Default)]
 pub struct CropTool {
     anchor: Option<(f32, f32)>,
     rect: Option<IntRect>,
+    /// Index into `CROP_RATIOS`.
+    ratio: usize,
+    /// Throw away what falls outside the crop, rather than keeping it
+    /// off-canvas where a later canvas resize would bring it back.
+    delete_cropped: bool,
+}
+
+/// Clear every pixel outside `keep` on every raster layer.
+fn discard_outside(doc: &mut Document, keep: IntRect) {
+    let mut edit = doc.begin_edit("Crop");
+    for id in edit.raster_layer_ids() {
+        let Some(tiles) = edit
+            .doc()
+            .tree
+            .find(id)
+            .and_then(|l| l.as_raster())
+            .map(|r| r.tiles.clone())
+        else {
+            continue;
+        };
+        let mut kept = photoslop_core::TileMap::new();
+        for (coord, buf) in tiles.iter() {
+            let trect = coord.rect();
+            if keep.intersect(&trect).is_empty() {
+                continue;
+            }
+            if keep.contains(trect.left, trect.top)
+                && keep.contains(trect.right - 1, trect.bottom - 1)
+            {
+                kept.insert(*coord, buf.clone());
+                continue;
+            }
+            // Straddles the edge: keep the inside, blank the rest.
+            let mut trimmed = (**buf).clone();
+            for ly in 0..photoslop_core::TILE_SIZE {
+                for lx in 0..photoslop_core::TILE_SIZE {
+                    let (x, y) = (trect.left + lx, trect.top + ly);
+                    if !keep.contains(x, y) {
+                        let ix = (ly * photoslop_core::TILE_SIZE + lx) as usize;
+                        trimmed.set(ix, photoslop_color::Rgba::TRANSPARENT);
+                    }
+                }
+            }
+            kept.insert(*coord, std::sync::Arc::new(trimmed));
+        }
+        kept.prune_blank();
+        edit.replace_layer_tiles(id, kept);
+    }
+    edit.commit();
 }
 
 impl ToolPlugin for CropTool {
@@ -550,11 +653,22 @@ impl ToolPlugin for CropTool {
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         let Some((ax, ay)) = self.anchor else { return };
+        let (mut bx, mut by) = (input.x, input.y);
+        // A locked ratio follows the longer side of the drag, so the box
+        // never shrinks away from the cursor.
+        if let Some(aspect) = CROP_ASPECTS[self.ratio.min(CROP_ASPECTS.len() - 1)] {
+            let (dx, dy) = (bx - ax, by - ay);
+            if dx.abs() / aspect >= dy.abs() {
+                by = ay + (dx.abs() / aspect) * if dy < 0.0 { -1.0 } else { 1.0 };
+            } else {
+                bx = ax + (dy.abs() * aspect) * if dx < 0.0 { -1.0 } else { 1.0 };
+            }
+        }
         let rect = IntRect::new(
-            ax.min(input.x).round() as i32,
-            ay.min(input.y).round() as i32,
-            ax.max(input.x).round() as i32,
-            ay.max(input.y).round() as i32,
+            ax.min(bx).round() as i32,
+            ay.min(by).round() as i32,
+            ax.max(bx).round() as i32,
+            ay.max(by).round() as i32,
         );
         self.rect = Some(rect.intersect(&ctx.doc.canvas_rect()));
     }
@@ -563,10 +677,30 @@ impl ToolPlugin for CropTool {
         self.anchor = None;
     }
 
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::choice("crop-ratio", "Ratio", CROP_RATIOS, self.ratio),
+            ToolOption::toggle("crop-delete", "Delete Cropped Pixels", self.delete_cropped),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "crop-ratio" => self.ratio = value.index().min(CROP_RATIOS.len() - 1),
+            "crop-delete" => self.delete_cropped = value.bool(),
+            _ => {}
+        }
+    }
+
     fn on_commit(&mut self, ctx: &mut ToolCtx) {
         let Some(rect) = self.rect.take() else { return };
         if rect.is_empty() {
             return;
+        }
+        // Trim before the canvas moves under it, while the rect still
+        // means what it says in document coordinates.
+        if self.delete_cropped {
+            discard_outside(ctx.doc, rect);
         }
         crop_to(ctx.doc, rect);
     }
@@ -691,6 +825,80 @@ mod tests {
             .tiles
             .pixel(x, y)
             .to_u8()
+    }
+
+    #[test]
+    fn a_locked_crop_ratio_holds_its_shape() {
+        let mut doc = Document::new("t", 400, 400, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = CropTool::default();
+        tool.set_option("crop-ratio", OptionValue::Choice(1)); // 1:1
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        // Drag a wide, shallow box: the ratio should square it up off the
+        // longer side, so it follows the cursor rather than collapsing.
+        tool.on_pointer_move(&mut ctx, input(220.0, 60.0));
+        let rect = tool.rect.expect("a crop rect");
+        assert_eq!(
+            rect.width(),
+            rect.height(),
+            "1:1 should be square, got {}x{}",
+            rect.width(),
+            rect.height()
+        );
+        assert_eq!(rect.width(), 200, "and should follow the longer side");
+
+        tool.set_option("crop-ratio", OptionValue::Choice(4)); // 16:9
+        tool.on_pointer_move(&mut ctx, input(180.0, 60.0));
+        let rect = tool.rect.expect("a crop rect");
+        let ratio = rect.width() as f32 / rect.height() as f32;
+        assert!(
+            (ratio - 16.0 / 9.0).abs() < 0.05,
+            "expected 16:9, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn deleting_cropped_pixels_actually_deletes_them() {
+        for delete in [false, true] {
+            let mut doc = Document::new("t", 200, 200, Depth::Eight);
+            let mut layer = Layer::new_raster("wide");
+            blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                Depth::Eight,
+                IntRect::from_xywh(0, 0, 200, 200),
+                &[255u8, 0, 0, 255].repeat(200 * 200),
+            );
+            doc.push_layer(layer);
+            let id = doc.active_layer.unwrap();
+
+            let mut state = EditorState::default();
+            let mut tool = CropTool::default();
+            tool.set_option("crop-delete", OptionValue::Bool(delete));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(50.0, 50.0));
+            tool.on_pointer_move(&mut ctx, input(150.0, 150.0));
+            tool.on_pointer_up(&mut ctx, input(150.0, 150.0));
+            tool.on_commit(&mut ctx);
+
+            assert_eq!(doc.width, 100, "the canvas shrank either way");
+            let tiles = &doc.tree.find(id).unwrap().as_raster().unwrap().tiles;
+            // Inside the crop, the pixels survive whatever the setting.
+            assert_eq!(tiles.pixel(50, 50).to_u8()[3], 255);
+            // Outside it, they are kept off-canvas or thrown away.
+            let outside = tiles.pixel(-10, 50).to_u8()[3];
+            if delete {
+                assert_eq!(outside, 0, "delete should have cleared it");
+            } else {
+                assert_eq!(outside, 255, "without delete it rides along off-canvas");
+            }
+        }
     }
 
     #[test]

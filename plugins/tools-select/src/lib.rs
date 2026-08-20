@@ -4,7 +4,7 @@
 //! Modifier convention (Photoshop): Shift = add to selection, Alt =
 //! subtract, Shift+Alt = intersect, no modifier = replace.
 
-use photoslop_core::{Document, IntRect, LayerKind, SelectOp, TileCoord, TILE_SIZE};
+use photoslop_core::{Document, IntRect, LayerKind, SelectOp, Selection, TileCoord, TILE_SIZE};
 use photoslop_plugin_api::{
     EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
     ToolCtx, ToolOption, ToolPlugin,
@@ -72,13 +72,63 @@ fn active_raster(doc: &Document) -> Option<&photoslop_core::RasterLayer> {
     }
 }
 
-fn op_from(modifiers: Modifiers) -> SelectOp {
+/// The four ways a new shape can meet the existing selection, in the order
+/// Photoshop's buttons sit in.
+const SELECT_MODES: &[&str] = &["New", "Add", "Subtract", "Intersect"];
+
+fn mode_from_index(i: usize) -> SelectOp {
+    match i {
+        1 => SelectOp::Add,
+        2 => SelectOp::Subtract,
+        3 => SelectOp::Intersect,
+        _ => SelectOp::Replace,
+    }
+}
+
+fn mode_index(op: SelectOp) -> usize {
+    match op {
+        SelectOp::Replace => 0,
+        SelectOp::Add => 1,
+        SelectOp::Subtract => 2,
+        SelectOp::Intersect => 3,
+    }
+}
+
+/// Modifiers win over the options bar, and the bar decides what an
+/// unmodified drag does -- which is how Photoshop's selection tools work.
+fn op_from(modifiers: Modifiers, base: SelectOp) -> SelectOp {
     match (modifiers.shift, modifiers.alt) {
         (true, true) => SelectOp::Intersect,
         (true, false) => SelectOp::Add,
         (false, true) => SelectOp::Subtract,
-        (false, false) => SelectOp::Replace,
+        (false, false) => base,
     }
+}
+
+/// Draw a shape into `sel`, softening the shape's own edge first.
+///
+/// Feather belongs to the shape you just drew, not to the result. The
+/// difference shows the moment you add to an existing selection:
+/// feathering afterwards would soften the boundary of the whole thing,
+/// including edges you had already settled.
+fn commit_shape(
+    sel: &mut Selection,
+    feather: f32,
+    op: SelectOp,
+    draw: impl Fn(&mut Selection, SelectOp),
+) {
+    if feather < 0.5 {
+        draw(sel, op);
+        return;
+    }
+    let mut shape = Selection::new();
+    draw(&mut shape, SelectOp::Replace);
+    shape.feather(feather);
+    if shape.is_empty() {
+        return;
+    }
+    let bounds = shape.bounds();
+    sel.apply_shape(bounds, op, |x, y| shape.coverage(x, y));
 }
 
 fn drag_rect(ax: f32, ay: f32, bx: f32, by: f32, square: bool) -> IntRect {
@@ -106,6 +156,10 @@ enum MarqueeShape {
 
 pub struct MarqueeTool {
     shape: MarqueeShape,
+    /// What an unmodified drag does.
+    mode: SelectOp,
+    /// Radius the new shape's edge is softened by, in pixels.
+    feather: f32,
     anchor: Option<(f32, f32, Modifiers)>,
     current: Option<IntRect>,
 }
@@ -114,6 +168,8 @@ impl MarqueeTool {
     fn new(shape: MarqueeShape) -> Self {
         MarqueeTool {
             shape,
+            mode: SelectOp::Replace,
+            feather: 0.0,
             anchor: None,
             current: None,
         }
@@ -176,7 +232,7 @@ impl ToolPlugin for MarqueeTool {
             .current
             .take()
             .unwrap_or_else(|| drag_rect(ax, ay, input.x, input.y, false));
-        let op = op_from(m);
+        let op = op_from(m, self.mode);
         if rect.is_empty() {
             // Click without drag: deselect (Photoshop behavior).
             if op == SelectOp::Replace {
@@ -187,10 +243,13 @@ impl ToolPlugin for MarqueeTool {
             return;
         }
         let shape = self.shape;
+        let feather = self.feather;
         let mut edit = ctx.doc.begin_edit("Select");
-        edit.change_selection(|sel, _| match shape {
-            MarqueeShape::Rect => sel.select_rect(rect, op),
-            MarqueeShape::Ellipse => sel.select_ellipse(rect, op),
+        edit.change_selection(|sel, _| {
+            commit_shape(sel, feather, op, |target, op| match shape {
+                MarqueeShape::Rect => target.select_rect(rect, op),
+                MarqueeShape::Ellipse => target.select_ellipse(rect, op),
+            })
         });
         edit.commit();
     }
@@ -198,6 +257,28 @@ impl ToolPlugin for MarqueeTool {
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
         self.anchor = None;
         self.current = None;
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::choice("marquee-mode", "Mode", SELECT_MODES, mode_index(self.mode)),
+            ToolOption::slider(
+                "marquee-feather",
+                "Feather",
+                self.feather,
+                0.0,
+                250.0,
+                " px",
+            ),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "marquee-mode" => self.mode = mode_from_index(value.index()),
+            "marquee-feather" => self.feather = value.num().max(0.0),
+            _ => {}
+        }
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
@@ -233,6 +314,10 @@ pub struct LassoTool {
     contrast: f32,
     /// Magnetic: pixels between automatically dropped anchor points.
     frequency: f32,
+    /// What an unmodified drag does.
+    mode: SelectOp,
+    /// Radius the new shape's edge is softened by, in pixels.
+    feather: f32,
 }
 
 impl LassoTool {
@@ -245,6 +330,8 @@ impl LassoTool {
             width: 10.0,
             contrast: 10.0,
             frequency: 8.0,
+            mode: SelectOp::Replace,
+            feather: 0.0,
         }
     }
 
@@ -254,14 +341,19 @@ impl LassoTool {
         if points.len() < 3 {
             return;
         }
-        let op = op_from(self.modifiers);
+        let op = op_from(self.modifiers, self.mode);
         let name = match self.kind {
             LassoKind::Free => "Lasso Select",
             LassoKind::Polygonal => "Polygonal Lasso",
             LassoKind::Magnetic => "Magnetic Lasso",
         };
         let mut edit = ctx.doc.begin_edit(name);
-        edit.change_selection(|sel, _| sel.select_polygon(&points, op));
+        let feather = self.feather;
+        edit.change_selection(|sel, _| {
+            commit_shape(sel, feather, op, |target, op| {
+                target.select_polygon(&points, op)
+            })
+        });
         edit.commit();
     }
 
@@ -347,8 +439,12 @@ impl ToolPlugin for LassoTool {
     }
 
     fn options(&self) -> Vec<ToolOption> {
-        match self.kind {
-            LassoKind::Magnetic => vec![
+        let mut opts = vec![
+            ToolOption::choice("lasso-mode", "Mode", SELECT_MODES, mode_index(self.mode)),
+            ToolOption::slider("lasso-feather", "Feather", self.feather, 0.0, 250.0, " px"),
+        ];
+        if self.kind == LassoKind::Magnetic {
+            opts.extend([
                 ToolOption::slider("lasso-width", "Width", self.width, 1.0, 40.0, " px"),
                 ToolOption::slider("lasso-contrast", "Contrast", self.contrast, 1.0, 100.0, ""),
                 ToolOption::slider(
@@ -359,13 +455,15 @@ impl ToolPlugin for LassoTool {
                     100.0,
                     "",
                 ),
-            ],
-            _ => Vec::new(),
+            ]);
         }
+        opts
     }
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
+            "lasso-mode" => self.mode = mode_from_index(value.index()),
+            "lasso-feather" => self.feather = value.num().max(0.0),
             "lasso-width" => self.width = value.num(),
             "lasso-contrast" => self.contrast = value.num(),
             "lasso-frequency" => self.frequency = value.num(),
@@ -468,6 +566,8 @@ pub struct WandTool {
     pub tolerance: u8,
     /// Off selects every matching pixel, not just the connected blob.
     pub contiguous: bool,
+    /// What an unmodified click does.
+    mode: SelectOp,
 }
 
 impl WandTool {
@@ -475,6 +575,7 @@ impl WandTool {
         WandTool {
             tolerance: 32,
             contiguous: true,
+            mode: SelectOp::Replace,
         }
     }
 }
@@ -557,12 +658,13 @@ impl ToolPlugin for WandTool {
         let Some(pixels) = wand_select(ctx.doc, x, y, self.tolerance, self.contiguous) else {
             return;
         };
-        let op = op_from(input.modifiers);
+        let op = op_from(input.modifiers, self.mode);
         commit_pixels(ctx, &pixels, op, "Magic Wand");
     }
 
     fn options(&self) -> Vec<ToolOption> {
         vec![
+            ToolOption::choice("wand-mode", "Mode", SELECT_MODES, mode_index(self.mode)),
             ToolOption::slider(
                 "wand-tolerance",
                 "Tolerance",
@@ -577,6 +679,7 @@ impl ToolPlugin for WandTool {
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
+            "wand-mode" => self.mode = mode_from_index(value.index()),
             "wand-tolerance" => self.tolerance = value.num().round().clamp(0.0, 255.0) as u8,
             "wand-contiguous" => self.contiguous = value.bool(),
             _ => {}
@@ -772,6 +875,8 @@ pub struct ObjectSelectTool {
     current: Option<(f32, f32)>,
     modifiers: Modifiers,
     tolerance: f32,
+    /// What an unmodified drag does.
+    mode: SelectOp,
 }
 
 impl ObjectSelectTool {
@@ -780,6 +885,7 @@ impl ObjectSelectTool {
             anchor: None,
             current: None,
             modifiers: Modifiers::default(),
+            mode: SelectOp::Replace,
             tolerance: 24.0,
         }
     }
@@ -872,19 +978,17 @@ impl ToolPlugin for ObjectSelectTool {
     }
 
     fn options(&self) -> Vec<ToolOption> {
-        vec![ToolOption::slider(
-            "os-tolerance",
-            "Tolerance",
-            self.tolerance,
-            1.0,
-            128.0,
-            "",
-        )]
+        vec![
+            ToolOption::choice("os-mode", "Mode", SELECT_MODES, mode_index(self.mode)),
+            ToolOption::slider("os-tolerance", "Tolerance", self.tolerance, 1.0, 128.0, ""),
+        ]
     }
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
-        if key == "os-tolerance" {
-            self.tolerance = value.num();
+        match key {
+            "os-mode" => self.mode = mode_from_index(value.index()),
+            "os-tolerance" => self.tolerance = value.num(),
+            _ => {}
         }
     }
 
@@ -910,7 +1014,12 @@ impl ToolPlugin for ObjectSelectTool {
             a.1.max(input.y).ceil() as i32,
         );
         let pixels = self.find_object(ctx.doc, rect);
-        commit_pixels(ctx, &pixels, op_from(self.modifiers), "Object Selection");
+        commit_pixels(
+            ctx,
+            &pixels,
+            op_from(self.modifiers, self.mode),
+            "Object Selection",
+        );
     }
 
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
@@ -978,6 +1087,100 @@ mod tests {
         tool.on_pointer_down(ctx, input(from.0, from.1, m));
         tool.on_pointer_move(ctx, input(to.0, to.1, m));
         tool.on_pointer_up(ctx, input(to.0, to.1, m));
+    }
+
+    #[test]
+    fn the_mode_option_decides_what_an_unmodified_drag_does() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Rect);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        let plain = Modifiers::default();
+
+        drag(&mut tool, &mut ctx, (10.0, 10.0), (50.0, 50.0), plain);
+        // Add: the first selection survives the second drag.
+        tool.set_option("marquee-mode", OptionValue::Choice(1));
+        drag(&mut tool, &mut ctx, (100.0, 100.0), (140.0, 140.0), plain);
+        assert_eq!(ctx.doc.selection.coverage(20, 20), 255, "the first stays");
+        assert_eq!(
+            ctx.doc.selection.coverage(120, 120),
+            255,
+            "the second joins"
+        );
+
+        // Back to New: the next drag is on its own again.
+        tool.set_option("marquee-mode", OptionValue::Choice(0));
+        drag(&mut tool, &mut ctx, (150.0, 10.0), (190.0, 50.0), plain);
+        assert_eq!(ctx.doc.selection.coverage(20, 20), 0, "the old one is gone");
+        assert_eq!(ctx.doc.selection.coverage(170, 30), 255);
+    }
+
+    #[test]
+    fn a_modifier_still_overrides_the_mode() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Rect);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        drag(
+            &mut tool,
+            &mut ctx,
+            (10.0, 10.0),
+            (50.0, 50.0),
+            Modifiers::default(),
+        );
+        // Mode says Add, but alt still means subtract.
+        tool.set_option("marquee-mode", OptionValue::Choice(1));
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        drag(&mut tool, &mut ctx, (20.0, 20.0), (60.0, 60.0), alt);
+        assert_eq!(ctx.doc.selection.coverage(30, 30), 0, "alt subtracted");
+        assert_eq!(ctx.doc.selection.coverage(12, 12), 255, "the rest stayed");
+    }
+
+    #[test]
+    fn feather_softens_the_new_shape_not_the_whole_selection() {
+        let plain = Modifiers::default();
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Rect);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        // A hard rectangle first, with no feather set.
+        drag(&mut tool, &mut ctx, (10.0, 10.0), (60.0, 60.0), plain);
+        assert_eq!(ctx.doc.selection.coverage(11, 35), 255, "hard edge");
+
+        // Now add a feathered one elsewhere. Its own edge softens...
+        tool.set_option("marquee-feather", OptionValue::Num(8.0));
+        tool.set_option("marquee-mode", OptionValue::Choice(1));
+        drag(&mut tool, &mut ctx, (100.0, 100.0), (160.0, 160.0), plain);
+        let edge = ctx.doc.selection.coverage(101, 130);
+        assert!(
+            edge > 0 && edge < 255,
+            "the feathered edge should be partial, got {edge}"
+        );
+        assert_eq!(
+            ctx.doc.selection.coverage(130, 130),
+            255,
+            "centre stays full"
+        );
+
+        // ...and the rectangle that was already there keeps its hard edge.
+        assert_eq!(
+            ctx.doc.selection.coverage(11, 35),
+            255,
+            "feather must not reach back into what was already selected"
+        );
     }
 
     #[test]
