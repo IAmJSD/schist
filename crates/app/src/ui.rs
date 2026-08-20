@@ -234,6 +234,71 @@ pub fn dropdown<T: Clone + PartialEq + 'static>(
     root
 }
 
+/// A bare slider track that reports a 0..1 ratio while dragged. Panels and
+/// dialogs both build on this.
+pub fn slider_track(
+    id: &'static str,
+    ratio: f32,
+    width: f32,
+    on_change: impl Fn(&mut Workspace, f32) + Clone + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let entity = cx.entity();
+    let down = on_change.clone();
+    let moved = on_change;
+    div()
+        .relative()
+        .w(px(width))
+        .h(px(12.0))
+        .flex_none()
+        .rounded_sm()
+        .bg(gpui::rgb(FIELD_BG))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(width * ratio.clamp(0.0, 1.0)))
+                .rounded_sm()
+                .bg(gpui::rgb(ACCENT)),
+        )
+        .child(
+            gpui::canvas(
+                move |bounds, _window, cx| {
+                    entity.update(cx, |ws, _| ws.record_slider_bounds(id, bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, ev: &gpui::MouseDownEvent, _w, cx| {
+                ws.begin_slider(id, ratio);
+                if let Some(r) = ws.slider_ratio(id, ev.position) {
+                    down(ws, r);
+                }
+                cx.notify();
+            }),
+        )
+        .on_mouse_move(cx.listener(move |ws, ev: &gpui::MouseMoveEvent, _w, cx| {
+            if ev.pressed_button == Some(MouseButton::Left) && ws.dragging_slider(id) {
+                if let Some(r) = ws.slider_ratio(id, ev.position) {
+                    moved(ws, r);
+                    cx.notify();
+                }
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |ws, _ev: &gpui::MouseUpEvent, _w, _cx| {
+                ws.end_slider(id);
+            }),
+        )
+}
+
 /// A labelled row inside a dialog.
 pub fn field_row(label: impl Into<SharedString>, control: impl IntoElement) -> impl IntoElement {
     div()

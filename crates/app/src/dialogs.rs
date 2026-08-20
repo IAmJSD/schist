@@ -24,6 +24,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             height,
             anchor,
         } => canvas_size(ws, width, height, anchor, cx).into_any_element(),
+        Modal::Filter { id, values } => filter_dialog(ws, id, values, cx).into_any_element(),
+        Modal::Adjustment {
+            layer,
+            params,
+            original,
+        } => adjustment_dialog(layer, params, original, cx).into_any_element(),
     })
 }
 
@@ -291,4 +297,191 @@ fn canvas_size(
         ));
 
     ui::modal_frame("Canvas Size", 340.0, body, actions)
+}
+
+/// One slider row's description, shared by the filter and adjustment
+/// dialogs (both render the same control from the same shape).
+struct SliderSpec {
+    id: &'static str,
+    label: &'static str,
+    value: f32,
+    min: f32,
+    max: f32,
+    suffix: &'static str,
+}
+
+/// A labelled slider row used by the filter and adjustment dialogs.
+fn param_slider(
+    spec: SliderSpec,
+    on_change: impl Fn(&mut Workspace, f32) + Clone + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let SliderSpec {
+        id,
+        label,
+        value,
+        min,
+        max,
+        suffix,
+    } = spec;
+    let span = (max - min).max(1e-6);
+    let ratio = ((value - min) / span).clamp(0.0, 1.0);
+    let display = if max - min > 20.0 {
+        format!("{value:.0}{suffix}")
+    } else {
+        format!("{value:.2}{suffix}")
+    };
+    let set = on_change.clone();
+    ui::field_row(
+        label,
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(ui::slider_track(
+                id,
+                ratio,
+                120.0,
+                move |ws, r| set(ws, min + r * span),
+                cx,
+            ))
+            .child(
+                div()
+                    .w(px(56.0))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .child(display),
+            ),
+    )
+}
+
+fn filter_dialog(
+    ws: &mut Workspace,
+    id: &'static str,
+    values: photoslop_plugin_api::FilterValues,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let (name, specs) = ws
+        .registry
+        .filters()
+        .find(|f| f.id() == id)
+        .map(|f| (f.name().to_string(), f.params()))
+        .unwrap_or_else(|| (id.to_string(), Vec::new()));
+
+    let mut body = div().flex().flex_col().gap_1();
+    for spec in specs {
+        let key = spec.key;
+        body = body.child(param_slider(
+            SliderSpec {
+                id: spec.key,
+                label: spec.label,
+                value: values.get(spec.key),
+                min: spec.min,
+                max: spec.max,
+                suffix: spec.suffix,
+            },
+            move |ws, v| {
+                ws.update_modal(|m| {
+                    if let Modal::Filter { values, .. } = m {
+                        values.set(key, v);
+                    }
+                });
+            },
+            cx,
+        ));
+    }
+    body = body.child(
+        div()
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(ui::TEXT_DIM))
+            .child("Applies to the active layer, inside the selection."),
+    );
+
+    let apply_values = values.clone();
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            move |ws, _w, cx| {
+                ws.apply_filter(id, &apply_values, cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    ui::modal_frame(name, 360.0, body, actions)
+}
+
+fn adjustment_dialog(
+    layer: photoslop_core::LayerId,
+    params: photoslop_adjustments::Params,
+    original: (Option<String>, Vec<u8>),
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let specs = params.param_specs();
+    let title = params.display_name().to_string();
+    let mut body = div().flex().flex_col().gap_1();
+    for spec in specs {
+        let key = spec.key;
+        body = body.child(param_slider(
+            SliderSpec {
+                id: spec.key,
+                label: spec.label,
+                value: spec.value,
+                min: spec.min,
+                max: spec.max,
+                suffix: spec.suffix,
+            },
+            move |ws, v| {
+                // Live preview: write straight onto the layer as the
+                // slider moves, then commit one history entry on OK.
+                let mut updated = None;
+                ws.update_modal(|m| {
+                    if let Modal::Adjustment { params, .. } = m {
+                        params.set_param(key, v);
+                        updated = Some(params.clone());
+                    }
+                });
+                if let Some(params) = updated {
+                    ws.preview_adjustment(layer, &params);
+                }
+            },
+            cx,
+        ));
+    }
+
+    let committed = params.clone();
+    let cancel_original = original.clone();
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            move |ws, _w, cx| {
+                ws.revert_adjustment(layer, cancel_original.clone(), cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            move |ws, _w, cx| {
+                ws.commit_adjustment(layer, &committed, original.clone(), cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    ui::modal_frame(title, 360.0, body, actions)
 }

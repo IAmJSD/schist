@@ -10,6 +10,7 @@ members = [
     "crates/codec-psd",
     "crates/vector",
     "crates/text-engine",
+    "crates/adjustments",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
@@ -17,6 +18,7 @@ members = [
     "plugins/tools-transform",
     "plugins/tools-vector",
     "plugins/tools-type",
+    "plugins/filters-core",
     "plugins/commands-core",
 ]
 
@@ -36,6 +38,7 @@ photoslop-color = { path = "crates/color" }
 photoslop-codec-psd = { path = "crates/codec-psd" }
 photoslop-vector = { path = "crates/vector" }
 photoslop-text-engine = { path = "crates/text-engine" }
+photoslop-adjustments = { path = "crates/adjustments" }
 photoslop-codecs-common = { path = "plugins/codecs-common" }
 photoslop-tools-basic = { path = "plugins/tools-basic" }
 photoslop-tools-paint = { path = "plugins/tools-paint" }
@@ -43,6 +46,7 @@ photoslop-tools-select = { path = "plugins/tools-select" }
 photoslop-tools-transform = { path = "plugins/tools-transform" }
 photoslop-tools-vector = { path = "plugins/tools-vector" }
 photoslop-tools-type = { path = "plugins/tools-type" }
+photoslop-filters-core = { path = "plugins/filters-core" }
 photoslop-commands-core = { path = "plugins/commands-core" }
 
 # external

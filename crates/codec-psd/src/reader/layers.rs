@@ -327,6 +327,7 @@ fn parse_additional_blocks(
                     rec.adjustment = Some(AdjustmentData {
                         kind,
                         raw: data.to_vec(),
+                        params_json: None,
                     });
                 }
                 rec.extras.push(RawBlock {

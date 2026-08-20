@@ -194,11 +194,56 @@ pub trait CommandPlugin: Send {
     fn commands(&self) -> Vec<Command>;
 }
 
-/// Destructive pixel filter (dialogs and non-destructive adjustment
-/// rendering land in M8; the trait exists so the registry shape is stable).
+/// One tunable of a filter. The shell turns these into dialog sliders, so
+/// a filter never has to know anything about the UI toolkit.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterParam {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub default: f32,
+    /// Displayed after the value, e.g. " px" or "%".
+    pub suffix: &'static str,
+}
+
+/// Parameter values keyed by [`FilterParam::key`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilterValues(pub Vec<(&'static str, f32)>);
+
+impl FilterValues {
+    pub fn defaults(params: &[FilterParam]) -> FilterValues {
+        FilterValues(params.iter().map(|p| (p.key, p.default)).collect())
+    }
+
+    pub fn get(&self, key: &str) -> f32 {
+        self.0
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or_default()
+    }
+
+    pub fn set(&mut self, key: &'static str, value: f32) {
+        match self.0.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => self.0.push((key, value)),
+        }
+    }
+}
+
+/// A destructive pixel filter.
 pub trait FilterPlugin: Send + Sync {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
-    /// Apply in place to a straight-alpha f32 RGBA buffer.
-    fn apply(&self, pixels: &mut [f32], width: usize, height: usize);
+    /// Menu grouping, e.g. "Blur" or "Sharpen".
+    fn category(&self) -> &'static str {
+        "Other"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        Vec::new()
+    }
+    /// Apply in place to a straight-alpha f32 RGBA buffer of
+    /// `width * height` pixels.
+    fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues);
 }

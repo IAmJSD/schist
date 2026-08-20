@@ -62,6 +62,7 @@ fn build_registry() -> PluginRegistry {
         Box::new(photoslop_tools_vector::VectorToolsPlugin),
         Box::new(photoslop_tools_type::TypeToolsPlugin),
         Box::new(photoslop_commands_core::CoreCommandsPlugin),
+        Box::new(photoslop_filters_core::CoreFiltersPlugin),
         Box::new(photoslop_codecs_common::CommonCodecsPlugin),
         Box::new(PsdPlugin),
     ];

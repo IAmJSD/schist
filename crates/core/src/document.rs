@@ -259,6 +259,25 @@ impl Document {
                 self.add_damage(bounds);
                 self.structure_changed();
             }
+            EditOp::AdjustmentParams {
+                layer,
+                before,
+                after,
+            } => {
+                let (json, raw) = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    if let crate::layer::LayerKind::Adjustment(data) = &mut l.kind {
+                        data.params_json = json.clone();
+                        data.raw = raw.clone();
+                    }
+                }
+                self.damage_all();
+                self.structure_changed();
+            }
             EditOp::DocSize { before, after } => {
                 let (w, h) = if dir == Direction::Undo {
                     *before
@@ -509,6 +528,32 @@ impl<'a> EditBuilder<'a> {
         let transformed =
             crate::resample::transform_tiles(&raster.tiles, matrix, depth, filter, clip);
         self.replace_layer_tiles(layer_id, transformed);
+    }
+
+    /// Record an adjustment layer's parameter change (the caller has
+    /// already applied it, e.g. through a live dialog preview).
+    pub fn record_adjustment_params(
+        &mut self,
+        layer: LayerId,
+        before: (Option<String>, Vec<u8>),
+        after: (Option<String>, Vec<u8>),
+    ) {
+        if before == after {
+            return;
+        }
+        if let Some(l) = self.doc.tree.find_mut(layer) {
+            if let crate::layer::LayerKind::Adjustment(data) = &mut l.kind {
+                data.params_json = after.0.clone();
+                data.raw = after.1.clone();
+            }
+        }
+        self.ops.push(EditOp::AdjustmentParams {
+            layer,
+            before,
+            after,
+        });
+        let canvas = self.doc.canvas_rect();
+        self.damage = self.damage.union(&canvas);
     }
 
     /// Change the canvas size, optionally offsetting existing content

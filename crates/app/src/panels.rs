@@ -54,6 +54,10 @@ enum MenuEntry {
     Cmd(&'static str),
     /// An app-level item handled by the shell.
     App(&'static str, AppItem, Option<&'static str>),
+    /// Create an adjustment layer of this kind.
+    Adjustment(photoslop_core::AdjustmentKind),
+    /// Open a registered filter's dialog.
+    Filter(&'static str),
     Sep,
 }
 
@@ -137,6 +141,14 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
             ],
         ),
         (
+            "Adjust",
+            photoslop_adjustments::Params::creatable()
+                .iter()
+                .map(|&k| Adjustment(k))
+                .collect(),
+        ),
+        ("Filter", filter_menu_entries()),
+        (
             "View",
             vec![
                 App("Zoom In", ZoomIn, Some("cmd-=")),
@@ -147,6 +159,34 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
         ),
     ]
 }
+
+/// Filters grouped by category, in registration order.
+fn filter_menu_entries() -> Vec<MenuEntry> {
+    // The ids are static strings owned by the plugins; the menu resolves
+    // names from the registry at render time.
+    let mut out = Vec::new();
+    for (i, (_, ids)) in FILTER_GROUPS.iter().enumerate() {
+        if i > 0 {
+            out.push(MenuEntry::Sep);
+        }
+        out.extend(ids.iter().map(|id| MenuEntry::Filter(id)));
+    }
+    out
+}
+
+/// Menu grouping for the built-in filters.
+const FILTER_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Blur",
+        &[
+            "filter.gaussian_blur",
+            "filter.box_blur",
+            "filter.motion_blur",
+        ],
+    ),
+    ("Sharpen", &["filter.sharpen", "filter.unsharp_mask"]),
+    ("Noise", &["filter.add_noise", "filter.median"]),
+];
 
 fn keybind_hint(kb: Option<&str>) -> String {
     let Some(kb) = kb else { return String::new() };
@@ -314,6 +354,34 @@ pub fn menu_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                         move |ws, _e, _w, cx| {
                                             ws.close_popup(cx);
                                             ws.run_command(id, cx);
+                                        },
+                                        cx,
+                                    )
+                                    .into_any_element()
+                                }
+                                MenuEntry::Adjustment(kind) => menu_row(
+                                    kind.display_name().to_string(),
+                                    String::new(),
+                                    move |ws, _e, _w, cx| {
+                                        ws.close_popup(cx);
+                                        ws.add_adjustment(kind, cx);
+                                    },
+                                    cx,
+                                )
+                                .into_any_element(),
+                                MenuEntry::Filter(id) => {
+                                    let name = ws
+                                        .registry
+                                        .filters()
+                                        .find(|f| f.id() == id)
+                                        .map(|f| format!("{}…", f.name()))
+                                        .unwrap_or_else(|| id.to_string());
+                                    menu_row(
+                                        name,
+                                        String::new(),
+                                        move |ws, _e, _w, cx| {
+                                            ws.close_popup(cx);
+                                            ws.open_filter_dialog(id, cx);
                                         },
                                         cx,
                                     )
@@ -1005,6 +1073,12 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                 .flex_none()
                                 .bg(gpui::rgb(0x0E0E0E))
                                 .rounded_sm()
+                                // Adjustment layers open their settings
+                                // from the thumbnail, like Photoshop.
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |ws, _e, _w, cx| ws.edit_adjustment(id, cx)),
+                                )
                                 .child(match (&row.kind, thumb) {
                                     (RowKind::Raster, Some(t)) => {
                                         img(t).max_w(px(36.0)).max_h(px(28.0)).into_any_element()
@@ -1012,7 +1086,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                     (RowKind::Group, _) => {
                                         icon("folder", 14.0, TEXT_DIM).into_any_element()
                                     }
-                                    _ => icon("wand", 12.0, TEXT_DIM).into_any_element(),
+                                    _ => icon("adjust", 13.0, TEXT_DIM).into_any_element(),
                                 }),
                         )
                         .child(div().text_size(px(12.0)).overflow_hidden().child(row.name))

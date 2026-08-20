@@ -1,0 +1,9 @@
+[package]
+name = "photoslop-filters-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-plugin-api.workspace = true
+photoslop-color.workspace = true

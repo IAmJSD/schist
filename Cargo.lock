@@ -3855,6 +3855,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "photoslop-adjustments"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "photoslop-color",
+ "photoslop-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "photoslop-app"
 version = "0.1.0"
 dependencies = [
@@ -3863,12 +3874,14 @@ dependencies = [
  "gpui",
  "image",
  "log",
+ "photoslop-adjustments",
  "photoslop-codec-psd",
  "photoslop-codecs-common",
  "photoslop-color",
  "photoslop-commands-core",
  "photoslop-compositor",
  "photoslop-core",
+ "photoslop-filters-core",
  "photoslop-plugin-api",
  "photoslop-text-engine",
  "photoslop-tools-basic",
@@ -3931,11 +3944,14 @@ dependencies = [
 name = "photoslop-compositor"
 version = "0.1.0"
 dependencies = [
+ "log",
+ "photoslop-adjustments",
  "photoslop-color",
  "photoslop-core",
  "photoslop-pixel-ops",
  "rayon",
  "rustc-hash 2.1.3",
+ "serde_json",
 ]
 
 [[package]]
@@ -3950,6 +3966,14 @@ dependencies = [
  "rustc-hash 2.1.3",
  "serde",
  "smallvec",
+]
+
+[[package]]
+name = "photoslop-filters-core"
+version = "0.1.0"
+dependencies = [
+ "photoslop-color",
+ "photoslop-plugin-api",
 ]
 
 [[package]]

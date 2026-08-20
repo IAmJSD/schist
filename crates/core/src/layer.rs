@@ -122,6 +122,11 @@ pub struct AdjustmentData {
     pub kind: AdjustmentKind,
     /// The verbatim PSD additional-info payload for this adjustment.
     pub raw: Vec<u8>,
+    /// Our canonical parameters as JSON, set when the user edits the layer.
+    /// When present it wins over `raw`; when absent the renderer parses
+    /// `raw`. The kernel deliberately doesn't know the schema — that lives
+    /// in `photoslop-adjustments`.
+    pub params_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

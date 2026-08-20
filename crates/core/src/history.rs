@@ -85,6 +85,14 @@ pub enum EditOp {
         before: Option<Box<LayerMask>>,
         after: Option<Box<LayerMask>>,
     },
+    /// An adjustment layer's parameters changed. Holds the canonical JSON
+    /// and the PSD payload, since editing parameters invalidates the
+    /// preserved bytes.
+    AdjustmentParams {
+        layer: LayerId,
+        before: (Option<String>, Vec<u8>),
+        after: (Option<String>, Vec<u8>),
+    },
     /// Canvas dimensions changed (Image Size / Canvas Size). Pixel moves
     /// and rescales ride along as ordinary tile writes in the same edit.
     DocSize {

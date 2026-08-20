@@ -244,6 +244,91 @@ pub fn blend_pixel(mode: BlendMode, top: Rgba, bottom: Rgba, x: i32, y: i32) -> 
     }
 }
 
+/// Blend a whole span with the mode chosen *once*, so the per-pixel loop
+/// monomorphizes over a single blend function instead of re-matching an
+/// enum 65,536 times. This is the compositor's hot path.
+///
+/// `opacity` scales the source alpha. Returns false for modes that need
+/// per-pixel context (Dissolve) or full-colour math (the HSL family), which
+/// the caller then handles with [`blend_pixel`].
+pub fn blend_span(mode: BlendMode, top: &[f32], bottom: &mut [f32], opacity: f32) -> bool {
+    use BlendMode::*;
+
+    #[inline(always)]
+    fn run<F: Fn(f32, f32) -> f32>(top: &[f32], bottom: &mut [f32], opacity: f32, blend: F) {
+        for (s, d) in top.chunks_exact(4).zip(bottom.chunks_exact_mut(4)) {
+            let a_s = s[3] * opacity;
+            if a_s <= 0.0 {
+                continue;
+            }
+            let a_b = d[3];
+            let a_o = a_s + a_b * (1.0 - a_s);
+            if a_o <= 0.0 {
+                continue;
+            }
+            let inv = 1.0 / a_o;
+            for c in 0..3 {
+                let cs = s[c];
+                let cb = d[c];
+                let bl = blend(cb, cs).clamp(0.0, 1.0);
+                d[c] = (cs * a_s * (1.0 - a_b) + bl * a_s * a_b + cb * a_b * (1.0 - a_s)) * inv;
+            }
+            d[3] = a_o;
+        }
+    }
+
+    match mode {
+        Normal | PassThrough => run(top, bottom, opacity, |_, s| s),
+        Darken => run(top, bottom, opacity, |b, s| b.min(s)),
+        Multiply => run(top, bottom, opacity, mul),
+        ColorBurn => run(top, bottom, opacity, color_burn),
+        LinearBurn => run(top, bottom, opacity, |b, s| b + s - 1.0),
+        Lighten => run(top, bottom, opacity, |b, s| b.max(s)),
+        Screen => run(top, bottom, opacity, screen),
+        ColorDodge => run(top, bottom, opacity, color_dodge),
+        LinearDodge => run(top, bottom, opacity, |b, s| b + s),
+        Overlay => run(top, bottom, opacity, |b, s| hard_light(s, b)),
+        SoftLight => run(top, bottom, opacity, soft_light),
+        HardLight => run(top, bottom, opacity, hard_light),
+        VividLight => run(top, bottom, opacity, |b, s| {
+            if s <= 0.5 {
+                color_burn(b, 2.0 * s)
+            } else {
+                color_dodge(b, 2.0 * s - 1.0)
+            }
+        }),
+        LinearLight => run(top, bottom, opacity, |b, s| b + 2.0 * s - 1.0),
+        PinLight => run(top, bottom, opacity, |b, s| {
+            if s <= 0.5 {
+                b.min(2.0 * s)
+            } else {
+                b.max(2.0 * s - 1.0)
+            }
+        }),
+        HardMix => run(
+            top,
+            bottom,
+            opacity,
+            |b, s| if b + s >= 1.0 { 1.0 } else { 0.0 },
+        ),
+        Difference => run(top, bottom, opacity, |b, s| (b - s).abs()),
+        Exclusion => run(top, bottom, opacity, |b, s| b + s - 2.0 * b * s),
+        Subtract => run(top, bottom, opacity, |b, s| b - s),
+        Divide => run(
+            top,
+            bottom,
+            opacity,
+            |b, s| if s <= 0.0 { 1.0 } else { b / s },
+        ),
+        // Dissolve needs pixel coordinates; the HSL modes and
+        // Darker/Lighter Color need all three channels at once.
+        Dissolve | Hue | Saturation | Color | Luminosity | DarkerColor | LighterColor => {
+            return false
+        }
+    }
+    true
+}
+
 /// Blend two equally-sized straight-alpha f32 RGBA buffers in place:
 /// `bottom = blend(top over bottom)`. `origin` is the document-space
 /// position of the buffer's first pixel (for Dissolve), `width` its row
@@ -432,5 +517,72 @@ mod tests {
             1e-6,
             "px1",
         );
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+    use BlendMode::*;
+
+    /// The span path must agree with the per-pixel reference for every
+    /// mode it claims to handle — it is an optimization, not a variant.
+    #[test]
+    fn span_matches_reference_for_every_supported_mode() {
+        let samples = [
+            ([0.2f32, 0.7, 0.4, 1.0], [0.8f32, 0.1, 0.6, 1.0]),
+            ([0.0, 0.0, 0.0, 0.5], [1.0, 1.0, 1.0, 1.0]),
+            ([1.0, 0.5, 0.25, 0.75], [0.3, 0.9, 0.1, 0.4]),
+            ([0.5, 0.5, 0.5, 0.0], [0.5, 0.5, 0.5, 1.0]),
+            ([0.9, 0.2, 0.5, 1.0], [0.0, 0.0, 0.0, 0.0]),
+        ];
+        for &mode in BlendMode::layer_modes() {
+            for opacity in [1.0f32, 0.5, 0.0] {
+                for (top, bottom) in samples {
+                    let mut span_out = bottom.to_vec();
+                    let handled = blend_span(mode, &top, &mut span_out, opacity);
+                    if !handled {
+                        continue;
+                    }
+                    let expected = blend_pixel(
+                        mode,
+                        Rgba::new(top[0], top[1], top[2], top[3] * opacity),
+                        Rgba::new(bottom[0], bottom[1], bottom[2], bottom[3]),
+                        0,
+                        0,
+                    );
+                    for (i, want) in [expected.r, expected.g, expected.b, expected.a]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        assert!(
+                            (span_out[i] - want).abs() < 1e-4,
+                            "{} opacity={opacity} chan {i}: {} vs {want}",
+                            mode.display_name(),
+                            span_out[i]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_dependent_modes_are_declined() {
+        let top = [0.5f32, 0.5, 0.5, 1.0];
+        for mode in [
+            Dissolve,
+            Hue,
+            Saturation,
+            Color,
+            Luminosity,
+            DarkerColor,
+            LighterColor,
+        ] {
+            let mut out = vec![0.2f32, 0.2, 0.2, 1.0];
+            let before = out.clone();
+            assert!(!blend_span(mode, &top, &mut out, 1.0), "{mode:?}");
+            assert_eq!(out, before, "declined modes must not touch the buffer");
+        }
     }
 }
