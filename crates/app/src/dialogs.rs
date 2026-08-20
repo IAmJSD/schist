@@ -77,6 +77,11 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::ContentAwareScale { width, height } => {
             content_aware_scale_dialog(&state, width, height, cx).into_any_element()
         }
+        Modal::FilterGallery {
+            stack,
+            selected,
+            preview,
+        } => crate::gallery::render(ws, stack, selected, preview, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {

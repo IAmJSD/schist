@@ -91,8 +91,10 @@ fn every_filter_survives_degenerate_sizes() {
 #[test]
 fn every_filter_does_something_at_its_defaults() {
     // A filter whose default settings are a no-op is almost always a bug.
-    // Offset is the exception: it defaults to no shift, as Photoshop's does.
-    const EXPECTED_NO_OPS: &[&str] = &["filter.offset"];
+    // Two are not: Offset defaults to no shift and Camera Raw to a
+    // neutral development, exactly as Photoshop's do -- opening either
+    // and touching nothing should leave the image alone.
+    const EXPECTED_NO_OPS: &[&str] = &["filter.offset", "filter.camera_raw"];
     let (w, h) = (33usize, 21usize);
     for f in registry().filters() {
         let before = image(w, h);

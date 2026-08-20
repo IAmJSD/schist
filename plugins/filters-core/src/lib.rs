@@ -8,7 +8,9 @@ use photoslop_plugin_api::{
     FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry,
 };
 
+pub mod camera_raw;
 pub mod distort;
+pub mod neural;
 pub mod other;
 pub mod pixelate;
 pub mod render;
@@ -534,6 +536,8 @@ impl PluginManifest for CoreFiltersPlugin {
         registry.register_filter(Box::new(UnsharpMask));
         registry.register_filter(Box::new(AddNoise));
         registry.register_filter(Box::new(Median));
+        camera_raw::register(registry);
+        neural::register(registry);
         distort::register(registry);
         pixelate::register(registry);
         render::register(registry);

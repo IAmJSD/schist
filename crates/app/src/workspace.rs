@@ -136,6 +136,16 @@ pub struct Workspace {
     proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
 }
 
+/// One filter in the Filter Gallery's stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GalleryEntry {
+    pub id: &'static str,
+    pub values: photoslop_plugin_api::FilterValues,
+    /// Unticking keeps the entry but skips it, which is how the gallery's
+    /// eye toggles work.
+    pub enabled: bool,
+}
+
 /// What Edit ▸ Fill fills with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillSource {
@@ -409,6 +419,14 @@ pub enum Modal {
     DestructiveAdjustment {
         kind: photoslop_core::AdjustmentKind,
         params: Box<photoslop_adjustments::Params>,
+        preview: bool,
+    },
+    /// Filter ▸ Filter Gallery: a stack of filters applied in order.
+    FilterGallery {
+        /// Applied bottom to top, as in Photoshop's stack.
+        stack: Vec<GalleryEntry>,
+        /// Index into `stack` whose parameters the panel is showing.
+        selected: usize,
         preview: bool,
     },
     /// Edit ▸ Content-Aware Scale.
@@ -1598,6 +1616,97 @@ impl Workspace {
         self.after_change(cx);
     }
 
+    /// Open the Filter Gallery.
+    pub fn show_filter_gallery(&mut self, cx: &mut Context<Self>) {
+        if !self.begin_filter_preview() {
+            cx.notify();
+            return;
+        }
+        // Start with one filter so the panel has something to show.
+        let first = self
+            .registry
+            .filters()
+            .find(|f| f.category() == "Stylize")
+            .or_else(|| self.registry.filters().next());
+        let stack = first
+            .map(|f| {
+                vec![GalleryEntry {
+                    id: f.id(),
+                    values: photoslop_plugin_api::FilterValues::defaults(&f.params()),
+                    enabled: true,
+                }]
+            })
+            .unwrap_or_default();
+        self.preview_gallery(&stack, cx);
+        self.open_modal(
+            Modal::FilterGallery {
+                stack,
+                selected: 0,
+                preview: true,
+            },
+            cx,
+        );
+    }
+
+    /// Run a gallery stack over the preview snapshot, bottom to top.
+    fn run_gallery(&self, stack: &[GalleryEntry], buf: &mut [f32], w: usize, h: usize) {
+        for entry in stack {
+            if !entry.enabled {
+                continue;
+            }
+            let Some(filter) = self.registry.filters().find(|f| f.id() == entry.id) else {
+                continue;
+            };
+            filter.apply(buf, w, h, &entry.values);
+        }
+    }
+
+    pub fn preview_gallery(&mut self, stack: &[GalleryEntry], cx: &mut Context<Self>) {
+        let Some(preview) = self.filter_preview.clone() else {
+            return;
+        };
+        let (w, h) = (
+            preview.region.width() as usize,
+            preview.region.height() as usize,
+        );
+        let mut buf = preview.original.clone();
+        self.run_gallery(stack, &mut buf, w, h);
+        self.write_region(
+            preview.layer,
+            preview.region,
+            &preview.original,
+            &buf,
+            "",
+            false,
+        );
+        self.after_change(cx);
+    }
+
+    /// Bake the stack in as one history entry.
+    pub fn commit_gallery(&mut self, stack: &[GalleryEntry], cx: &mut Context<Self>) {
+        // Restore first so the recorded edit has the right "before".
+        self.preview_gallery(&[], cx);
+        let Some(preview) = self.filter_preview.take() else {
+            return;
+        };
+        let (w, h) = (
+            preview.region.width() as usize,
+            preview.region.height() as usize,
+        );
+        let mut buf = preview.original.clone();
+        self.run_gallery(stack, &mut buf, w, h);
+        self.write_region(
+            preview.layer,
+            preview.region,
+            &preview.original,
+            &buf,
+            "Filter Gallery",
+            true,
+        );
+        self.status = "Filter Gallery".into();
+        self.after_change(cx);
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its
@@ -2198,6 +2307,7 @@ impl Workspace {
             }
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
+            | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }
             | Modal::Fill { .. }
             | Modal::SelectModify { .. }

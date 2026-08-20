@@ -118,6 +118,7 @@ enum AppItem {
     ContentAwareFill,
     TransformSelection,
     ContentAwareScaleItem,
+    FilterGalleryItem,
     LiquifyItem,
     PuppetWarpItem,
     VanishingPointItem,
@@ -285,6 +286,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
             // Liquify and Vanishing Point sit above the categories, as
             // they do in Photoshop's Filter menu.
             let mut out = vec![
+                App("Filter Gallery…", FilterGalleryItem, None),
+                Filter("filter.camera_raw"),
                 App("Liquify", LiquifyItem, None),
                 App("Vanishing Point", VanishingPointItem, None),
                 Sep,
@@ -429,6 +432,17 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
             "filter.maximum",
             "filter.minimum",
             "filter.offset",
+        ],
+    ),
+    (
+        "Neural Filters",
+        &[
+            "filter.neural.skin_smoothing",
+            "filter.neural.jpeg_artifacts",
+            "filter.neural.colorize",
+            "filter.neural.super_zoom",
+            "filter.neural.color_transfer",
+            "filter.neural.depth_blur",
         ],
     ),
 ];
@@ -597,6 +611,7 @@ fn run_app_item(
                 cx,
             )
         }
+        AppItem::FilterGalleryItem => ws.show_filter_gallery(cx),
         AppItem::LiquifyItem => ws.activate_tool("liquify", cx),
         AppItem::PuppetWarpItem => ws.activate_tool("puppet_warp", cx),
         AppItem::VanishingPointItem => ws.activate_tool("vanishing_point", cx),

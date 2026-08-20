@@ -5,6 +5,7 @@ mod assets;
 mod crash;
 mod curve_editor;
 mod dialogs;
+mod gallery;
 mod keymap;
 mod panels;
 mod style_dialog;
