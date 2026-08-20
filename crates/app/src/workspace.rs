@@ -717,7 +717,7 @@ impl Workspace {
     }
 
     /// Everything the paint closure needs, computed with &mut self.
-    fn prepare_paint(&mut self, bounds: Bounds<Pixels>) -> PaintJob {
+    fn prepare_paint(&mut self, bounds: Bounds<Pixels>, scale_factor: f32) -> PaintJob {
         self.canvas_bounds = bounds;
         let mut job = PaintJob::default();
         let Some(doc) = self.doc.as_ref() else {
@@ -742,15 +742,28 @@ impl Workspace {
         let to_screen = move |x: f32, y: f32| -> Point<Pixels> {
             point(px(origin.0 + x * zoom), px(origin.1 + y * zoom))
         };
+        // Snap a document-space coordinate to the device-pixel grid.
+        // Abutting quads MUST share bit-identical edges or fractional
+        // zoom/pan leaves sub-pixel gaps between tiles that show through
+        // as hairline seams; computing every tile's edges through this one
+        // function (same input -> same output) guarantees they meet.
+        let sf = scale_factor.max(0.01);
+        let snap_x = move |x: f32| ((origin.0 + x * zoom) * sf).round() / sf;
+        let snap_y = move |y: f32| ((origin.1 + y * zoom) * sf).round() / sf;
+        let snapped_bounds = move |rect: IntRect| -> Bounds<Pixels> {
+            let x0 = snap_x(rect.left as f32);
+            let x1 = snap_x(rect.right as f32);
+            let y0 = snap_y(rect.top as f32);
+            let y1 = snap_y(rect.bottom as f32);
+            Bounds {
+                origin: point(px(x0), px(y0)),
+                size: size(px(x1 - x0), px(y1 - y0)),
+            }
+        };
 
         if zoom <= PREVIEW_ZOOM_CUTOFF {
             if let Some(img) = self.refresh_preview() {
-                let origin = to_screen(0.0, 0.0);
-                let sz = size(
-                    px(canvas_rect.width() as f32 * zoom),
-                    px(canvas_rect.height() as f32 * zoom),
-                );
-                job.tiles.push((Bounds { origin, size: sz }, img));
+                job.tiles.push((snapped_bounds(canvas_rect), img));
             }
         } else {
             // Visible document rect.
@@ -769,33 +782,19 @@ impl Workspace {
             }
             for coord in coords {
                 if let Some(img) = self.tile_image(coord) {
-                    let trect = coord.rect();
-                    let origin = to_screen(trect.left as f32, trect.top as f32);
-                    let sz = size(px(TILE_SIZE as f32 * zoom), px(TILE_SIZE as f32 * zoom));
-                    job.tiles.push((Bounds { origin, size: sz }, img));
+                    job.tiles.push((snapped_bounds(coord.rect()), img));
                 }
             }
         }
 
         // Document border.
-        job.outlines.push((
-            Bounds {
-                origin: to_screen(0.0, 0.0),
-                size: size(
-                    px(canvas_rect.width() as f32 * zoom),
-                    px(canvas_rect.height() as f32 * zoom),
-                ),
-            },
-            gpui::rgb(0x000000).into(),
-        ));
+        job.outlines
+            .push((snapped_bounds(canvas_rect), gpui::rgb(0x000000).into()));
 
         // Selection marching-ants (static dashes for now: alternating
         // black/white nested outlines).
         if let Some(b) = sel_bounds {
-            let bounds_px = Bounds {
-                origin: to_screen(b.left as f32, b.top as f32),
-                size: size(px(b.width() as f32 * zoom), px(b.height() as f32 * zoom)),
-            };
+            let bounds_px = snapped_bounds(b);
             job.outlines.push((bounds_px, gpui::rgb(0xFFFFFF).into()));
             job.outlines.push((
                 Bounds {
@@ -884,7 +883,10 @@ impl Workspace {
             }))
             .child(
                 canvas(
-                    move |bounds, _window, cx| entity.update(cx, |ws, _| ws.prepare_paint(bounds)),
+                    move |bounds, window, cx| {
+                        let scale = window.scale_factor();
+                        entity.update(cx, |ws, _| ws.prepare_paint(bounds, scale))
+                    },
                     move |_bounds, job: PaintJob, window, _cx| {
                         for (bounds, img) in job.tiles {
                             let _ =
