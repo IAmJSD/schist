@@ -301,13 +301,93 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
     (
         "Blur",
         &[
-            "filter.gaussian_blur",
+            "filter.average",
             "filter.box_blur",
+            "filter.gaussian_blur",
+            "filter.lens_blur",
             "filter.motion_blur",
+            "filter.radial_blur",
+            "filter.surface_blur",
         ],
     ),
-    ("Sharpen", &["filter.sharpen", "filter.unsharp_mask"]),
-    ("Noise", &["filter.add_noise", "filter.median"]),
+    (
+        "Distort",
+        &[
+            "filter.displace",
+            "filter.pinch",
+            "filter.polar",
+            "filter.ripple",
+            "filter.shear",
+            "filter.spherize",
+            "filter.twirl",
+            "filter.wave",
+            "filter.zigzag",
+        ],
+    ),
+    (
+        "Noise",
+        &[
+            "filter.add_noise",
+            "filter.despeckle",
+            "filter.dust_scratches",
+            "filter.median",
+            "filter.reduce_noise",
+        ],
+    ),
+    (
+        "Pixelate",
+        &[
+            "filter.color_halftone",
+            "filter.crystallize",
+            "filter.facet",
+            "filter.fragment",
+            "filter.mezzotint",
+            "filter.mosaic",
+            "filter.pointillize",
+        ],
+    ),
+    (
+        "Render",
+        &[
+            "filter.clouds",
+            "filter.difference_clouds",
+            "filter.fibers",
+            "filter.lens_flare",
+        ],
+    ),
+    (
+        "Sharpen",
+        &[
+            "filter.sharpen",
+            "filter.sharpen_edges",
+            "filter.smart_sharpen",
+            "filter.unsharp_mask",
+        ],
+    ),
+    (
+        "Stylize",
+        &[
+            "filter.diffuse",
+            "filter.emboss",
+            "filter.extrude",
+            "filter.find_edges",
+            "filter.glowing_edges",
+            "filter.oil_paint",
+            "filter.solarize",
+            "filter.tiles",
+            "filter.trace_contour",
+            "filter.wind",
+        ],
+    ),
+    (
+        "Other",
+        &[
+            "filter.high_pass",
+            "filter.maximum",
+            "filter.minimum",
+            "filter.offset",
+        ],
+    ),
 ];
 
 fn keybind_hint(kb: Option<&str>) -> String {

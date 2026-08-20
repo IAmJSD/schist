@@ -8,6 +8,72 @@ use photoslop_plugin_api::{
     FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry,
 };
 
+pub mod distort;
+pub mod other;
+pub mod pixelate;
+pub mod render;
+pub mod stylize;
+pub mod util;
+
+/// A `FilterParam` without the struct-literal noise.
+pub const fn param(
+    key: &'static str,
+    label: &'static str,
+    min: f32,
+    max: f32,
+    default: f32,
+    suffix: &'static str,
+) -> FilterParam {
+    FilterParam {
+        key,
+        label,
+        min,
+        max,
+        default,
+        suffix,
+    }
+}
+
+/// Declare a filter whose whole implementation is one closure.
+///
+/// Most of the set is exactly that: a name, a couple of sliders, and a
+/// function over the pixel buffer. Spelling out the trait impl for each
+/// would be forty lines of boilerplate apiece.
+#[macro_export]
+macro_rules! simple_filter {
+    ($ty:ident, $id:expr, $name:expr, $category:expr, [$($param:expr),* $(,)?], $body:expr) => {
+        pub struct $ty;
+
+        impl FilterPlugin for $ty {
+            fn id(&self) -> &'static str {
+                $id
+            }
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn category(&self) -> &'static str {
+                $category
+            }
+            fn params(&self) -> Vec<FilterParam> {
+                vec![$($param),*]
+            }
+            fn apply(
+                &self,
+                pixels: &mut [f32],
+                width: usize,
+                height: usize,
+                values: &FilterValues,
+            ) {
+                if width == 0 || height == 0 {
+                    return;
+                }
+                #[allow(clippy::redundant_closure_call)]
+                ($body)(pixels, width, height, values)
+            }
+        }
+    };
+}
+
 fn premultiply(pixels: &mut [f32]) {
     for px in pixels.chunks_exact_mut(4) {
         px[0] *= px[3];
@@ -468,6 +534,11 @@ impl PluginManifest for CoreFiltersPlugin {
         registry.register_filter(Box::new(UnsharpMask));
         registry.register_filter(Box::new(AddNoise));
         registry.register_filter(Box::new(Median));
+        distort::register(registry);
+        pixelate::register(registry);
+        render::register(registry);
+        stylize::register(registry);
+        other::register(registry);
     }
 }
 
