@@ -25,6 +25,13 @@ pub struct AddAdjustment {
     pub kind: String,
 }
 
+/// Step to the next tool in a toolbar group (Shift + the group's key).
+#[derive(Clone, PartialEq, Debug, serde::Deserialize, gpui::Action)]
+#[action(namespace = photoslop, no_json)]
+pub struct CycleToolGroup {
+    pub group: String,
+}
+
 /// Set tool opacity (digit keys: 1 => 10% … 0 => 100%).
 #[derive(Clone, PartialEq, Debug, serde::Deserialize, gpui::Action)]
 #[action(namespace = photoslop, no_json)]

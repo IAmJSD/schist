@@ -39,7 +39,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
             ));
         }
     }
-    // Tool activation keys.
+    // Tool activation keys, plus Shift+key to cycle a group's tools.
     for tool in registry.tools() {
         if let Some(key) = tool.shortcut() {
             bindings.push(KeyBinding::new(
@@ -49,6 +49,20 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
                 },
                 TYPING_SAFE,
             ));
+            if registry
+                .tools()
+                .filter(|t| t.group() == tool.group())
+                .count()
+                > 1
+            {
+                bindings.push(KeyBinding::new(
+                    &format!("shift-{key}"),
+                    CycleToolGroup {
+                        group: tool.group().to_string(),
+                    },
+                    TYPING_SAFE,
+                ));
+            }
         }
     }
     // App-level bindings.

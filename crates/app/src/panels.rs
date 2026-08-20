@@ -750,8 +750,23 @@ pub fn tool_options_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl
 
 pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let active = ws.editor.active_tool;
-    let tools: Vec<(&'static str, &'static str)> =
-        ws.registry.tools().map(|t| (t.id(), t.icon())).collect();
+    // One slot per group, showing whichever tool that group last used —
+    // Photoshop's nested tools, so twenty tools take eleven slots.
+    let slots: Vec<(&'static str, &'static str, bool, bool)> = ws
+        .tool_groups
+        .clone()
+        .into_iter()
+        .map(|(group, tools)| {
+            let shown = ws.group_tool(group);
+            let icon = ws
+                .registry
+                .tool_mut(shown)
+                .map(|t| t.icon())
+                .unwrap_or("move");
+            (group, icon, tools.contains(&active), tools.len() > 1)
+        })
+        .collect();
+
     div()
         .flex()
         .flex_col()
@@ -762,28 +777,132 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .border_r_1()
         .border_color(gpui::rgb(PANEL_EDGE))
         .pt_1()
-        .children(tools.into_iter().map(|(id, icon_name)| {
-            let is_active = id == active;
+        .children(
+            slots
+                .into_iter()
+                .map(|(group, icon_name, is_active, has_siblings)| {
+                    div()
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(30.0))
+                        .my(px(1.0))
+                        .rounded_sm()
+                        .when_active(is_active)
+                        .hover(move |s| if is_active { s } else { s.bg(gpui::rgb(HOVER)) })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                                ws.press_tool_group(group, ev.position, cx);
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |ws, _ev, _w, cx| {
+                                ws.release_tool_group(group, cx);
+                            }),
+                        )
+                        // Right-click opens the flyout immediately, for
+                        // people who don't want to wait out the hold.
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                                ws.open_tool_flyout(group, ev.position, cx);
+                            }),
+                        )
+                        .child(icon(
+                            icon_name,
+                            16.0,
+                            if is_active { 0xFFFFFF } else { TEXT },
+                        ))
+                        .children(has_siblings.then(|| {
+                            // The corner mark that means "more tools here".
+                            div()
+                                .absolute()
+                                .right(px(2.0))
+                                .bottom(px(2.0))
+                                .size(px(4.0))
+                                .bg(gpui::rgb(if is_active { 0xFFFFFF } else { TEXT_DIM }))
+                        }))
+                }),
+        )
+        .child(color_wells(ws, cx))
+}
+
+/// The flyout listing a group's tools, opened by holding or right-clicking
+/// its toolbar slot.
+pub fn tool_flyout(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::AnyElement> {
+    let (group, position) = ws.tool_flyout?;
+    let active = ws.editor.active_tool;
+    let shortcut = ws
+        .group_shortcut(group)
+        .map(|s| s.to_uppercase())
+        .unwrap_or_default();
+    let tools: Vec<&'static str> = ws
+        .tool_groups
+        .iter()
+        .find(|(g, _)| *g == group)
+        .map(|(_, t)| t.clone())
+        .unwrap_or_default();
+    let rows: Vec<gpui::AnyElement> = tools
+        .into_iter()
+        .map(|id| {
+            let (name, icon_name) = ws
+                .registry
+                .tool_mut(id)
+                .map(|t| (t.name(), t.icon()))
+                .unwrap_or((id, "move"));
+            let selected = id == active;
+            let shortcut = shortcut.clone();
             div()
                 .flex()
+                .flex_row()
                 .items_center()
-                .justify_center()
-                .size(px(30.0))
-                .my(px(1.0))
-                .rounded_sm()
-                .when_active(is_active)
-                .hover(move |s| if is_active { s } else { s.bg(gpui::rgb(HOVER)) })
+                .gap_2()
+                .px_2()
+                .h(px(24.0))
+                .when_active(selected)
+                .hover(move |s| if selected { s } else { s.bg(gpui::rgb(HOVER)) })
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |ws, _ev, _w, cx| ws.activate_tool(id, cx)),
+                    cx.listener(move |ws, _e, _w, cx| {
+                        ws.close_tool_flyout(cx);
+                        ws.activate_tool(id, cx);
+                    }),
                 )
-                .child(icon(
-                    icon_name,
-                    16.0,
-                    if is_active { 0xFFFFFF } else { TEXT },
-                ))
-        }))
-        .child(color_wells(ws, cx))
+                .child(icon(icon_name, 14.0, TEXT))
+                .child(div().flex_grow().text_size(px(12.0)).child(name))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(TEXT_DIM))
+                        .child(shortcut),
+                )
+                .into_any_element()
+        })
+        .collect();
+
+    Some(
+        deferred(
+            div()
+                .absolute()
+                // Sits just right of the toolbar, level with the slot.
+                .left(px(42.0))
+                .top(px(f32::from(position.y) - 12.0))
+                .w(px(200.0))
+                .py_1()
+                .bg(gpui::rgb(POPUP_BG))
+                .border_1()
+                .border_color(gpui::rgb(0x3A3A3A))
+                .rounded_sm()
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|ws, _e, _w, cx| ws.close_tool_flyout(cx)))
+                .children(rows),
+        )
+        .into_any_element(),
+    )
 }
 
 fn color_wells(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {

@@ -86,6 +86,10 @@ impl ToolPlugin for MarqueeTool {
         }
     }
 
+    fn group(&self) -> &'static str {
+        "marquee"
+    }
+
     fn on_pointer_down(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
         self.anchor = Some((input.x, input.y, input.modifiers));
         self.current = None;

@@ -86,6 +86,14 @@ pub struct Workspace {
     /// Layer thumbnails keyed by layer id, tagged with the doc revision
     /// they were rendered at.
     thumbs: FxHashMap<photoslop_core::LayerId, (u64, Arc<RenderImage>)>,
+    /// Toolbar groups: (group id, tool ids in registration order).
+    pub tool_groups: Vec<(&'static str, Vec<&'static str>)>,
+    /// The tool each group last used — what its toolbar slot shows.
+    group_active: FxHashMap<&'static str, &'static str>,
+    /// An open tool flyout: the group and where to draw it.
+    pub tool_flyout: Option<(&'static str, Point<Pixels>)>,
+    /// A toolbar slot being held down, for click-and-hold flyouts.
+    tool_press: Option<&'static str>,
     /// The open right-click menu, if any.
     pub context_menu: Option<ContextMenu>,
     /// The open modal dialog, if any.
@@ -299,6 +307,10 @@ impl Workspace {
             slider_bounds: FxHashMap::default(),
             active_slider: None,
             thumbs: FxHashMap::default(),
+            tool_groups: Vec::new(),
+            group_active: FxHashMap::default(),
+            tool_flyout: None,
+            tool_press: None,
             context_menu: None,
             modal: None,
             focused_field: None,
@@ -315,6 +327,7 @@ impl Workspace {
             display_transform: None,
             proof_transform: None,
         };
+        ws.rebuild_tool_groups();
         ws.new_document();
         // Periodic crash-recovery snapshot; the task ends with the entity.
         cx.spawn(async move |this, cx| loop {
@@ -646,6 +659,8 @@ impl Workspace {
         if let Some(tool) = self.registry.tool_mut(id) {
             let id = tool.id();
             let name = tool.name();
+            let group = tool.group();
+            self.group_active.insert(group, id);
             self.editor.active_tool = id;
             self.status = format!("Tool: {name}").into();
             if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(id)) {
@@ -780,6 +795,157 @@ impl Workspace {
             self.offset = point(self.offset.x + delta.x, self.offset.y + delta.y);
         }
         cx.notify();
+    }
+
+    // ----- toolbar groups -----
+
+    /// Collect the registry's tools into toolbar groups, preserving
+    /// registration order both between and within groups.
+    fn rebuild_tool_groups(&mut self) {
+        let mut groups: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+        for tool in self.registry.tools() {
+            if !tool.in_toolbar() {
+                continue;
+            }
+            let group = tool.group();
+            match groups.iter_mut().find(|(g, _)| *g == group) {
+                Some((_, tools)) => tools.push(tool.id()),
+                None => groups.push((group, vec![tool.id()])),
+            }
+        }
+        // Lay the slots out the way Photoshop does rather than in plugin
+        // registration order. Groups not listed here (third-party tools)
+        // keep their registration order and follow the built-ins.
+        const ORDER: &[&str] = &[
+            "move",
+            "marquee",
+            "lasso",
+            "wand",
+            "crop",
+            "eyedropper",
+            "brush",
+            "clone",
+            "eraser",
+            "gradient",
+            "dodge",
+            "pen",
+            "type",
+            "shape",
+            "hand",
+            "zoom",
+        ];
+        groups
+            .sort_by_key(|(group, _)| ORDER.iter().position(|g| g == group).unwrap_or(ORDER.len()));
+        for (group, tools) in &groups {
+            self.group_active.entry(group).or_insert(tools[0]);
+        }
+        self.tool_groups = groups;
+    }
+
+    /// The tool a group's toolbar slot currently represents.
+    pub fn group_tool(&self, group: &'static str) -> &'static str {
+        self.group_active
+            .get(group)
+            .copied()
+            .or_else(|| {
+                self.tool_groups
+                    .iter()
+                    .find(|(g, _)| *g == group)
+                    .and_then(|(_, tools)| tools.first().copied())
+            })
+            .unwrap_or("move")
+    }
+
+    /// Keyboard shortcut shown for a group (Photoshop gives every tool in a
+    /// group the same letter).
+    pub fn group_shortcut(&mut self, group: &'static str) -> Option<&'static str> {
+        let ids: Vec<&'static str> = self
+            .tool_groups
+            .iter()
+            .find(|(g, _)| *g == group)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_default();
+        ids.into_iter()
+            .find_map(|id| self.registry.tool_mut(id).and_then(|t| t.shortcut()))
+    }
+
+    /// Press on a toolbar slot: hold opens the flyout, a click activates.
+    pub fn press_tool_group(
+        &mut self,
+        group: &'static str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tool_press = Some(group);
+        let has_siblings = self
+            .tool_groups
+            .iter()
+            .any(|(g, tools)| *g == group && tools.len() > 1);
+        if !has_siblings {
+            return;
+        }
+        // Click-and-hold, like Photoshop's nested tools.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(350))
+                .await;
+            this.update(cx, |ws, cx| {
+                if ws.tool_press == Some(group) {
+                    ws.open_tool_flyout(group, position, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Release on a toolbar slot: activate unless the hold already opened
+    /// the flyout.
+    pub fn release_tool_group(&mut self, group: &'static str, cx: &mut Context<Self>) {
+        let pressed = self.tool_press.take();
+        if pressed != Some(group) || self.tool_flyout.is_some() {
+            return;
+        }
+        let tool = self.group_tool(group);
+        self.activate_tool(tool, cx);
+    }
+
+    pub fn open_tool_flyout(
+        &mut self,
+        group: &'static str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tool_flyout = Some((group, position));
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub fn close_tool_flyout(&mut self, cx: &mut Context<Self>) {
+        self.tool_press = None;
+        if self.tool_flyout.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Shift+the group's key steps to the next tool in that group.
+    pub fn cycle_tool_group(&mut self, group: &'static str, cx: &mut Context<Self>) {
+        let tools: Vec<&'static str> = self
+            .tool_groups
+            .iter()
+            .find(|(g, _)| *g == group)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_default();
+        if tools.is_empty() {
+            return;
+        }
+        let current = self.group_tool(group);
+        let next = tools
+            .iter()
+            .position(|t| *t == current)
+            .map(|i| tools[(i + 1) % tools.len()])
+            .unwrap_or(tools[0]);
+        self.activate_tool(next, cx);
     }
 
     // ----- context menus -----
@@ -1021,6 +1187,10 @@ impl Workspace {
     }
 
     pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
+        if self.tool_flyout.is_some() {
+            self.close_tool_flyout(cx);
+            return;
+        }
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
             return;
@@ -2558,6 +2728,7 @@ impl Render for Workspace {
         let chrome = self.screen_mode == ScreenMode::Standard;
         let modal = crate::dialogs::render(self, cx);
         let context_menu = panels::context_menu(self, window.viewport_size(), cx);
+        let tool_flyout = panels::tool_flyout(self, cx);
         div()
             .size_full()
             .flex()
@@ -2587,12 +2758,25 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, action: &ActivateTool, _w, cx| {
                 ws.activate_tool(&action.id.clone(), cx);
             }))
+            .on_action(cx.listener(|ws, action: &CycleToolGroup, _w, cx| {
+                // The group ids are 'static strings from the registry; find
+                // the matching one rather than leaking a new allocation.
+                let group = ws
+                    .tool_groups
+                    .iter()
+                    .map(|(g, _)| *g)
+                    .find(|g| *g == action.group);
+                if let Some(group) = group {
+                    ws.cycle_tool_group(group, cx);
+                }
+            }))
             .on_action(cx.listener(|ws, action: &SetToolOpacity, _w, cx| {
                 ws.editor.tool_opacity = action.percent as f32 / 100.0;
                 ws.status = format!("Opacity: {}%", action.percent).into();
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &NewFile, _w, cx| {
+                ws.rebuild_tool_groups();
                 ws.new_document();
                 cx.notify();
             }))
@@ -2716,6 +2900,7 @@ impl Render for Workspace {
                     .children(chrome.then(|| panels::side_panels(self, cx))),
             )
             .children(chrome.then(|| panels::status_bar(self)))
+            .children(tool_flyout)
             .children(context_menu)
             .children(modal)
     }

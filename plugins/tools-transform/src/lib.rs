@@ -279,6 +279,11 @@ impl ToolPlugin for TransformTool {
         "transform"
     }
 
+    fn in_toolbar(&self) -> bool {
+        // Free transform is a command (⌘T), not a toolbar slot.
+        false
+    }
+
     fn on_activate(&mut self, ctx: &mut ToolCtx) {
         self.begin(ctx);
     }

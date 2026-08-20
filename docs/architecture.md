@@ -77,6 +77,10 @@ single dirty tile — what a brush stroke actually costs — in ~3 ms
 trait marks where a GPU backend would slot in; see PLAN.md §2 for why it
 isn't there yet.
 
+Tools declare a `group()`, so related tools share one toolbar slot with a
+flyout and a shared shortcut letter — third-party tools can join an existing
+group or form their own, and unknown groups sort after the built-ins.
+
 ## The GPUI boundary
 
 The kernel and plugins never import GPUI. Tools receive `PointerInput` in

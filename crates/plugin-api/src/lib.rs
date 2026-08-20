@@ -114,6 +114,20 @@ pub trait ToolPlugin: Send {
         None
     }
 
+    /// Tools sharing a group id occupy one toolbar slot, like Photoshop's
+    /// nested tools: the slot shows whichever one was last used, a flyout
+    /// lists the rest, and Shift+the group's key cycles them. Defaults to
+    /// the tool's own id, i.e. a group of one.
+    fn group(&self) -> &'static str {
+        self.id()
+    }
+
+    /// False for tools that are reachable only by command or shortcut and
+    /// shouldn't take a toolbar slot (free transform, for instance).
+    fn in_toolbar(&self) -> bool {
+        true
+    }
+
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput);
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput);
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput);

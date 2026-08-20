@@ -386,6 +386,16 @@ impl ToolPlugin for PaintTool {
         }
     }
 
+    fn group(&self) -> &'static str {
+        match self.mode {
+            // Brush and pencil share a slot, as do the three tonal tools.
+            PaintMode::Brush | PaintMode::Pencil => "brush",
+            PaintMode::Eraser => "eraser",
+            PaintMode::Clone => "clone",
+            PaintMode::Dodge | PaintMode::Burn | PaintMode::Sponge => "dodge",
+        }
+    }
+
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         self.cursor = Some((input.x, input.y));
         // Alt-click sets the clone stamp's source point.
@@ -479,6 +489,10 @@ impl ToolPlugin for GradientTool {
     }
     fn shortcut(&self) -> Option<&'static str> {
         matches!(self.kind, GradientKind::Linear).then_some("g")
+    }
+
+    fn group(&self) -> &'static str {
+        "gradient"
     }
 
     fn on_pointer_down(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
@@ -618,6 +632,10 @@ impl ToolPlugin for BucketTool {
     }
     fn icon(&self) -> &'static str {
         "bucket"
+    }
+    fn group(&self) -> &'static str {
+        // The bucket shares the gradient's slot, as in Photoshop.
+        "gradient"
     }
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {

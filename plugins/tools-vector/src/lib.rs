@@ -182,6 +182,10 @@ impl ToolPlugin for ShapeTool {
         matches!(self.kind, ShapeKind::Rectangle).then_some("u")
     }
 
+    fn group(&self) -> &'static str {
+        "shape"
+    }
+
     fn on_pointer_down(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
         self.anchor = Some((input.x, input.y));
         self.current = Some((input.x, input.y));
