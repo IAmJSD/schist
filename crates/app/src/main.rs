@@ -2,6 +2,7 @@
 
 mod actions;
 mod assets;
+mod crash;
 mod dialogs;
 mod keymap;
 mod panels;
@@ -50,6 +51,26 @@ impl PluginManifest for PsdPlugin {
     }
 }
 
+/// Crash reporting stays off unless the user opts in.
+fn crash_reports_enabled() -> bool {
+    if std::env::var("PHOTOSLOP_CRASH_REPORTS").is_ok_and(|v| v == "1") {
+        return true;
+    }
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+        .map(|d| d.join("photoslop/preferences.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("crash_reports").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 /// Assemble the first-party plugin set. Every entry here is optional — the
 /// app boots (to an empty shell) with any or all of them removed.
 fn build_registry() -> (PluginRegistry, photoslop_plugin_host_wasm::PluginManager) {
@@ -80,6 +101,9 @@ fn build_registry() -> (PluginRegistry, photoslop_plugin_host_wasm::PluginManage
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Opt-in: PHOTOSLOP_CRASH_REPORTS=1, or the preference file's
+    // crash_reports flag once the user enables it in Preferences.
+    crash::install_handler(crash_reports_enabled());
     let (registry, plugin_manager) = build_registry();
 
     Application::new()

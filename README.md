@@ -1,65 +1,99 @@
 # Photoslop
 
-A Photoshop-class, plugin-first image editor written in Rust on [GPUI]
-(Zed's GPU-accelerated UI framework), with native PSD/PSB support.
-
-**Status: M0–M5 complete** (see [PLAN.md](PLAN.md) for the full roadmap):
-tiled canvas with pan/zoom, full layer model (groups, masks, clipping, all
-27 PSD blend modes), painting with unlimited undo, anti-aliased selections,
-and a PSD/PSB reader with byte-level round-trip preservation of everything
-it doesn't yet interpret.
+A layered image editor written in Rust on [GPUI], with first-class PSD
+support and a plugin-first architecture — every tool, filter, format and
+menu command is a plugin, including the built-in ones.
 
 [GPUI]: https://gpui.rs
 
-## Building & running
+**Status: v1 feature-complete (milestones M0–M12 of [PLAN.md](PLAN.md)).**
+272 tests, clippy-clean, verified end-to-end under a real window.
 
-Linux needs GPUI's system deps:
+## Build and run
 
 ```sh
+# Linux needs GPUI's system dependencies:
 sudo apt-get install build-essential pkg-config libfontconfig-dev \
   libwayland-dev libxkbcommon-x11-dev libxcb1-dev libxcb-render0-dev \
-  libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev clang mold
-cargo run -p photoslop-app --release [file.psd|file.png|…]
+  libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev clang
+
+cargo run --release -p photoslop-app -- [file.psd|file.png|…]
 ```
 
-`cargo test --workspace` runs the full suite (105 tests: kernel, blend-mode
-reference, compositor semantics, tools, commands, PSD corpus).
+`cargo test --workspace` runs everything. Packaging scripts for macOS,
+Windows and Linux live in [packaging/](packaging); tagging `vX.Y.Z` builds
+them all in CI.
 
-## Architecture (microkernel + plugins)
+## What it does
 
+**Documents.** PSD and PSB read *and* write — layers, nested groups, masks,
+all 27 blend modes, adjustment layers, 8/16/32-bit, RGB and greyscale. Every
+block Photoslop doesn't understand (layer effects, text engine data, smart
+objects) is preserved byte-for-byte, so a round trip never loses work. Also
+PNG, JPEG, WebP and TIFF.
+
+**Editing.** Brush, pencil, eraser, clone stamp, gradient, paint bucket,
+dodge/burn/sponge; rectangular/elliptical marquee, lasso, magic wand with
+anti-aliased selections and boolean modifiers; move, crop, free transform
+with rotate/scale/skew; pen and shape tools; editable text layers.
+
+**Non-destructive.** Adjustment layers (levels, curves, hue/saturation,
+brightness/contrast, black & white, invert, posterize, threshold, solid
+colour), layer masks, clipping masks, group isolation, per-layer blend mode
+and opacity. Destructive filters — blurs, sharpen, unsharp mask, noise,
+median — apply inside the selection.
+
+**Colour.** ICC profiles honoured on open, assign vs. convert as separate
+operations, a document→display transform, soft proofing, and ordered
+dithering when exporting to 8-bit.
+
+**Editor.** Rulers with drag-out guides, grid and snapping, screen modes,
+light/dark themes, navigator, history with click-to-jump, unlimited undo,
+crash recovery, and a fully remappable keymap.
+
+## Keyboard
+
+Photoshop's defaults (⌘ on macOS, Ctrl elsewhere):
+
+| | |
+|---|---|
+| Tools | `V` move · `M` marquee · `L` lasso · `W` wand · `C` crop · `B` brush · `E` eraser · `S` clone · `G` gradient · `P` pen · `T` type · `U` shapes · `I` eyedropper · `H`/space hand · `Z` zoom |
+| Edit | ⌘Z / ⌘⇧Z undo・redo · ⌘X/C/V · ⌘⇧C copy merged · ⌘T free transform |
+| Select | ⌘A all · ⌘D deselect · ⌘⇧D reselect · ⌘⇧I inverse · shift/alt-drag to add/subtract |
+| Layers | ⌘⇧N new · ⌘J duplicate · ⌘⇧J via cut · ⌘G group · ⌘E/⌘⇧E merge · ⌘[ ⌘] reorder · ⌘⌥G clipping mask |
+| Adjust | ⌘L levels · ⌘M curves · ⌘U hue/sat · ⌘I invert |
+| View | ⌘0 fit · ⌘1 100% · ⌘R rulers · ⌘' grid · ⌘; guides · ⌘H extras · Tab/F screen modes · ⌘K preferences |
+| Painting | `[`/`]` brush size · digits set opacity · `D`/`X` default・swap colours |
+
+Remap anything in `~/.config/photoslop/keymap.json`:
+
+```json
+{ "ctrl-shift-x": "command:edit.fill_foreground", "f1": "tool:brush" }
 ```
-crates/core         kernel: document, COW tile store, layers, history, selection
-crates/color        pixel/color primitives, depth conversion
-crates/pixel-ops    CPU reference blend modes (the semantic contract)
-crates/compositor   tile compositor + damage-driven cache
-crates/plugin-api   the trait surface every feature implements
-crates/codec-psd    standalone PSD/PSB reader (writer lands in M6)
-crates/app          GPUI shell: workspace, canvas, panels, keymap
-plugins/*           every user-facing feature: tools, commands, codecs
+
+## Plugins
+
+Third-party plugins are sandboxed WebAssembly — no filesystem, network or
+clock, and a fuel budget so a runaway plugin can't hang the editor. A filter
+is one function:
+
+```rust
+photoslop_filter! {
+    id: "com.example.sepia",
+    name: "Sepia",
+    category: "Plugins",
+    params: [param("amount", "Amount", 0.0, 100.0, 100.0, "%")],
+    apply: |pixels: &mut [f32], _w: usize, _h: usize, params: &Params| { /* … */ }
+}
 ```
 
-The kernel contains **zero** user-facing features. Tools receive input as
-plain document-space events and return overlay primitives, so every tool is
-unit-testable without a GUI. Pixels live in 256×256 copy-on-write tiles;
-undo snapshots cost memory proportional to *changed* pixels only.
+Drop the `.wasm` in `~/.config/photoslop/plugins/` — or use **File ▸
+Plugins…**, which also shows why anything failed to load. Full instructions
+and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 
-## Keybindings (defaults, ctrl on Linux/Windows ⇄ cmd on macOS)
+## Documentation
 
-Tools: `V` move · `M` marquee · `L` lasso · `W` wand · `B` brush ·
-`E` eraser · `I` eyedropper · `H` hand (or hold Space) · `Z` zoom.
-Commands: `⌘Z/⌘⇧Z` undo/redo · `⌘A/⌘D/⌘⇧I` select all/none/inverse ·
-`⌘J` duplicate layer · `⌘E/⌘⇧E` merge down/visible · `⌘G` group ·
-`⌘C/X/V` clipboard · `⌥⌫` fill · `[`/`]` brush size · digits = opacity ·
-`⌘0/⌘1` fit/100% · `⌘O/⌘S` open/save.
-
-Remap via `~/.config/photoslop/keymap.json`:
-`{ "ctrl-shift-x": "command:edit.fill_foreground", "f1": "tool:brush" }`
-
-## PSD support
-
-Reads PSD and PSB, 8/16/32-bit, RGB + Grayscale: layers, nested groups,
-masks, all blend modes, opacity/clipping/visibility, adjustment-layer
-identification, RLE + raw compression. Text layers and smart objects import
-as raster layers carrying their original data blocks. Every unknown byte
-block is preserved verbatim so files survive a future save-and-reopen in
-Photoshop without loss (the M6 writer re-emits them).
+* [PLAN.md](PLAN.md) — the roadmap this was built against, with status
+* [docs/architecture.md](docs/architecture.md) — how the pieces fit
+* [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
+* [docs/versioning.md](docs/versioning.md) — compatibility and releases

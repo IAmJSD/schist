@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Photoslop</string>
+    <key>CFBundleDisplayName</key><string>Photoslop</string>
+    <key>CFBundleIdentifier</key><string>com.infrawrench.photoslop</string>
+    <key>CFBundleVersion</key><string>0.1.0</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleExecutable</key><string>photoslop</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Photoshop Document</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.adobe.photoshop-image</string>
+                <string>public.png</string>
+                <string>public.jpeg</string>
+                <string>public.tiff</string>
+                <string>org.webmproject.webp</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

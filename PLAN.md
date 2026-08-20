@@ -1,20 +1,27 @@
 # Photoslop — Development Plan
 
-> **Status (2026-08-20): M0–M8 complete.** Workspace + kernel + plugin
+> **Status (2026-08-20): M0–M12 complete — v1 feature-complete.** Workspace + kernel + plugin
 > registry (M0); tiled canvas with pan/zoom and codecs (M1); full layer
 > model with all PSD blend modes and layers panel (M2); brush engine +
 > history (M3); selections, masks, clipboard, fill (M4); PSD/PSB reader
 > with round-trip preservation (M5); PSD writer, save/save-as and crash
 > recovery (M6); transform/crop/resize, vector shapes, pen, text layers and
 > clone/gradient/bucket/dodge-burn (M7); adjustment layers, filters and a
-> 2.4x compositor speed-up (M8). Verified end-to-end under Xvfb.
+> 2.4x compositor speed-up (M8); sandboxed WebAssembly plugins with an SDK
+> and examples (M9); ICC colour management, soft proofing and export
+> options (M10); rulers/guides/grid/snapping, screen modes, themes,
+> preferences and the navigator (M11); packaging, crash reporting and docs
+> (M12). Verified end-to-end in a real window.
 > Known deferrals so far: rotate-view rendering, animated marching ants
 > (static outline), tablet pressure (mouse = 1.0), system clipboard interop,
 > magnetic lasso, a curves *editor* widget (curves parse, render and
 > round-trip; only the graph UI is missing), vector shape layers saved as
-> vectors (they rasterize), and the wgpu compositor — the CPU path now
-> meets the M8 interactivity target on its own (see below), so the GPU
-> backend would add complexity without a measured win.
+> vectors (they rasterize), CMYK/Lab documents, zip-compressed PSD channels,
+> and the wgpu compositor — the CPU path meets the M8 interactivity target
+> on its own (measurements in §7/M8), so the GPU backend would add
+> complexity without a demonstrated win. macOS signing and notarization are
+> wired into the release workflow but unexercised here: this machine has no
+> Apple credentials, so those steps are secret-gated and skip cleanly.
 
 A GPU-accelerated, Photoshop-class raster/vector image editor written in Rust on **GPUI**
 (Zed's UI framework), with first-class **PSD** support, a **plugin-first architecture**

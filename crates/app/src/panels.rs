@@ -89,6 +89,7 @@ enum AppItem {
     ClearGuides,
     ScreenModeItem,
     Preferences,
+    CheckForUpdates,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -105,6 +106,7 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Export…", Export, Some("cmd-shift-alt-s")),
                 Sep,
                 App("Plugins…", Plugins, None),
+                App("Check for Updates…", CheckForUpdates, None),
                 Sep,
                 App("Quit", Quit, Some("cmd-q")),
             ],
@@ -342,6 +344,7 @@ fn run_app_item(
         AppItem::ClearGuides => ws.clear_guides(cx),
         AppItem::ScreenModeItem => ws.cycle_screen_mode(cx),
         AppItem::Preferences => ws.open_modal(Modal::Preferences, cx),
+        AppItem::CheckForUpdates => ws.check_for_update(cx),
         AppItem::FreeTransform => ws.activate_tool("transform", cx),
         AppItem::Crop => {
             let rect = ws

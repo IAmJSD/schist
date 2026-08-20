@@ -149,6 +149,10 @@ pub struct ViewOptions {
     pub snap: bool,
     pub grid_spacing: f32,
     pub theme: Theme,
+    /// Write a local crash report when the editor panics. Opt-in, and
+    /// nothing is ever transmitted.
+    #[serde(default)]
+    pub crash_reports: bool,
 }
 
 impl Default for ViewOptions {
@@ -161,6 +165,7 @@ impl Default for ViewOptions {
             snap: true,
             grid_spacing: 64.0,
             theme: Theme::Dark,
+            crash_reports: false,
         }
     }
 }
@@ -1604,6 +1609,42 @@ impl Workspace {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Ask upstream whether a newer release exists. Opt-in, user-initiated,
+    /// and the only network request the app makes.
+    pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        self.status = "Checking for updates…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async { crate::crash::check_for_update() })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.status = match status {
+                    crate::crash::UpdateStatus::UpToDate => format!(
+                        "Photoslop {} is up to date",
+                        crate::crash::current_version()
+                    )
+                    .into(),
+                    crate::crash::UpdateStatus::Available { version, url } => {
+                        log::info!("update {version} available at {url}");
+                        format!(
+                            "Version {version} is available — see {}",
+                            crate::crash::RELEASES_PAGE
+                        )
+                        .into()
+                    }
+                    crate::crash::UpdateStatus::Failed(err) => {
+                        format!("Update check failed: {err}").into()
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }

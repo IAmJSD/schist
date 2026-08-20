@@ -1,0 +1,32 @@
+# Flatpak manifest. Build with:
+#   flatpak-builder --user --install build packaging/linux/com.infrawrench.Photoslop.yaml
+app-id: com.infrawrench.Photoslop
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: photoslop
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Photoslop only touches files the user picks through the portal.
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-documents
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/photoslop/cargo
+modules:
+  - name: photoslop
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release -p photoslop-app
+      - install -Dm755 target/release/photoslop /app/bin/photoslop
+      - install -Dm644 packaging/linux/photoslop.desktop
+          /app/share/applications/com.infrawrench.Photoslop.desktop
+    sources:
+      - type: dir
+        path: ../..

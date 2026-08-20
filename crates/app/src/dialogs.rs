@@ -916,11 +916,29 @@ fn preferences(
                 cx,
             ),
         ))
+        .child(ui::field_row(
+            "Diagnostics",
+            ui::checkbox(
+                "Write a local crash report on panic",
+                view.crash_reports,
+                |ws| {
+                    ws.view.crash_reports = !ws.view.crash_reports;
+                    ws.save_view_options();
+                },
+                cx,
+            ),
+        ))
         .child(
             div()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(ui::TEXT_DIM))
                 .child(format!("Keyboard shortcuts: {keymap_path}")),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child(format!("Version {}", crate::crash::current_version())),
         );
 
     let actions = div().flex().flex_row().gap_2().child(ui::button(

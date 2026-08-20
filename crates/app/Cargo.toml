@@ -15,6 +15,8 @@ log.workspace = true
 env_logger.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Only used by the opt-in "Check for Updates" request.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 image.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
