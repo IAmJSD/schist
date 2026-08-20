@@ -70,6 +70,17 @@ Photoshop's defaults (⌘ on macOS, Ctrl elsewhere):
 | View | ⌘0 fit · ⌘1 100% · ⌘R rulers · ⌘' grid · ⌘; guides · ⌘H extras · Tab/F screen modes · ⌘K preferences |
 | Painting | `[`/`]` brush size · digits set opacity · `D`/`X` default・swap colours |
 
+## Mouse and touchpad
+
+Two-finger scroll pans; **Ctrl/⌘/Alt + scroll zooms** toward the pointer.
+Prefer it the other way round? **Preferences ▸ Zoom with scroll wheel**
+swaps them, so plain scrolling zooms and the modifier pans.
+
+Pinch-to-zoom is not available: GPUI does not surface trackpad pinch
+gestures on any platform, so the event never reaches the application. Use
+Ctrl+scroll, the zoom-with-scroll preference, ⌘+/⌘- , or the navigator's
+zoom slider.
+
 Remap anything in `~/.config/photoslop/keymap.json`:
 
 ```json

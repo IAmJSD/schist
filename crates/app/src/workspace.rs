@@ -174,6 +174,11 @@ pub struct ViewOptions {
     pub snap: bool,
     pub grid_spacing: f32,
     pub theme: Theme,
+    /// Scroll zooms instead of panning (Photoshop's "Zoom with Scroll
+    /// Wheel"). Useful on touchpads, where pinch gestures never arrive —
+    /// GPUI doesn't surface them on any platform.
+    #[serde(default)]
+    pub zoom_with_scroll: bool,
     /// Write a local crash report when the editor panics. Opt-in, and
     /// nothing is ever transmitted.
     #[serde(default)]
@@ -190,6 +195,7 @@ impl Default for ViewOptions {
             snap: true,
             grid_spacing: 64.0,
             theme: Theme::Dark,
+            zoom_with_scroll: false,
             crash_reports: false,
         }
     }
@@ -793,11 +799,28 @@ impl Workspace {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // Touchpads send many small precise deltas; a mouse wheel sends a
+        // few large line-sized ones. Scaling lines to 30px puts both on a
+        // comparable footing.
         let delta = ev.delta.pixel_delta(px(30.0));
-        if ev.modifiers.control || ev.modifiers.platform {
-            let factor = 1.0 + f32::from(delta.y) / 200.0;
-            let local = self.to_local(ev.position);
-            self.zoom_by(factor.clamp(0.5, 2.0), Some(local));
+        // Ctrl (or Cmd, or Alt — Photoshop's Windows binding) flips the
+        // gesture's meaning, whichever way round the preference has it.
+        let modifier = ev.modifiers.control || ev.modifiers.platform || ev.modifiers.alt;
+        let zooming = if self.view.zoom_with_scroll {
+            !modifier
+        } else {
+            modifier
+        };
+        if zooming {
+            // Exponential so the gesture is symmetric: scrolling back up
+            // returns to exactly the zoom you started from, and a precise
+            // touchpad delta of a couple of pixels still moves it a little
+            // rather than rounding away to nothing.
+            let steps = f32::from(delta.y) / 240.0;
+            if steps.abs() > f32::EPSILON {
+                let local = self.to_local(ev.position);
+                self.zoom_by(2f32.powf(steps), Some(local));
+            }
         } else {
             self.offset = point(self.offset.x + delta.x, self.offset.y + delta.y);
         }

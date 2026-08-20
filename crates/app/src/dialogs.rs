@@ -920,6 +920,18 @@ fn preferences(
             ),
         ))
         .child(ui::field_row(
+            "Scrolling",
+            ui::checkbox(
+                "Zoom with scroll wheel",
+                view.zoom_with_scroll,
+                |ws| {
+                    ws.view.zoom_with_scroll = !ws.view.zoom_with_scroll;
+                    ws.save_view_options();
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
             "Diagnostics",
             ui::checkbox(
                 "Write a local crash report on panic",
