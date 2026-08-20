@@ -113,6 +113,10 @@ enum AppItem {
     Trim,
     /// Apply an adjustment to the pixels rather than adding a layer.
     ApplyAdjustment(photoslop_core::AdjustmentKind),
+    PathFill,
+    PathStroke,
+    PathToSelection,
+    PathDelete,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -235,6 +239,17 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Cmd("layer.delete"),
                 Sep,
                 App("Layer Style…", LayerStyleItem, None),
+                Sep,
+                Sub(
+                    "Path",
+                    vec![
+                        App("Fill Path", PathFill, None),
+                        App("Stroke Path", PathStroke, None),
+                        App("Make Selection", PathToSelection, None),
+                        Sep,
+                        App("Delete Path", PathDelete, None),
+                    ],
+                ),
                 Sep,
                 Cmd("layer.group"),
                 Cmd("layer.merge_down"),
@@ -525,6 +540,10 @@ fn run_app_item(
         AppItem::FlipCanvasV => ws.transform_canvas(crate::workspace::CanvasTransform::FlipV, cx),
         AppItem::Trim => ws.trim(cx),
         AppItem::ApplyAdjustment(kind) => ws.apply_adjustment_destructive(kind, cx),
+        AppItem::PathFill => ws.use_active_path(crate::workspace::PathOp::Fill, cx),
+        AppItem::PathStroke => ws.use_active_path(crate::workspace::PathOp::Stroke, cx),
+        AppItem::PathToSelection => ws.use_active_path(crate::workspace::PathOp::Select, cx),
+        AppItem::PathDelete => ws.use_active_path(crate::workspace::PathOp::Delete, cx),
         AppItem::SelectExpand => ws.open_modal(
             Modal::SelectModify {
                 kind: crate::workspace::ModifyKind::Expand,

@@ -5,6 +5,8 @@
 //! pixels and keep no editable vector data, which is why re-opening a saved
 //! file gives raster layers (noted in PLAN.md §7 as an M7 scope cut).
 
+pub mod paths;
+
 use photoslop_color::Rgba;
 use photoslop_core::{Document, IntRect, Layer, LayerPath, TileCoord, TILE_SIZE};
 use photoslop_plugin_api::{
@@ -15,7 +17,20 @@ use photoslop_vector::{FillRule, Path, PathBuilder};
 
 /// Paint a coverage mask onto a fresh layer above the active one, honouring
 /// the current selection, as a single undoable edit.
-fn commit_shape(doc: &mut Document, path: &Path, color: Rgba, rule: FillRule, name: &str) {
+/// Rasterize a path onto a new layer, clipped to the selection.
+///
+/// Public so the shell can drive Fill Path and Stroke Path from the menu.
+pub fn fill_path(doc: &mut Document, path: &Path, color: Rgba, rule: FillRule, name: &str) {
+    commit_shape(doc, path, color, rule, name)
+}
+
+pub(crate) fn commit_shape(
+    doc: &mut Document,
+    path: &Path,
+    color: Rgba,
+    rule: FillRule,
+    name: &str,
+) {
     let bounds = path.bounds().intersect(&doc.canvas_rect());
     if bounds.is_empty() {
         return;
@@ -488,10 +503,17 @@ impl PluginManifest for VectorToolsPlugin {
 
     fn register(&self, registry: &mut PluginRegistry) {
         registry.register_tool(Box::new(PenTool::default()));
+        registry.register_tool(Box::new(paths::FreeformPenTool::new(false)));
+        registry.register_tool(Box::new(paths::FreeformPenTool::new(true)));
+        registry.register_tool(Box::new(paths::PathSelectTool::new(paths::ArrowKind::Path)));
+        registry.register_tool(Box::new(paths::PathSelectTool::new(
+            paths::ArrowKind::Direct,
+        )));
         registry.register_tool(Box::new(ShapeTool::new(ShapeKind::Rectangle)));
         registry.register_tool(Box::new(ShapeTool::new(ShapeKind::Ellipse)));
         registry.register_tool(Box::new(ShapeTool::new(ShapeKind::Line)));
         registry.register_tool(Box::new(ShapeTool::new(ShapeKind::Polygon)));
+        registry.register_tool(Box::new(paths::CustomShapeTool::new()));
     }
 }
 

@@ -57,6 +57,10 @@ pub struct Document {
     pub guides: Vec<Guide>,
     /// The last non-empty selection, so Reselect can bring it back.
     pub last_selection: Option<Selection>,
+    /// Stored vector paths, as in Photoshop's Paths panel.
+    pub paths: Vec<crate::path::VectorPath>,
+    /// Index into `paths` of the one being edited.
+    pub active_path: Option<usize>,
     /// Per-layer snapshot of the pixels the document was opened with,
     /// which is what the History Brush paints back from. Tile maps are
     /// copy-on-write, so this costs a handful of `Arc` clones.
@@ -93,6 +97,8 @@ impl Document {
             last_selection: None,
             saved_selections: Vec::new(),
             history_source: Default::default(),
+            paths: Vec::new(),
+            active_path: None,
             damage: Vec::new(),
             dirty: false,
         }

@@ -132,6 +132,26 @@ pub struct Workspace {
     proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
 }
 
+/// What to do with the active stored path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathOp {
+    Fill,
+    Stroke,
+    Select,
+    Delete,
+}
+
+impl PathOp {
+    pub fn title(self) -> &'static str {
+        match self {
+            PathOp::Fill => "Fill Path",
+            PathOp::Stroke => "Stroke Path",
+            PathOp::Select => "Make Selection",
+            PathOp::Delete => "Delete Path",
+        }
+    }
+}
+
 /// Image ▸ Auto Tone / Auto Contrast / Auto Color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoMode {
@@ -1196,6 +1216,80 @@ impl Workspace {
             photoslop_color::ColorMode::Grayscale => "Grayscale",
         }
         .into();
+        self.after_change(cx);
+    }
+
+    /// Rasterize the active path: fill it, stroke it, or turn it into a
+    /// selection. The three things Photoshop's Paths panel buttons do.
+    pub fn use_active_path(&mut self, op: PathOp, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let Some(path) = doc.active_path.and_then(|i| doc.paths.get(i)).cloned() else {
+            self.status = "No path to use".into();
+            cx.notify();
+            return;
+        };
+        if path.is_empty() {
+            self.status = "The path is empty".into();
+            cx.notify();
+            return;
+        }
+        let flat = photoslop_tools_vector::paths::flatten(&path);
+        let colour = self.editor.foreground;
+        let width = self.editor.brush_size.max(1.0);
+        let Some(doc) = self.doc.as_mut() else { return };
+        match op {
+            PathOp::Fill => {
+                photoslop_tools_vector::fill_path(
+                    doc,
+                    &flat,
+                    colour,
+                    photoslop_vector::FillRule::NonZero,
+                    "Fill Path",
+                );
+            }
+            PathOp::Stroke => {
+                let stroked = photoslop_vector::stroke_path(
+                    &flat,
+                    photoslop_vector::StrokeStyle::new(width)
+                        .with_cap(photoslop_vector::LineCap::Round)
+                        .with_join(photoslop_vector::LineJoin::Round),
+                );
+                photoslop_tools_vector::fill_path(
+                    doc,
+                    &stroked,
+                    colour,
+                    photoslop_vector::FillRule::NonZero,
+                    "Stroke Path",
+                );
+            }
+            PathOp::Select => {
+                let rect = flat.bounds();
+                let mask =
+                    photoslop_vector::rasterize(&flat, rect, photoslop_vector::FillRule::NonZero);
+                let w = rect.width().max(0) as usize;
+                let mut edit = doc.begin_edit("Make Selection");
+                edit.change_selection(|sel, _| {
+                    sel.deselect();
+                    sel.activate();
+                    sel.apply_shape(rect, photoslop_core::SelectOp::Replace, |x, y| {
+                        mask[(y - rect.top) as usize * w + (x - rect.left) as usize]
+                    });
+                });
+                edit.commit();
+            }
+            PathOp::Delete => {
+                if let Some(i) = doc.active_path {
+                    doc.paths.remove(i);
+                    doc.active_path = if doc.paths.is_empty() {
+                        None
+                    } else {
+                        Some(i.min(doc.paths.len() - 1))
+                    };
+                }
+                doc.damage_all();
+            }
+        }
+        self.status = op.title().into();
         self.after_change(cx);
     }
 
@@ -3247,11 +3341,23 @@ impl Workspace {
             guides.push(dragging);
         }
         let tool_id = self.editor.active_tool;
-        let overlays = self
+        let mut overlays = self
             .registry
             .tool_mut(tool_id)
             .map(|t| t.overlays(doc, &self.editor))
             .unwrap_or_default();
+        // The active stored path is always visible, whichever tool is in
+        // use -- otherwise a path drawn with the pen would vanish the
+        // moment you switched to something else.
+        if !PATH_TOOLS.contains(&tool_id) {
+            if let Some(path) = doc.active_path.and_then(|i| doc.paths.get(i)) {
+                for sub in &photoslop_tools_vector::paths::flatten(path).subpaths {
+                    if sub.len() >= 2 {
+                        overlays.push(photoslop_plugin_api::Overlay::AntsPolygon(sub.clone()));
+                    }
+                }
+            }
+        }
         let origin = (
             f32::from(bounds.origin.x) + f32::from(self.offset.x),
             f32::from(bounds.origin.y) + f32::from(self.offset.y),
@@ -3896,3 +4002,13 @@ fn style_enabled(style: &photoslop_core::LayerStyle, key: &str) -> bool {
         _ => false,
     }
 }
+
+/// Tools that draw the active path themselves, so the canvas must not draw
+/// it a second time on top.
+const PATH_TOOLS: &[&str] = &[
+    "pen",
+    "pen.freeform",
+    "pen.curvature",
+    "path_select",
+    "direct_select",
+];
