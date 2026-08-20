@@ -1,0 +1,10 @@
+[package]
+name = "photoslop-tools-retouch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-color.workspace = true
+photoslop-plugin-api.workspace = true

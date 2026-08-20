@@ -31,6 +31,7 @@ photoslop-codec-psd.workspace = true
 photoslop-codecs-common.workspace = true
 photoslop-tools-basic.workspace = true
 photoslop-tools-paint.workspace = true
+photoslop-tools-retouch.workspace = true
 photoslop-tools-select.workspace = true
 photoslop-tools-transform.workspace = true
 photoslop-tools-vector.workspace = true

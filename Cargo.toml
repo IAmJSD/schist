@@ -20,6 +20,7 @@ members = [
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
+    "plugins/tools-retouch",
     "plugins/tools-select",
     "plugins/tools-transform",
     "plugins/tools-vector",
@@ -52,6 +53,7 @@ photoslop-colormgmt = { path = "crates/colormgmt" }
 photoslop-codecs-common = { path = "plugins/codecs-common" }
 photoslop-tools-basic = { path = "plugins/tools-basic" }
 photoslop-tools-paint = { path = "plugins/tools-paint" }
+photoslop-tools-retouch = { path = "plugins/tools-retouch" }
 photoslop-tools-select = { path = "plugins/tools-select" }
 photoslop-tools-transform = { path = "plugins/tools-transform" }
 photoslop-tools-vector = { path = "plugins/tools-vector" }

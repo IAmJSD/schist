@@ -4191,6 +4191,7 @@ dependencies = [
  "photoslop-text-engine",
  "photoslop-tools-basic",
  "photoslop-tools-paint",
+ "photoslop-tools-retouch",
  "photoslop-tools-select",
  "photoslop-tools-transform",
  "photoslop-tools-type",
@@ -4381,6 +4382,15 @@ dependencies = [
  "photoslop-pixel-ops",
  "photoslop-plugin-api",
  "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "photoslop-tools-retouch"
+version = "0.1.0"
+dependencies = [
+ "photoslop-color",
+ "photoslop-core",
+ "photoslop-plugin-api",
 ]
 
 [[package]]

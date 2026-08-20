@@ -57,6 +57,10 @@ pub struct Document {
     pub guides: Vec<Guide>,
     /// The last non-empty selection, so Reselect can bring it back.
     pub last_selection: Option<Selection>,
+    /// Per-layer snapshot of the pixels the document was opened with,
+    /// which is what the History Brush paints back from. Tile maps are
+    /// copy-on-write, so this costs a handful of `Arc` clones.
+    pub history_source: rustc_hash::FxHashMap<LayerId, crate::tile::TileMap>,
     /// Named selections stashed by Select ▸ Save Selection. Photoshop
     /// keeps these as alpha channels; we have no channels panel yet, so
     /// they live here and are not written to PSD.
@@ -88,6 +92,7 @@ impl Document {
             guides: Vec::new(),
             last_selection: None,
             saved_selections: Vec::new(),
+            history_source: Default::default(),
             damage: Vec::new(),
             dirty: false,
         }
@@ -95,6 +100,23 @@ impl Document {
 
     pub fn canvas_rect(&self) -> IntRect {
         IntRect::from_size(self.width, self.height)
+    }
+
+    /// Record the current pixels as the History Brush's source. Called
+    /// when a document is opened or created, matching Photoshop, whose
+    /// default history source is the state the file was opened in.
+    pub fn snapshot_history_source(&mut self) {
+        self.history_source.clear();
+        let mut stack: Vec<&crate::layer::Layer> = self.tree.layers.iter().collect();
+        while let Some(layer) = stack.pop() {
+            match &layer.kind {
+                crate::layer::LayerKind::Raster(r) => {
+                    self.history_source.insert(layer.id, r.tiles.clone());
+                }
+                crate::layer::LayerKind::Group(g) => stack.extend(g.children.iter()),
+                crate::layer::LayerKind::Adjustment(_) => {}
+            }
+        }
     }
 
     pub fn add_damage(&mut self, rect: IntRect) {

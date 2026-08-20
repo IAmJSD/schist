@@ -10,7 +10,8 @@ use photoslop_core::{
     Document, IntRect, LayerId, LayerKind, StrokeEdit, TileCoord, TileMap, TILE_SIZE,
 };
 use photoslop_plugin_api::{
-    EditorState, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolPlugin,
+    EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
+    ToolOption, ToolPlugin,
 };
 use rustc_hash::FxHashMap;
 
@@ -25,6 +26,20 @@ enum PaintMode {
     Dodge,
     Burn,
     Sponge,
+    /// Blur softens under the brush, Sharpen does the opposite.
+    Blur,
+    Sharpen,
+    /// Smudge drags colour along the stroke.
+    Smudge,
+    /// Healing brush: texture from an alt-clicked source, colour and
+    /// lighting from the destination.
+    Heal,
+    /// Spot healing: no source point, it fills from the surroundings.
+    SpotHeal,
+    /// Paints back from the snapshot the document was opened with.
+    HistoryBrush,
+    /// Erases pixels that match the colour under the brush centre.
+    BackgroundEraser,
 }
 
 /// Where a dab's colour comes from.
@@ -40,6 +55,26 @@ enum Ink {
     },
     /// Tonal adjustment of whatever is already there.
     Tone(Tone),
+    /// Convolve the pre-stroke pixels under the brush.
+    Convolve {
+        snapshot: TileMap,
+        sharpen: bool,
+    },
+    /// Drag colour along the stroke. The carried colour lives on the
+    /// stroke, not here, because it changes dab to dab.
+    Smudge,
+    /// Healing: `patch` holds this dab's replacement pixels, recomputed
+    /// per dab in `prepare_heal`.
+    Heal,
+    /// Paint back from a snapshot of the whole layer.
+    Restore {
+        snapshot: TileMap,
+    },
+    /// Erase pixels close to `target` in colour.
+    BackgroundErase {
+        target: Rgba,
+        tolerance: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +131,27 @@ struct Stroke {
     size: f32,
     hardness: f32,
     mode: PaintMode,
+    /// The layer as it was when the stroke began. Tile maps are
+    /// copy-on-write, so this is a handful of Arc clones, not a copy.
+    snapshot: TileMap,
+    /// Smudge: the colour the brush is currently dragging.
+    carried: Option<Rgba>,
+    /// Healing: replacement pixels for the dab being stamped, in document
+    /// coordinates over `heal_rect`.
+    heal: Vec<Rgba>,
+    heal_rect: IntRect,
+    /// Healing brush: offset from the alt-clicked source point.
+    heal_offset: (i32, i32),
 }
 
 impl Stroke {
-    fn begin(ctx: &mut ToolCtx, input: PointerInput, mode: PaintMode, ink: Ink) -> Option<Stroke> {
+    fn begin(
+        ctx: &mut ToolCtx,
+        input: PointerInput,
+        mode: PaintMode,
+        ink: Ink,
+        heal_offset: (i32, i32),
+    ) -> Option<Stroke> {
         let layer = paintable_layer(ctx.doc)?;
         let mut stroke = Stroke {
             edit: StrokeEdit::new(match mode {
@@ -110,6 +162,13 @@ impl Stroke {
                 PaintMode::Dodge => "Dodge",
                 PaintMode::Burn => "Burn",
                 PaintMode::Sponge => "Sponge",
+                PaintMode::Blur => "Blur",
+                PaintMode::Sharpen => "Sharpen",
+                PaintMode::Smudge => "Smudge",
+                PaintMode::Heal => "Healing Brush",
+                PaintMode::SpotHeal => "Spot Healing Brush",
+                PaintMode::HistoryBrush => "History Brush",
+                PaintMode::BackgroundEraser => "Background Eraser",
             }),
             layer,
             coverage: FxHashMap::default(),
@@ -124,6 +183,17 @@ impl Stroke {
                 ctx.state.brush_hardness
             },
             mode,
+            snapshot: ctx
+                .doc
+                .tree
+                .find(layer)
+                .and_then(|l| l.as_raster())
+                .map(|r| r.tiles.clone())
+                .unwrap_or_default(),
+            carried: None,
+            heal: Vec::new(),
+            heal_rect: IntRect::EMPTY,
+            heal_offset,
         };
         stroke.dab(ctx.doc, input.x, input.y, input.pressure);
         Some(stroke)
@@ -162,6 +232,14 @@ impl Stroke {
             (cx + radius).ceil() as i32 + 1,
             (cy + radius).ceil() as i32 + 1,
         );
+        // Healing and smudging need to look at a whole dab's worth of
+        // pixels before any of them can be written, so they compute their
+        // replacement up front.
+        match self.mode {
+            PaintMode::Heal | PaintMode::SpotHeal => self.prepare_heal(bounds, cx, cy, radius),
+            PaintMode::Smudge => self.prepare_smudge(doc, cx, cy, radius),
+            _ => {}
+        }
         // Hard inner radius; anti-aliased single-pixel rim even at
         // hardness 1 so pencil still gets its crisp-but-not-jagged edge.
         let inner = radius * self.hardness.clamp(0.0, 0.99);
@@ -212,6 +290,8 @@ impl Stroke {
             // Ensure before-capture happens (and get write access).
             let cov = self.coverage.get(&coord).unwrap();
             let (ink, opacity) = (self.ink.clone(), self.opacity);
+            let carried = self.carried;
+            let (heal, heal_rect) = (&self.heal, self.heal_rect);
             let Some(tile) = self.edit.writable_tile(doc, self.layer, coord) else {
                 continue;
             };
@@ -248,12 +328,244 @@ impl Stroke {
                                 apply_tone(*tone, orig, a)
                             }
                         }
+                        Ink::Convolve { snapshot, sharpen } => {
+                            let out = convolve_at(snapshot, x, y, *sharpen);
+                            Rgba {
+                                r: orig.r + (out.r - orig.r) * a,
+                                g: orig.g + (out.g - orig.g) * a,
+                                b: orig.b + (out.b - orig.b) * a,
+                                a: orig.a,
+                            }
+                        }
+                        Ink::Smudge => match carried {
+                            Some(c) if orig.a > 0.0 => Rgba {
+                                r: orig.r + (c.r - orig.r) * a,
+                                g: orig.g + (c.g - orig.g) * a,
+                                b: orig.b + (c.b - orig.b) * a,
+                                a: orig.a + (c.a - orig.a) * a,
+                            },
+                            _ => orig,
+                        },
+                        Ink::Heal => {
+                            let src = heal_at(heal, heal_rect, x, y);
+                            match src {
+                                Some(src) => Rgba {
+                                    r: orig.r + (src.r - orig.r) * a,
+                                    g: orig.g + (src.g - orig.g) * a,
+                                    b: orig.b + (src.b - orig.b) * a,
+                                    a: orig.a.max(src.a * a),
+                                },
+                                None => orig,
+                            }
+                        }
+                        Ink::Restore { snapshot } => {
+                            let src = snapshot.pixel(x, y);
+                            Rgba {
+                                r: orig.r + (src.r - orig.r) * a,
+                                g: orig.g + (src.g - orig.g) * a,
+                                b: orig.b + (src.b - orig.b) * a,
+                                a: orig.a + (src.a - orig.a) * a,
+                            }
+                        }
+                        Ink::BackgroundErase { target, tolerance } => {
+                            let d = (orig.r - target.r)
+                                .abs()
+                                .max((orig.g - target.g).abs())
+                                .max((orig.b - target.b).abs());
+                            if d <= *tolerance {
+                                // Feather out over the last tenth of the
+                                // tolerance so edges do not come out jagged.
+                                let soft = if *tolerance > 0.0 {
+                                    ((tolerance - d) / (tolerance * 0.25).max(1e-4)).clamp(0.0, 1.0)
+                                } else {
+                                    1.0
+                                };
+                                Rgba {
+                                    a: orig.a * (1.0 - a * soft),
+                                    ..orig
+                                }
+                            } else {
+                                orig
+                            }
+                        }
                     };
                     tile.set(ix, out);
                 }
             }
             doc.add_damage(clip);
         }
+    }
+
+    /// Work out this dab's replacement pixels.
+    ///
+    /// The healing brush takes texture from the sampled source and colour
+    /// from the destination: it shifts the source patch so that its mean
+    /// matches the destination's, which is a cheap stand-in for
+    /// Photoshop's gradient-domain solve and is indistinguishable on the
+    /// small dabs the tool is actually used with.
+    ///
+    /// Spot healing has no source, so it interpolates the ring of pixels
+    /// just outside the dab across the hole, weighted by inverse distance
+    /// -- which is what removes a blemish.
+    fn prepare_heal(&mut self, bounds: IntRect, cx: f32, cy: f32, radius: f32) {
+        self.heal_rect = bounds;
+        let (w, h) = (
+            bounds.width().max(0) as usize,
+            bounds.height().max(0) as usize,
+        );
+        self.heal = vec![Rgba::TRANSPARENT; w * h];
+        if w == 0 || h == 0 {
+            return;
+        }
+        let dst = &self.snapshot;
+
+        if self.mode == PaintMode::Heal {
+            let (dx, dy) = self.heal_offset;
+            // Match colour across the dab's *rim*, not its interior.
+            //
+            // Averaging over the whole dab would carry the mean of the
+            // thing being healed away -- paint over a red blemish and the
+            // result comes back red. The ring just outside the dab is the
+            // skin you actually want the patch to match.
+            let outer = radius + 3.0;
+            let (mut sm, mut dm, mut n) = ([0f32; 3], [0f32; 3], 0f32);
+            let scan = IntRect::new(
+                (cx - outer).floor() as i32,
+                (cy - outer).floor() as i32,
+                (cx + outer).ceil() as i32 + 1,
+                (cy + outer).ceil() as i32 + 1,
+            );
+            for y in scan.top..scan.bottom {
+                for x in scan.left..scan.right {
+                    let d = (x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy);
+                    if d < radius || d >= outer {
+                        continue;
+                    }
+                    let sp = dst.pixel(x - dx, y - dy);
+                    let dp = dst.pixel(x, y);
+                    sm[0] += sp.r;
+                    sm[1] += sp.g;
+                    sm[2] += sp.b;
+                    dm[0] += dp.r;
+                    dm[1] += dp.g;
+                    dm[2] += dp.b;
+                    n += 1.0;
+                }
+            }
+            if n == 0.0 {
+                return;
+            }
+            let shift = [
+                (dm[0] - sm[0]) / n,
+                (dm[1] - sm[1]) / n,
+                (dm[2] - sm[2]) / n,
+            ];
+            for y in 0..h {
+                for x in 0..w {
+                    let (px, py) = (bounds.left + x as i32, bounds.top + y as i32);
+                    let sp = dst.pixel(px - dx, py - dy);
+                    self.heal[y * w + x] = Rgba {
+                        r: (sp.r + shift[0]).clamp(0.0, 1.0),
+                        g: (sp.g + shift[1]).clamp(0.0, 1.0),
+                        b: (sp.b + shift[2]).clamp(0.0, 1.0),
+                        a: sp.a,
+                    };
+                }
+            }
+            return;
+        }
+
+        // Spot healing: gather the ring just outside the dab.
+        let mut ring: Vec<(f32, f32, Rgba)> = Vec::new();
+        let outer = radius + 3.0;
+        let scan = IntRect::new(
+            (cx - outer).floor() as i32,
+            (cy - outer).floor() as i32,
+            (cx + outer).ceil() as i32 + 1,
+            (cy + outer).ceil() as i32 + 1,
+        );
+        for y in scan.top..scan.bottom {
+            for x in scan.left..scan.right {
+                let d = (x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy);
+                if d >= radius && d < outer {
+                    let p = dst.pixel(x, y);
+                    if p.a > 0.0 {
+                        ring.push((x as f32 + 0.5, y as f32 + 0.5, p));
+                    }
+                }
+            }
+        }
+        if ring.is_empty() {
+            return;
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (
+                    bounds.left as f32 + x as f32 + 0.5,
+                    bounds.top as f32 + y as f32 + 0.5,
+                );
+                let (mut acc, mut wsum) = ([0f32; 4], 0f32);
+                for (rx, ry, c) in &ring {
+                    // Inverse square distance: nearby ring pixels dominate,
+                    // which keeps the patch following local colour.
+                    let d2 = (rx - fx).powi(2) + (ry - fy).powi(2);
+                    let wgt = 1.0 / (d2 + 1.0);
+                    acc[0] += c.r * wgt;
+                    acc[1] += c.g * wgt;
+                    acc[2] += c.b * wgt;
+                    acc[3] += c.a * wgt;
+                    wsum += wgt;
+                }
+                self.heal[y * w + x] = Rgba {
+                    r: acc[0] / wsum,
+                    g: acc[1] / wsum,
+                    b: acc[2] / wsum,
+                    a: acc[3] / wsum,
+                };
+            }
+        }
+    }
+
+    /// Pick up the colour under the brush, mixing it with what is already
+    /// being carried. A low mix means the smear fades quickly.
+    fn prepare_smudge(&mut self, doc: &Document, cx: f32, cy: f32, radius: f32) {
+        let Some(raster) = doc.tree.find(self.layer).and_then(|l| l.as_raster()) else {
+            return;
+        };
+        let (mut acc, mut n) = ([0f32; 4], 0f32);
+        let r = radius.max(1.0) as i32;
+        let (ix, iy) = (cx as i32, cy as i32);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if (dx * dx + dy * dy) as f32 > radius * radius {
+                    continue;
+                }
+                let p = raster.tiles.pixel(ix + dx, iy + dy);
+                acc[0] += p.r;
+                acc[1] += p.g;
+                acc[2] += p.b;
+                acc[3] += p.a;
+                n += 1.0;
+            }
+        }
+        if n == 0.0 {
+            return;
+        }
+        let here = Rgba {
+            r: acc[0] / n,
+            g: acc[1] / n,
+            b: acc[2] / n,
+            a: acc[3] / n,
+        };
+        self.carried = Some(match self.carried {
+            None => here,
+            Some(c) => Rgba {
+                r: c.r + (here.r - c.r) * 0.35,
+                g: c.g + (here.g - c.g) * 0.35,
+                b: c.b + (here.b - c.b) * 0.35,
+                a: c.a + (here.a - c.a) * 0.35,
+            },
+        });
     }
 
     fn finish(self, doc: &mut Document) {
@@ -291,6 +603,8 @@ pub struct PaintTool {
     /// when the first stroke after it begins.
     clone_source: Option<(f32, f32)>,
     clone_offset: Option<(i32, i32)>,
+    /// Background eraser colour tolerance, 0..=1.
+    tolerance: f32,
 }
 
 impl PaintTool {
@@ -301,6 +615,7 @@ impl PaintTool {
             cursor: None,
             clone_source: None,
             clone_offset: None,
+            tolerance: 0.12,
         }
     }
 
@@ -334,8 +649,53 @@ impl PaintTool {
                     dy: offset.1,
                 }
             }
+            PaintMode::Blur => Ink::Convolve {
+                snapshot: layer_tiles(ctx.doc)?,
+                sharpen: false,
+            },
+            PaintMode::Sharpen => Ink::Convolve {
+                snapshot: layer_tiles(ctx.doc)?,
+                sharpen: true,
+            },
+            PaintMode::Smudge => Ink::Smudge,
+            PaintMode::Heal => {
+                // Like the clone stamp, healing needs an alt-clicked
+                // source before it can do anything.
+                let source = self.clone_source?;
+                self.clone_offset.get_or_insert((
+                    (input.x - source.0).round() as i32,
+                    (input.y - source.1).round() as i32,
+                ));
+                Ink::Heal
+            }
+            PaintMode::SpotHeal => Ink::Heal,
+            PaintMode::HistoryBrush => Ink::Restore {
+                snapshot: ctx
+                    .doc
+                    .history_source
+                    .get(&paintable_layer(ctx.doc)?)
+                    .cloned()?,
+            },
+            PaintMode::BackgroundEraser => {
+                let tiles = layer_tiles(ctx.doc)?;
+                Ink::BackgroundErase {
+                    // Photoshop samples the colour under the brush's
+                    // crosshair when the stroke starts.
+                    target: tiles.pixel(input.x as i32, input.y as i32),
+                    tolerance: self.tolerance,
+                }
+            }
         })
     }
+}
+
+/// The active paintable layer's tiles.
+fn layer_tiles(doc: &Document) -> Option<TileMap> {
+    let layer = paintable_layer(doc)?;
+    doc.tree
+        .find(layer)
+        .and_then(|l| l.as_raster())
+        .map(|r| r.tiles.clone())
 }
 
 impl ToolPlugin for PaintTool {
@@ -348,6 +708,13 @@ impl ToolPlugin for PaintTool {
             PaintMode::Dodge => "dodge",
             PaintMode::Burn => "burn",
             PaintMode::Sponge => "sponge",
+            PaintMode::Blur => "blur",
+            PaintMode::Sharpen => "sharpen",
+            PaintMode::Smudge => "smudge",
+            PaintMode::Heal => "heal",
+            PaintMode::SpotHeal => "spot_heal",
+            PaintMode::HistoryBrush => "history_brush",
+            PaintMode::BackgroundEraser => "background_eraser",
         }
     }
 
@@ -360,6 +727,13 @@ impl ToolPlugin for PaintTool {
             PaintMode::Dodge => "Dodge",
             PaintMode::Burn => "Burn",
             PaintMode::Sponge => "Sponge",
+            PaintMode::Blur => "Blur",
+            PaintMode::Sharpen => "Sharpen",
+            PaintMode::Smudge => "Smudge",
+            PaintMode::Heal => "Healing Brush",
+            PaintMode::SpotHeal => "Spot Healing Brush",
+            PaintMode::HistoryBrush => "History Brush",
+            PaintMode::BackgroundEraser => "Background Eraser",
         }
     }
 
@@ -372,6 +746,12 @@ impl ToolPlugin for PaintTool {
             PaintMode::Dodge => "dodge",
             PaintMode::Burn => "burn",
             PaintMode::Sponge => "sponge",
+            PaintMode::Blur => "blur",
+            PaintMode::Sharpen => "sharpen",
+            PaintMode::Smudge => "smudge",
+            PaintMode::Heal | PaintMode::SpotHeal => "heal",
+            PaintMode::HistoryBrush => "history-brush",
+            PaintMode::BackgroundEraser => "eraser-background",
         }
     }
 
@@ -383,23 +763,53 @@ impl ToolPlugin for PaintTool {
             PaintMode::Clone => Some("s"),
             PaintMode::Dodge => Some("o"),
             PaintMode::Burn | PaintMode::Sponge => None,
+            PaintMode::SpotHeal => Some("j"),
+            PaintMode::HistoryBrush => Some("y"),
+            PaintMode::Blur
+            | PaintMode::Sharpen
+            | PaintMode::Smudge
+            | PaintMode::Heal
+            | PaintMode::BackgroundEraser => None,
         }
     }
 
     fn group(&self) -> &'static str {
         match self.mode {
-            // Brush and pencil share a slot, as do the three tonal tools.
+            // Photoshop's own groupings: tools that share a toolbar slot.
             PaintMode::Brush | PaintMode::Pencil => "brush",
-            PaintMode::Eraser => "eraser",
+            PaintMode::Eraser | PaintMode::BackgroundEraser => "eraser",
             PaintMode::Clone => "clone",
             PaintMode::Dodge | PaintMode::Burn | PaintMode::Sponge => "dodge",
+            PaintMode::SpotHeal | PaintMode::Heal => "heal",
+            PaintMode::Blur | PaintMode::Sharpen | PaintMode::Smudge => "blur",
+            PaintMode::HistoryBrush => "history_brush",
+        }
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        match self.mode {
+            PaintMode::BackgroundEraser => vec![ToolOption::slider(
+                "bge-tolerance",
+                "Tolerance",
+                self.tolerance * 100.0,
+                1.0,
+                100.0,
+                "%",
+            )],
+            _ => Vec::new(),
+        }
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        if key == "bge-tolerance" {
+            self.tolerance = (value.num() / 100.0).clamp(0.01, 1.0);
         }
     }
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         self.cursor = Some((input.x, input.y));
         // Alt-click sets the clone stamp's source point.
-        if self.mode == PaintMode::Clone && input.modifiers.alt {
+        if matches!(self.mode, PaintMode::Clone | PaintMode::Heal) && input.modifiers.alt {
             self.clone_source = Some((input.x, input.y));
             self.clone_offset = None;
             return;
@@ -407,7 +817,8 @@ impl ToolPlugin for PaintTool {
         let Some(ink) = self.ink_for(ctx, input) else {
             return;
         };
-        self.stroke = Stroke::begin(ctx, input, self.mode, ink);
+        let heal_offset = self.clone_offset.unwrap_or((0, 0));
+        self.stroke = Stroke::begin(ctx, input, self.mode, ink, heal_offset);
     }
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
@@ -726,6 +1137,29 @@ impl ToolPlugin for BucketTool {
     fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
 }
 
+/// Build one paint tool by id. Exists so integration tests can drive a
+/// single tool without standing up a whole registry.
+pub fn tool_for_test(id: &str) -> Option<Box<dyn ToolPlugin>> {
+    let mode = match id {
+        "brush" => PaintMode::Brush,
+        "pencil" => PaintMode::Pencil,
+        "eraser" => PaintMode::Eraser,
+        "clone" => PaintMode::Clone,
+        "dodge" => PaintMode::Dodge,
+        "burn" => PaintMode::Burn,
+        "sponge" => PaintMode::Sponge,
+        "blur" => PaintMode::Blur,
+        "sharpen" => PaintMode::Sharpen,
+        "smudge" => PaintMode::Smudge,
+        "heal" => PaintMode::Heal,
+        "spot_heal" => PaintMode::SpotHeal,
+        "history_brush" => PaintMode::HistoryBrush,
+        "background_eraser" => PaintMode::BackgroundEraser,
+        _ => return None,
+    };
+    Some(Box::new(PaintTool::new(mode)))
+}
+
 pub struct PaintToolsPlugin;
 
 impl PluginManifest for PaintToolsPlugin {
@@ -741,6 +1175,13 @@ impl PluginManifest for PaintToolsPlugin {
         registry.register_tool(Box::new(PaintTool::new(PaintMode::Dodge)));
         registry.register_tool(Box::new(PaintTool::new(PaintMode::Burn)));
         registry.register_tool(Box::new(PaintTool::new(PaintMode::Sponge)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::SpotHeal)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::Heal)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::BackgroundEraser)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::HistoryBrush)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::Blur)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::Sharpen)));
+        registry.register_tool(Box::new(PaintTool::new(PaintMode::Smudge)));
         registry.register_tool(Box::new(GradientTool::new(GradientKind::Linear)));
         registry.register_tool(Box::new(GradientTool::new(GradientKind::Radial)));
         registry.register_tool(Box::new(BucketTool::new()));
@@ -1232,4 +1673,46 @@ mod m7_tests {
         assert_eq!(px(&doc, 4, 16), [255, 0, 0, 255], "dark side filled");
         assert_eq!(px(&doc, 25, 16), [200, 200, 200, 255], "light side kept");
     }
+}
+
+/// A 3x3 blur or sharpen of the pre-stroke pixels at one point.
+fn convolve_at(tiles: &TileMap, x: i32, y: i32, sharpen: bool) -> Rgba {
+    let mut acc = [0f32; 4];
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let p = tiles.pixel(x + dx, y + dy);
+            acc[0] += p.r;
+            acc[1] += p.g;
+            acc[2] += p.b;
+            acc[3] += p.a;
+        }
+    }
+    let mean = Rgba {
+        r: acc[0] / 9.0,
+        g: acc[1] / 9.0,
+        b: acc[2] / 9.0,
+        a: acc[3] / 9.0,
+    };
+    if !sharpen {
+        return mean;
+    }
+    // Sharpen is the blur subtracted rather than added: an unsharp mask.
+    let c = tiles.pixel(x, y);
+    Rgba {
+        r: (c.r + (c.r - mean.r)).clamp(0.0, 1.0),
+        g: (c.g + (c.g - mean.g)).clamp(0.0, 1.0),
+        b: (c.b + (c.b - mean.b)).clamp(0.0, 1.0),
+        a: c.a,
+    }
+}
+
+/// Look up a prepared heal patch pixel.
+fn heal_at(patch: &[Rgba], rect: IntRect, x: i32, y: i32) -> Option<Rgba> {
+    if !rect.contains(x, y) {
+        return None;
+    }
+    let w = rect.width() as usize;
+    patch
+        .get((y - rect.top) as usize * w + (x - rect.left) as usize)
+        .copied()
 }

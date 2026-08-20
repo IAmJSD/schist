@@ -430,7 +430,10 @@ impl Workspace {
         self.install_document(doc);
     }
 
-    pub fn install_document(&mut self, doc: Document) {
+    pub fn install_document(&mut self, mut doc: Document) {
+        // Photoshop's History Brush paints back from the state the file
+        // was opened in, so that is what gets snapshotted here.
+        doc.snapshot_history_source();
         self.doc = Some(doc);
         self.rebuild_color_transforms();
         self.cache.invalidate_all();
