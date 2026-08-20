@@ -52,7 +52,7 @@ impl PluginManifest for PsdPlugin {
 
 /// Assemble the first-party plugin set. Every entry here is optional — the
 /// app boots (to an empty shell) with any or all of them removed.
-fn build_registry() -> PluginRegistry {
+fn build_registry() -> (PluginRegistry, photoslop_plugin_host_wasm::PluginManager) {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
         Box::new(photoslop_tools_basic::BasicToolsPlugin),
@@ -70,12 +70,17 @@ fn build_registry() -> PluginRegistry {
         log::info!("loading plugin {}", manifest.id());
         manifest.register(&mut registry);
     }
-    registry
+    // Third-party WebAssembly plugins, sandboxed (M9).
+    let manager = match photoslop_plugin_host_wasm::PluginManager::plugin_dir() {
+        Some(dir) => photoslop_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
+        None => photoslop_plugin_host_wasm::PluginManager::default(),
+    };
+    (registry, manager)
 }
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let registry = build_registry();
+    let (registry, plugin_manager) = build_registry();
 
     Application::new()
         .with_assets(assets::Assets)
@@ -89,7 +94,7 @@ fn main() {
                 },
                 |_window, cx| {
                     cx.new(|cx| {
-                        let mut ws = Workspace::new(registry, cx);
+                        let mut ws = Workspace::new(registry, plugin_manager, cx);
                         if let Some(path) = std::env::args().nth(1) {
                             ws.load_file(path.into(), cx);
                         } else if let Some(recovery) = Workspace::pending_recovery() {

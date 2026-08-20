@@ -30,6 +30,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             params,
             original,
         } => adjustment_dialog(layer, params, original, cx).into_any_element(),
+        Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
     })
 }
 
@@ -485,3 +486,104 @@ fn adjustment_dialog(
         ));
     ui::modal_frame(title, 360.0, body, actions)
 }
+
+/// The third-party plugin manager: what loaded, what didn't and why, and
+/// per-plugin enable/disable.
+fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let dir = photoslop_plugin_host_wasm::PluginManager::plugin_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no config directory)".into());
+    let rows: Vec<gpui::AnyElement> = ws
+        .plugins
+        .entries
+        .iter()
+        .map(|entry| {
+            let id = entry.id.clone();
+            let enabled = entry.enabled;
+            let kind = match &entry.kind {
+                Some(photoslop_plugin_host_wasm::abi::PluginKind::Filter) => "filter",
+                Some(photoslop_plugin_host_wasm::abi::PluginKind::Codec) => "format",
+                None => "unavailable",
+            };
+            let detail = match &entry.error {
+                Some(err) => err.to_string(),
+                None => format!("{kind} · {}", entry.id),
+            };
+            let failed = entry.error.is_some();
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(12.0)).child(entry.name.clone()))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(gpui::rgb(if failed { 0xD08770 } else { ui::TEXT_DIM }))
+                                .child(detail),
+                        ),
+                )
+                .child(if failed {
+                    div().into_any_element()
+                } else {
+                    ui::checkbox(
+                        if enabled { "Enabled" } else { "Disabled" },
+                        enabled,
+                        move |ws| {
+                            let id = id.clone();
+                            ws.pending_plugin_toggle = Some((id, !enabled));
+                        },
+                        cx,
+                    )
+                    .into_any_element()
+                })
+                .into_any_element()
+        })
+        .collect();
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child(format!("Plugins load from {dir}")),
+        )
+        .when(rows.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_size(px(12.0))
+                    .py_2()
+                    .child("No plugins installed yet."),
+            )
+        })
+        .children(rows);
+
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Install…",
+            false,
+            crate::keymap::install_plugin_dialog,
+            cx,
+        ))
+        .child(ui::button(
+            "Close",
+            true,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ));
+    ui::modal_frame("Plugins", 420.0, body, actions)
+}
+
+use gpui::prelude::FluentBuilder as _;

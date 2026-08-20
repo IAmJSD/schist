@@ -76,6 +76,7 @@ enum AppItem {
     CanvasSize,
     FreeTransform,
     Crop,
+    Plugins,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -89,6 +90,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Open…", Open, Some("cmd-o")),
                 App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
+                Sep,
+                App("Plugins…", Plugins, None),
                 Sep,
                 App("Quit", Quit, Some("cmd-q")),
             ],
@@ -254,6 +257,7 @@ fn run_app_item(
                 ws.open_modal(modal, cx);
             }
         }
+        AppItem::Plugins => ws.open_modal(Modal::PluginManager, cx),
         AppItem::FreeTransform => ws.activate_tool("transform", cx),
         AppItem::Crop => {
             let rect = ws

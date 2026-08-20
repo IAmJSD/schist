@@ -62,6 +62,11 @@ pub struct Workspace {
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
+    /// Third-party plugin registry state (M9).
+    pub plugins: photoslop_plugin_host_wasm::PluginManager,
+    /// Plugin enable/disable requested from the manager UI, applied on the
+    /// next render pass (the checkbox callback has no context to do it).
+    pub pending_plugin_toggle: Option<(String, bool)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +96,8 @@ pub enum Modal {
         id: &'static str,
         values: photoslop_plugin_api::FilterValues,
     },
+    /// The third-party plugin manager.
+    PluginManager,
     /// Editing an existing adjustment layer's parameters. `original` is
     /// what the layer held before the dialog opened, so Cancel can put it
     /// back exactly.
@@ -113,7 +120,11 @@ struct Preview {
 }
 
 impl Workspace {
-    pub fn new(registry: PluginRegistry, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        registry: PluginRegistry,
+        plugins: photoslop_plugin_host_wasm::PluginManager,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut ws = Workspace {
             registry,
             editor: EditorState::default(),
@@ -136,6 +147,8 @@ impl Workspace {
             modal: None,
             focused_field: None,
             field_buffer: String::new(),
+            plugins,
+            pending_plugin_toggle: None,
         };
         ws.new_document();
         // Periodic crash-recovery snapshot; the task ends with the entity.
@@ -687,8 +700,8 @@ impl Workspace {
                     *height = value as u32;
                 }
             }
-            // Filter and adjustment dialogs use sliders, not typed fields.
-            Modal::Filter { .. } | Modal::Adjustment { .. } => {}
+            // These dialogs have no typed fields.
+            Modal::Filter { .. } | Modal::Adjustment { .. } | Modal::PluginManager => {}
         });
     }
 
@@ -1044,6 +1057,33 @@ impl Workspace {
         edit.commit();
         self.status = name.into();
         self.after_change(cx);
+    }
+
+    /// Enable or disable a third-party plugin.
+    pub fn set_plugin_enabled(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
+        let Some(dir) = photoslop_plugin_host_wasm::PluginManager::plugin_dir() else {
+            return;
+        };
+        self.plugins.set_enabled(&id, enabled, &dir);
+        self.status = format!(
+            "{} {} — restart to apply",
+            id,
+            if enabled { "enabled" } else { "disabled" }
+        )
+        .into();
+        cx.notify();
+    }
+
+    /// Install a plugin file into the plugin directory.
+    pub fn install_plugin(&mut self, source: PathBuf, cx: &mut Context<Self>) {
+        let Some(dir) = photoslop_plugin_host_wasm::PluginManager::plugin_dir() else {
+            return;
+        };
+        self.status = match photoslop_plugin_host_wasm::PluginManager::install(&source, &dir) {
+            Ok(path) => format!("Installed {} — restart to load", path.display()).into(),
+            Err(err) => format!("Plugin rejected: {err}").into(),
+        };
+        cx.notify();
     }
 
     /// Open a filter's parameter dialog, pre-filled with its defaults.
@@ -1539,6 +1579,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((id, enabled)) = self.pending_plugin_toggle.take() {
+            self.set_plugin_enabled(id, enabled, cx);
+        }
         let captures_keys = self.tool_captures_keys() || self.modal.is_some();
         let modal = crate::dialogs::render(self, cx);
         div()

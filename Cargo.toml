@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# Example plugins compile to wasm32-unknown-unknown, not the host target.
+exclude = ["examples/plugins/sepia-filter", "examples/plugins/pgm-codec"]
 members = [
     "crates/app",
     "crates/core",
@@ -11,6 +13,8 @@ members = [
     "crates/vector",
     "crates/text-engine",
     "crates/adjustments",
+    "crates/plugin-host-wasm",
+    "crates/plugin-sdk",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
@@ -39,6 +43,8 @@ photoslop-codec-psd = { path = "crates/codec-psd" }
 photoslop-vector = { path = "crates/vector" }
 photoslop-text-engine = { path = "crates/text-engine" }
 photoslop-adjustments = { path = "crates/adjustments" }
+photoslop-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
+photoslop-plugin-sdk = { path = "crates/plugin-sdk" }
 photoslop-codecs-common = { path = "plugins/codecs-common" }
 photoslop-tools-basic = { path = "plugins/tools-basic" }
 photoslop-tools-paint = { path = "plugins/tools-paint" }

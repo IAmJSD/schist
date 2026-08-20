@@ -1,0 +1,10 @@
+[package]
+name = "photoslop-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Write Photoslop plugins in Rust, compiled to WebAssembly."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

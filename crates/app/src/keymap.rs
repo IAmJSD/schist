@@ -151,6 +151,29 @@ pub fn open_file_dialog(_ws: &mut Workspace, window: &mut Window, cx: &mut Conte
     .detach();
 }
 
+/// Pick a `.wasm` plugin to install.
+pub fn install_plugin_dialog(
+    _ws: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let rx = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: Some("Install Plugin".into()),
+    });
+    cx.spawn_in(window, async move |this, cx| {
+        if let Ok(Ok(Some(mut paths))) = rx.await {
+            if let Some(path) = paths.pop() {
+                this.update_in(cx, |ws, _window, cx| ws.install_plugin(path, cx))
+                    .ok();
+            }
+        }
+    })
+    .detach();
+}
+
 pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let dir = ws
         .doc

@@ -1,0 +1,15 @@
+[package]
+name = "photoslop-plugin-host-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-plugin-api.workspace = true
+photoslop-color.workspace = true
+wasmtime = { version = "47", default-features = false, features = ["cranelift", "runtime", "std"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true

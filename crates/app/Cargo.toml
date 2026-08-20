@@ -36,3 +36,4 @@ photoslop-vector.workspace = true
 photoslop-commands-core.workspace = true
 photoslop-filters-core.workspace = true
 photoslop-adjustments.workspace = true
+photoslop-plugin-host-wasm.workspace = true
