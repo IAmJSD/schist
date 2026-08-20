@@ -37,7 +37,9 @@ fn through_rgb(px: &mut [f32], f: impl FnOnce(&mut Vec<f32>)) {
 fn model_note(id: &str, fallback: &str) -> Option<String> {
     match photoslop_neural::spec(id) {
         Some(spec) if photoslop_neural::installed(id) => {
-            Some(format!("Using {} ({}).", spec.name, spec.license))
+            // The dot rather than nested brackets: the names already have
+            // brackets in them.
+            Some(format!("Using {} \u{b7} {}.", spec.name, spec.license))
         }
         Some(spec) => Some(format!(
             "{} is not installed \u{2014} {fallback} Get it from \

@@ -42,9 +42,9 @@
 >
 > **M15 (a model behind the Neural Filters, 2026-08-20).** `crates/neural`
 > runs ONNX through `tract`, so inference is pure Rust with nothing to
-> install. Super Zoom gets `detail.onnx`, a 20k-parameter residual CNN
+> install. Super Zoom gets `detail.onnx`, a 39k-parameter residual CNN
 > trained here on the Kodak suite (`tools/train/detail.py`) and shipped in
-> the binary: +0.70 dB over bicubic on held-out images, at 80 KB. Style
+> the binary: +1.06 dB over bicubic on held-out images, at 153 KB. Style
 > Transfer gets the ONNX Model Zoo's fast-neural-style networks, fetched
 > on demand and checked against the hashes upstream publishes. Those are
 > opset 9 and use `Upsample`, which `tract` never implemented, so

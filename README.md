@@ -152,8 +152,8 @@ Remap anything in `~/.config/photoslop/keymap.json`:
   they report full pressure.
 - **Only two Neural Filters run a network.** Super Zoom uses a small
   residual CNN trained for this application (`tools/train/detail.py`,
-  80 KB, shipped in the binary); Style Transfer uses the fast
-  neural-style networks from the ONNX Model Zoo, downloaded on demand
+  39k parameters and 153 KB, shipped in the binary); Style Transfer uses
+  the fast neural-style networks from the ONNX Model Zoo, downloaded on demand
   from Filter ▸ Neural Filters ▸ Manage Models. Inference is
   [`tract`](https://github.com/sonos/tract) — pure Rust, nothing to
   install. The rest are signal processing: Skin Smoothing does not know

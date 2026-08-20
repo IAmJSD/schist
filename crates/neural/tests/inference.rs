@@ -2,55 +2,95 @@
 
 use photoslop_neural as neural;
 
-/// A test image with photograph-like statistics: hard-edged shapes at a
-/// range of sizes, plus fine texture.
+/// A test image with photograph-like statistics: a multi-octave noise
+/// field with roughly a 1/f spectrum, plus hard-edged shapes over it.
 ///
 /// The shape of the input matters more than it looks. The network was
-/// trained on natural images, and it is *supposed* to be specialised to
-/// them -- fed a pure high-frequency sinusoid or a fine checkerboard it
-/// overshoots badly, because nothing in a photograph looks like that.
-/// Testing it on such an image would measure the wrong thing. Edges plus
-/// texture is what a photograph is made of and what an enlargement
-/// destroys.
+/// trained on natural images and it is *supposed* to be specialised to
+/// them; fed a pure sinusoid, a fine checkerboard, or white noise it
+/// gains nothing, because nothing in a photograph looks like that and
+/// none of it survives a downscale anyway. What a photograph is made of
+/// is smooth variation at every scale with edges cut through it, and
+/// that is what an enlargement destroys, so that is what this builds.
 fn photo_like(w: usize, h: usize) -> Vec<f32> {
     // A small deterministic PRNG, so the test image is fixed without
     // pulling in a dependency for it.
     let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f32 / (1u64 << 53) as f32
+    };
+
+    // One octave: random values on a lattice, smoothly interpolated.
+    let mut octave = |cell: usize, out: &mut Vec<f32>, amp: f32| {
+        let (gw, gh) = (w / cell + 2, h / cell + 2);
+        let grid: Vec<f32> = (0..gw * gh * 3).map(|_| next()).collect();
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f32 / cell as f32, y as f32 / cell as f32);
+                let (gx, gy) = (fx as usize, fy as usize);
+                // Smoothstep, so there are no lattice creases.
+                let tx = {
+                    let t = fx - gx as f32;
+                    t * t * (3.0 - 2.0 * t)
+                };
+                let ty = {
+                    let t = fy - gy as f32;
+                    t * t * (3.0 - 2.0 * t)
+                };
+                for c in 0..3 {
+                    let g = |ix: usize, iy: usize| grid[(iy * gw + ix) * 3 + c];
+                    let top = g(gx, gy) * (1.0 - tx) + g(gx + 1, gy) * tx;
+                    let bot = g(gx, gy + 1) * (1.0 - tx) + g(gx + 1, gy + 1) * tx;
+                    out[(y * w + x) * 3 + c] += (top * (1.0 - ty) + bot * ty) * amp;
+                }
+            }
+        }
+    };
+
+    let mut px = vec![0.0f32; w * h * 3];
+    let mut total = 0.0;
+    for cell in [64usize, 32, 16, 8, 4, 2] {
+        // Amplitude proportional to scale is what makes it 1/f.
+        let amp = cell as f32;
+        octave(cell, &mut px, amp);
+        total += amp;
+    }
+    for v in px.iter_mut() {
+        *v = 0.25 + (*v / total) * 0.5;
+    }
+
+    // Edges cut through it. Tinted rather than flat-filled, so the
+    // interiors keep their texture the way a real subject would.
     let mut next = || {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
         (state >> 11) as f32 / (1u64 << 53) as f32
     };
-    let mut px = vec![0.5f32; w * h * 3];
-    for _ in 0..60 {
-        let colour = [next(), next(), next()];
-        if next() < 0.5 {
-            let x0 = (next() * w as f32) as usize;
-            let y0 = (next() * h as f32) as usize;
-            let rw = 4 + (next() * 56.0) as usize;
-            let rh = 4 + (next() * 56.0) as usize;
-            for y in y0..(y0 + rh).min(h) {
-                for x in x0..(x0 + rw).min(w) {
-                    px[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&colour);
-                }
-            }
-        } else {
-            let cx = next() * w as f32;
-            let cy = next() * h as f32;
-            let r = 4.0 + next() * 36.0;
-            for y in 0..h {
-                for x in 0..w {
-                    if (x as f32 - cx).hypot(y as f32 - cy) < r {
-                        px[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&colour);
+    for _ in 0..40 {
+        let tint = [next(), next(), next()];
+        let round = next() < 0.5;
+        let (cx, cy) = (next() * w as f32, next() * h as f32);
+        let (rw, rh) = (4.0 + next() * 40.0, 4.0 + next() * 40.0);
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+                let inside = if round {
+                    (dx / rw).hypot(dy / rh) < 1.0
+                } else {
+                    dx.abs() < rw && dy.abs() < rh
+                };
+                if inside {
+                    for c in 0..3 {
+                        let v = &mut px[(y * w + x) * 3 + c];
+                        *v = (*v * 0.35 + tint[c] * 0.65).clamp(0.0, 1.0);
                     }
                 }
             }
         }
-    }
-    // Fine texture on top, which is the first thing a downscale loses.
-    for v in px.iter_mut() {
-        *v = (*v + (next() - 0.5) * 0.06).clamp(0.0, 1.0);
     }
     px
 }
@@ -123,12 +163,20 @@ fn a_tile_runs_and_stays_in_range() {
     }
 }
 
+/// 128x128 of raw RGB, from a photograph the model has never seen:
+/// `kodim23` of the Kodak True Color suite is in the validation split in
+/// `tools/train/detail.py`, so it was held out of training. Stored raw
+/// rather than as a PNG so the test needs no decoder.
+const PHOTO: &[u8] = include_bytes!("fixtures/photo.rgb");
+
 #[test]
 fn the_model_recovers_detail_a_downscale_destroyed() {
     // The property the network was trained for, checked end to end
-    // through the tiled runner rather than on a single tile.
-    let (w, h) = (256usize, 192usize);
-    let truth = photo_like(w, h);
+    // through the tiled runner rather than on a single tile -- and on a
+    // real photograph, because that is the distribution it was fitted to
+    // and synthetic images flatter it or punish it for the wrong reasons.
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
     let soft = degrade(&truth, w, h);
     let mut restored = soft.clone();
     let model = neural::get("detail").expect("model");
