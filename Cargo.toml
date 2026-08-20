@@ -76,7 +76,7 @@ photoslop-commands-core = { path = "plugins/commands-core" }
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch, which upstream has no
 # equivalent of; needed for trackpad pinch-to-zoom on the canvas.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "2dd0180e3bba20d9f0cc5bdfba346cafb13eed32" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "e82eb44da17ade861d9b55e4f9b594bf04f819ce" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
