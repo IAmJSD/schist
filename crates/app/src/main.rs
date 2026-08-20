@@ -10,7 +10,7 @@ use gpui::{px, size, App, AppContext as _, Application, Bounds, WindowBounds, Wi
 use photoslop_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
 use workspace::Workspace;
 
-/// PSD/PSB import via `photoslop-codec-psd` (write support lands in M6).
+/// PSD/PSB import and export via `photoslop-codec-psd`.
 struct PsdCodec;
 
 impl CodecPlugin for PsdCodec {
@@ -28,6 +28,12 @@ impl CodecPlugin for PsdCodec {
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<photoslop_core::Document> {
         Ok(photoslop_codec_psd::read_psd(bytes)?)
+    }
+    fn can_export(&self) -> bool {
+        true
+    }
+    fn export(&self, doc: &photoslop_core::Document) -> anyhow::Result<Vec<u8>> {
+        Ok(photoslop_codec_psd::write_psd(doc)?)
     }
 }
 
@@ -80,6 +86,10 @@ fn main() {
                         let mut ws = Workspace::new(registry, cx);
                         if let Some(path) = std::env::args().nth(1) {
                             ws.load_file(path.into(), cx);
+                        } else if let Some(recovery) = Workspace::pending_recovery() {
+                            // A previous session died with unsaved work.
+                            log::info!("recovering {recovery:?}");
+                            ws.recover_from(recovery, cx);
                         }
                         ws
                     })

@@ -30,6 +30,7 @@ actions!(
     [
         NewFile,
         OpenFile,
+        SaveFile,
         SaveFileAs,
         ZoomIn,
         ZoomOut,

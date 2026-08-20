@@ -28,6 +28,8 @@ use std::sync::Arc;
 /// of hundreds of tile quads.
 const PREVIEW_ZOOM_CUTOFF: f32 = 0.35;
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
+/// How often a dirty document is snapshotted for crash recovery.
+const AUTOSAVE_SECS: u64 = 30;
 
 pub struct Workspace {
     pub registry: PluginRegistry,
@@ -97,6 +99,16 @@ impl Workspace {
             thumbs: FxHashMap::default(),
         };
         ws.new_document();
+        // Periodic crash-recovery snapshot; the task ends with the entity.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(AUTOSAVE_SECS))
+                .await;
+            if this.update(cx, |ws, _| ws.autosave()).is_err() {
+                break;
+            }
+        })
+        .detach();
         ws
     }
 
@@ -156,35 +168,159 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Serialize the document to `path`, choosing the codec by extension.
     pub fn save_file_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let result = (|| -> anyhow::Result<()> {
-            let doc = self
-                .doc
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("no document"))?;
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("png")
-                .to_ascii_lowercase();
-            let codec = self
-                .registry
-                .codecs()
-                .find(|c| c.can_export() && c.extensions().contains(&ext.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("no exporter for .{ext} (PSD save lands in M6)"))?;
-            let bytes = codec.export(doc)?;
-            std::fs::write(&path, bytes)?;
-            doc.dirty = false;
-            doc.path = Some(path.clone());
-            Ok(())
-        })();
-        self.status = match result {
-            Ok(()) => format!("Saved {}", path.display()).into(),
+        match self.write_document_to(&path) {
+            Ok(()) => {
+                if let Some(doc) = &mut self.doc {
+                    doc.dirty = false;
+                    doc.path = Some(path.clone());
+                    if let Some(name) = path.file_name() {
+                        doc.title = name.to_string_lossy().into_owned();
+                    }
+                }
+                self.clear_recovery();
+                self.status = format!("Saved {}", path.display()).into();
+            }
             Err(err) => {
                 log::error!("save failed: {err:#}");
-                format!("Save failed: {err}").into()
+                self.status = format!("Save failed: {err}").into();
             }
+        }
+        cx.notify();
+    }
+
+    /// ⌘S: save over the document's existing path, or fall back to Save As
+    /// when it has never been saved (or its format can't be written).
+    pub fn save_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.doc.as_ref().and_then(|d| d.path.clone());
+        match path {
+            Some(path) if self.exporter_for(&path).is_some() => self.save_file_as(path, cx),
+            _ => keymap::save_file_dialog(self, window, cx),
+        }
+    }
+
+    fn exporter_for(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<&dyn photoslop_plugin_api::CodecPlugin> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        self.registry
+            .codecs()
+            .find(|c| c.can_export() && c.extensions().contains(&ext.as_str()))
+    }
+
+    fn write_document_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let doc = self
+            .doc
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no document"))?;
+        let codec = self.exporter_for(path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no exporter for .{}",
+                path.extension().and_then(|e| e.to_str()).unwrap_or("")
+            )
+        })?;
+        let bytes = codec.export(doc)?;
+        // Write to a sibling temp file and rename, so an interrupted save
+        // can't truncate the user's existing file.
+        let tmp = path.with_extension("photoslop-tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    // ----- crash recovery -----
+
+    /// Directory holding autosaved recovery snapshots.
+    pub fn recovery_dir() -> Option<PathBuf> {
+        let base = std::env::var("XDG_STATE_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".local/state"))
+            })?;
+        Some(base.join("photoslop/recovery"))
+    }
+
+    fn recovery_path(&self) -> Option<PathBuf> {
+        Some(Self::recovery_dir()?.join(format!("session-{}.psd", std::process::id())))
+    }
+
+    /// Write a recovery snapshot if the document has unsaved changes.
+    /// Returns true when a snapshot was written.
+    pub fn autosave(&mut self) -> bool {
+        let dirty = self.doc.as_ref().map(|d| d.dirty).unwrap_or(false);
+        if !dirty {
+            return false;
+        }
+        let Some(path) = self.recovery_path() else {
+            return false;
         };
+        let Some(dir) = path.parent() else {
+            return false;
+        };
+        if let Err(err) = std::fs::create_dir_all(dir) {
+            log::warn!("autosave: cannot create {dir:?}: {err}");
+            return false;
+        }
+        match self.write_document_to(&path) {
+            Ok(()) => {
+                log::debug!("autosaved recovery snapshot to {path:?}");
+                true
+            }
+            Err(err) => {
+                log::warn!("autosave failed: {err:#}");
+                false
+            }
+        }
+    }
+
+    fn clear_recovery(&self) {
+        if let Some(path) = self.recovery_path() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Newest recovery snapshot left behind by a previous run, if any.
+    pub fn pending_recovery() -> Option<PathBuf> {
+        let dir = Self::recovery_dir()?;
+        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("psd") {
+                continue;
+            }
+            // Skip a snapshot this very process owns.
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == format!("session-{}.psd", std::process::id()))
+            {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                best = Some((modified, path));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Load a recovery snapshot and mark it dirty (it has no real path).
+    pub fn recover_from(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.load_file(path.clone(), cx);
+        if let Some(doc) = &mut self.doc {
+            doc.path = None;
+            doc.dirty = true;
+            doc.title = format!("{} (recovered)", doc.title);
+        }
+        let _ = std::fs::remove_file(&path);
+        self.status = "Recovered unsaved work from a previous session".into();
         cx.notify();
     }
 
@@ -971,6 +1107,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &OpenFile, window, cx| {
                 keymap::open_file_dialog(ws, window, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &SaveFile, window, cx| {
+                ws.save_current(window, cx);
             }))
             .on_action(cx.listener(|ws, _: &SaveFileAs, window, cx| {
                 keymap::save_file_dialog(ws, window, cx);

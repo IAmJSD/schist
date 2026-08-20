@@ -3856,6 +3856,7 @@ dependencies = [
  "byteorder",
  "log",
  "photoslop-color",
+ "photoslop-compositor",
  "photoslop-core",
  "thiserror 2.0.20",
 ]

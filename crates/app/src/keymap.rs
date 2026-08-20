@@ -53,7 +53,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         KeyBinding::new(&translate("cmd-n"), NewFile, CONTEXT),
         KeyBinding::new(&translate("cmd-o"), OpenFile, CONTEXT),
         KeyBinding::new(&translate("cmd-shift-s"), SaveFileAs, CONTEXT),
-        KeyBinding::new(&translate("cmd-s"), SaveFileAs, CONTEXT), // until M6 in-place save
+        KeyBinding::new(&translate("cmd-s"), SaveFile, CONTEXT),
         KeyBinding::new(&translate("cmd-="), ZoomIn, CONTEXT),
         KeyBinding::new(&translate("cmd--"), ZoomOut, CONTEXT),
         KeyBinding::new(&translate("cmd-0"), ZoomFit, CONTEXT),
@@ -146,11 +146,26 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
+    // PSD is the native save format (PLAN.md §2); keep an existing
+    // extension when the document already has a writable one.
     let suggested = ws
         .doc
         .as_ref()
-        .map(|d| format!("{}.png", d.title.trim_end_matches(".png")))
-        .unwrap_or_else(|| "untitled.png".into());
+        .map(|d| {
+            let stem = std::path::Path::new(&d.title)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled".into());
+            let ext = d
+                .path
+                .as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|e| e.to_str())
+                .filter(|e| ["psd", "psb", "png", "jpg", "jpeg", "webp", "tif", "tiff"].contains(e))
+                .unwrap_or("psd");
+            format!("{stem}.{ext}")
+        })
+        .unwrap_or_else(|| "untitled.psd".into());
     let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
     cx.spawn_in(window, async move |this, cx| {
         if let Ok(Ok(Some(path))) = rx.await {

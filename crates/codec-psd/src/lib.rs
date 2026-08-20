@@ -16,9 +16,11 @@
 
 pub mod error;
 mod reader;
+mod writer;
 
 pub use error::PsdError;
 pub use reader::read_psd;
+pub use writer::{write_psd, write_psd_with, PSB_MAX_DIM, PSD_MAX_DIM};
 
 /// Quick signature probe: does this buffer look like a PSD/PSB file?
 ///

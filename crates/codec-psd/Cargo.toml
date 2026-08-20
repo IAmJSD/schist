@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 photoslop-core.workspace = true
+photoslop-compositor.workspace = true
 photoslop-color.workspace = true
 anyhow.workspace = true
 byteorder.workspace = true

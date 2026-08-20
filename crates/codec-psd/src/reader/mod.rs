@@ -6,7 +6,7 @@ mod image_data;
 mod layers;
 mod pixels;
 mod resources;
-mod rle;
+pub(crate) mod rle;
 
 use crate::error::PsdError;
 use cursor::Cursor;

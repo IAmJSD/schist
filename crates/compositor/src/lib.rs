@@ -28,6 +28,36 @@ pub fn composite_tile(doc: &Document, coord: TileCoord) -> TileF32 {
     dst
 }
 
+/// Composite an arbitrary document-space region to straight-alpha f32 RGBA,
+/// tightly packed `region.width() * region.height() * 4` floats. Used where
+/// full precision matters (16/32-bit export, PSD merged-image data).
+pub fn composite_region_f32(doc: &Document, region: IntRect) -> Vec<f32> {
+    let w = region.width() as usize;
+    let h = region.height() as usize;
+    let mut out = vec![0.0f32; w * h * 4];
+    let coords: Vec<TileCoord> = TileCoord::covering(&region).collect();
+    let tiles: Vec<(TileCoord, TileF32)> = coords
+        .into_par_iter()
+        .map(|c| (c, composite_tile(doc, c)))
+        .collect();
+    for (coord, tile) in tiles {
+        let trect = coord.rect();
+        let clip = trect.intersect(&region);
+        for y in clip.top..clip.bottom {
+            let ly = (y - trect.top) as usize;
+            let oy = (y - region.top) as usize;
+            for x in clip.left..clip.right {
+                let lx = (x - trect.left) as usize;
+                let ox = (x - region.left) as usize;
+                let s = (ly * TILE_SIZE as usize + lx) * 4;
+                let d = (oy * w + ox) * 4;
+                out[d..d + 4].copy_from_slice(&tile[s..s + 4]);
+            }
+        }
+    }
+    out
+}
+
 /// Composite an arbitrary document-space region to RGBA8 (straight alpha),
 /// tightly packed `region.width() * region.height() * 4` bytes.
 pub fn composite_region_rgba8(doc: &Document, region: IntRect) -> Vec<u8> {
