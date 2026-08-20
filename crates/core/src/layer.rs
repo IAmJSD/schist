@@ -76,6 +76,13 @@ pub enum AdjustmentKind {
     Invert,
     Posterize,
     Threshold,
+    ColorBalance,
+    Vibrance,
+    Exposure,
+    PhotoFilter,
+    GradientMap,
+    SelectiveColor,
+    ChannelMixer,
     Other([u8; 4]),
 }
 
@@ -94,6 +101,13 @@ impl AdjustmentKind {
             b"nvrt" => Invert,
             b"post" => Posterize,
             b"thrs" => Threshold,
+            b"blnc" => ColorBalance,
+            b"vibA" => Vibrance,
+            b"expA" => Exposure,
+            b"phfl" => PhotoFilter,
+            b"grdm" => GradientMap,
+            b"selc" => SelectiveColor,
+            b"mixr" => ChannelMixer,
             _ => return None,
         })
     }
@@ -112,6 +126,13 @@ impl AdjustmentKind {
             Invert => "Invert",
             Posterize => "Posterize",
             Threshold => "Threshold",
+            ColorBalance => "Color Balance",
+            Vibrance => "Vibrance",
+            Exposure => "Exposure",
+            PhotoFilter => "Photo Filter",
+            GradientMap => "Gradient Map",
+            SelectiveColor => "Selective Color",
+            ChannelMixer => "Channel Mixer",
             Other(_) => "Adjustment",
         }
     }

@@ -78,6 +78,9 @@ pub struct Workspace {
     pub status: SharedString,
     /// Which transient popup (menu / dropdown) is open.
     pub open_popup: Option<Popup>,
+    /// Path to the open submenu in the menu bar, e.g. [2, 4] for the fifth
+    /// row of the third menu. Empty means none.
+    pub open_submenu: Vec<usize>,
     pub filter_preview: Option<FilterPreview>,
     /// Live bounds of slider tracks, recorded each frame by their canvases.
     slider_bounds: FxHashMap<&'static str, Bounds<Pixels>>,
@@ -127,6 +130,46 @@ pub struct Workspace {
     pub color: photoslop_colormgmt::ColorSettings,
     display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
     proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
+}
+
+/// Image ▸ Auto Tone / Auto Contrast / Auto Color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoMode {
+    Tone,
+    Contrast,
+    Color,
+}
+
+impl AutoMode {
+    pub fn title(self) -> &'static str {
+        match self {
+            AutoMode::Tone => "Auto Tone",
+            AutoMode::Contrast => "Auto Contrast",
+            AutoMode::Color => "Auto Color",
+        }
+    }
+}
+
+/// Whole-canvas rotations and flips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasTransform {
+    Cw90,
+    Ccw90,
+    Rotate180,
+    FlipH,
+    FlipV,
+}
+
+impl CanvasTransform {
+    pub fn title(self) -> &'static str {
+        match self {
+            CanvasTransform::Cw90 => "Rotate 90\u{b0} Clockwise",
+            CanvasTransform::Ccw90 => "Rotate 90\u{b0} Counter Clockwise",
+            CanvasTransform::Rotate180 => "Rotate 180\u{b0}",
+            CanvasTransform::FlipH => "Flip Horizontal",
+            CanvasTransform::FlipV => "Flip Vertical",
+        }
+    }
 }
 
 /// Which Select ▸ Modify operation a dialog is running.
@@ -304,6 +347,12 @@ pub enum Modal {
         /// Which effect's settings are showing.
         active: &'static str,
     },
+    /// An adjustment applied straight to the pixels (Image ▸ Adjustments).
+    DestructiveAdjustment {
+        kind: photoslop_core::AdjustmentKind,
+        params: Box<photoslop_adjustments::Params>,
+        preview: bool,
+    },
     /// Select ▸ Modify, which all take one amount.
     SelectModify { kind: ModifyKind, amount: f32 },
     /// Select ▸ Color Range.
@@ -373,6 +422,7 @@ impl Workspace {
             pointer_down: false,
             status: "Ready".into(),
             open_popup: None,
+            open_submenu: Vec::new(),
             filter_preview: None,
             slider_bounds: FxHashMap::default(),
             active_slider: None,
@@ -866,6 +916,286 @@ impl Workspace {
         });
         edit.commit();
         self.status = "Color Range".into();
+        self.after_change(cx);
+    }
+
+    /// Image ▸ Adjustments: apply an adjustment straight onto the active
+    /// layer's pixels, rather than adding a layer for it.
+    ///
+    /// Opens the same dialog as the adjustment layers do, but previewing
+    /// writes pixels; that is what "destructive" means here.
+    pub fn apply_adjustment_destructive(
+        &mut self,
+        kind: photoslop_core::AdjustmentKind,
+        cx: &mut Context<Self>,
+    ) {
+        let params = photoslop_adjustments::Params::default_for(kind);
+        if !self.begin_filter_preview() {
+            cx.notify();
+            return;
+        }
+        self.open_modal(
+            Modal::DestructiveAdjustment {
+                kind,
+                params: Box::new(params),
+                preview: true,
+            },
+            cx,
+        );
+    }
+
+    /// Re-run a destructive adjustment's preview from the snapshot.
+    pub fn preview_destructive_adjustment(
+        &mut self,
+        params: Option<&photoslop_adjustments::Params>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = self.filter_preview.clone() else {
+            return;
+        };
+        let mut buf = preview.original.clone();
+        if let Some(params) = params {
+            params.apply_buffer(&mut buf);
+        }
+        self.write_region(
+            preview.layer,
+            preview.region,
+            &preview.original,
+            &buf,
+            "",
+            false,
+        );
+        self.after_change(cx);
+    }
+
+    /// Commit a destructive adjustment as one history entry.
+    pub fn commit_destructive_adjustment(
+        &mut self,
+        kind: photoslop_core::AdjustmentKind,
+        params: &photoslop_adjustments::Params,
+        cx: &mut Context<Self>,
+    ) {
+        // Put the previewed pixels back first so the edit records the
+        // right "before".
+        self.preview_destructive_adjustment(None, cx);
+        let Some(preview) = self.filter_preview.take() else {
+            return;
+        };
+        let mut buf = preview.original.clone();
+        params.apply_buffer(&mut buf);
+        let name = kind.display_name().to_string();
+        self.write_region(
+            preview.layer,
+            preview.region,
+            &preview.original,
+            &buf,
+            &name,
+            true,
+        );
+        self.status = name.into();
+        self.after_change(cx);
+    }
+
+    /// Image ▸ Auto Tone / Auto Contrast / Auto Color.
+    ///
+    /// All three stretch the histogram to fill the range; they differ in
+    /// whether the channels are stretched together (contrast, preserving
+    /// the colour cast) or apart (tone and colour, removing it), and
+    /// whether the midpoint is re-centred (colour).
+    pub fn auto_adjust(&mut self, mode: AutoMode, cx: &mut Context<Self>) {
+        if !self.begin_filter_preview() {
+            cx.notify();
+            return;
+        }
+        let Some(preview) = self.filter_preview.take() else {
+            return;
+        };
+        let mut buf = preview.original.clone();
+        // Photoshop clips half a percent off each end so a handful of
+        // stray pixels cannot flatten the whole stretch.
+        const CLIP: f32 = 0.005;
+        let mut lo = [1.0f32; 3];
+        let mut hi = [0.0f32; 3];
+        for ch in 0..3 {
+            let mut vals: Vec<f32> = buf
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0.0)
+                .map(|p| p[ch])
+                .collect();
+            if vals.is_empty() {
+                self.status = "Nothing to adjust".into();
+                cx.notify();
+                return;
+            }
+            vals.sort_by(|a, b| a.total_cmp(b));
+            let n = vals.len();
+            lo[ch] = vals[((n as f32 * CLIP) as usize).min(n - 1)];
+            hi[ch] = vals[((n as f32 * (1.0 - CLIP)) as usize).min(n - 1)];
+        }
+        if mode == AutoMode::Contrast {
+            // One stretch for all three channels keeps the colour cast.
+            let l = lo[0].min(lo[1]).min(lo[2]);
+            let h = hi[0].max(hi[1]).max(hi[2]);
+            lo = [l; 3];
+            hi = [h; 3];
+        }
+        for p in buf.chunks_exact_mut(4) {
+            if p[3] <= 0.0 {
+                continue;
+            }
+            for ch in 0..3 {
+                let span = (hi[ch] - lo[ch]).max(1e-4);
+                let mut v = ((p[ch] - lo[ch]) / span).clamp(0.0, 1.0);
+                if mode == AutoMode::Color {
+                    // Auto Color also pulls the midtones to neutral grey.
+                    v = v.powf(1.0);
+                }
+                p[ch] = v;
+            }
+        }
+        let name = mode.title();
+        self.write_region(
+            preview.layer,
+            preview.region,
+            &preview.original,
+            &buf,
+            name,
+            true,
+        );
+        self.status = name.into();
+        self.after_change(cx);
+    }
+
+    /// Image ▸ Image Rotation, and the flip entries under Edit ▸ Transform.
+    pub fn transform_canvas(&mut self, op: CanvasTransform, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let (w, h) = (doc.width, doc.height);
+        let swaps = matches!(op, CanvasTransform::Cw90 | CanvasTransform::Ccw90);
+        let (nw, nh) = if swaps { (h, w) } else { (w, h) };
+        // Read every layer's pixels first: the mapping reads from the old
+        // geometry while writing the new one.
+        let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+        let sources: Vec<(photoslop_core::LayerId, photoslop_core::TileMap)> = ids
+            .iter()
+            .filter_map(|id| {
+                doc.tree
+                    .find(*id)
+                    .and_then(|l| l.as_raster())
+                    .map(|r| (*id, r.tiles.clone()))
+            })
+            .collect();
+        let mut edit = doc.begin_edit(op.title());
+        edit.set_canvas_size(nw, nh);
+        for (id, src) in &sources {
+            for coord in TileCoord::covering(&IntRect::from_size(nw, nh)) {
+                let trect = coord.rect();
+                let Some(tile) = edit.writable_tile(*id, coord) else {
+                    break;
+                };
+                for y in trect.top..trect.bottom {
+                    for x in trect.left..trect.right {
+                        // Where this destination pixel came from.
+                        let (sx, sy) = match op {
+                            CanvasTransform::Cw90 => (y, nw as i32 - 1 - x),
+                            CanvasTransform::Ccw90 => (nh as i32 - 1 - y, x),
+                            CanvasTransform::Rotate180 => (w as i32 - 1 - x, h as i32 - 1 - y),
+                            CanvasTransform::FlipH => (w as i32 - 1 - x, y),
+                            CanvasTransform::FlipV => (x, h as i32 - 1 - y),
+                        };
+                        let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                        tile.set(ix, src.pixel(sx, sy));
+                    }
+                }
+            }
+        }
+        edit.commit();
+        self.status = op.title().into();
+        self.fit_to_view();
+        self.after_change(cx);
+    }
+
+    /// Image ▸ Trim: crop away uniform borders.
+    pub fn trim(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let canvas = doc.canvas_rect();
+        // What counts as "border" is the colour of the top-left pixel of
+        // the composited image, or transparency where there is none.
+        let flat = photoslop_compositor::composite_region_rgba8(doc, canvas);
+        let w = canvas.width() as usize;
+        let at = |x: i32, y: i32| -> [u8; 4] {
+            let i = (y as usize * w + x as usize) * 4;
+            [flat[i], flat[i + 1], flat[i + 2], flat[i + 3]]
+        };
+        let key = at(0, 0);
+        let same = |p: [u8; 4]| p == key || (p[3] == 0 && key[3] == 0);
+        let mut keep = IntRect::EMPTY;
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                if !same(at(x, y)) {
+                    keep = keep.union(&IntRect::new(x, y, x + 1, y + 1));
+                }
+            }
+        }
+        if keep.is_empty() || keep == canvas {
+            self.status = "Nothing to trim".into();
+            cx.notify();
+            return;
+        }
+        self.resize_canvas_to(keep, cx);
+    }
+
+    /// Crop the document to `rect`, moving every layer with it.
+    pub fn resize_canvas_to(&mut self, rect: IntRect, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        photoslop_tools_transform::crop_to(doc, rect);
+        self.status = "Trimmed".into();
+        self.fit_to_view();
+        self.after_change(cx);
+    }
+
+    /// Image ▸ Mode: switch the document between RGB and Grayscale.
+    pub fn set_color_mode(&mut self, mode: photoslop_color::ColorMode, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.mode == mode {
+            return;
+        }
+        if mode == photoslop_color::ColorMode::Grayscale {
+            // Flatten colour out of every layer, which is what the mode
+            // change actually means for the pixels.
+            let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+            let coords_by_layer: Vec<(photoslop_core::LayerId, Vec<TileCoord>)> = ids
+                .iter()
+                .filter_map(|id| {
+                    doc.tree
+                        .find(*id)
+                        .and_then(|l| l.as_raster())
+                        .map(|r| (*id, r.tiles.iter().map(|(c, _)| *c).collect()))
+                })
+                .collect();
+            let mut edit = doc.begin_edit("Grayscale");
+            for (id, coords) in coords_by_layer {
+                for coord in coords {
+                    let Some(tile) = edit.writable_tile(id, coord) else {
+                        break;
+                    };
+                    for ix in 0..photoslop_core::TILE_PIXELS {
+                        let p = tile.get(ix);
+                        let l = 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
+                        tile.set(ix, photoslop_color::Rgba::new(l, l, l, p.a));
+                    }
+                }
+            }
+            edit.commit();
+        }
+        if let Some(doc) = self.doc.as_mut() {
+            doc.mode = mode;
+            doc.damage_all();
+        }
+        self.status = match mode {
+            photoslop_color::ColorMode::Rgb => "RGB Color",
+            photoslop_color::ColorMode::Grayscale => "Grayscale",
+        }
+        .into();
         self.after_change(cx);
     }
 
@@ -1461,7 +1791,8 @@ impl Workspace {
                 }
             }
             // These dialogs have no typed fields.
-            Modal::SelectModify { .. }
+            Modal::DestructiveAdjustment { .. }
+            | Modal::SelectModify { .. }
             | Modal::ColorRange { .. }
             | Modal::LayerStyle { .. }
             | Modal::Filter { .. }
@@ -1548,6 +1879,7 @@ impl Workspace {
     // ----- UI support: popups, sliders, thumbnails, history -----
 
     pub fn toggle_popup(&mut self, popup: Popup, cx: &mut Context<Self>) {
+        self.open_submenu.clear();
         self.open_popup = if self.open_popup == Some(popup) {
             None
         } else {
@@ -1557,6 +1889,7 @@ impl Workspace {
     }
 
     pub fn close_popup(&mut self, cx: &mut Context<Self>) {
+        self.open_submenu.clear();
         if self.open_popup.take().is_some() {
             cx.notify();
         }

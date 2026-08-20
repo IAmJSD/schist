@@ -180,6 +180,57 @@ pub enum Params {
     /// Recognised kind whose payload we couldn't parse: renders as a no-op
     /// but keeps its raw bytes for round-trip.
     Unsupported,
+    /// Shifts colour balance separately in shadows, midtones and
+    /// highlights. Each triple is cyan/red, magenta/green, yellow/blue in
+    /// -100..=100.
+    ColorBalance {
+        shadows: [f32; 3],
+        midtones: [f32; 3],
+        highlights: [f32; 3],
+        /// Keep the pixel's luminance while the hue moves.
+        preserve_luminosity: bool,
+    },
+    /// Saturation that leans on the least saturated pixels, so skin tones
+    /// and already-vivid colours move least.
+    Vibrance {
+        vibrance: f32,
+        saturation: f32,
+    },
+    /// Linear exposure in stops, plus offset and gamma.
+    Exposure {
+        exposure: f32,
+        offset: f32,
+        gamma: f32,
+    },
+    /// A coloured filter over the image, as if screwed onto the lens.
+    PhotoFilter {
+        color: [f32; 3],
+        /// 0..=100.
+        density: f32,
+        preserve_luminosity: bool,
+    },
+    /// Remaps luminance through a two-colour ramp.
+    GradientMap {
+        from: [f32; 3],
+        to: [f32; 3],
+        reverse: bool,
+    },
+    /// Per-colour-range CMYK tweaks. `ranges` is indexed by
+    /// [`SelectiveRange`], each holding cyan/magenta/yellow/black in
+    /// -100..=100.
+    SelectiveColor {
+        ranges: [[f32; 4]; 6],
+        /// Relative scales by what is already there; absolute does not.
+        relative: bool,
+    },
+    /// Each output channel as a weighted sum of the inputs, in percent.
+    ChannelMixer {
+        red: [f32; 3],
+        green: [f32; 3],
+        blue: [f32; 3],
+        constant: [f32; 3],
+        monochrome: bool,
+    },
 }
 
 impl Params {
@@ -212,6 +263,43 @@ impl Params {
             AdjustmentKind::SolidColor => Params::SolidColor {
                 rgba: [0.0, 0.0, 0.0, 1.0],
             },
+            AdjustmentKind::ColorBalance => Params::ColorBalance {
+                shadows: [0.0; 3],
+                midtones: [0.0; 3],
+                highlights: [0.0; 3],
+                preserve_luminosity: true,
+            },
+            AdjustmentKind::Vibrance => Params::Vibrance {
+                vibrance: 0.0,
+                saturation: 0.0,
+            },
+            AdjustmentKind::Exposure => Params::Exposure {
+                exposure: 0.0,
+                offset: 0.0,
+                gamma: 1.0,
+            },
+            AdjustmentKind::PhotoFilter => Params::PhotoFilter {
+                // Photoshop's "Warming Filter (85)".
+                color: [0.929, 0.510, 0.208],
+                density: 25.0,
+                preserve_luminosity: true,
+            },
+            AdjustmentKind::GradientMap => Params::GradientMap {
+                from: [0.0, 0.0, 0.0],
+                to: [1.0, 1.0, 1.0],
+                reverse: false,
+            },
+            AdjustmentKind::SelectiveColor => Params::SelectiveColor {
+                ranges: [[0.0; 4]; 6],
+                relative: true,
+            },
+            AdjustmentKind::ChannelMixer => Params::ChannelMixer {
+                red: [100.0, 0.0, 0.0],
+                green: [0.0, 100.0, 0.0],
+                blue: [0.0, 0.0, 100.0],
+                constant: [0.0; 3],
+                monochrome: false,
+            },
             _ => Params::Unsupported,
         }
     }
@@ -227,6 +315,13 @@ impl Params {
             Params::Posterize { .. } => AdjustmentKind::Posterize,
             Params::Threshold { .. } => AdjustmentKind::Threshold,
             Params::SolidColor { .. } => AdjustmentKind::SolidColor,
+            Params::ColorBalance { .. } => AdjustmentKind::ColorBalance,
+            Params::Vibrance { .. } => AdjustmentKind::Vibrance,
+            Params::Exposure { .. } => AdjustmentKind::Exposure,
+            Params::PhotoFilter { .. } => AdjustmentKind::PhotoFilter,
+            Params::GradientMap { .. } => AdjustmentKind::GradientMap,
+            Params::SelectiveColor { .. } => AdjustmentKind::SelectiveColor,
+            Params::ChannelMixer { .. } => AdjustmentKind::ChannelMixer,
             Params::Unsupported => AdjustmentKind::Other(*b"____"),
         }
     }
@@ -375,6 +470,129 @@ impl Params {
                 b: rgba[2],
                 a: px.a,
             },
+            Params::ColorBalance {
+                shadows,
+                midtones,
+                highlights,
+                preserve_luminosity,
+            } => {
+                let lum = luma(px);
+                // Weight each band by how much of the pixel falls in it;
+                // the midtone bell peaks at 0.5 and the two ends ramp away
+                // from it, which is what stops a shadow tweak bleaching
+                // the highlights.
+                let sh = (1.0 - lum * 2.0).clamp(0.0, 1.0);
+                let hi = ((lum - 0.5) * 2.0).clamp(0.0, 1.0);
+                let mid = 1.0 - sh - hi;
+                let shift =
+                    |c: usize| (shadows[c] * sh + midtones[c] * mid + highlights[c] * hi) / 100.0;
+                let out = Rgba {
+                    r: (px.r + shift(0)).clamp(0.0, 1.0),
+                    g: (px.g + shift(1)).clamp(0.0, 1.0),
+                    b: (px.b + shift(2)).clamp(0.0, 1.0),
+                    a: px.a,
+                };
+                if *preserve_luminosity {
+                    relight(out, lum)
+                } else {
+                    out
+                }
+            }
+            Params::Vibrance {
+                vibrance,
+                saturation,
+            } => {
+                let max = px.r.max(px.g).max(px.b);
+                let min = px.r.min(px.g).min(px.b);
+                let sat = max - min;
+                // Vibrance leans on the least saturated pixels, which is
+                // what keeps skin tones from going lurid.
+                let amount = saturation / 100.0 + (vibrance / 100.0) * (1.0 - sat);
+                saturate(px, amount)
+            }
+            Params::Exposure {
+                exposure,
+                offset,
+                gamma,
+            } => {
+                let scale = 2f32.powf(*exposure);
+                let g = (1.0 / gamma.max(0.01)).clamp(0.01, 100.0);
+                let f = |v: f32| (((v * scale) + offset).max(0.0)).powf(g).clamp(0.0, 1.0);
+                Rgba {
+                    r: f(px.r),
+                    g: f(px.g),
+                    b: f(px.b),
+                    a: px.a,
+                }
+            }
+            Params::PhotoFilter {
+                color,
+                density,
+                preserve_luminosity,
+            } => {
+                let d = (density / 100.0).clamp(0.0, 1.0);
+                // Multiply towards the filter colour, which is what a real
+                // filter does to the light passing through it.
+                let out = Rgba {
+                    r: px.r * (1.0 - d + d * color[0] * 2.0).min(2.0),
+                    g: px.g * (1.0 - d + d * color[1] * 2.0).min(2.0),
+                    b: px.b * (1.0 - d + d * color[2] * 2.0).min(2.0),
+                    a: px.a,
+                };
+                let out = Rgba {
+                    r: out.r.clamp(0.0, 1.0),
+                    g: out.g.clamp(0.0, 1.0),
+                    b: out.b.clamp(0.0, 1.0),
+                    a: out.a,
+                };
+                if *preserve_luminosity {
+                    relight(out, luma(px))
+                } else {
+                    out
+                }
+            }
+            Params::GradientMap { from, to, reverse } => {
+                let mut t = luma(px);
+                if *reverse {
+                    t = 1.0 - t;
+                }
+                Rgba {
+                    r: from[0] + (to[0] - from[0]) * t,
+                    g: from[1] + (to[1] - from[1]) * t,
+                    b: from[2] + (to[2] - from[2]) * t,
+                    a: px.a,
+                }
+            }
+            Params::SelectiveColor { ranges, relative } => selective_color(px, ranges, *relative),
+            Params::ChannelMixer {
+                red,
+                green,
+                blue,
+                constant,
+                monochrome,
+            } => {
+                let mix = |w: &[f32; 3], k: f32| {
+                    ((px.r * w[0] + px.g * w[1] + px.b * w[2]) / 100.0 + k / 100.0).clamp(0.0, 1.0)
+                };
+                if *monochrome {
+                    // Monochrome uses the red row for every output channel,
+                    // matching Photoshop.
+                    let v = mix(red, constant[0]);
+                    Rgba {
+                        r: v,
+                        g: v,
+                        b: v,
+                        a: px.a,
+                    }
+                } else {
+                    Rgba {
+                        r: mix(red, constant[0]),
+                        g: mix(green, constant[1]),
+                        b: mix(blue, constant[2]),
+                        a: px.a,
+                    }
+                }
+            }
             Params::Unsupported => px,
         }
     }
@@ -993,6 +1211,85 @@ impl Params {
                 spec("g", "Green", 0.0, 1.0, rgba[1], ""),
                 spec("b", "Blue", 0.0, 1.0, rgba[2], ""),
             ],
+            Params::ColorBalance {
+                shadows,
+                midtones,
+                highlights,
+                ..
+            } => {
+                // Three bands of three, named the way Photoshop labels the
+                // ends of each slider.
+                let mut out = Vec::new();
+                for (band, vals) in [("sh", shadows), ("mid", midtones), ("hi", highlights)] {
+                    for (c, label) in [
+                        ("cr", "Cyan/Red"),
+                        ("mg", "Magenta/Green"),
+                        ("yb", "Yellow/Blue"),
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        out.push(spec(
+                            balance_key(band, label.0),
+                            balance_label(band, label.1),
+                            -100.0,
+                            100.0,
+                            vals[c],
+                            "",
+                        ));
+                    }
+                }
+                out
+            }
+            Params::Vibrance {
+                vibrance,
+                saturation,
+            } => vec![
+                spec("vibrance", "Vibrance", -100.0, 100.0, *vibrance, ""),
+                spec("saturation", "Saturation", -100.0, 100.0, *saturation, ""),
+            ],
+            Params::Exposure {
+                exposure,
+                offset,
+                gamma,
+            } => vec![
+                spec("exposure", "Exposure", -20.0, 20.0, *exposure, " EV"),
+                spec("offset", "Offset", -0.5, 0.5, *offset, ""),
+                spec("gamma", "Gamma", 0.1, 9.99, *gamma, ""),
+            ],
+            Params::PhotoFilter { density, .. } => {
+                vec![spec("density", "Density", 0.0, 100.0, *density, "%")]
+            }
+            Params::GradientMap { .. } => Vec::new(),
+            Params::SelectiveColor { ranges, .. } => {
+                let mut out = Vec::new();
+                for (i, r) in SelectiveRange::ALL.iter().enumerate() {
+                    for (c, label) in ["Cyan", "Magenta", "Yellow", "Black"].iter().enumerate() {
+                        out.push(spec(
+                            selective_key(i, c),
+                            selective_label(*r, label),
+                            -100.0,
+                            100.0,
+                            ranges[i][c],
+                            "%",
+                        ));
+                    }
+                }
+                out
+            }
+            Params::ChannelMixer {
+                red, green, blue, ..
+            } => vec![
+                spec("r_r", "Red \u{2192} Red", -200.0, 200.0, red[0], "%"),
+                spec("r_g", "Green \u{2192} Red", -200.0, 200.0, red[1], "%"),
+                spec("r_b", "Blue \u{2192} Red", -200.0, 200.0, red[2], "%"),
+                spec("g_r", "Red \u{2192} Green", -200.0, 200.0, green[0], "%"),
+                spec("g_g", "Green \u{2192} Green", -200.0, 200.0, green[1], "%"),
+                spec("g_b", "Blue \u{2192} Green", -200.0, 200.0, green[2], "%"),
+                spec("b_r", "Red \u{2192} Blue", -200.0, 200.0, blue[0], "%"),
+                spec("b_g", "Green \u{2192} Blue", -200.0, 200.0, blue[1], "%"),
+                spec("b_b", "Blue \u{2192} Blue", -200.0, 200.0, blue[2], "%"),
+            ],
             Params::Curves(_) | Params::Invert | Params::Unsupported => Vec::new(),
         }
     }
@@ -1065,7 +1362,85 @@ impl Params {
                     _ => {}
                 }
             }
-            Params::Curves(_) | Params::Invert | Params::Unsupported => {}
+            Params::ColorBalance {
+                shadows,
+                midtones,
+                highlights,
+                ..
+            } => {
+                let v = value.clamp(-100.0, 100.0);
+                let (band, c) = match key {
+                    "sh_cr" => (0, 0),
+                    "sh_mg" => (0, 1),
+                    "sh_yb" => (0, 2),
+                    "mid_cr" => (1, 0),
+                    "mid_mg" => (1, 1),
+                    "mid_yb" => (1, 2),
+                    "hi_cr" => (2, 0),
+                    "hi_mg" => (2, 1),
+                    "hi_yb" => (2, 2),
+                    _ => return,
+                };
+                match band {
+                    0 => shadows[c] = v,
+                    1 => midtones[c] = v,
+                    _ => highlights[c] = v,
+                }
+            }
+            Params::Vibrance {
+                vibrance,
+                saturation,
+            } => match key {
+                "vibrance" => *vibrance = value.clamp(-100.0, 100.0),
+                "saturation" => *saturation = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Params::Exposure {
+                exposure,
+                offset,
+                gamma,
+            } => match key {
+                "exposure" => *exposure = value.clamp(-20.0, 20.0),
+                "offset" => *offset = value.clamp(-0.5, 0.5),
+                "gamma" => *gamma = value.clamp(0.1, 9.99),
+                _ => {}
+            },
+            Params::PhotoFilter { density, .. } => {
+                if key == "density" {
+                    *density = value.clamp(0.0, 100.0);
+                }
+            }
+            Params::SelectiveColor { ranges, .. } => {
+                for (r, range) in ranges.iter_mut().enumerate() {
+                    for (c, slot) in range.iter_mut().enumerate() {
+                        if key == selective_key(r, c) {
+                            *slot = value.clamp(-100.0, 100.0);
+                            return;
+                        }
+                    }
+                }
+            }
+            Params::ChannelMixer {
+                red, green, blue, ..
+            } => {
+                let v = value.clamp(-200.0, 200.0);
+                match key {
+                    "r_r" => red[0] = v,
+                    "r_g" => red[1] = v,
+                    "r_b" => red[2] = v,
+                    "g_r" => green[0] = v,
+                    "g_g" => green[1] = v,
+                    "g_b" => green[2] = v,
+                    "b_r" => blue[0] = v,
+                    "b_g" => blue[1] = v,
+                    "b_b" => blue[2] = v,
+                    _ => {}
+                }
+            }
+            Params::GradientMap { .. }
+            | Params::Curves(_)
+            | Params::Invert
+            | Params::Unsupported => {}
         }
     }
 
@@ -1079,6 +1454,13 @@ impl Params {
             AdjustmentKind::Invert,
             AdjustmentKind::Posterize,
             AdjustmentKind::Threshold,
+            AdjustmentKind::ColorBalance,
+            AdjustmentKind::Vibrance,
+            AdjustmentKind::Exposure,
+            AdjustmentKind::PhotoFilter,
+            AdjustmentKind::GradientMap,
+            AdjustmentKind::SelectiveColor,
+            AdjustmentKind::ChannelMixer,
             AdjustmentKind::SolidColor,
         ]
     }
@@ -1313,5 +1695,403 @@ mod prepared_tests {
         .prepare();
         assert!(fill.is_fill());
         assert_eq!(fill.fill_color().unwrap().g, 0.4);
+    }
+}
+
+/// Rec. 601 luminance, which is what Photoshop's adjustments weight by.
+fn luma(px: Rgba) -> f32 {
+    0.299 * px.r + 0.587 * px.g + 0.114 * px.b
+}
+
+/// Scale a pixel back to a target luminance, so a hue move does not also
+/// change how bright the pixel looks ("Preserve Luminosity").
+fn relight(px: Rgba, target: f32) -> Rgba {
+    let now = luma(px);
+    if now <= 1e-4 {
+        return px;
+    }
+    let k = target / now;
+    Rgba {
+        r: (px.r * k).clamp(0.0, 1.0),
+        g: (px.g * k).clamp(0.0, 1.0),
+        b: (px.b * k).clamp(0.0, 1.0),
+        a: px.a,
+    }
+}
+
+/// Push a pixel away from (or towards) its own luminance.
+fn saturate(px: Rgba, amount: f32) -> Rgba {
+    let l = luma(px);
+    let k = 1.0 + amount;
+    Rgba {
+        r: (l + (px.r - l) * k).clamp(0.0, 1.0),
+        g: (l + (px.g - l) * k).clamp(0.0, 1.0),
+        b: (l + (px.b - l) * k).clamp(0.0, 1.0),
+        a: px.a,
+    }
+}
+
+/// The colour ranges Selective Color works on, in `ranges` order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectiveRange {
+    Reds = 0,
+    Yellows = 1,
+    Greens = 2,
+    Cyans = 3,
+    Blues = 4,
+    Magentas = 5,
+}
+
+impl SelectiveRange {
+    pub const ALL: [SelectiveRange; 6] = [
+        SelectiveRange::Reds,
+        SelectiveRange::Yellows,
+        SelectiveRange::Greens,
+        SelectiveRange::Cyans,
+        SelectiveRange::Blues,
+        SelectiveRange::Magentas,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SelectiveRange::Reds => "Reds",
+            SelectiveRange::Yellows => "Yellows",
+            SelectiveRange::Greens => "Greens",
+            SelectiveRange::Cyans => "Cyans",
+            SelectiveRange::Blues => "Blues",
+            SelectiveRange::Magentas => "Magentas",
+        }
+    }
+}
+
+/// Selective Color: CMYK nudges applied only to the colour ranges a pixel
+/// belongs to.
+///
+/// A pixel's membership of a range is how much of its saturation that
+/// range accounts for, so a pure red is entirely in Reds while an orange
+/// is split between Reds and Yellows. That is what makes the adjustment
+/// selective rather than global.
+fn selective_color(px: Rgba, ranges: &[[f32; 4]; 6], relative: bool) -> Rgba {
+    let max = px.r.max(px.g).max(px.b);
+    let min = px.r.min(px.g).min(px.b);
+    let mid = px.r + px.g + px.b - max - min;
+    let sat = max - min;
+    if sat <= 1e-5 {
+        return px;
+    }
+    // Weight of each of the six ranges for this pixel.
+    let mut w = [0f32; 6];
+    let (primary, secondary) = if max == px.r {
+        if px.g >= px.b {
+            (0usize, 1usize) // red -> yellow
+        } else {
+            (0, 5) // red -> magenta
+        }
+    } else if max == px.g {
+        if px.b >= px.r {
+            (2, 3) // green -> cyan
+        } else {
+            (2, 1) // green -> yellow
+        }
+    } else if px.r >= px.g {
+        (4, 5) // blue -> magenta
+    } else {
+        (4, 3) // blue -> cyan
+    };
+    // How far the middle channel sits between the min and max decides the
+    // split between the primary and the neighbouring secondary.
+    let t = ((mid - min) / sat).clamp(0.0, 1.0);
+    w[primary] = 1.0 - t;
+    w[secondary] = t;
+
+    // Convert to CMYK properly: pull the black out first, then normalise
+    // the remaining ink. Skipping the normalisation makes the round trip
+    // lossy, so an untouched Selective Color would darken every pixel.
+    let k0 = 1.0 - max;
+    let denom = 1.0 - k0;
+    let mut cmy = if denom > 1e-5 {
+        [
+            (1.0 - px.r - k0) / denom,
+            (1.0 - px.g - k0) / denom,
+            (1.0 - px.b - k0) / denom,
+        ]
+    } else {
+        [0.0; 3]
+    };
+    let mut k = k0;
+    for (i, weight) in w.iter().enumerate() {
+        if *weight <= 0.0 {
+            continue;
+        }
+        let adj = ranges[i];
+        for c in 0..3 {
+            let d = adj[c] / 100.0 * weight;
+            cmy[c] = if relative {
+                cmy[c] + cmy[c] * d
+            } else {
+                cmy[c] + d
+            };
+        }
+        let dk = adj[3] / 100.0 * weight;
+        k = if relative { k + k * dk } else { k + dk };
+    }
+    let k = k.clamp(0.0, 1.0);
+    let f = |c: f32| ((1.0 - c.clamp(0.0, 1.0)) * (1.0 - k)).clamp(0.0, 1.0);
+    // (1 - C)(1 - K) is the exact inverse of the extraction above.
+    Rgba {
+        r: f(cmy[0]),
+        g: f(cmy[1]),
+        b: f(cmy[2]),
+        a: px.a,
+    }
+}
+
+/// Slider keys for Color Balance, e.g. "sh_cr" for shadows cyan/red.
+/// Interned so `ParamSpec` can stay `&'static str`.
+fn balance_key(band: &str, channel: &str) -> &'static str {
+    match (band, channel) {
+        ("sh", "cr") => "sh_cr",
+        ("sh", "mg") => "sh_mg",
+        ("sh", "yb") => "sh_yb",
+        ("mid", "cr") => "mid_cr",
+        ("mid", "mg") => "mid_mg",
+        ("mid", "yb") => "mid_yb",
+        ("hi", "cr") => "hi_cr",
+        ("hi", "mg") => "hi_mg",
+        _ => "hi_yb",
+    }
+}
+
+fn balance_label(band: &str, channel: &str) -> &'static str {
+    match (band, channel) {
+        ("sh", "Cyan/Red") => "Shadows C/R",
+        ("sh", "Magenta/Green") => "Shadows M/G",
+        ("sh", "Yellow/Blue") => "Shadows Y/B",
+        ("mid", "Cyan/Red") => "Midtones C/R",
+        ("mid", "Magenta/Green") => "Midtones M/G",
+        ("mid", "Yellow/Blue") => "Midtones Y/B",
+        ("hi", "Cyan/Red") => "Highlights C/R",
+        ("hi", "Magenta/Green") => "Highlights M/G",
+        _ => "Highlights Y/B",
+    }
+}
+
+fn selective_key(range: usize, channel: usize) -> &'static str {
+    const KEYS: [[&str; 4]; 6] = [
+        ["r_c", "r_m", "r_y", "r_k"],
+        ["y_c", "y_m", "y_y", "y_k"],
+        ["g_c", "g_m", "g_y", "g_k"],
+        ["c_c", "c_m", "c_y", "c_k"],
+        ["b_c", "b_m", "b_y", "b_k"],
+        ["m_c", "m_m", "m_y", "m_k"],
+    ];
+    KEYS[range.min(5)][channel.min(3)]
+}
+
+fn selective_label(range: SelectiveRange, channel: &str) -> &'static str {
+    const LABELS: [[&str; 4]; 6] = [
+        ["Reds: Cyan", "Reds: Magenta", "Reds: Yellow", "Reds: Black"],
+        [
+            "Yellows: Cyan",
+            "Yellows: Magenta",
+            "Yellows: Yellow",
+            "Yellows: Black",
+        ],
+        [
+            "Greens: Cyan",
+            "Greens: Magenta",
+            "Greens: Yellow",
+            "Greens: Black",
+        ],
+        [
+            "Cyans: Cyan",
+            "Cyans: Magenta",
+            "Cyans: Yellow",
+            "Cyans: Black",
+        ],
+        [
+            "Blues: Cyan",
+            "Blues: Magenta",
+            "Blues: Yellow",
+            "Blues: Black",
+        ],
+        [
+            "Magentas: Cyan",
+            "Magentas: Magenta",
+            "Magentas: Yellow",
+            "Magentas: Black",
+        ],
+    ];
+    let c = ["Cyan", "Magenta", "Yellow", "Black"]
+        .iter()
+        .position(|x| *x == channel)
+        .unwrap_or(0);
+    LABELS[range as usize][c]
+}
+
+#[cfg(test)]
+mod new_adjustment_tests {
+    use super::*;
+
+    fn px(r: f32, g: f32, b: f32) -> Rgba {
+        Rgba::new(r, g, b, 1.0)
+    }
+
+    #[test]
+    fn defaults_are_identity() {
+        // Opening an adjustment and touching nothing must not change a
+        // single pixel.
+        let sample = [
+            px(0.0, 0.0, 0.0),
+            px(1.0, 1.0, 1.0),
+            px(0.2, 0.6, 0.9),
+            px(0.8, 0.3, 0.1),
+            px(0.5, 0.5, 0.5),
+        ];
+        for kind in [
+            AdjustmentKind::ColorBalance,
+            AdjustmentKind::Vibrance,
+            AdjustmentKind::Exposure,
+            AdjustmentKind::SelectiveColor,
+            AdjustmentKind::ChannelMixer,
+        ] {
+            let p = Params::default_for(kind);
+            for c in sample {
+                let out = p.apply(c);
+                assert!(
+                    (out.r - c.r).abs() < 1e-3
+                        && (out.g - c.g).abs() < 1e-3
+                        && (out.b - c.b).abs() < 1e-3,
+                    "{kind:?} default is not identity: {c:?} -> {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn color_balance_moves_the_band_it_is_told_to() {
+        let mut p = Params::default_for(AdjustmentKind::ColorBalance);
+        if let Params::ColorBalance {
+            preserve_luminosity,
+            ..
+        } = &mut p
+        {
+            *preserve_luminosity = false;
+        }
+        p.set_param("hi_cr", 100.0);
+        // A highlight goes redder...
+        let hi = p.apply(px(0.9, 0.9, 0.9));
+        assert!(hi.r > hi.g, "highlight did not go red: {hi:?}");
+        // ...while a shadow is left alone.
+        let sh = p.apply(px(0.05, 0.05, 0.05));
+        assert!(
+            (sh.r - sh.g).abs() < 0.02,
+            "shadow moved with a highlights slider: {sh:?}"
+        );
+    }
+
+    #[test]
+    fn vibrance_spares_already_saturated_colours() {
+        let mut p = Params::default_for(AdjustmentKind::Vibrance);
+        p.set_param("vibrance", 100.0);
+        let dull = px(0.5, 0.45, 0.4);
+        let vivid = px(1.0, 0.0, 0.0);
+        let dull_gain = {
+            let o = p.apply(dull);
+            (o.r - o.b).abs() - (dull.r - dull.b).abs()
+        };
+        let vivid_gain = {
+            let o = p.apply(vivid);
+            (o.r - o.b).abs() - (vivid.r - vivid.b).abs()
+        };
+        assert!(
+            dull_gain > vivid_gain,
+            "vibrance should push the dull colour harder ({dull_gain} vs {vivid_gain})"
+        );
+    }
+
+    #[test]
+    fn exposure_is_a_stop_per_unit() {
+        let mut p = Params::default_for(AdjustmentKind::Exposure);
+        p.set_param("exposure", 1.0);
+        let out = p.apply(px(0.25, 0.25, 0.25));
+        assert!(
+            (out.r - 0.5).abs() < 1e-3,
+            "one stop should double the value: {out:?}"
+        );
+    }
+
+    #[test]
+    fn gradient_map_replaces_colour_with_the_ramp() {
+        let p = Params::GradientMap {
+            from: [1.0, 0.0, 0.0],
+            to: [0.0, 0.0, 1.0],
+            reverse: false,
+        };
+        let dark = p.apply(px(0.0, 0.0, 0.0));
+        assert!(
+            dark.r > 0.9 && dark.b < 0.1,
+            "black did not map to the low end"
+        );
+        let light = p.apply(px(1.0, 1.0, 1.0));
+        assert!(
+            light.b > 0.9 && light.r < 0.1,
+            "white did not map to the high end"
+        );
+    }
+
+    #[test]
+    fn photo_filter_warms_without_changing_brightness() {
+        let p = Params::default_for(AdjustmentKind::PhotoFilter);
+        let before = px(0.5, 0.5, 0.5);
+        let after = p.apply(before);
+        assert!(after.r > after.b, "warming filter did not warm: {after:?}");
+        let (lb, la) = (
+            0.299 * before.r + 0.587 * before.g + 0.114 * before.b,
+            0.299 * after.r + 0.587 * after.g + 0.114 * after.b,
+        );
+        assert!(
+            (la - lb).abs() < 0.02,
+            "Preserve Luminosity did not hold brightness: {lb} -> {la}"
+        );
+    }
+
+    #[test]
+    fn selective_color_touches_only_the_named_range() {
+        let mut p = Params::default_for(AdjustmentKind::SelectiveColor);
+        // Add magenta to the reds, which pulls green out of them.
+        p.set_param("r_m", 100.0);
+        let red = p.apply(px(0.8, 0.3, 0.3));
+        let blue = p.apply(px(0.3, 0.3, 0.8));
+        assert!(red.g < 0.25, "reds were not affected: {red:?}");
+        assert!(
+            (blue.b - 0.8).abs() < 0.02 && (blue.g - 0.3).abs() < 0.02,
+            "blues moved with a reds slider: {blue:?}"
+        );
+    }
+
+    #[test]
+    fn channel_mixer_monochrome_flattens_to_grey() {
+        let mut p = Params::default_for(AdjustmentKind::ChannelMixer);
+        if let Params::ChannelMixer { monochrome, .. } = &mut p {
+            *monochrome = true;
+        }
+        let out = p.apply(px(1.0, 0.0, 0.0));
+        assert!(
+            (out.r - out.g).abs() < 1e-4 && (out.g - out.b).abs() < 1e-4,
+            "monochrome mix is not grey: {out:?}"
+        );
+    }
+
+    #[test]
+    fn every_creatable_adjustment_has_a_name_and_survives_a_round_trip() {
+        for kind in Params::creatable() {
+            let p = Params::default_for(*kind);
+            assert_eq!(p.kind(), *kind, "kind() disagrees with default_for");
+            assert!(!p.display_name().is_empty(), "{kind:?} has no display name");
+            let json = serde_json::to_string(&p).expect("serialise");
+            let back: Params = serde_json::from_str(&json).expect("deserialise");
+            assert_eq!(back, p, "{kind:?} did not survive a JSON round trip");
+        }
     }
 }

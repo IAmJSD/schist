@@ -5,7 +5,7 @@ use crate::ui;
 use crate::workspace::{Modal, Popup, Workspace};
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    Styled as _,
+    StatefulInteractiveElement as _, Styled as _,
 };
 use photoslop_core::Filter;
 
@@ -61,6 +61,11 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::ColorRange { tolerance, target } => {
             color_range_dialog(&state, tolerance, target, cx).into_any_element()
         }
+        Modal::DestructiveAdjustment {
+            kind,
+            params,
+            preview,
+        } => destructive_adjustment_dialog(&state, kind, *params, preview, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {
@@ -519,6 +524,108 @@ fn filter_dialog(
             cx,
         ));
     ui::modal_frame(name, 360.0, body, actions)
+}
+
+/// Image ▸ Adjustments: the same sliders as the adjustment layers, but
+/// previewing writes pixels and OK bakes them in.
+fn destructive_adjustment_dialog(
+    _state: &DialogState,
+    kind: photoslop_core::AdjustmentKind,
+    params: photoslop_adjustments::Params,
+    preview: bool,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let specs = params.param_specs();
+    let mut body = div()
+        .id("destructive-adjust-body")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .max_h(px(360.0))
+        .overflow_y_scroll();
+    for spec in specs {
+        let key = spec.key;
+        body = body.child(param_slider(
+            SliderSpec {
+                id: spec.key,
+                label: spec.label,
+                value: spec.value,
+                min: spec.min,
+                max: spec.max,
+                suffix: spec.suffix,
+            },
+            move |ws, v, cx| {
+                let mut next = None;
+                ws.update_modal(|m| {
+                    if let Modal::DestructiveAdjustment {
+                        params, preview, ..
+                    } = m
+                    {
+                        params.set_param(key, v);
+                        if *preview {
+                            next = Some((**params).clone());
+                        }
+                    }
+                });
+                if let Some(params) = next {
+                    ws.preview_destructive_adjustment(Some(&params), cx);
+                }
+            },
+            cx,
+        ));
+    }
+    body = body.child(ui::checkbox(
+        "Preview",
+        preview,
+        move |ws, cx| {
+            let mut next = None;
+            ws.update_modal(|m| {
+                if let Modal::DestructiveAdjustment {
+                    params, preview, ..
+                } = m
+                {
+                    *preview = !*preview;
+                    next = Some((*preview, (**params).clone()));
+                }
+            });
+            match next {
+                Some((true, p)) => ws.preview_destructive_adjustment(Some(&p), cx),
+                Some((false, _)) => ws.preview_destructive_adjustment(None, cx),
+                None => {}
+            }
+        },
+        cx,
+    ));
+
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            move |ws, _w, cx| {
+                let mut run = None;
+                ws.update_modal(|m| {
+                    if let Modal::DestructiveAdjustment { kind, params, .. } = m {
+                        run = Some((*kind, (**params).clone()));
+                    }
+                });
+                ws.modal = None;
+                if let Some((kind, params)) = run {
+                    ws.commit_destructive_adjustment(kind, &params, cx);
+                }
+                cx.notify();
+            },
+            cx,
+        ));
+    ui::modal_frame(kind.display_name(), 380.0, body, actions)
 }
 
 /// Select ▸ Modify: one amount and an OK.

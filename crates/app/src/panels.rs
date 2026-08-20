@@ -59,6 +59,8 @@ enum MenuEntry {
     Adjustment(photoslop_core::AdjustmentKind),
     /// Open a registered filter's dialog.
     Filter(&'static str),
+    /// A nested menu, opened by hovering its row.
+    Sub(&'static str, Vec<MenuEntry>),
     Sep,
 }
 
@@ -98,6 +100,19 @@ enum AppItem {
     SelectSmooth,
     SelectFeatherItem,
     ColorRangeItem,
+    ModeRgb,
+    ModeGrayscale,
+    AutoTone,
+    AutoContrast,
+    AutoColor,
+    RotateCw,
+    RotateCcw,
+    Rotate180,
+    FlipCanvasH,
+    FlipCanvasV,
+    Trim,
+    /// Apply an adjustment to the pixels rather than adding a layer.
+    ApplyAdjustment(photoslop_core::AdjustmentKind),
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -135,15 +150,50 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Cmd("edit.fill_background"),
                 Sep,
                 App("Free Transform", FreeTransform, Some("cmd-t")),
+                Sub(
+                    "Transform",
+                    vec![
+                        App("Rotate 180°", Rotate180, None),
+                        App("Rotate 90° Clockwise", RotateCw, None),
+                        App("Rotate 90° Counter Clockwise", RotateCcw, None),
+                        Sep,
+                        App("Flip Horizontal", FlipCanvasH, None),
+                        App("Flip Vertical", FlipCanvasV, None),
+                    ],
+                ),
             ],
         ),
         (
             "Image",
             vec![
+                Sub(
+                    "Mode",
+                    vec![
+                        App("RGB Color", ModeRgb, None),
+                        App("Grayscale", ModeGrayscale, None),
+                    ],
+                ),
+                Sub("Adjustments", destructive_adjustment_entries()),
+                Sep,
+                App("Auto Tone", AutoTone, None),
+                App("Auto Contrast", AutoContrast, None),
+                App("Auto Color", AutoColor, None),
+                Sep,
                 App("Image Size…", ImageSize, Some("cmd-alt-i")),
                 App("Canvas Size…", CanvasSize, Some("cmd-alt-c")),
-                Sep,
+                Sub(
+                    "Image Rotation",
+                    vec![
+                        App("180°", Rotate180, None),
+                        App("90° Clockwise", RotateCw, None),
+                        App("90° Counter Clockwise", RotateCcw, None),
+                        Sep,
+                        App("Flip Canvas Horizontal", FlipCanvasH, None),
+                        App("Flip Canvas Vertical", FlipCanvasV, None),
+                    ],
+                ),
                 App("Crop to Selection", Crop, None),
+                App("Trim", Trim, None),
                 Sep,
                 App("Assign Profile…", AssignProfile, None),
                 App("Convert to Profile…", ConvertProfile, None),
@@ -159,13 +209,16 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Sep,
                 App("Color Range…", ColorRangeItem, None),
                 Sep,
-                // Photoshop nests these under Modify; the menu bar has no
-                // submenus yet, so they sit in their own block.
-                App("Modify: Border…", SelectBorder, None),
-                App("Modify: Smooth…", SelectSmooth, None),
-                App("Modify: Expand…", SelectExpand, None),
-                App("Modify: Contract…", SelectContract, None),
-                App("Modify: Feather…", SelectFeatherItem, None),
+                Sub(
+                    "Modify",
+                    vec![
+                        App("Border…", SelectBorder, None),
+                        App("Smooth…", SelectSmooth, None),
+                        App("Expand…", SelectExpand, None),
+                        App("Contract…", SelectContract, None),
+                        App("Feather…", SelectFeatherItem, None),
+                    ],
+                ),
                 Sep,
                 Cmd("select.grow"),
                 Cmd("select.similar"),
@@ -223,15 +276,24 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
 /// Filters grouped by category, in registration order.
 fn filter_menu_entries() -> Vec<MenuEntry> {
     // The ids are static strings owned by the plugins; the menu resolves
-    // names from the registry at render time.
-    let mut out = Vec::new();
-    for (i, (_, ids)) in FILTER_GROUPS.iter().enumerate() {
-        if i > 0 {
-            out.push(MenuEntry::Sep);
-        }
-        out.extend(ids.iter().map(|id| MenuEntry::Filter(id)));
-    }
-    out
+    // names from the registry at render time. Categories nest, as in
+    // Photoshop's Filter menu.
+    FILTER_GROUPS
+        .iter()
+        .map(|(name, ids)| {
+            MenuEntry::Sub(name, ids.iter().map(|id| MenuEntry::Filter(id)).collect())
+        })
+        .collect()
+}
+
+/// Image ▸ Adjustments: the same list as the Adjust menu, but applied to
+/// the pixels rather than as a layer.
+fn destructive_adjustment_entries() -> Vec<MenuEntry> {
+    photoslop_adjustments::Params::creatable()
+        .iter()
+        .filter(|k| !matches!(k, photoslop_core::AdjustmentKind::SolidColor))
+        .map(|&k| MenuEntry::App(k.display_name(), AppItem::ApplyAdjustment(k), None))
+        .collect()
 }
 
 /// Menu grouping for the built-in filters.
@@ -371,6 +433,18 @@ fn run_app_item(
         AppItem::ClearGuides => ws.clear_guides(cx),
         AppItem::ScreenModeItem => ws.cycle_screen_mode(cx),
         AppItem::Preferences => ws.open_modal(Modal::Preferences, cx),
+        AppItem::ModeRgb => ws.set_color_mode(photoslop_color::ColorMode::Rgb, cx),
+        AppItem::ModeGrayscale => ws.set_color_mode(photoslop_color::ColorMode::Grayscale, cx),
+        AppItem::AutoTone => ws.auto_adjust(crate::workspace::AutoMode::Tone, cx),
+        AppItem::AutoContrast => ws.auto_adjust(crate::workspace::AutoMode::Contrast, cx),
+        AppItem::AutoColor => ws.auto_adjust(crate::workspace::AutoMode::Color, cx),
+        AppItem::RotateCw => ws.transform_canvas(crate::workspace::CanvasTransform::Cw90, cx),
+        AppItem::RotateCcw => ws.transform_canvas(crate::workspace::CanvasTransform::Ccw90, cx),
+        AppItem::Rotate180 => ws.transform_canvas(crate::workspace::CanvasTransform::Rotate180, cx),
+        AppItem::FlipCanvasH => ws.transform_canvas(crate::workspace::CanvasTransform::FlipH, cx),
+        AppItem::FlipCanvasV => ws.transform_canvas(crate::workspace::CanvasTransform::FlipV, cx),
+        AppItem::Trim => ws.trim(cx),
+        AppItem::ApplyAdjustment(kind) => ws.apply_adjustment_destructive(kind, cx),
         AppItem::SelectExpand => ws.open_modal(
             Modal::SelectModify {
                 kind: crate::workspace::ModifyKind::Expand,
@@ -542,92 +616,154 @@ pub fn menu_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                         )
                         .child(title);
                     if is_open {
-                        let rows: Vec<gpui::AnyElement> = entries
-                            .into_iter()
-                            .map(|entry| match entry {
-                                MenuEntry::Sep => div()
-                                    .h(px(1.0))
-                                    .my_1()
-                                    .bg(gpui::rgb(0x3A3A3A))
-                                    .into_any_element(),
-                                MenuEntry::Cmd(id) => {
-                                    let (label, hint) = ws
-                                        .registry
-                                        .command(id)
-                                        .map(|c| (c.title.to_string(), keybind_hint(c.keybind)))
-                                        .unwrap_or_else(|| (id.to_string(), String::new()));
-                                    menu_row(
-                                        label,
-                                        hint,
-                                        move |ws, _e, _w, cx| {
-                                            ws.close_popup(cx);
-                                            ws.run_command(id, cx);
-                                        },
-                                        cx,
-                                    )
-                                    .into_any_element()
-                                }
-                                MenuEntry::Adjustment(kind) => menu_row(
-                                    kind.display_name().to_string(),
-                                    String::new(),
-                                    move |ws, _e, _w, cx| {
-                                        ws.close_popup(cx);
-                                        ws.add_adjustment(kind, cx);
-                                    },
-                                    cx,
-                                )
-                                .into_any_element(),
-                                MenuEntry::Filter(id) => {
-                                    let name = ws
-                                        .registry
-                                        .filters()
-                                        .find(|f| f.id() == id)
-                                        .map(|f| format!("{}…", f.name()))
-                                        .unwrap_or_else(|| id.to_string());
-                                    menu_row(
-                                        name,
-                                        String::new(),
-                                        move |ws, _e, _w, cx| {
-                                            ws.close_popup(cx);
-                                            ws.open_filter_dialog(id, cx);
-                                        },
-                                        cx,
-                                    )
-                                    .into_any_element()
-                                }
-                                MenuEntry::App(label, item, kb) => menu_row_checked(
-                                    label.to_string(),
-                                    keybind_hint(kb),
-                                    app_item_checked(ws, item),
-                                    move |ws, _e, window, cx| {
-                                        ws.close_popup(cx);
-                                        run_app_item(ws, item, window, cx);
-                                    },
-                                    cx,
-                                )
-                                .into_any_element(),
-                            })
-                            .collect();
                         button = button.child(deferred(
-                            div()
-                                .absolute()
-                                .top(px(24.0))
-                                .left_0()
-                                .w(px(230.0))
-                                .py_1()
-                                .bg(gpui::rgb(POPUP_BG))
-                                .border_1()
-                                .border_color(gpui::rgb(0x3A3A3A))
-                                .rounded_sm()
-                                .shadow_lg()
-                                .occlude()
-                                .on_mouse_down_out(cx.listener(|ws, _e, _w, cx| ws.close_popup(cx)))
-                                .children(rows),
+                            menu_panel(ws, entries, &[i], 24.0, 0.0, cx).on_mouse_down_out(
+                                cx.listener(|ws, _e, _w, cx| ws.close_popup(cx)),
+                            ),
                         ));
                     }
                     button
                 }),
         )
+}
+
+/// One menu panel: the rows of `entries`, plus any submenu that is open
+/// beneath them.
+///
+/// `path` identifies this panel in the menu tree, so hovering a row can
+/// name the submenu to open without the panels needing to know about each
+/// other. `top`/`left` place the panel relative to whatever opened it.
+fn menu_panel(
+    ws: &mut Workspace,
+    entries: Vec<MenuEntry>,
+    path: &[usize],
+    top: f32,
+    left: f32,
+    cx: &mut Context<Workspace>,
+) -> gpui::Div {
+    let rows: Vec<gpui::AnyElement> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(row, entry)| menu_entry_row(ws, entry, path, row, cx))
+        .collect();
+    div()
+        .absolute()
+        .top(px(top))
+        .left(px(left))
+        .w(px(230.0))
+        .py_1()
+        .bg(gpui::rgb(POPUP_BG))
+        .border_1()
+        .border_color(gpui::rgb(0x3A3A3A))
+        .rounded_sm()
+        .shadow_lg()
+        .occlude()
+        .children(rows)
+}
+
+fn menu_entry_row(
+    ws: &mut Workspace,
+    entry: MenuEntry,
+    path: &[usize],
+    row: usize,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    match entry {
+        MenuEntry::Sep => div()
+            .h(px(1.0))
+            .my_1()
+            .bg(gpui::rgb(0x3A3A3A))
+            .into_any_element(),
+        MenuEntry::Cmd(id) => {
+            let (label, hint) = ws
+                .registry
+                .command(id)
+                .map(|c| (c.title.to_string(), keybind_hint(c.keybind)))
+                .unwrap_or_else(|| (id.to_string(), String::new()));
+            menu_row(
+                label,
+                hint,
+                move |ws, _e, _w, cx| {
+                    ws.close_popup(cx);
+                    ws.run_command(id, cx);
+                },
+                cx,
+            )
+            .into_any_element()
+        }
+        MenuEntry::Adjustment(kind) => menu_row(
+            kind.display_name().to_string(),
+            String::new(),
+            move |ws, _e, _w, cx| {
+                ws.close_popup(cx);
+                ws.add_adjustment(kind, cx);
+            },
+            cx,
+        )
+        .into_any_element(),
+        MenuEntry::Filter(id) => {
+            let name = ws
+                .registry
+                .filters()
+                .find(|f| f.id() == id)
+                .map(|f| format!("{}…", f.name()))
+                .unwrap_or_else(|| id.to_string());
+            menu_row(
+                name,
+                String::new(),
+                move |ws, _e, _w, cx| {
+                    ws.close_popup(cx);
+                    ws.open_filter_dialog(id, cx);
+                },
+                cx,
+            )
+            .into_any_element()
+        }
+        MenuEntry::App(label, item, kb) => menu_row_checked(
+            label.to_string(),
+            keybind_hint(kb),
+            app_item_checked(ws, item),
+            move |ws, _e, window, cx| {
+                ws.close_popup(cx);
+                run_app_item(ws, item, window, cx);
+            },
+            cx,
+        )
+        .into_any_element(),
+        MenuEntry::Sub(label, children) => {
+            let mut here = path.to_vec();
+            here.push(row);
+            let open = ws.open_submenu == here;
+            let hover_path = here.clone();
+            let mut root = div()
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px_2()
+                .h(px(22.0))
+                .text_size(px(12.0))
+                .hover(|s| s.bg(gpui::rgb(HOVER)))
+                // Photoshop opens submenus on hover, and the pointer has to
+                // cross the parent row to reach the child panel anyway.
+                .on_mouse_move(cx.listener(move |ws, _e: &MouseMoveEvent, _w, cx| {
+                    if ws.open_submenu != hover_path {
+                        ws.open_submenu = hover_path.clone();
+                        cx.notify();
+                    }
+                }))
+                .child(div().child(label))
+                .child(icon("chevron-right", 10.0, TEXT_DIM));
+            if open {
+                // Sits alongside its own row, clear of this panel's width.
+                // Not wrapped in `deferred`: the panel containing this row
+                // already is, and GPUI does not allow nesting them.
+                root = root.child(menu_panel(ws, children, &here, -4.0, 224.0, cx));
+            }
+            root.into_any_element()
+        }
+    }
 }
 
 // ===== sliders =====
