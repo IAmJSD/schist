@@ -1705,6 +1705,166 @@ impl Workspace {
         self.after_change(cx);
     }
 
+    /// Capture every layer's visibility and appearance as a named comp.
+    pub fn new_layer_comp(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let states: Vec<photoslop_core::LayerCompState> = doc
+            .tree
+            .iter()
+            .map(|l| photoslop_core::LayerCompState {
+                layer: l.id,
+                visible: l.visible,
+                opacity: l.opacity,
+                fill_opacity: l.fill_opacity,
+                blend: l.blend,
+                style: l.style,
+            })
+            .collect();
+        let n = doc.layer_comps.len() + 1;
+        let mut comp = photoslop_core::LayerComp::new(format!("Layer Comp {n}"));
+        comp.states = states;
+        doc.layer_comps.push(comp);
+        self.status = "Layer comp captured".into();
+        cx.notify();
+    }
+
+    /// Restore a comp. Pixels are untouched: a comp is a way of showing
+    /// the same artwork several ways, not a second copy of it.
+    pub fn apply_layer_comp(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(comp) = doc.layer_comps.get(index).cloned() else {
+            return;
+        };
+        let mut edit = doc.begin_edit(format!("Apply {}", comp.name));
+        for state in &comp.states {
+            edit.change_props(state.layer, |l| {
+                if comp.apply_visibility {
+                    l.visible = state.visible;
+                }
+                if comp.apply_appearance {
+                    l.opacity = state.opacity;
+                    l.fill_opacity = state.fill_opacity;
+                    l.blend = state.blend;
+                    l.style = state.style;
+                    // The cached raster belongs to the old style.
+                    l.styled = None;
+                }
+            });
+        }
+        edit.commit();
+        self.status = comp.name.into();
+        self.after_change(cx);
+    }
+
+    pub fn delete_layer_comp(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(doc) = self.doc.as_mut() {
+            if index < doc.layer_comps.len() {
+                doc.layer_comps.remove(index);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Export every artboard, or every slice, as its own file next to the
+    /// document.
+    pub fn export_regions(&mut self, slices: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let regions: Vec<(String, IntRect)> = if slices {
+            doc.slices
+                .iter()
+                .map(|s| (s.name.clone(), s.rect))
+                .collect()
+        } else {
+            doc.artboards
+                .iter()
+                .map(|a| (a.name.clone(), a.rect))
+                .collect()
+        };
+        if regions.is_empty() {
+            self.status = if slices {
+                "No slices to export".into()
+            } else {
+                "No artboards to export".into()
+            };
+            cx.notify();
+            return;
+        }
+        let dir = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let rx = cx.prompt_for_new_path(&dir, Some("export"));
+        let doc_regions = regions;
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update_in(cx, |ws, _window, cx| {
+                    ws.write_regions(&path, &doc_regions, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Write one PNG per region, named `<stem>-<region>.png`.
+    fn write_regions(
+        &mut self,
+        base: &std::path::Path,
+        regions: &[(String, IntRect)],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let stem = base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "export".into());
+        let dir = base.parent().unwrap_or(std::path::Path::new("."));
+        let mut written = 0usize;
+        for (name, rect) in regions {
+            let rect = rect.intersect(&doc.canvas_rect());
+            if rect.is_empty() {
+                continue;
+            }
+            // Codecs export a whole document, so each region becomes a
+            // one-layer document of its flattened pixels.
+            let rgba = photoslop_compositor::composite_region_rgba8(doc, rect);
+            let mut region_doc = Document::new(
+                name.clone(),
+                rect.width() as u32,
+                rect.height() as u32,
+                doc.depth,
+            );
+            let mut layer = Layer::new_raster(name.clone());
+            photoslop_core::blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                doc.depth,
+                IntRect::from_size(rect.width() as u32, rect.height() as u32),
+                &rgba,
+            );
+            region_doc.push_layer(layer);
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                .collect();
+            let out = dir.join(format!("{stem}-{safe}.png"));
+            let Some(codec) = self.registry.codecs().find(|c| c.id() == "png") else {
+                continue;
+            };
+            match codec.export(&region_doc) {
+                Ok(bytes) => {
+                    if std::fs::write(&out, bytes).is_ok() {
+                        written += 1;
+                    }
+                }
+                Err(e) => log::error!("export {name}: {e}"),
+            }
+        }
+        self.status = format!("Exported {written} region(s)").into();
+        cx.notify();
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its

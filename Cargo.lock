@@ -4191,6 +4191,7 @@ dependencies = [
  "photoslop-plugin-host-wasm",
  "photoslop-text-engine",
  "photoslop-tools-basic",
+ "photoslop-tools-doc",
  "photoslop-tools-paint",
  "photoslop-tools-retouch",
  "photoslop-tools-select",
@@ -4379,6 +4380,16 @@ dependencies = [
  "photoslop-compositor",
  "photoslop-core",
  "photoslop-plugin-api",
+]
+
+[[package]]
+name = "photoslop-tools-doc"
+version = "0.1.0"
+dependencies = [
+ "photoslop-color",
+ "photoslop-core",
+ "photoslop-plugin-api",
+ "photoslop-vector",
 ]
 
 [[package]]

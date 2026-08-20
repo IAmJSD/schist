@@ -84,6 +84,11 @@ icons!(
     "liquify",
     "puppet",
     "vanishing-point",
+    "artboard",
+    "count",
+    "frame",
+    "note",
+    "slice",
 );
 
 pub struct Assets;

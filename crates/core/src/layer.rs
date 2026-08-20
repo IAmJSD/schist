@@ -10,7 +10,9 @@ use crate::tile::{MaskTileMap, TileMap};
 use crate::BlendMode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct LayerId(pub u64);
 
 static NEXT_LAYER_ID: AtomicU64 = AtomicU64::new(1);
@@ -209,6 +211,9 @@ pub struct Layer {
     pub extras: Vec<RawBlock>,
     /// Layer effects. Empty by default, so a layer costs nothing extra.
     pub style: crate::style::LayerStyle,
+    /// True for layers made by the Frame tool: their mask is the frame's
+    /// shape, so anything pasted in is clipped to it.
+    pub is_frame: bool,
     /// Set when this layer is a smart object: its `kind` still holds the
     /// rendered pixels, but they are derived from here and are re-rendered
     /// from the source whenever the transform changes.
@@ -242,6 +247,7 @@ impl Layer {
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
             style: crate::style::LayerStyle::default(),
+            is_frame: false,
             smart: None,
             styled: None,
             render_offset: (0, 0),

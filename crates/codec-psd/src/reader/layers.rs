@@ -577,6 +577,7 @@ fn make_layer(rec: Rec, mask_tiles: Option<MaskTileMap>, kind: LayerKind) -> Lay
             .and_then(|b| crate::effects::read_lfx2(&b.data))
             .unwrap_or_default(),
         extras: rec.extras,
+        is_frame: false,
         smart: None,
         styled: None,
         render_offset: (0, 0),

@@ -4,6 +4,7 @@
 //! in plugins (see `photoslop-plugin-api`). If every plugin were removed the
 //! app would boot to an empty workspace that can do nothing.
 
+pub mod annotate;
 pub mod blend;
 pub mod document;
 pub mod geom;
@@ -16,6 +17,7 @@ pub mod smart;
 pub mod style;
 pub mod tile;
 
+pub use annotate::{Artboard, CountGroup, LayerComp, LayerCompState, Note, Slice};
 pub use blend::BlendMode;
 pub use document::{
     blit_rgba8, Document, DocumentId, EditBuilder, Guide, PreservedResource, StrokeEdit,

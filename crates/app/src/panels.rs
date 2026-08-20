@@ -61,6 +61,9 @@ enum MenuEntry {
     Filter(&'static str),
     /// A nested menu, opened by hovering its row.
     Sub(&'static str, Vec<MenuEntry>),
+    /// An app item whose label is not known at compile time -- the names
+    /// of layer comps, for instance.
+    Dynamic(String, AppItem),
     Sep,
 }
 
@@ -122,6 +125,13 @@ enum AppItem {
     TransformSelection,
     ContentAwareScaleItem,
     FilterGalleryItem,
+    NewLayerComp,
+    ExportArtboards,
+    ExportSlices,
+    ClearNotes,
+    ClearCounts,
+    ApplyLayerComp(usize),
+    DeleteLayerComp(usize),
     LiquifyItem,
     PuppetWarpItem,
     VanishingPointItem,
@@ -131,7 +141,7 @@ enum AppItem {
     PathDelete,
 }
 
-fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
+fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;
     vec![
@@ -143,6 +153,14 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
                 App("Export…", Export, Some("cmd-shift-alt-s")),
+                Sep,
+                Sub(
+                    "Export",
+                    vec![
+                        App("Artboards to PNG…", ExportArtboards, None),
+                        App("Slices to PNG…", ExportSlices, None),
+                    ],
+                ),
                 Sep,
                 App("Plugins…", Plugins, None),
                 App("Check for Updates…", CheckForUpdates, None),
@@ -265,6 +283,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Sep,
                 App("Layer Style…", LayerStyleItem, None),
                 Sep,
+                Sub("Layer Comps", layer_comp_entries(ws)),
+                Sep,
                 Sub(
                     "Path",
                     vec![
@@ -315,6 +335,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Extras", ToggleExtras, Some("cmd-h")),
                 App("Snap", ToggleSnap, Some("cmd-shift-;")),
                 App("Clear Guides", ClearGuides, Some("cmd-alt-;")),
+                App("Clear Notes", ClearNotes, None),
+                App("Clear Count", ClearCounts, None),
                 Sep,
                 App("Screen Mode", ScreenModeItem, Some("f")),
                 App("Proof Colors", ProofColors, None),
@@ -336,6 +358,35 @@ fn filter_menu_entries() -> Vec<MenuEntry> {
             MenuEntry::Sub(name, ids.iter().map(|id| MenuEntry::Filter(id)).collect())
         })
         .collect()
+}
+
+/// The Layer Comps submenu: capture a new one, then the existing comps,
+/// each of which applies on click and can be deleted from beside it.
+fn layer_comp_entries(ws: &Workspace) -> Vec<MenuEntry> {
+    let mut out = vec![MenuEntry::App(
+        "New Layer Comp",
+        AppItem::NewLayerComp,
+        None,
+    )];
+    let comps: Vec<String> = ws
+        .doc
+        .as_ref()
+        .map(|d| d.layer_comps.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
+    if !comps.is_empty() {
+        out.push(MenuEntry::Sep);
+        for (i, name) in comps.iter().enumerate() {
+            out.push(MenuEntry::Dynamic(name.clone(), AppItem::ApplyLayerComp(i)));
+        }
+        out.push(MenuEntry::Sep);
+        for (i, name) in comps.iter().enumerate() {
+            out.push(MenuEntry::Dynamic(
+                format!("Delete {name}"),
+                AppItem::DeleteLayerComp(i),
+            ));
+        }
+    }
+    out
 }
 
 /// Image ▸ Adjustments: the same list as the Adjust menu, but applied to
@@ -621,6 +672,25 @@ fn run_app_item(
             )
         }
         AppItem::FilterGalleryItem => ws.show_filter_gallery(cx),
+        AppItem::NewLayerComp => ws.new_layer_comp(cx),
+        AppItem::ApplyLayerComp(i) => ws.apply_layer_comp(i, cx),
+        AppItem::DeleteLayerComp(i) => ws.delete_layer_comp(i, cx),
+        AppItem::ExportArtboards => ws.export_regions(false, window, cx),
+        AppItem::ExportSlices => ws.export_regions(true, window, cx),
+        AppItem::ClearNotes => {
+            if let Some(doc) = ws.doc.as_mut() {
+                doc.notes.clear();
+                doc.damage_all();
+            }
+            ws.after_change(cx);
+        }
+        AppItem::ClearCounts => {
+            if let Some(doc) = ws.doc.as_mut() {
+                doc.counts.clear();
+                doc.damage_all();
+            }
+            ws.after_change(cx);
+        }
         AppItem::LiquifyItem => ws.activate_tool("liquify", cx),
         AppItem::PuppetWarpItem => ws.activate_tool("puppet_warp", cx),
         AppItem::VanishingPointItem => ws.activate_tool("vanishing_point", cx),
@@ -786,7 +856,7 @@ pub fn menu_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .border_b_1()
         .border_color(gpui::rgb(PANEL_EDGE))
         .children(
-            menus()
+            menus(ws)
                 .into_iter()
                 .enumerate()
                 .map(|(i, (title, entries))| {
@@ -910,6 +980,16 @@ fn menu_entry_row(
             )
             .into_any_element()
         }
+        MenuEntry::Dynamic(label, item) => menu_row(
+            label,
+            String::new(),
+            move |ws, _e, window, cx| {
+                ws.close_popup(cx);
+                run_app_item(ws, item, window, cx);
+            },
+            cx,
+        )
+        .into_any_element(),
         MenuEntry::App(label, item, kb) => menu_row_checked(
             label.to_string(),
             keybind_hint(kb),

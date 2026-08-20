@@ -23,6 +23,7 @@ members = [
     "plugins/tools-paint",
     "plugins/tools-retouch",
     "plugins/tools-warp",
+    "plugins/tools-doc",
     "plugins/tools-select",
     "plugins/tools-transform",
     "plugins/tools-vector",
@@ -61,6 +62,7 @@ photoslop-tools-basic = { path = "plugins/tools-basic" }
 photoslop-tools-paint = { path = "plugins/tools-paint" }
 photoslop-tools-retouch = { path = "plugins/tools-retouch" }
 photoslop-tools-warp = { path = "plugins/tools-warp" }
+photoslop-tools-doc = { path = "plugins/tools-doc" }
 photoslop-tools-select = { path = "plugins/tools-select" }
 photoslop-tools-transform = { path = "plugins/tools-transform" }
 photoslop-tools-vector = { path = "plugins/tools-vector" }

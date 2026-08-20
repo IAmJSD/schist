@@ -57,6 +57,16 @@ pub struct Document {
     pub guides: Vec<Guide>,
     /// The last non-empty selection, so Reselect can bring it back.
     pub last_selection: Option<Selection>,
+    /// Named canvases within the document, each exportable on its own.
+    pub artboards: Vec<crate::annotate::Artboard>,
+    /// Regions marked for separate export.
+    pub slices: Vec<crate::annotate::Slice>,
+    /// Pinned annotations.
+    pub notes: Vec<crate::annotate::Note>,
+    /// Tally marks from the Count tool.
+    pub counts: Vec<crate::annotate::CountGroup>,
+    /// Named snapshots of layer visibility and appearance.
+    pub layer_comps: Vec<crate::annotate::LayerComp>,
     /// Stored vector paths, as in Photoshop's Paths panel.
     pub paths: Vec<crate::path::VectorPath>,
     /// Index into `paths` of the one being edited.
@@ -98,6 +108,11 @@ impl Document {
             saved_selections: Vec::new(),
             history_source: Default::default(),
             paths: Vec::new(),
+            artboards: Vec::new(),
+            slices: Vec::new(),
+            notes: Vec::new(),
+            counts: Vec::new(),
+            layer_comps: Vec::new(),
             active_path: None,
             damage: Vec::new(),
             dirty: false,
@@ -123,6 +138,11 @@ impl Document {
                 crate::layer::LayerKind::Adjustment(_) => {}
             }
         }
+    }
+
+    /// How many frame layers the document has, for naming the next one.
+    pub fn frame_count(&self) -> usize {
+        self.tree.iter().filter(|l| l.is_frame).count()
     }
 
     pub fn add_damage(&mut self, rect: IntRect) {
