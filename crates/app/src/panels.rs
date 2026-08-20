@@ -117,6 +117,10 @@ enum AppItem {
     FillItem,
     ContentAwareFill,
     TransformSelection,
+    ContentAwareScaleItem,
+    LiquifyItem,
+    PuppetWarpItem,
+    VanishingPointItem,
     PathFill,
     PathStroke,
     PathToSelection,
@@ -159,6 +163,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Fill…", FillItem, Some("shift-f5")),
                 App("Stroke…", StrokeItem, None),
                 App("Content-Aware Fill", ContentAwareFill, None),
+                App("Content-Aware Scale…", ContentAwareScaleItem, None),
+                App("Puppet Warp", PuppetWarpItem, None),
                 Sep,
                 App("Free Transform", FreeTransform, Some("cmd-t")),
                 Sub(
@@ -275,7 +281,17 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 .map(|&k| Adjustment(k))
                 .collect(),
         ),
-        ("Filter", filter_menu_entries()),
+        ("Filter", {
+            // Liquify and Vanishing Point sit above the categories, as
+            // they do in Photoshop's Filter menu.
+            let mut out = vec![
+                App("Liquify", LiquifyItem, None),
+                App("Vanishing Point", VanishingPointItem, None),
+                Sep,
+            ];
+            out.extend(filter_menu_entries());
+            out
+        }),
         (
             "View",
             vec![
@@ -567,6 +583,23 @@ fn run_app_item(
             cx,
         ),
         AppItem::ContentAwareFill => ws.content_aware_fill(cx),
+        AppItem::ContentAwareScaleItem => {
+            let (w, h) = ws
+                .doc
+                .as_ref()
+                .map(|d| (d.width, d.height))
+                .unwrap_or((1, 1));
+            ws.open_modal(
+                Modal::ContentAwareScale {
+                    width: w,
+                    height: h,
+                },
+                cx,
+            )
+        }
+        AppItem::LiquifyItem => ws.activate_tool("liquify", cx),
+        AppItem::PuppetWarpItem => ws.activate_tool("puppet_warp", cx),
+        AppItem::VanishingPointItem => ws.activate_tool("vanishing_point", cx),
         AppItem::TransformSelection => {
             if ws.doc.as_ref().is_some_and(|d| d.selection.is_empty()) {
                 ws.status = "Transform Selection needs a selection".into();

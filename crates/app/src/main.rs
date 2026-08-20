@@ -81,6 +81,7 @@ fn build_registry() -> (PluginRegistry, photoslop_plugin_host_wasm::PluginManage
         Box::new(photoslop_tools_basic::BasicToolsPlugin),
         Box::new(photoslop_tools_paint::PaintToolsPlugin),
         Box::new(photoslop_tools_retouch::RetouchToolsPlugin),
+        Box::new(photoslop_tools_warp::WarpToolsPlugin),
         Box::new(photoslop_tools_select::SelectToolsPlugin),
         Box::new(photoslop_tools_transform::TransformToolsPlugin),
         Box::new(photoslop_tools_vector::VectorToolsPlugin),

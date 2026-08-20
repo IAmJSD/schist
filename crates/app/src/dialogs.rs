@@ -74,6 +74,9 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::Fill { source, opacity } => {
             fill_dialog(ws, &state, source, opacity, cx).into_any_element()
         }
+        Modal::ContentAwareScale { width, height } => {
+            content_aware_scale_dialog(&state, width, height, cx).into_any_element()
+        }
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {
@@ -645,6 +648,95 @@ fn destructive_adjustment_dialog(
         body,
         actions,
     )
+}
+
+/// Edit ▸ Content-Aware Scale.
+fn content_aware_scale_dialog(
+    state: &DialogState,
+    width: u32,
+    height: u32,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(ui::field_row(
+            "Width",
+            ui::num_field(
+                ui::NumField {
+                    id: "cas-width",
+                    value: width as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("cas-width"),
+                    buffer: state.field_buffer.clone(),
+                },
+                |ws, v| {
+                    ws.update_modal(|m| {
+                        if let Modal::ContentAwareScale { width, .. } = m {
+                            *width = v.max(1.0) as u32;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Height",
+            ui::num_field(
+                ui::NumField {
+                    id: "cas-height",
+                    value: height as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("cas-height"),
+                    buffer: state.field_buffer.clone(),
+                },
+                |ws, v| {
+                    ws.update_modal(|m| {
+                        if let Modal::ContentAwareScale { height, .. } = m {
+                            *height = v.max(1.0) as u32;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child("Carves low-detail seams. A selection marks what to protect."),
+        );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            |ws, _w, cx| {
+                let mut run = None;
+                ws.update_modal(|m| {
+                    if let Modal::ContentAwareScale { width, height } = m {
+                        run = Some((*width, *height));
+                    }
+                });
+                ws.close_modal(cx);
+                if let Some((w, h)) = run {
+                    ws.content_aware_scale(w, h, cx);
+                }
+            },
+            cx,
+        ));
+    ui::modal_frame("Content-Aware Scale", 340.0, body, actions)
 }
 
 /// Edit ▸ Stroke.

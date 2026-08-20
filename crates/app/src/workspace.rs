@@ -411,6 +411,8 @@ pub enum Modal {
         params: Box<photoslop_adjustments::Params>,
         preview: bool,
     },
+    /// Edit ▸ Content-Aware Scale.
+    ContentAwareScale { width: u32, height: u32 },
     /// Edit ▸ Stroke.
     Stroke {
         width: f32,
@@ -1555,6 +1557,47 @@ impl Workspace {
         self.after_change(cx);
     }
 
+    /// Edit ▸ Content-Aware Scale: resize the canvas by carving seams
+    /// rather than squashing everything equally.
+    pub fn content_aware_scale(&mut self, width: u32, height: u32, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if width == 0 || height == 0 || (width, height) == (doc.width, doc.height) {
+            return;
+        }
+        let canvas = doc.canvas_rect();
+        // The selection marks what to protect, as Photoshop's Protect
+        // channel does.
+        let protect = (!doc.selection.is_empty()).then(|| doc.selection.clone());
+        let depth = doc.depth;
+        let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+        let mut carved: Vec<(photoslop_core::LayerId, photoslop_core::TileMap)> = Vec::new();
+        for id in &ids {
+            let Some(raster) = doc.tree.find(*id).and_then(|l| l.as_raster()) else {
+                continue;
+            };
+            let mut img = photoslop_tools_warp::scale::Image::from_tiles(
+                &raster.tiles,
+                canvas,
+                protect.as_ref(),
+            );
+            img.content_aware_resize(width as usize, height as usize);
+            carved.push((
+                *id,
+                img.into_tiles(IntRect::from_size(width, height), depth),
+            ));
+        }
+        let mut edit = doc.begin_edit("Content-Aware Scale");
+        for (id, tiles) in carved {
+            edit.replace_layer_tiles(id, tiles);
+        }
+        edit.set_canvas_size(width, height);
+        edit.change_selection(|sel, _| sel.deselect());
+        edit.commit();
+        self.status = "Content-Aware Scale".into();
+        self.fit_to_view();
+        self.after_change(cx);
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its
@@ -2144,6 +2187,13 @@ impl Workspace {
             Modal::LayerProperties { name, .. } => {
                 if id == "layer-name" {
                     *name = buffer;
+                }
+            }
+            Modal::ContentAwareScale { width, height } => {
+                if id == "cas-width" {
+                    *width = value as u32;
+                } else if id == "cas-height" {
+                    *height = value as u32;
                 }
             }
             // These dialogs have no typed fields.

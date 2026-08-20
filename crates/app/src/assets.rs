@@ -81,6 +81,9 @@ icons!(
     "shape-custom",
     "sharpen",
     "smudge",
+    "liquify",
+    "puppet",
+    "vanishing-point",
 );
 
 pub struct Assets;

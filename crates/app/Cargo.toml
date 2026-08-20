@@ -35,6 +35,7 @@ photoslop-tools-retouch.workspace = true
 photoslop-tools-select.workspace = true
 photoslop-tools-transform.workspace = true
 photoslop-tools-vector.workspace = true
+photoslop-tools-warp.workspace = true
 photoslop-tools-type.workspace = true
 photoslop-text-engine.workspace = true
 photoslop-vector.workspace = true
