@@ -1,0 +1,8 @@
+[package]
+name = "photoslop-vector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true

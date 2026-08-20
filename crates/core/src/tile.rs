@@ -235,6 +235,35 @@ impl TileMap {
         bounds
     }
 
+    /// Pixel-tight bounds of non-transparent content (as opposed to the
+    /// tile-granular `tile_bounds`). Used when writing PSD layer rects and
+    /// when clamping resample lookups to the real edge of the artwork.
+    pub fn content_bounds(&self) -> IntRect {
+        let mut out = IntRect::EMPTY;
+        for (coord, buf) in self.iter() {
+            let trect = coord.rect();
+            for ly in 0..TILE_SIZE {
+                let mut first: Option<i32> = None;
+                let mut last = 0;
+                for lx in 0..TILE_SIZE {
+                    if buf.get((ly * TILE_SIZE + lx) as usize).a > 0.0 {
+                        first.get_or_insert(lx);
+                        last = lx;
+                    }
+                }
+                if let Some(first) = first {
+                    out = out.union(&IntRect::new(
+                        trect.left + first,
+                        trect.top + ly,
+                        trect.left + last + 1,
+                        trect.top + ly + 1,
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// Read a single pixel at document coordinates.
     pub fn pixel(&self, x: i32, y: i32) -> Rgba {
         let coord = TileCoord::containing(x, y);

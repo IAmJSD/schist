@@ -61,6 +61,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1846,6 +1852,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontdb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
+dependencies = [
+ "fontconfig-parser",
+ "log",
+ "memmap2",
+ "slotmap",
+ "tinyvec",
+]
+
+[[package]]
+name = "fontdue"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7894823fa221401399e2598f8b63f81ac77ff5c63248b7656779bff1632d7d3d"
+dependencies = [
+ "hashbrown 0.15.5",
+ "ttf-parser 0.25.1",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2468,6 +2497,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -3839,9 +3870,14 @@ dependencies = [
  "photoslop-compositor",
  "photoslop-core",
  "photoslop-plugin-api",
+ "photoslop-text-engine",
  "photoslop-tools-basic",
  "photoslop-tools-paint",
  "photoslop-tools-select",
+ "photoslop-tools-transform",
+ "photoslop-tools-type",
+ "photoslop-tools-vector",
+ "photoslop-vector",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -3910,6 +3946,7 @@ dependencies = [
  "log",
  "parking_lot",
  "photoslop-color",
+ "rayon",
  "rustc-hash 2.1.3",
  "serde",
  "smallvec",
@@ -3936,6 +3973,18 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "photoslop-text-engine"
+version = "0.1.0"
+dependencies = [
+ "fontdb 0.24.0",
+ "fontdue",
+ "log",
+ "photoslop-color",
+ "photoslop-core",
+ "serde",
 ]
 
 [[package]]
@@ -3967,6 +4016,45 @@ dependencies = [
  "photoslop-core",
  "photoslop-pixel-ops",
  "photoslop-plugin-api",
+]
+
+[[package]]
+name = "photoslop-tools-transform"
+version = "0.1.0"
+dependencies = [
+ "photoslop-color",
+ "photoslop-core",
+ "photoslop-plugin-api",
+]
+
+[[package]]
+name = "photoslop-tools-type"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "photoslop-color",
+ "photoslop-core",
+ "photoslop-plugin-api",
+ "photoslop-text-engine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "photoslop-tools-vector"
+version = "0.1.0"
+dependencies = [
+ "photoslop-color",
+ "photoslop-core",
+ "photoslop-plugin-api",
+ "photoslop-vector",
+]
+
+[[package]]
+name = "photoslop-vector"
+version = "0.1.0"
+dependencies = [
+ "photoslop-core",
 ]
 
 [[package]]

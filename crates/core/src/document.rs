@@ -9,6 +9,7 @@ use photoslop_color::{ColorMode, Depth};
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DocumentId(pub u64);
@@ -258,6 +259,17 @@ impl Document {
                 self.add_damage(bounds);
                 self.structure_changed();
             }
+            EditOp::DocSize { before, after } => {
+                let (w, h) = if dir == Direction::Undo {
+                    *before
+                } else {
+                    *after
+                };
+                self.width = w;
+                self.height = h;
+                self.damage_all();
+                self.structure_changed();
+            }
             EditOp::SelectionSet { before, after } => {
                 let target = if dir == Direction::Undo {
                     before
@@ -429,6 +441,103 @@ impl<'a> EditBuilder<'a> {
             self.doc.tree.insert_at(&to, layer);
             self.ops.push(EditOp::LayerMove { from, to });
         }
+    }
+
+    /// Replace a raster layer's tiles wholesale, recording every tile that
+    /// changes (transforms, filters and resizes all go through this).
+    pub fn replace_layer_tiles(&mut self, layer_id: LayerId, new_tiles: TileMap) {
+        let Some(layer) = self.doc.tree.find(layer_id) else {
+            return;
+        };
+        let Some(raster) = layer.as_raster() else {
+            return;
+        };
+        let mut coords: Vec<TileCoord> = raster.tiles.coords().collect();
+        for coord in new_tiles.coords() {
+            if !coords.contains(&coord) {
+                coords.push(coord);
+            }
+        }
+        let mut damage = IntRect::EMPTY;
+        for coord in coords {
+            let before = self
+                .doc
+                .tree
+                .find(layer_id)
+                .and_then(|l| l.as_raster())
+                .and_then(|r| r.tiles.snapshot(coord));
+            let after = new_tiles.snapshot(coord);
+            if before.as_ref().map(Arc::as_ptr) == after.as_ref().map(Arc::as_ptr) {
+                continue;
+            }
+            self.ops.push(EditOp::TileWrite {
+                layer: layer_id,
+                coord,
+                before,
+                after: None,
+            });
+            self.recorded_tiles
+                .insert((layer_id, coord), self.ops.len() - 1);
+            damage = damage.union(&coord.rect());
+        }
+        if let Some(raster) = self
+            .doc
+            .tree
+            .find_mut(layer_id)
+            .and_then(|l| l.as_raster_mut())
+        {
+            raster.tiles = new_tiles;
+        }
+        self.damage = self.damage.union(&damage);
+    }
+
+    /// Apply an affine transform to a layer's pixels (and its mask).
+    pub fn transform_layer(
+        &mut self,
+        layer_id: LayerId,
+        matrix: &crate::resample::Affine,
+        filter: crate::resample::Filter,
+        clip: IntRect,
+    ) {
+        let depth = self.doc.depth;
+        let Some(layer) = self.doc.tree.find(layer_id) else {
+            return;
+        };
+        let Some(raster) = layer.as_raster() else {
+            return;
+        };
+        let transformed =
+            crate::resample::transform_tiles(&raster.tiles, matrix, depth, filter, clip);
+        self.replace_layer_tiles(layer_id, transformed);
+    }
+
+    /// Change the canvas size, optionally offsetting existing content
+    /// (Canvas Size) or rescaling every layer (Image Size).
+    pub fn set_canvas_size(&mut self, width: u32, height: u32) {
+        let before = (self.doc.width, self.doc.height);
+        if before == (width, height) {
+            return;
+        }
+        self.doc.width = width;
+        self.doc.height = height;
+        self.ops.push(EditOp::DocSize {
+            before,
+            after: (width, height),
+        });
+        self.damage = self.damage.union(&IntRect::from_size(
+            width.max(before.0),
+            height.max(before.1),
+        ));
+    }
+
+    /// Ids of every raster layer in the document, bottom-to-top.
+    pub fn raster_layer_ids(&self) -> Vec<LayerId> {
+        self.doc
+            .tree
+            .iter()
+            .filter(|l| l.as_raster().is_some())
+            .map(|l| l.id)
+            .collect()
     }
 
     /// Change scalar properties via closure; captures before/after.

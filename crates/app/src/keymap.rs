@@ -12,6 +12,9 @@ use photoslop_plugin_api::PluginRegistry;
 use std::path::PathBuf;
 
 const CONTEXT: Option<&str> = Some("Workspace");
+/// Context for bindings without modifiers: suppressed while a tool is
+/// capturing typing (see `Workspace::tool_captures_keys`).
+const TYPING_SAFE: Option<&str> = Some("Workspace && editable");
 
 fn translate(binding: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -44,7 +47,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
                 ActivateTool {
                     id: tool.id().to_string(),
                 },
-                CONTEXT,
+                TYPING_SAFE,
             ));
         }
     }
@@ -58,12 +61,22 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         KeyBinding::new(&translate("cmd--"), ZoomOut, CONTEXT),
         KeyBinding::new(&translate("cmd-0"), ZoomFit, CONTEXT),
         KeyBinding::new(&translate("cmd-1"), ZoomActual, CONTEXT),
-        KeyBinding::new("[", BrushSmaller, CONTEXT),
-        KeyBinding::new("]", BrushLarger, CONTEXT),
-        KeyBinding::new("x", SwapColors, CONTEXT),
-        KeyBinding::new("d", DefaultColors, CONTEXT),
+        KeyBinding::new("[", BrushSmaller, TYPING_SAFE),
+        KeyBinding::new("]", BrushLarger, TYPING_SAFE),
+        KeyBinding::new("x", SwapColors, TYPING_SAFE),
+        KeyBinding::new("d", DefaultColors, TYPING_SAFE),
         KeyBinding::new("escape", CancelGesture, CONTEXT),
+        KeyBinding::new("enter", CommitGesture, TYPING_SAFE),
+        KeyBinding::new(
+            &translate("cmd-t"),
+            ActivateTool {
+                id: "transform".into(),
+            },
+            CONTEXT,
+        ),
         KeyBinding::new(&translate("cmd-q"), Quit, CONTEXT),
+        KeyBinding::new(&translate("cmd-alt-i"), ShowImageSize, CONTEXT),
+        KeyBinding::new(&translate("cmd-alt-c"), ShowCanvasSize, CONTEXT),
     ]);
     // Digit keys -> tool opacity (1 = 10% … 0 = 100%).
     for digit in 0..=9u32 {
@@ -71,7 +84,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         bindings.push(KeyBinding::new(
             &digit.to_string(),
             SetToolOpacity { percent },
-            CONTEXT,
+            TYPING_SAFE,
         ));
     }
 

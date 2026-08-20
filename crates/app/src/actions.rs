@@ -41,6 +41,9 @@ actions!(
         SwapColors,
         DefaultColors,
         CancelGesture,
+        CommitGesture,
+        ShowImageSize,
+        ShowCanvasSize,
         Quit,
     ]
 );

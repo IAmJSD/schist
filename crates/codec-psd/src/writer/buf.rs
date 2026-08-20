@@ -59,7 +59,7 @@ impl Buf {
 
     /// Zero-pad until the buffer length is a multiple of `align`.
     pub fn pad_to(&mut self, align: usize) {
-        while self.data.len() % align != 0 {
+        while !self.data.len().is_multiple_of(align) {
             self.data.push(0);
         }
     }
@@ -72,7 +72,7 @@ impl Buf {
         let start = self.data.len();
         self.data.push(n as u8);
         self.data.extend_from_slice(&bytes[..n]);
-        while (self.data.len() - start) % align != 0 {
+        while !(self.data.len() - start).is_multiple_of(align) {
             self.data.push(0);
         }
     }

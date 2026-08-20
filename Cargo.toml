@@ -8,10 +8,15 @@ members = [
     "crates/compositor",
     "crates/color",
     "crates/codec-psd",
+    "crates/vector",
+    "crates/text-engine",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
     "plugins/tools-select",
+    "plugins/tools-transform",
+    "plugins/tools-vector",
+    "plugins/tools-type",
     "plugins/commands-core",
 ]
 
@@ -29,10 +34,15 @@ photoslop-pixel-ops = { path = "crates/pixel-ops" }
 photoslop-compositor = { path = "crates/compositor" }
 photoslop-color = { path = "crates/color" }
 photoslop-codec-psd = { path = "crates/codec-psd" }
+photoslop-vector = { path = "crates/vector" }
+photoslop-text-engine = { path = "crates/text-engine" }
 photoslop-codecs-common = { path = "plugins/codecs-common" }
 photoslop-tools-basic = { path = "plugins/tools-basic" }
 photoslop-tools-paint = { path = "plugins/tools-paint" }
 photoslop-tools-select = { path = "plugins/tools-select" }
+photoslop-tools-transform = { path = "plugins/tools-transform" }
+photoslop-tools-vector = { path = "plugins/tools-vector" }
+photoslop-tools-type = { path = "plugins/tools-type" }
 photoslop-commands-core = { path = "plugins/commands-core" }
 
 # external

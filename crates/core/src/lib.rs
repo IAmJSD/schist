@@ -9,6 +9,7 @@ pub mod document;
 pub mod geom;
 pub mod history;
 pub mod layer;
+pub mod resample;
 pub mod selection;
 pub mod tile;
 
@@ -20,6 +21,7 @@ pub use layer::{
     AdjustmentData, AdjustmentKind, GroupLayer, Layer, LayerId, LayerKind, LayerMask, LayerPath,
     LayerTree, RasterLayer, RawBlock,
 };
+pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
 pub use tile::{MaskTileMap, TileBuf, TileCoord, TileMap, TILE_PIXELS, TILE_SIZE};
 

@@ -2,8 +2,10 @@
 
 mod actions;
 mod assets;
+mod dialogs;
 mod keymap;
 mod panels;
+mod ui;
 mod workspace;
 
 use gpui::{px, size, App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions};
@@ -56,6 +58,9 @@ fn build_registry() -> PluginRegistry {
         Box::new(photoslop_tools_basic::BasicToolsPlugin),
         Box::new(photoslop_tools_paint::PaintToolsPlugin),
         Box::new(photoslop_tools_select::SelectToolsPlugin),
+        Box::new(photoslop_tools_transform::TransformToolsPlugin),
+        Box::new(photoslop_tools_vector::VectorToolsPlugin),
+        Box::new(photoslop_tools_type::TypeToolsPlugin),
         Box::new(photoslop_commands_core::CoreCommandsPlugin),
         Box::new(photoslop_codecs_common::CommonCodecsPlugin),
         Box::new(PsdPlugin),

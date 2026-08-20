@@ -85,6 +85,12 @@ pub enum EditOp {
         before: Option<Box<LayerMask>>,
         after: Option<Box<LayerMask>>,
     },
+    /// Canvas dimensions changed (Image Size / Canvas Size). Pixel moves
+    /// and rescales ride along as ordinary tile writes in the same edit.
+    DocSize {
+        before: (u32, u32),
+        after: (u32, u32),
+    },
     /// Selection changed.
     SelectionSet {
         before: Box<Selection>,

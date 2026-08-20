@@ -235,6 +235,23 @@ impl Layer {
         }
     }
 
+    /// Pixel-exact content bounds. `content_bounds` is tile-granular and
+    /// cheap (it drives damage tracking); this one scans pixels and is what
+    /// hit-testing, PSD layer rects and UI boxes want.
+    pub fn tight_bounds(&self) -> IntRect {
+        match &self.kind {
+            LayerKind::Raster(r) => r.tiles.content_bounds(),
+            LayerKind::Group(g) => {
+                let mut b = IntRect::EMPTY;
+                for child in &g.children {
+                    b = b.union(&child.tight_bounds());
+                }
+                b
+            }
+            LayerKind::Adjustment(_) => IntRect::EMPTY,
+        }
+    }
+
     fn find(&self, id: LayerId) -> Option<&Layer> {
         if self.id == id {
             return Some(self);

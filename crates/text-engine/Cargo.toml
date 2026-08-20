@@ -1,0 +1,13 @@
+[package]
+name = "photoslop-text-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-color.workspace = true
+fontdue = "0.9"
+fontdb = "0.24"
+log.workspace = true
+serde.workspace = true

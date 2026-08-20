@@ -1,0 +1,10 @@
+[package]
+name = "photoslop-tools-transform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-plugin-api.workspace = true
+photoslop-color.workspace = true

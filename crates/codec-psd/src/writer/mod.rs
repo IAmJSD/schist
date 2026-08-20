@@ -332,7 +332,7 @@ fn prepare_entry(entry: &Entry<'_>, doc: &Document, psb: bool) -> Result<Prepare
         Entry::Leaf(layer) => {
             let (bounds, channels) = match &layer.kind {
                 LayerKind::Raster(r) => {
-                    let bounds = tight_bounds(&r.tiles);
+                    let bounds = r.tiles.content_bounds();
                     if bounds.is_empty() {
                         (IntRect::EMPTY, empty_channels(doc))
                     } else {
@@ -426,33 +426,6 @@ fn empty_channels(doc: &Document) -> Vec<(i16, Vec<u8>)> {
 }
 
 // ===== channel data =====
-
-/// Tight (pixel-exact) bounds of a layer's non-transparent content.
-fn tight_bounds(tiles: &TileMap) -> IntRect {
-    let mut out = IntRect::EMPTY;
-    for (coord, buf) in tiles.iter() {
-        let trect = coord.rect();
-        for ly in 0..TILE_SIZE {
-            let mut first: Option<i32> = None;
-            let mut last = 0;
-            for lx in 0..TILE_SIZE {
-                if buf.get((ly * TILE_SIZE + lx) as usize).a > 0.0 {
-                    first.get_or_insert(lx);
-                    last = lx;
-                }
-            }
-            if let Some(first) = first {
-                out = out.union(&IntRect::new(
-                    trect.left + first,
-                    trect.top + ly,
-                    trect.left + last + 1,
-                    trect.top + ly + 1,
-                ));
-            }
-        }
-    }
-    out
-}
 
 fn mask_bounds(mask: &LayerMask) -> IntRect {
     if !mask.bounds.is_empty() {

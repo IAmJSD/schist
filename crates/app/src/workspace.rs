@@ -57,12 +57,35 @@ pub struct Workspace {
     /// Layer thumbnails keyed by layer id, tagged with the doc revision
     /// they were rendered at.
     thumbs: FxHashMap<photoslop_core::LayerId, (u64, Arc<RenderImage>)>,
+    /// The open modal dialog, if any.
+    pub modal: Option<Modal>,
+    /// Numeric field currently accepting digits, and its edit buffer.
+    pub focused_field: Option<&'static str>,
+    pub field_buffer: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
     Menu(usize),
     BlendModes,
+    /// A dropdown inside a dialog, keyed by field id.
+    Field(&'static str),
+}
+
+/// Which modal dialog is open.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Modal {
+    ImageSize {
+        width: u32,
+        height: u32,
+        filter: photoslop_core::Filter,
+        link: bool,
+    },
+    CanvasSize {
+        width: u32,
+        height: u32,
+        anchor: (f32, f32),
+    },
 }
 
 #[derive(Default)]
@@ -97,6 +120,9 @@ impl Workspace {
             slider_bounds: FxHashMap::default(),
             active_slider: None,
             thumbs: FxHashMap::default(),
+            modal: None,
+            focused_field: None,
+            field_buffer: String::new(),
         };
         ws.new_document();
         // Periodic crash-recovery snapshot; the task ends with the entity.
@@ -336,6 +362,7 @@ impl Workspace {
         let zx = (f32::from(avail.width) - margin) / doc.width as f32;
         let zy = (f32::from(avail.height) - margin) / doc.height as f32;
         self.zoom = zx.min(zy).clamp(0.005, 32.0);
+        self.editor.zoom = self.zoom;
         self.center();
     }
 
@@ -364,6 +391,7 @@ impl Workspace {
             px(f32::from(pivot.y) - (f32::from(pivot.y) - f32::from(self.offset.y)) * scale),
         );
         self.zoom = new;
+        self.editor.zoom = new;
     }
 
     fn doc_pos(&self, canvas_local: Point<Pixels>) -> (f32, f32) {
@@ -424,8 +452,16 @@ impl Workspace {
         }
         if let Some(tool) = self.registry.tool_mut(id) {
             let id = tool.id();
+            let name = tool.name();
             self.editor.active_tool = id;
-            self.status = format!("Tool: {}", tool.name()).into();
+            self.status = format!("Tool: {name}").into();
+            if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(id)) {
+                let mut ctx = ToolCtx {
+                    doc,
+                    state: &mut self.editor,
+                };
+                tool.on_activate(&mut ctx);
+            }
         }
         self.after_change(cx);
     }
@@ -535,7 +571,163 @@ impl Workspace {
         cx.notify();
     }
 
+    // ----- modals and numeric fields -----
+
+    pub fn open_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
+        self.modal = Some(modal);
+        self.focused_field = None;
+        self.field_buffer.clear();
+        self.open_popup = None;
+        cx.notify();
+    }
+
+    pub fn close_modal(&mut self, cx: &mut Context<Self>) {
+        self.modal = None;
+        self.focused_field = None;
+        self.field_buffer.clear();
+        self.open_popup = None;
+        cx.notify();
+    }
+
+    /// Mutate the open modal's state in place.
+    pub fn update_modal(&mut self, f: impl FnOnce(&mut Modal)) {
+        if let Some(modal) = &mut self.modal {
+            f(modal);
+        }
+    }
+
+    pub fn focus_field(&mut self, id: &'static str) {
+        self.focused_field = Some(id);
+        self.field_buffer.clear();
+    }
+
+    /// Feed a keystroke to the focused numeric field. Returns true when the
+    /// field consumed it.
+    fn field_key(&mut self, key: &str, text: Option<&str>) -> bool {
+        let Some(id) = self.focused_field else {
+            return false;
+        };
+        match key {
+            "backspace" => {
+                self.field_buffer.pop();
+            }
+            "escape" => {
+                self.focused_field = None;
+                self.field_buffer.clear();
+                return true;
+            }
+            "enter" | "tab" => {
+                self.commit_field(id);
+                return true;
+            }
+            _ => match text {
+                Some(t) if t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty() => {
+                    self.field_buffer.push_str(t)
+                }
+                _ => return false,
+            },
+        }
+        // Apply as you type so the dialog stays live.
+        self.commit_field_value(id);
+        true
+    }
+
+    fn commit_field(&mut self, id: &'static str) {
+        self.commit_field_value(id);
+        self.focused_field = None;
+        self.field_buffer.clear();
+    }
+
+    fn commit_field_value(&mut self, id: &'static str) {
+        let Ok(value) = self.field_buffer.parse::<f32>() else {
+            return;
+        };
+        let value = value.max(1.0);
+        let aspect = self
+            .doc
+            .as_ref()
+            .map(|d| d.width as f32 / d.height.max(1) as f32)
+            .unwrap_or(1.0);
+        self.update_modal(|m| match m {
+            Modal::ImageSize {
+                width,
+                height,
+                link,
+                ..
+            } => {
+                if id == "image-size-w" {
+                    *width = value as u32;
+                    if *link {
+                        *height = (value / aspect).round().max(1.0) as u32;
+                    }
+                } else if id == "image-size-h" {
+                    *height = value as u32;
+                    if *link {
+                        *width = (value * aspect).round().max(1.0) as u32;
+                    }
+                }
+            }
+            Modal::CanvasSize { width, height, .. } => {
+                if id == "canvas-size-w" {
+                    *width = value as u32;
+                } else if id == "canvas-size-h" {
+                    *height = value as u32;
+                }
+            }
+        });
+    }
+
+    /// True when the active tool is capturing raw typing.
+    pub fn tool_captures_keys(&mut self) -> bool {
+        let id = self.editor.active_tool;
+        self.registry
+            .tool_mut(id)
+            .map(|t| t.captures_keys())
+            .unwrap_or(false)
+    }
+
+    /// Feed a keystroke to the active tool. Returns true if it consumed it.
+    fn tool_key(&mut self, ev: &gpui::KeyDownEvent) -> bool {
+        let tool_id = self.editor.active_tool;
+        let key = ev.keystroke.key.clone();
+        let text = ev.keystroke.key_char.clone();
+        let modifiers = Modifiers {
+            shift: ev.keystroke.modifiers.shift,
+            alt: ev.keystroke.modifiers.alt,
+            ctrl_or_cmd: ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform,
+        };
+        let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) else {
+            return false;
+        };
+        let mut ctx = ToolCtx {
+            doc,
+            state: &mut self.editor,
+        };
+        tool.on_key(&mut ctx, &key, text.as_deref(), modifiers)
+    }
+
+    /// Enter: let the active tool commit its pending gesture.
+    pub fn commit_gesture(&mut self, cx: &mut Context<Self>) {
+        let tool_id = self.editor.active_tool;
+        if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
+            tool.on_commit(&mut ctx);
+        }
+        self.after_change(cx);
+    }
+
     pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
+        if self.modal.is_some() {
+            self.close_modal(cx);
+            return;
+        }
+        if self.open_popup.is_some() {
+            self.close_popup(cx);
+            return;
+        }
         self.pointer_down = false;
         self.pan_last = None;
         let tool_id = self.editor.active_tool;
@@ -1005,6 +1197,16 @@ impl Workspace {
             )
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
+                if ws.field_key(&ev.keystroke.key, ev.keystroke.key_char.as_deref()) {
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if ws.tool_key(ev) {
+                    ws.after_change(cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if ev.keystroke.key == "space" && !ev.is_held {
                     ws.space_held = true;
                     cx.notify();
@@ -1082,6 +1284,8 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let captures_keys = self.tool_captures_keys() || self.modal.is_some();
+        let modal = crate::dialogs::render(self, cx);
         div()
             .size_full()
             .flex()
@@ -1089,7 +1293,14 @@ impl Render for Workspace {
             .bg(gpui::rgb(0x1E1E1E))
             .text_color(gpui::rgb(0xD8D8D8))
             .text_size(px(12.0))
-            .key_context("Workspace")
+            // While a tool is capturing typing the context loses "editable",
+            // which is what single-letter shortcuts are bound against — so
+            // letters reach the tool instead of switching tools.
+            .key_context(if captures_keys {
+                "Workspace"
+            } else {
+                "Workspace editable"
+            })
             .on_action(cx.listener(|ws, action: &RunCommand, _w, cx| {
                 ws.run_command(&action.id.clone(), cx);
             }))
@@ -1128,6 +1339,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &ZoomActual, _w, cx| {
                 ws.zoom = 1.0;
+                ws.editor.zoom = 1.0;
                 ws.center();
                 cx.notify();
             }))
@@ -1151,6 +1363,30 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &CancelGesture, _w, cx| {
                 ws.cancel_gesture(cx);
             }))
+            .on_action(cx.listener(|ws, _: &CommitGesture, _w, cx| {
+                ws.commit_gesture(cx);
+            }))
+            .on_action(cx.listener(|ws, _: &ShowImageSize, _w, cx| {
+                if let Some(doc) = ws.doc.as_ref() {
+                    let modal = Modal::ImageSize {
+                        width: doc.width,
+                        height: doc.height,
+                        filter: ws.editor.resample,
+                        link: true,
+                    };
+                    ws.open_modal(modal, cx);
+                }
+            }))
+            .on_action(cx.listener(|ws, _: &ShowCanvasSize, _w, cx| {
+                if let Some(doc) = ws.doc.as_ref() {
+                    let modal = Modal::CanvasSize {
+                        width: doc.width,
+                        height: doc.height,
+                        anchor: (0.5, 0.5),
+                    };
+                    ws.open_modal(modal, cx);
+                }
+            }))
             .on_action(|_: &Quit, _w, cx| cx.quit())
             .child(panels::menu_bar(self, cx))
             .child(panels::tool_options_bar(self, cx))
@@ -1165,5 +1401,6 @@ impl Render for Workspace {
                     .child(panels::side_panels(self, cx)),
             )
             .child(panels::status_bar(self))
+            .children(modal)
     }
 }

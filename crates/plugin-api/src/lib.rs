@@ -56,6 +56,11 @@ pub struct EditorState {
     pub tool_opacity: f32,
     pub active_tool: &'static str,
     pub clipboard: Option<std::sync::Arc<ClipboardImage>>,
+    /// Current canvas zoom, mirrored from the viewport so tools can size
+    /// hit targets and handles in *screen* pixels.
+    pub zoom: f32,
+    /// Resampling filter used when committing transforms.
+    pub resample: photoslop_core::Filter,
 }
 
 impl Default for EditorState {
@@ -68,6 +73,8 @@ impl Default for EditorState {
             tool_opacity: 1.0,
             active_tool: "move",
             clipboard: None,
+            zoom: 1.0,
+            resample: photoslop_core::Filter::Bicubic,
         }
     }
 }
@@ -110,6 +117,33 @@ pub trait ToolPlugin: Send {
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput);
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput);
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput);
+    /// True while the tool wants raw typing (the type tool with an open
+    /// text layer). The shell switches the keymap context so single-letter
+    /// shortcuts stop matching, and routes keys to `on_key` instead.
+    fn captures_keys(&self) -> bool {
+        false
+    }
+
+    /// Raw key input, delivered before the keymap so a tool that is
+    /// capturing text (the type tool) can swallow plain letters instead of
+    /// letting them switch tools. `key` is the physical key name
+    /// ("a", "enter", "backspace"); `text` is the character it would type,
+    /// when it types one. Return true to consume the event.
+    fn on_key(
+        &mut self,
+        _ctx: &mut ToolCtx,
+        _key: &str,
+        _text: Option<&str>,
+        _modifiers: Modifiers,
+    ) -> bool {
+        false
+    }
+
+    /// The user switched to this tool. Modal tools (free transform, crop)
+    /// start their session here.
+    fn on_activate(&mut self, _ctx: &mut ToolCtx) {}
+    /// Enter pressed: commit whatever the tool has pending.
+    fn on_commit(&mut self, _ctx: &mut ToolCtx) {}
     /// Escape pressed while the tool is mid-gesture.
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {}
     /// Called when the user switches away from this tool.

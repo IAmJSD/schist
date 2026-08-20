@@ -72,6 +72,14 @@ pub fn unpack_channel(
     Ok(out)
 }
 
+/// Slice-based wrapper around [`unpack_row`], used by the writer's
+/// round-trip tests (encode -> decode -> compare).
+#[cfg(test)]
+pub fn unpack_row_for_test(packed: &[u8], out: &mut [u8]) -> Result<(), PsdError> {
+    let mut cur = Cursor::new(packed);
+    unpack_row(&mut cur, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,12 +139,4 @@ mod tests {
         let out = unpack_channel(&mut cur, 2, 4, false).unwrap();
         assert_eq!(out, [0xAA, 0xAA, 0xAA, 0xAA, 1, 2, 3, 4]);
     }
-}
-
-/// Slice-based wrapper around [`unpack_row`], used by the writer's
-/// round-trip tests (encode -> decode -> compare).
-#[cfg(test)]
-pub fn unpack_row_for_test(packed: &[u8], out: &mut [u8]) -> Result<(), PsdError> {
-    let mut cur = Cursor::new(packed);
-    unpack_row(&mut cur, out)
 }

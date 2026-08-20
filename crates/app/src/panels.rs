@@ -6,7 +6,7 @@
 //! are monochrome SVGs from the embedded asset source, tinted by text
 //! color — no emoji.
 
-use crate::workspace::{Popup, Workspace};
+use crate::workspace::{Modal, Popup, Workspace};
 use gpui::{
     canvas, deferred, div, img, px, svg, Context, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, RenderImage,
@@ -29,7 +29,7 @@ fn swatch_hex(c: Rgba) -> gpui::Rgba {
     gpui::rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
 }
 
-fn icon(name: &str, size: f32, color: u32) -> impl IntoElement {
+pub fn icon(name: &str, size: f32, color: u32) -> impl IntoElement {
     svg()
         .path(format!("icons/{name}.svg"))
         .size(px(size))
@@ -61,12 +61,17 @@ enum MenuEntry {
 enum AppItem {
     New,
     Open,
+    Save,
     SaveAs,
     Quit,
     ZoomIn,
     ZoomOut,
     ZoomFit,
     ZoomActual,
+    ImageSize,
+    CanvasSize,
+    FreeTransform,
+    Crop,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -78,6 +83,7 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
             vec![
                 App("New", New, Some("cmd-n")),
                 App("Open…", Open, Some("cmd-o")),
+                App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
                 Sep,
                 App("Quit", Quit, Some("cmd-q")),
@@ -97,6 +103,17 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Sep,
                 Cmd("edit.fill_foreground"),
                 Cmd("edit.fill_background"),
+                Sep,
+                App("Free Transform", FreeTransform, Some("cmd-t")),
+            ],
+        ),
+        (
+            "Image",
+            vec![
+                App("Image Size…", ImageSize, Some("cmd-alt-i")),
+                App("Canvas Size…", CanvasSize, Some("cmd-alt-c")),
+                Sep,
+                App("Crop to Selection", Crop, None),
             ],
         ),
         (
@@ -166,6 +183,7 @@ fn run_app_item(
     match item {
         AppItem::New => ws.new_document(),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
+        AppItem::Save => ws.save_current(window, cx),
         AppItem::SaveAs => crate::keymap::save_file_dialog(ws, window, cx),
         AppItem::Quit => cx.quit(),
         AppItem::ZoomIn => ws.zoom_by(1.25, None),
@@ -173,6 +191,46 @@ fn run_app_item(
         AppItem::ZoomFit => ws.fit_to_view(),
         AppItem::ZoomActual => {
             ws.zoom = 1.0;
+            ws.editor.zoom = 1.0;
+        }
+        AppItem::ImageSize => {
+            if let Some(doc) = ws.doc.as_ref() {
+                let modal = Modal::ImageSize {
+                    width: doc.width,
+                    height: doc.height,
+                    filter: ws.editor.resample,
+                    link: true,
+                };
+                ws.open_modal(modal, cx);
+            }
+        }
+        AppItem::CanvasSize => {
+            if let Some(doc) = ws.doc.as_ref() {
+                let modal = Modal::CanvasSize {
+                    width: doc.width,
+                    height: doc.height,
+                    anchor: (0.5, 0.5),
+                };
+                ws.open_modal(modal, cx);
+            }
+        }
+        AppItem::FreeTransform => ws.activate_tool("transform", cx),
+        AppItem::Crop => {
+            let rect = ws
+                .doc
+                .as_ref()
+                .filter(|d| !d.selection.is_empty())
+                .map(|d| d.selection.bounds().intersect(&d.canvas_rect()));
+            match rect {
+                Some(rect) if !rect.is_empty() => {
+                    if let Some(doc) = ws.doc.as_mut() {
+                        photoslop_tools_transform::crop_to(doc, rect);
+                    }
+                    ws.after_change(cx);
+                    ws.fit_to_view();
+                }
+                _ => ws.status = "Crop to Selection needs a selection".into(),
+            }
         }
     }
     cx.notify();
