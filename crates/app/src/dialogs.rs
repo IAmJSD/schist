@@ -66,6 +66,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             params,
             preview,
         } => destructive_adjustment_dialog(&state, kind, *params, preview, cx).into_any_element(),
+        Modal::Stroke { width, position } => {
+            stroke_dialog(ws, &state, width, position, cx).into_any_element()
+        }
+        Modal::Fill { source, opacity } => {
+            fill_dialog(ws, &state, source, opacity, cx).into_any_element()
+        }
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {
@@ -626,6 +632,188 @@ fn destructive_adjustment_dialog(
             cx,
         ));
     ui::modal_frame(kind.display_name(), 380.0, body, actions)
+}
+
+/// Edit ▸ Stroke.
+fn stroke_dialog(
+    ws: &Workspace,
+    _state: &DialogState,
+    width: f32,
+    position: photoslop_core::StrokePosition,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    use photoslop_core::StrokePosition;
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(param_slider(
+            SliderSpec {
+                id: "stroke-width",
+                label: "Width",
+                value: width,
+                min: 1.0,
+                max: 250.0,
+                suffix: " px",
+            },
+            |ws, v, _cx| {
+                ws.update_modal(|m| {
+                    if let Modal::Stroke { width, .. } = m {
+                        *width = v;
+                    }
+                });
+            },
+            cx,
+        ))
+        .child(ui::field_row(
+            "Location",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("stroke-position"),
+                    is_open: ws.open_popup == Some(Popup::Field("stroke-position")),
+                    current: position,
+                    label: match position {
+                        StrokePosition::Inside => "Inside",
+                        StrokePosition::Center => "Center",
+                        StrokePosition::Outside => "Outside",
+                    }
+                    .into(),
+                    width: 150.0,
+                    options: vec![
+                        ("Inside".into(), StrokePosition::Inside),
+                        ("Center".into(), StrokePosition::Center),
+                        ("Outside".into(), StrokePosition::Outside),
+                    ],
+                },
+                |ws, p| {
+                    ws.update_modal(|m| {
+                        if let Modal::Stroke { position, .. } = m {
+                            *position = p;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child("Strokes the selection in the foreground colour."),
+        );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            |ws, _w, cx| {
+                let mut run = None;
+                ws.update_modal(|m| {
+                    if let Modal::Stroke { width, position } = m {
+                        run = Some((*width, *position));
+                    }
+                });
+                ws.close_modal(cx);
+                if let Some((w, p)) = run {
+                    ws.stroke_selection(w, p, cx);
+                }
+            },
+            cx,
+        ));
+    ui::modal_frame("Stroke", 340.0, body, actions)
+}
+
+/// Edit ▸ Fill.
+fn fill_dialog(
+    ws: &Workspace,
+    _state: &DialogState,
+    source: crate::workspace::FillSource,
+    opacity: f32,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    use crate::workspace::FillSource;
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(ui::field_row(
+            "Contents",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("fill-source"),
+                    is_open: ws.open_popup == Some(Popup::Field("fill-source")),
+                    current: source,
+                    label: source.label().into(),
+                    width: 170.0,
+                    options: FillSource::ALL
+                        .iter()
+                        .map(|s| (SharedString::from(s.label()), *s))
+                        .collect(),
+                },
+                |ws, s| {
+                    ws.update_modal(|m| {
+                        if let Modal::Fill { source, .. } = m {
+                            *source = s;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(param_slider(
+            SliderSpec {
+                id: "fill-opacity",
+                label: "Opacity",
+                value: opacity * 100.0,
+                min: 0.0,
+                max: 100.0,
+                suffix: "%",
+            },
+            |ws, v, _cx| {
+                ws.update_modal(|m| {
+                    if let Modal::Fill { opacity, .. } = m {
+                        *opacity = v / 100.0;
+                    }
+                });
+            },
+            cx,
+        ));
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            |ws, _w, cx| {
+                let mut run = None;
+                ws.update_modal(|m| {
+                    if let Modal::Fill { source, opacity } = m {
+                        run = Some((*source, *opacity));
+                    }
+                });
+                ws.close_modal(cx);
+                if let Some((s, o)) = run {
+                    ws.fill_selection(s, o, cx);
+                }
+            },
+            cx,
+        ));
+    ui::modal_frame("Fill", 340.0, body, actions)
 }
 
 /// Select ▸ Modify: one amount and an OK.

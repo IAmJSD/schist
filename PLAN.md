@@ -12,16 +12,37 @@
 > options (M10); rulers/guides/grid/snapping, screen modes, themes,
 > preferences and the navigator (M11); packaging, crash reporting and docs
 > (M12). Verified end-to-end in a real window.
-> Known deferrals so far: rotate-view rendering, animated marching ants
+>
+> **M13 (parity pass, 2026-08-20).** Measured against Photoshop CC 2020 and
+> closed the gaps that mattered most: all nine layer effects with their
+> dialog (§13.1); the five missing selection tools and the rest of the
+> Select menu (§13.2); twelve retouch tools including the healing family
+> (§13.3); the filter set from 7 to 50 across eight categories (§13.4);
+> seven more adjustments, plus Image ▸ Adjustments applying them
+> destructively (§13.5); stored vector paths with both selection arrows,
+> two more pens and custom shapes (§13.6); nested menus, Image ▸ Mode /
+> Auto / Rotation / Trim, and Edit ▸ Fill / Stroke / Content-Aware Fill.
+> Three bugs found and fixed on the way: modal dialogs were not blocking
+> pointer input to the canvas, the stroker punched a hole through every
+> line's start cap, and open paths were being silently closed.
+>
+> Known deferrals: rotate-view rendering, animated marching ants
 > (static outline), tablet pressure (mouse = 1.0), system clipboard interop,
-> magnetic lasso, a curves *editor* widget (curves parse, render and
-> round-trip; only the graph UI is missing), vector shape layers saved as
-> vectors (they rasterize), CMYK/Lab documents, zip-compressed PSD channels,
+> a curves *editor* widget (curves parse, render and round-trip; only the
+> graph UI is missing), vector shape layers saved as vectors (they
+> rasterize), writing `lfx2` effect descriptors (effects render and edit,
+> but a layer whose effects were edited drops its stale block on save
+> rather than writing back something the canvas is not showing), smart
+> objects (preserved verbatim, not interpreted), Filter Gallery / Liquify /
+> Camera Raw / Neural Filters, Transform Selection, the frame tool,
+> artboards, layer comps, CMYK/Lab documents, zip-compressed PSD channels,
 > and the wgpu compositor — the CPU path meets the M8 interactivity target
 > on its own (measurements in §7/M8), so the GPU backend would add
-> complexity without a demonstrated win. macOS signing and notarization are
-> wired into the release workflow but unexercised here: this machine has no
-> Apple credentials, so those steps are secret-gated and skip cleanly.
+> complexity without a demonstrated win. 3D was never planned; Adobe
+> deprecated it immediately after CC 2020 and removed it in 2022. macOS
+> signing and notarization are wired into the release workflow but
+> unexercised here: this machine has no Apple credentials, so those steps
+> are secret-gated and skip cleanly.
 
 A GPU-accelerated, Photoshop-class raster/vector image editor written in Rust on **GPUI**
 (Zed's UI framework), with first-class **PSD** support, a **plugin-first architecture**

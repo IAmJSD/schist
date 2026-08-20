@@ -132,6 +132,40 @@ pub struct Workspace {
     proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
 }
 
+/// What Edit ▸ Fill fills with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillSource {
+    Foreground,
+    Background,
+    Black,
+    White,
+    Gray,
+    /// Grow the surroundings inwards over the selection.
+    ContentAware,
+}
+
+impl FillSource {
+    pub const ALL: [FillSource; 6] = [
+        FillSource::Foreground,
+        FillSource::Background,
+        FillSource::Black,
+        FillSource::White,
+        FillSource::Gray,
+        FillSource::ContentAware,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FillSource::Foreground => "Foreground Color",
+            FillSource::Background => "Background Color",
+            FillSource::Black => "Black",
+            FillSource::White => "White",
+            FillSource::Gray => "50% Gray",
+            FillSource::ContentAware => "Content-Aware",
+        }
+    }
+}
+
 /// What to do with the active stored path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathOp {
@@ -373,6 +407,13 @@ pub enum Modal {
         params: Box<photoslop_adjustments::Params>,
         preview: bool,
     },
+    /// Edit ▸ Stroke.
+    Stroke {
+        width: f32,
+        position: photoslop_core::StrokePosition,
+    },
+    /// Edit ▸ Fill.
+    Fill { source: FillSource, opacity: f32 },
     /// Select ▸ Modify, which all take one amount.
     SelectModify { kind: ModifyKind, amount: f32 },
     /// Select ▸ Color Range.
@@ -1293,6 +1334,221 @@ impl Workspace {
         self.after_change(cx);
     }
 
+    /// Edit ▸ Stroke: paint a band along the selection's edge.
+    pub fn stroke_selection(
+        &mut self,
+        width: f32,
+        position: photoslop_core::StrokePosition,
+        cx: &mut Context<Self>,
+    ) {
+        let colour = self.editor.foreground;
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.selection.is_empty() {
+            self.status = "Stroke needs a selection".into();
+            cx.notify();
+            return;
+        }
+        let Some(layer) = doc.active_layer else {
+            return;
+        };
+        // Border() already builds the band; asking it for the right
+        // position is a matter of which side of the edge to take.
+        let canvas = doc.canvas_rect();
+        let mut band = doc.selection.clone();
+        let w = width.round().max(1.0) as i32;
+        match position {
+            photoslop_core::StrokePosition::Inside => {
+                let mut inner = band.clone();
+                inner.contract(w, canvas);
+                subtract_into(&mut band, &inner, canvas);
+            }
+            photoslop_core::StrokePosition::Outside => {
+                let mut outer = band.clone();
+                outer.expand(w, canvas);
+                let inner = band.clone();
+                subtract_into(&mut outer, &inner, canvas);
+                band = outer;
+            }
+            photoslop_core::StrokePosition::Center => band.border(w, canvas),
+        }
+        let rect = band.bounds().intersect(&canvas);
+        if rect.is_empty() {
+            self.status = "Nothing to stroke".into();
+            cx.notify();
+            return;
+        }
+        let mut edit = doc.begin_edit("Stroke");
+        for coord in TileCoord::covering(&rect) {
+            let trect = coord.rect();
+            let clip = trect.intersect(&rect);
+            if clip.is_empty() {
+                continue;
+            }
+            let Some(tile) = edit.writable_tile(layer, coord) else {
+                break;
+            };
+            for y in clip.top..clip.bottom {
+                for x in clip.left..clip.right {
+                    let cov = band.coverage(x, y) as f32 / 255.0;
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    let under = tile.get(ix);
+                    tile.set(
+                        ix,
+                        Rgba {
+                            a: colour.a * cov,
+                            ..colour
+                        }
+                        .over(under),
+                    );
+                }
+            }
+        }
+        edit.commit();
+        self.status = "Stroke".into();
+        self.after_change(cx);
+    }
+
+    /// Edit ▸ Fill.
+    pub fn fill_selection(&mut self, source: FillSource, opacity: f32, cx: &mut Context<Self>) {
+        let colour = match source {
+            FillSource::Foreground => self.editor.foreground,
+            FillSource::Background => self.editor.background,
+            FillSource::Black => Rgba::new(0.0, 0.0, 0.0, 1.0),
+            FillSource::White => Rgba::new(1.0, 1.0, 1.0, 1.0),
+            FillSource::Gray => Rgba::new(0.5, 0.5, 0.5, 1.0),
+            FillSource::ContentAware => {
+                self.content_aware_fill(cx);
+                return;
+            }
+        };
+        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(layer) = doc.active_layer else {
+            return;
+        };
+        let canvas = doc.canvas_rect();
+        let rect = if doc.selection.is_empty() {
+            canvas
+        } else {
+            doc.selection.bounds().intersect(&canvas)
+        };
+        if rect.is_empty() {
+            return;
+        }
+        let selection = doc.selection.clone();
+        let mut edit = doc.begin_edit("Fill");
+        for coord in TileCoord::covering(&rect) {
+            let trect = coord.rect();
+            let clip = trect.intersect(&rect);
+            if clip.is_empty() {
+                continue;
+            }
+            let Some(tile) = edit.writable_tile(layer, coord) else {
+                break;
+            };
+            for y in clip.top..clip.bottom {
+                for x in clip.left..clip.right {
+                    let cov = selection.coverage(x, y) as f32 / 255.0 * opacity;
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    let under = tile.get(ix);
+                    tile.set(
+                        ix,
+                        Rgba {
+                            a: colour.a * cov,
+                            ..colour
+                        }
+                        .over(under),
+                    );
+                }
+            }
+        }
+        edit.commit();
+        self.status = "Fill".into();
+        self.after_change(cx);
+    }
+
+    /// Edit ▸ Content-Aware Fill: grow the surroundings over the selection.
+    pub fn content_aware_fill(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.selection.is_empty() {
+            self.status = "Content-Aware Fill needs a selection".into();
+            cx.notify();
+            return;
+        }
+        let Some(layer) = doc.active_layer else {
+            return;
+        };
+        let canvas = doc.canvas_rect();
+        let sel_rect = doc.selection.bounds().intersect(&canvas);
+        // Work over a margin so the fill has surroundings to grow from.
+        let rect = IntRect::new(
+            sel_rect.left - 16,
+            sel_rect.top - 16,
+            sel_rect.right + 16,
+            sel_rect.bottom + 16,
+        )
+        .intersect(&canvas);
+        let Some(tiles) = doc
+            .tree
+            .find(layer)
+            .and_then(|l| l.as_raster())
+            .map(|r| r.tiles.clone())
+        else {
+            self.status = "Content-Aware Fill needs a pixel layer".into();
+            cx.notify();
+            return;
+        };
+        let selection = doc.selection.clone();
+        let (w, h) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
+        let mut hole = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                hole[y * w + x] =
+                    selection.coverage(rect.left + x as i32, rect.top + y as i32) >= 128;
+            }
+        }
+        let filled = photoslop_tools_retouch::inpaint(&tiles, rect, &hole);
+        let mut edit = doc.begin_edit("Content-Aware Fill");
+        for coord in TileCoord::covering(&rect) {
+            let trect = coord.rect();
+            let clip = trect.intersect(&rect);
+            if clip.is_empty() {
+                continue;
+            }
+            let Some(tile) = edit.writable_tile(layer, coord) else {
+                break;
+            };
+            for y in clip.top..clip.bottom {
+                for x in clip.left..clip.right {
+                    let cov = selection.coverage(x, y) as f32 / 255.0;
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    let under = tile.get(ix);
+                    let patch = filled[(y - rect.top) as usize * w + (x - rect.left) as usize];
+                    tile.set(
+                        ix,
+                        Rgba {
+                            r: under.r + (patch.r - under.r) * cov,
+                            g: under.g + (patch.g - under.g) * cov,
+                            b: under.b + (patch.b - under.b) * cov,
+                            a: under.a + (patch.a - under.a) * cov,
+                        },
+                    );
+                }
+            }
+        }
+        edit.commit();
+        self.status = "Content-Aware Fill".into();
+        self.after_change(cx);
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its
@@ -1886,6 +2142,8 @@ impl Workspace {
             }
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
+            | Modal::Stroke { .. }
+            | Modal::Fill { .. }
             | Modal::SelectModify { .. }
             | Modal::ColorRange { .. }
             | Modal::LayerStyle { .. }
@@ -4012,3 +4270,18 @@ const PATH_TOOLS: &[&str] = &[
     "path_select",
     "direct_select",
 ];
+
+/// Remove `other`'s coverage from `sel`, in place.
+fn subtract_into(
+    sel: &mut photoslop_core::Selection,
+    other: &photoslop_core::Selection,
+    canvas: IntRect,
+) {
+    let rect = sel.bounds().intersect(&canvas);
+    let keep = sel.clone();
+    sel.deselect();
+    sel.activate();
+    sel.apply_shape(rect, photoslop_core::SelectOp::Replace, |x, y| {
+        keep.coverage(x, y).saturating_sub(other.coverage(x, y))
+    });
+}

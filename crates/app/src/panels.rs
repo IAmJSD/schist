@@ -113,6 +113,9 @@ enum AppItem {
     Trim,
     /// Apply an adjustment to the pixels rather than adding a layer.
     ApplyAdjustment(photoslop_core::AdjustmentKind),
+    StrokeItem,
+    FillItem,
+    ContentAwareFill,
     PathFill,
     PathStroke,
     PathToSelection,
@@ -152,6 +155,9 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Sep,
                 Cmd("edit.fill_foreground"),
                 Cmd("edit.fill_background"),
+                App("Fill…", FillItem, Some("shift-f5")),
+                App("Stroke…", StrokeItem, None),
+                App("Content-Aware Fill", ContentAwareFill, None),
                 Sep,
                 App("Free Transform", FreeTransform, Some("cmd-t")),
                 Sub(
@@ -540,6 +546,21 @@ fn run_app_item(
         AppItem::FlipCanvasV => ws.transform_canvas(crate::workspace::CanvasTransform::FlipV, cx),
         AppItem::Trim => ws.trim(cx),
         AppItem::ApplyAdjustment(kind) => ws.apply_adjustment_destructive(kind, cx),
+        AppItem::StrokeItem => ws.open_modal(
+            Modal::Stroke {
+                width: 3.0,
+                position: photoslop_core::StrokePosition::Center,
+            },
+            cx,
+        ),
+        AppItem::FillItem => ws.open_modal(
+            Modal::Fill {
+                source: crate::workspace::FillSource::Foreground,
+                opacity: 1.0,
+            },
+            cx,
+        ),
+        AppItem::ContentAwareFill => ws.content_aware_fill(cx),
         AppItem::PathFill => ws.use_active_path(crate::workspace::PathOp::Fill, cx),
         AppItem::PathStroke => ws.use_active_path(crate::workspace::PathOp::Stroke, cx),
         AppItem::PathToSelection => ws.use_active_path(crate::workspace::PathOp::Select, cx),
