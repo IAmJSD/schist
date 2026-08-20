@@ -6,14 +6,15 @@
 //! toolbar and keymap treat them uniformly.
 
 use photoslop_color::Rgba;
-use photoslop_core::{Document, IntRect};
-use photoslop_plugin_api::{
-    EditorState, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolPlugin,
-};
+use photoslop_core::IntRect;
+use photoslop_plugin_api::{PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolPlugin};
 
-/// Move tool: drags the active layer. Pixels move on release (the canvas
-/// shows the outline during the drag); arrow-key nudge arrives with M11's
-/// keybind audit.
+/// Move tool: drags the active layer.
+///
+/// The pixels follow the cursor live. During the drag that happens through
+/// the layer's transient `render_offset`, so a 100-megapixel layer costs
+/// nothing per mouse event; on release the offset is baked into the tiles
+/// as a single undoable edit.
 pub struct MoveTool {
     drag: Option<Drag>,
 }
@@ -21,8 +22,8 @@ pub struct MoveTool {
 struct Drag {
     layer: photoslop_core::LayerId,
     start: (f32, f32),
-    current: (f32, f32),
-    bounds: IntRect,
+    /// The offset currently applied to the layer.
+    offset: (i32, i32),
 }
 
 impl MoveTool {
@@ -58,22 +59,48 @@ impl ToolPlugin for MoveTool {
         self.drag = Some(Drag {
             layer: id,
             start: (input.x, input.y),
-            current: (input.x, input.y),
-            bounds: layer.content_bounds(),
+            offset: (0, 0),
         });
     }
 
-    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
-        if let Some(drag) = &mut self.drag {
-            drag.current = (input.x, input.y);
+    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        let Some(drag) = &mut self.drag else { return };
+        let offset = (
+            (input.x - drag.start.0).round() as i32,
+            (input.y - drag.start.1).round() as i32,
+        );
+        if offset == drag.offset {
+            return;
         }
+        let previous = drag.offset;
+        drag.offset = offset;
+        let layer_id = drag.layer;
+        // Redraw where the layer was and where it now is.
+        let mut damage = IntRect::EMPTY;
+        if let Some(layer) = ctx.doc.tree.find_mut(layer_id) {
+            damage = damage.union(&layer.content_bounds());
+            layer.render_offset = offset;
+            damage = damage.union(&layer.content_bounds());
+        }
+        let _ = previous;
+        ctx.doc.add_damage(damage.inflated(1));
     }
 
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         let Some(drag) = self.drag.take() else { return };
-        let dx = (input.x - drag.start.0).round() as i32;
-        let dy = (input.y - drag.start.1).round() as i32;
+        // Take the offset from the release point: a fast drag can deliver
+        // down and up with no move event in between.
+        let (dx, dy) = (
+            (input.x - drag.start.0).round() as i32,
+            (input.y - drag.start.1).round() as i32,
+        );
+        // Put the layer back where its pixels actually are, then record the
+        // move as one edit so undo restores the original position.
+        if let Some(layer) = ctx.doc.tree.find_mut(drag.layer) {
+            layer.render_offset = (0, 0);
+        }
         if dx == 0 && dy == 0 {
+            ctx.doc.damage_all();
             return;
         }
         let mut edit = ctx.doc.begin_edit("Move Layer");
@@ -81,20 +108,17 @@ impl ToolPlugin for MoveTool {
         edit.commit();
     }
 
-    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
-        self.drag = None;
-    }
-
-    fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
-        match &self.drag {
-            Some(drag) if !drag.bounds.is_empty() => {
-                let dx = (drag.current.0 - drag.start.0).round() as i32;
-                let dy = (drag.current.1 - drag.start.1).round() as i32;
-                vec![Overlay::Rect(drag.bounds.translated(dx, dy))]
+    fn on_cancel(&mut self, ctx: &mut ToolCtx) {
+        if let Some(drag) = self.drag.take() {
+            if let Some(layer) = ctx.doc.tree.find_mut(drag.layer) {
+                layer.render_offset = (0, 0);
             }
-            _ => Vec::new(),
+            ctx.doc.damage_all();
         }
     }
+
+    // No overlay: the layer itself moves, so an outline would just be
+    // noise on top of it.
 }
 
 /// Eyedropper: picks the composited color under the cursor into the
@@ -187,8 +211,8 @@ impl PluginManifest for BasicToolsPlugin {
 mod tests {
     use super::*;
     use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, Layer};
-    use photoslop_plugin_api::Modifiers;
+    use photoslop_core::{blit_rgba8, Document, Layer};
+    use photoslop_plugin_api::{EditorState, Modifiers};
 
     fn input(x: f32, y: f32) -> PointerInput {
         PointerInput {
@@ -244,6 +268,84 @@ mod tests {
         assert_eq!(px(&doc, 15, 15), [255, 0, 0, 255], "undo restores");
         doc.redo();
         assert_eq!(px(&doc, 115, 65), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn drag_moves_pixels_live_before_release() {
+        let mut doc = red_square_doc();
+        let id = doc.active_layer.unwrap();
+        let mut state = EditorState::default();
+        let mut tool = MoveTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        tool.on_pointer_move(&mut ctx, input(120.0, 70.0));
+
+        // Mid-drag the layer already reads as moved...
+        let layer = doc.tree.find(id).unwrap();
+        assert_eq!(layer.render_offset, (100, 50));
+        assert_eq!(
+            layer.tight_bounds(),
+            IntRect::from_xywh(110, 60, 32, 32),
+            "bounds follow the drag"
+        );
+        // ...without any pixels having been rewritten yet.
+        assert_eq!(
+            layer.as_raster().unwrap().tiles.pixel(15, 15).to_u8(),
+            [255, 0, 0, 255],
+            "tiles untouched during the drag"
+        );
+        assert!(!doc.history.can_undo(), "nothing recorded mid-drag");
+    }
+
+    #[test]
+    fn cancelling_a_drag_puts_the_layer_back() {
+        let mut doc = red_square_doc();
+        let id = doc.active_layer.unwrap();
+        let mut state = EditorState::default();
+        let mut tool = MoveTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        tool.on_pointer_move(&mut ctx, input(120.0, 70.0));
+        tool.on_cancel(&mut ctx);
+        let layer = doc.tree.find(id).unwrap();
+        assert_eq!(layer.render_offset, (0, 0));
+        assert_eq!(layer.tight_bounds(), IntRect::from_xywh(10, 10, 32, 32));
+    }
+
+    #[test]
+    fn releasing_bakes_the_offset_into_the_pixels() {
+        let mut doc = red_square_doc();
+        let id = doc.active_layer.unwrap();
+        let mut state = EditorState::default();
+        let mut tool = MoveTool::new();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+            tool.on_pointer_move(&mut ctx, input(120.0, 70.0));
+            tool.on_pointer_up(&mut ctx, input(120.0, 70.0));
+        }
+        let layer = doc.tree.find(id).unwrap();
+        assert_eq!(layer.render_offset, (0, 0), "offset consumed");
+        assert_eq!(
+            layer.as_raster().unwrap().tiles.pixel(115, 65).to_u8(),
+            [255, 0, 0, 255],
+            "pixels really moved"
+        );
+        doc.undo();
+        let layer = doc.tree.find(id).unwrap();
+        assert_eq!(
+            layer.as_raster().unwrap().tiles.pixel(15, 15).to_u8(),
+            [255, 0, 0, 255]
+        );
     }
 
     #[test]

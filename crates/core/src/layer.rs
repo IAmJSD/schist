@@ -173,6 +173,13 @@ pub struct Layer {
     pub kind: LayerKind,
     /// Preserved PSD blocks (text engine data, effects, smart object refs…).
     pub extras: Vec<RawBlock>,
+    /// Transient display offset, in document pixels.
+    ///
+    /// The move tool sets this while dragging so the layer appears to move
+    /// immediately without rewriting a megabyte of tiles per mouse event;
+    /// on release the offset is baked into the pixels and cleared. It is
+    /// never saved.
+    pub render_offset: (i32, i32),
 }
 
 impl Layer {
@@ -189,6 +196,7 @@ impl Layer {
             mask: None,
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
+            render_offset: (0, 0),
         }
     }
 
@@ -225,10 +233,12 @@ impl Layer {
         }
     }
 
-    /// Content bounds in document space (tile-granular for raster).
+    /// Content bounds in document space (tile-granular for raster),
+    /// including any transient drag offset.
     pub fn content_bounds(&self) -> IntRect {
+        let (dx, dy) = self.render_offset;
         match &self.kind {
-            LayerKind::Raster(r) => r.tiles.tile_bounds(),
+            LayerKind::Raster(r) => r.tiles.tile_bounds().translated(dx, dy),
             LayerKind::Group(g) => {
                 let mut b = IntRect::EMPTY;
                 for child in &g.children {
@@ -244,8 +254,9 @@ impl Layer {
     /// cheap (it drives damage tracking); this one scans pixels and is what
     /// hit-testing, PSD layer rects and UI boxes want.
     pub fn tight_bounds(&self) -> IntRect {
+        let (dx, dy) = self.render_offset;
         match &self.kind {
-            LayerKind::Raster(r) => r.tiles.content_bounds(),
+            LayerKind::Raster(r) => r.tiles.content_bounds().translated(dx, dy),
             LayerKind::Group(g) => {
                 let mut b = IntRect::EMPTY;
                 for child in &g.children {

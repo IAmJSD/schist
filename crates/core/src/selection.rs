@@ -23,6 +23,9 @@ pub struct Selection {
     bounds: IntRect,
     /// False = no selection in effect (everything editable).
     active: bool,
+    /// Bumped on every change, so views can cache derived data (the
+    /// marching-ants outline) without diffing the mask.
+    generation: u64,
 }
 
 impl Selection {
@@ -38,6 +41,11 @@ impl Selection {
     /// Mark the selection active (used by tools writing `mask` directly).
     pub fn activate(&mut self) {
         self.active = true;
+    }
+
+    /// Counter identifying this selection's contents.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn bounds(&self) -> IntRect {
@@ -56,6 +64,7 @@ impl Selection {
 
     /// Recompute pixel-tight bounds by scanning tile contents.
     pub fn recompute_bounds(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.mask.prune_blank();
         let mut bounds = IntRect::EMPTY;
         for (coord, buf) in self.mask.iter() {
@@ -252,6 +261,7 @@ impl Selection {
         self.mask = MaskTileMap::new();
         self.bounds = IntRect::EMPTY;
         self.active = false;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Feather: approximate gaussian blur of the coverage mask using three
@@ -292,6 +302,53 @@ impl Selection {
         }
         self.mask = mask;
         self.recompute_bounds();
+    }
+
+    /// Trace the selection's boundary as polylines in document space.
+    ///
+    /// This is what "marching ants" actually are: the edges between
+    /// selected and unselected pixels, not the bounding box. Runs of
+    /// collinear edges are merged, so a rectangular selection comes back as
+    /// four segments rather than thousands.
+    pub fn outline(&self) -> Vec<Vec<(f32, f32)>> {
+        if self.is_empty() || self.bounds.is_empty() {
+            return Vec::new();
+        }
+        let bounds = self.bounds;
+        let inside = |x: i32, y: i32| self.mask.value(x, y) >= 128;
+        let mut segments: Vec<Vec<(f32, f32)>> = Vec::new();
+
+        // Horizontal edges: scan each row boundary, merging runs.
+        for y in bounds.top..=bounds.bottom {
+            let mut run: Option<i32> = None;
+            for x in bounds.left..=bounds.right {
+                let edge = x < bounds.right && inside(x, y) != inside(x, y - 1);
+                match (edge, run) {
+                    (true, None) => run = Some(x),
+                    (false, Some(start)) => {
+                        segments.push(vec![(start as f32, y as f32), (x as f32, y as f32)]);
+                        run = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Vertical edges.
+        for x in bounds.left..=bounds.right {
+            let mut run: Option<i32> = None;
+            for y in bounds.top..=bounds.bottom {
+                let edge = y < bounds.bottom && inside(x, y) != inside(x - 1, y);
+                match (edge, run) {
+                    (true, None) => run = Some(y),
+                    (false, Some(start)) => {
+                        segments.push(vec![(x as f32, start as f32), (x as f32, y as f32)]);
+                        run = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        segments
     }
 
     /// Approximate fraction of the canvas selected, for status display.
@@ -433,5 +490,90 @@ mod tests {
         sel.select_polygon(&[(0.0, 0.0), (40.0, 0.0), (0.0, 40.0)], SelectOp::Replace);
         assert!(sel.coverage(5, 5) > 200);
         assert_eq!(sel.coverage(35, 35), 0);
+    }
+}
+
+#[cfg(test)]
+mod outline_tests {
+    use super::*;
+
+    fn segments_of(sel: &Selection) -> Vec<((i32, i32), (i32, i32))> {
+        sel.outline()
+            .into_iter()
+            .map(|run| {
+                (
+                    (run[0].0 as i32, run[0].1 as i32),
+                    (run[1].0 as i32, run[1].1 as i32),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rectangle_traces_four_edges() {
+        let mut sel = Selection::new();
+        sel.select_rect(IntRect::from_xywh(2, 3, 5, 4), SelectOp::Replace);
+        let segs = segments_of(&sel);
+        // Merged runs, so a rectangle is exactly four segments.
+        assert_eq!(segs.len(), 4, "{segs:?}");
+        assert!(segs.contains(&((2, 3), (7, 3))), "top edge: {segs:?}");
+        assert!(segs.contains(&((2, 7), (7, 7))), "bottom edge: {segs:?}");
+        assert!(segs.contains(&((2, 3), (2, 7))), "left edge: {segs:?}");
+        assert!(segs.contains(&((7, 3), (7, 7))), "right edge: {segs:?}");
+    }
+
+    #[test]
+    fn outline_follows_a_hole_not_the_bounding_box() {
+        let mut sel = Selection::new();
+        sel.select_rect(IntRect::from_xywh(0, 0, 20, 20), SelectOp::Replace);
+        sel.select_rect(IntRect::from_xywh(5, 5, 10, 10), SelectOp::Subtract);
+        let segs = segments_of(&sel);
+        // Four edges outside plus four around the hole.
+        assert_eq!(segs.len(), 8, "{segs:?}");
+        assert!(
+            segs.contains(&((5, 5), (15, 5))),
+            "hole's top edge: {segs:?}"
+        );
+    }
+
+    #[test]
+    fn diagonal_selection_traces_a_staircase_not_a_rectangle() {
+        let mut sel = Selection::new();
+        sel.select_polygon(&[(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)], SelectOp::Replace);
+        let segs = segments_of(&sel);
+        // A triangle's hypotenuse becomes many short runs; a bounding box
+        // would have produced four.
+        assert!(
+            segs.len() > 10,
+            "expected a traced edge, got {}",
+            segs.len()
+        );
+        // Nothing may appear in the far corner, which the bounds include.
+        assert!(
+            !segs
+                .iter()
+                .any(|(a, b)| a.0 > 14 && a.1 > 14 || b.0 > 14 && b.1 > 14),
+            "outline stays off the empty corner: {segs:?}"
+        );
+    }
+
+    #[test]
+    fn empty_selection_has_no_outline() {
+        assert!(Selection::new().outline().is_empty());
+        let mut sel = Selection::new();
+        sel.select_rect(IntRect::from_xywh(0, 0, 4, 4), SelectOp::Replace);
+        sel.deselect();
+        assert!(sel.outline().is_empty());
+    }
+
+    #[test]
+    fn generation_changes_when_the_selection_does() {
+        let mut sel = Selection::new();
+        let start = sel.generation();
+        sel.select_rect(IntRect::from_xywh(0, 0, 4, 4), SelectOp::Replace);
+        let after_select = sel.generation();
+        assert_ne!(start, after_select);
+        sel.deselect();
+        assert_ne!(after_select, sel.generation());
     }
 }

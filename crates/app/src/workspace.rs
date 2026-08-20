@@ -111,6 +111,9 @@ pub struct Workspace {
     pub screen_mode: ScreenMode,
     /// A guide being dragged out of a ruler.
     dragging_guide: Option<photoslop_core::Guide>,
+    /// The selection outline, tagged with the selection generation it was
+    /// traced from.
+    selection_outline: Option<(u64, SelectionOutline)>,
     /// Navigator thumbnail, tagged with the revision it was rendered at.
     nav_thumb: Option<(u64, Arc<RenderImage>)>,
     /// The canvas takes focus on the first frame so keyboard shortcuts work
@@ -191,6 +194,9 @@ impl Default for ViewOptions {
         }
     }
 }
+
+/// A traced selection boundary: runs of document-space points.
+type SelectionOutline = Arc<Vec<Vec<(f32, f32)>>>;
 
 /// What a context menu was opened on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +326,7 @@ impl Workspace {
             view: load_view_options(),
             screen_mode: ScreenMode::default(),
             dragging_guide: None,
+            selection_outline: None,
             nav_thumb: None,
             focused_once: false,
             color_epoch: 0,
@@ -2132,6 +2139,24 @@ impl Workspace {
 
     // ----- painting -----
 
+    /// The selection's traced boundary, recomputed only when the selection
+    /// itself changes.
+    fn selection_outline(&mut self, generation: u64) -> SelectionOutline {
+        if let Some((gen, outline)) = &self.selection_outline {
+            if *gen == generation {
+                return outline.clone();
+            }
+        }
+        let outline = Arc::new(
+            self.doc
+                .as_ref()
+                .map(|d| d.selection.outline())
+                .unwrap_or_default(),
+        );
+        self.selection_outline = Some((generation, outline.clone()));
+        outline
+    }
+
     /// A composited tile after colour management, cached per tile.
     ///
     /// Colour conversion is the expensive part, so it stays tile-cached;
@@ -2415,8 +2440,8 @@ impl Workspace {
         let zoom = self.zoom;
         // Immutable-phase data, captured by value so the mutable phase
         // below (preview/tile-image builds) doesn't fight the borrows.
-        let sel_bounds = (!doc.selection.is_empty() && !doc.selection.bounds().is_empty())
-            .then(|| doc.selection.bounds());
+        let selection_generation = doc.selection.generation();
+        let has_selection = !doc.selection.is_empty() && !doc.selection.bounds().is_empty();
         let mut guides = doc.guides.clone();
         if let Some(dragging) = self.dragging_guide {
             guides.push(dragging);
@@ -2530,21 +2555,14 @@ impl Workspace {
             }
         }
 
-        // Selection marching-ants (static dashes for now: alternating
-        // black/white nested outlines).
-        if let Some(b) = sel_bounds.filter(|_| self.view.extras) {
-            let bounds_px = snapped_bounds(b);
-            job.outlines.push((bounds_px, gpui::rgb(0xFFFFFF).into()));
-            job.outlines.push((
-                Bounds {
-                    origin: point(bounds_px.origin.x - px(1.0), bounds_px.origin.y - px(1.0)),
-                    size: size(
-                        bounds_px.size.width + px(2.0),
-                        bounds_px.size.height + px(2.0),
-                    ),
-                },
-                gpui::rgb(0x000000).into(),
-            ));
+        // Marching ants: the selection's actual boundary, traced from the
+        // coverage mask and cached until the selection changes.
+        if has_selection && self.view.extras {
+            let outline = self.selection_outline(selection_generation);
+            for run in outline.iter() {
+                let pts: Vec<Point<Pixels>> = run.iter().map(|&(x, y)| to_screen(x, y)).collect();
+                push_ants(&mut job.ants, &pts);
+            }
         }
 
         // Active tool overlays.
@@ -2562,11 +2580,13 @@ impl Workspace {
                 Overlay::AntsPolygon(points) => {
                     let pts: Vec<Point<Pixels>> =
                         points.iter().map(|&(x, y)| to_screen(x, y)).collect();
-                    job.polylines.push(pts);
+                    push_ants(&mut job.ants, &pts);
                 }
                 Overlay::Line { x1, y1, x2, y2 } => {
-                    job.polylines
-                        .push(vec![to_screen(x1, y1), to_screen(x2, y2)]);
+                    job.polylines.push((
+                        vec![to_screen(x1, y1), to_screen(x2, y2)],
+                        gpui::rgb(0xFFFFFF).into(),
+                    ));
                 }
                 Overlay::Circle { cx: ccx, cy, r } => {
                     let d = r * 2.0 * zoom;
@@ -2664,7 +2684,25 @@ impl Workspace {
                                 gpui::BorderStyle::Solid,
                             ));
                         }
-                        for pts in job.polylines {
+                        for (segments, color) in [
+                            (job.ants.light, gpui::rgb(0xFFFFFF)),
+                            (job.ants.dark, gpui::rgb(0x000000)),
+                        ] {
+                            if segments.is_empty() {
+                                continue;
+                            }
+                            // One path per colour: a traced selection can be
+                            // thousands of dashes.
+                            let mut pb = PathBuilder::stroke(px(1.0));
+                            for [a, b] in segments {
+                                pb.move_to(a);
+                                pb.line_to(b);
+                            }
+                            if let Ok(path) = pb.build() {
+                                window.paint_path(path, color);
+                            }
+                        }
+                        for (pts, color) in job.polylines {
                             if pts.len() < 2 {
                                 continue;
                             }
@@ -2674,7 +2712,7 @@ impl Workspace {
                                 pb.line_to(*p);
                             }
                             if let Ok(path) = pb.build() {
-                                window.paint_path(path, gpui::rgb(0xFFFFFF));
+                                window.paint_path(path, color);
                             }
                         }
                         for bounds in job.circles {
@@ -2695,11 +2733,59 @@ impl Workspace {
     }
 }
 
+/// Marching ants: split a screen-space polyline into alternating white and
+/// black dashes so the outline reads over any content underneath.
+///
+/// The dash phase comes from each dash's *position* rather than its
+/// distance along the polyline. A traced selection arrives as hundreds of
+/// short runs, and per-run phase would restart every few pixels — leaving
+/// the whole outline one colour.
+fn push_ants(ants: &mut Ants, pts: &[Point<Pixels>]) {
+    const DASH: f32 = 4.0;
+    if pts.len() < 2 {
+        return;
+    }
+    for pair in pts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let (ax, ay) = (f32::from(a.x), f32::from(a.y));
+        let (bx, by) = (f32::from(b.x), f32::from(b.y));
+        let len = (bx - ax).hypot(by - ay);
+        if len <= 0.01 {
+            continue;
+        }
+        let mut t = 0.0f32;
+        while t < len {
+            let next = (t + DASH).min(len);
+            let lerp = |v0: f32, v1: f32, f: f32| v0 + (v1 - v0) * f;
+            let (sx, sy) = (lerp(ax, bx, t / len), lerp(ay, by, t / len));
+            let (ex, ey) = (lerp(ax, bx, next / len), lerp(ay, by, next / len));
+            let dark = (((sx + sy) / DASH).floor() as i64).rem_euclid(2) == 1;
+            let seg = [point(px(sx), px(sy)), point(px(ex), px(ey))];
+            if dark {
+                ants.dark.push(seg);
+            } else {
+                ants.light.push(seg);
+            }
+            t = next;
+        }
+    }
+}
+
+/// Dash segments batched by colour, so an outline of any complexity costs
+/// two paths rather than one per dash.
+#[derive(Default)]
+pub struct Ants {
+    light: Vec<[Point<Pixels>; 2]>,
+    dark: Vec<[Point<Pixels>; 2]>,
+}
+
 #[derive(Default)]
 pub struct PaintJob {
     tiles: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
     outlines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
-    polylines: Vec<Vec<Point<Pixels>>>,
+    polylines: Vec<(Vec<Point<Pixels>>, gpui::Hsla)>,
+    /// Marching-ants dashes.
+    ants: Ants,
     circles: Vec<Bounds<Pixels>>,
     /// Thin filled rectangles: grid lines, guides and ruler ticks.
     lines: Vec<(Bounds<Pixels>, gpui::Hsla)>,

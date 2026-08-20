@@ -255,7 +255,7 @@ fn composite_layers(
                 }
                 LayerKind::Raster(r) => {
                     // Skip layers with nothing in this tile entirely.
-                    if r.tiles.get(coord).is_none() {
+                    if layer.render_offset == (0, 0) && r.tiles.get(coord).is_none() {
                         i = clip_end;
                         continue;
                     }
@@ -367,11 +367,30 @@ fn render_single_layer(
     scratch: &mut Scratch,
 ) {
     match &layer.kind {
-        LayerKind::Raster(raster) => {
-            if let Some(tile) = raster.tiles.get(coord) {
-                tile.decode_f32(buf);
+        LayerKind::Raster(raster) => match layer.render_offset {
+            (0, 0) => {
+                if let Some(tile) = raster.tiles.get(coord) {
+                    tile.decode_f32(buf);
+                }
             }
-        }
+            // A layer being dragged is sampled through its offset instead
+            // of having a megabyte of tiles rewritten per mouse event.
+            (dx, dy) => {
+                let trect = coord.rect();
+                for p in 0..TILE_PIXELS {
+                    let x = trect.left + (p as i32 % TILE_SIZE) - dx;
+                    let y = trect.top + (p as i32 / TILE_SIZE) - dy;
+                    let px = raster.tiles.pixel(x, y);
+                    if px.a <= 0.0 {
+                        continue;
+                    }
+                    buf[p * 4] = px.r;
+                    buf[p * 4 + 1] = px.g;
+                    buf[p * 4 + 2] = px.b;
+                    buf[p * 4 + 3] = px.a;
+                }
+            }
+        },
         LayerKind::Group(g) => {
             composite_layers(doc, &g.children, coord, buf, scratch);
         }

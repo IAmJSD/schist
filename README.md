@@ -35,7 +35,9 @@ PNG, JPEG, WebP and TIFF.
 **Editing.** Brush, pencil, eraser, clone stamp, gradient, paint bucket,
 dodge/burn/sponge; rectangular/elliptical marquee, lasso, magic wand with
 anti-aliased selections and boolean modifiers; move, crop, free transform
-with rotate/scale/skew; pen and shape tools; editable text layers.
+with rotate/scale/skew; pen and shape tools; editable text layers. Marching
+ants trace the selection's real boundary — holes and all — and dragging a
+layer moves its pixels live rather than an outline.
 
 **Non-destructive.** Adjustment layers (levels, curves, hue/saturation,
 brightness/contrast, black & white, invert, posterize, threshold, solid
