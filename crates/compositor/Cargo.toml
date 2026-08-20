@@ -13,3 +13,6 @@ photoslop-pixel-ops.workspace = true
 photoslop-color.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+
+[dev-dependencies]
+photoslop-layer-fx.workspace = true

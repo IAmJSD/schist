@@ -277,6 +277,25 @@ impl TileMap {
         }
     }
 
+    /// A cheap identity for the map's current contents.
+    ///
+    /// Tiles are copy-on-write behind an `Arc`, so the pointer identity of
+    /// every tile plus its coordinate changes exactly when the pixels do.
+    /// That makes this far cheaper than hashing megabytes of pixels, and
+    /// it errs on the side of reporting a change.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut acc = 0u64;
+        for (coord, buf) in self.tiles.iter() {
+            let mut h = rustc_hash::FxHasher::default();
+            coord.hash(&mut h);
+            (Arc::as_ptr(buf) as usize).hash(&mut h);
+            // XOR so the order the map iterates in does not matter.
+            acc ^= h.finish();
+        }
+        acc
+    }
+
     /// Drop tiles that have become fully transparent.
     pub fn prune_blank(&mut self) {
         self.tiles.retain(|_, buf| !buf.is_blank());

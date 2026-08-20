@@ -199,7 +199,7 @@ fn composite_layers(
                 }
                 let mut src = scratch.take();
                 render_single_layer(doc, clip_layer, coord, &mut src, 1.0, scratch);
-                let opacity = clip_layer.opacity * clip_layer.fill_opacity;
+                let opacity = clip_layer.opacity * content_alpha(clip_layer);
                 let trect = coord.rect();
                 for p in 0..TILE_PIXELS {
                     let ba = base_alpha[p];
@@ -228,7 +228,7 @@ fn composite_layers(
                 &group_buf,
                 dst,
                 coord,
-                layer.opacity * layer.fill_opacity,
+                layer.opacity * content_alpha(layer),
                 layer,
                 doc,
             );
@@ -266,7 +266,7 @@ fn composite_layers(
                         &src,
                         dst,
                         coord,
-                        layer.opacity * layer.fill_opacity,
+                        layer.opacity * content_alpha(layer),
                         layer,
                         doc,
                     );
@@ -311,7 +311,7 @@ fn apply_adjustment(
         return;
     }
     let mask = layer.mask.as_ref().filter(|m| m.enabled);
-    let opacity = (layer.opacity * layer.fill_opacity).clamp(0.0, 1.0);
+    let opacity = (layer.opacity * content_alpha(layer)).clamp(0.0, 1.0);
     if opacity <= 0.0 {
         return;
     }
@@ -366,6 +366,35 @@ fn render_single_layer(
     alpha_scale: f32,
     scratch: &mut Scratch,
 ) {
+    // A layer with effects composites its styled raster instead of its
+    // own pixels: the fx renderer has already folded in fill opacity and
+    // drawn the shadows and glows around it.
+    if let Some(styled) = layer.styled.as_ref() {
+        match layer.render_offset {
+            (0, 0) => {
+                if let Some(tile) = styled.tiles.get(coord) {
+                    tile.decode_f32(buf);
+                }
+            }
+            (dx, dy) => {
+                let trect = coord.rect();
+                for p in 0..TILE_PIXELS {
+                    let x = trect.left + (p as i32 % TILE_SIZE) - dx;
+                    let y = trect.top + (p as i32 / TILE_SIZE) - dy;
+                    let px = styled.tiles.pixel(x, y);
+                    if px.a <= 0.0 {
+                        continue;
+                    }
+                    buf[p * 4] = px.r;
+                    buf[p * 4 + 1] = px.g;
+                    buf[p * 4 + 2] = px.b;
+                    buf[p * 4 + 3] = px.a;
+                }
+            }
+        }
+        apply_mask_and_alpha(layer, coord, buf, alpha_scale);
+        return;
+    }
     match &layer.kind {
         LayerKind::Raster(raster) => match layer.render_offset {
             (0, 0) => {
@@ -396,6 +425,11 @@ fn render_single_layer(
         }
         LayerKind::Adjustment(_) => {}
     }
+    apply_mask_and_alpha(layer, coord, buf, alpha_scale);
+}
+
+/// Scale a rendered tile's alpha by the layer mask and any extra factor.
+fn apply_mask_and_alpha(layer: &Layer, coord: TileCoord, buf: &mut TileF32, alpha_scale: f32) {
     let mask = layer.mask.as_ref().filter(|m| m.enabled);
     if mask.is_none() && alpha_scale >= 1.0 {
         return;
@@ -942,5 +976,16 @@ mod adjustment_tests {
         doc.push_layer(layer);
         // Threshold at 200/255 turns mid-grey black.
         assert_eq!(px(&doc, 10, 10)[0], 0);
+    }
+}
+
+/// Fill opacity, unless the layer's effects renderer already applied it to
+/// the styled raster -- applying it twice would double-fade the content
+/// and wrongly fade the effects too.
+fn content_alpha(layer: &Layer) -> f32 {
+    if layer.styled.is_some() {
+        1.0
+    } else {
+        layer.fill_opacity
     }
 }

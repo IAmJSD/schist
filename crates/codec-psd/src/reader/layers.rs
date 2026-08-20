@@ -553,6 +553,8 @@ fn make_layer(rec: Rec, mask_tiles: Option<MaskTileMap>, kind: LayerKind) -> Lay
         mask,
         kind,
         extras: rec.extras,
+        style: Default::default(),
+        styled: None,
         render_offset: (0, 0),
     }
 }

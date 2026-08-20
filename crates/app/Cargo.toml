@@ -26,6 +26,7 @@ photoslop-core.workspace = true
 photoslop-color.workspace = true
 photoslop-plugin-api.workspace = true
 photoslop-compositor.workspace = true
+photoslop-layer-fx.workspace = true
 photoslop-codec-psd.workspace = true
 photoslop-codecs-common.workspace = true
 photoslop-tools-basic.workspace = true

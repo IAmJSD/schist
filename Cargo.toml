@@ -5,6 +5,7 @@ exclude = ["examples/plugins/sepia-filter", "examples/plugins/pgm-codec"]
 members = [
     "crates/app",
     "crates/core",
+    "crates/layer-fx",
     "crates/plugin-api",
     "crates/pixel-ops",
     "crates/compositor",
@@ -42,6 +43,7 @@ photoslop-compositor = { path = "crates/compositor" }
 photoslop-color = { path = "crates/color" }
 photoslop-codec-psd = { path = "crates/codec-psd" }
 photoslop-vector = { path = "crates/vector" }
+photoslop-layer-fx = { path = "crates/layer-fx" }
 photoslop-text-engine = { path = "crates/text-engine" }
 photoslop-adjustments = { path = "crates/adjustments" }
 photoslop-plugin-host-wasm = { path = "crates/plugin-host-wasm" }

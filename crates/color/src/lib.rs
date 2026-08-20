@@ -34,7 +34,7 @@ pub enum ColorMode {
 }
 
 /// Straight-alpha RGBA, f32 components in 0.0..=1.0.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Rgba {
     pub r: f32,
     pub g: f32,

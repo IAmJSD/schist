@@ -156,6 +156,19 @@ pub enum LayerKind {
     Adjustment(AdjustmentData),
 }
 
+/// A layer's pixels with its effects rasterized around them.
+///
+/// `bounds` is the layer's content grown by the effects' reach, so a drop
+/// shadow is not clipped at the layer's own edge.
+#[derive(Debug, Clone)]
+pub struct StyledRaster {
+    pub tiles: crate::tile::TileMap,
+    pub bounds: crate::geom::IntRect,
+    /// Fingerprint of the inputs this was rendered from, so a rebuild can
+    /// be skipped when nothing has moved. Filled in by the caller.
+    pub key: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub id: LayerId,
@@ -173,6 +186,13 @@ pub struct Layer {
     pub kind: LayerKind,
     /// Preserved PSD blocks (text engine data, effects, smart object refs…).
     pub extras: Vec<RawBlock>,
+    /// Layer effects. Empty by default, so a layer costs nothing extra.
+    pub style: crate::style::LayerStyle,
+    /// The layer's pixels with `style` rasterized around them, rebuilt by
+    /// `photoslop-layer-fx` whenever the pixels or the style change. This
+    /// is a derived cache: never saved, never compared, and dropped as
+    /// soon as it goes stale.
+    pub styled: Option<std::sync::Arc<StyledRaster>>,
     /// Transient display offset, in document pixels.
     ///
     /// The move tool sets this while dragging so the layer appears to move
@@ -196,6 +216,8 @@ impl Layer {
             mask: None,
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
+            style: crate::style::LayerStyle::default(),
+            styled: None,
             render_offset: (0, 0),
         }
     }
@@ -237,6 +259,12 @@ impl Layer {
     /// including any transient drag offset.
     pub fn content_bounds(&self) -> IntRect {
         let (dx, dy) = self.render_offset;
+        // Effects draw outside the layer's own pixels, and the styled
+        // raster is what actually gets composited, so it defines the
+        // bounds whenever it exists.
+        if let Some(styled) = self.styled.as_ref() {
+            return styled.tiles.tile_bounds().translated(dx, dy);
+        }
         match &self.kind {
             LayerKind::Raster(r) => r.tiles.tile_bounds().translated(dx, dy),
             LayerKind::Group(g) => {
@@ -255,6 +283,9 @@ impl Layer {
     /// hit-testing, PSD layer rects and UI boxes want.
     pub fn tight_bounds(&self) -> IntRect {
         let (dx, dy) = self.render_offset;
+        if let Some(styled) = self.styled.as_ref() {
+            return styled.tiles.content_bounds().translated(dx, dy);
+        }
         match &self.kind {
             LayerKind::Raster(r) => r.tiles.content_bounds().translated(dx, dy),
             LayerKind::Group(g) => {

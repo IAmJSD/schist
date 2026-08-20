@@ -49,6 +49,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             params,
             original,
         } => adjustment_dialog(layer, params, original, cx).into_any_element(),
+        Modal::LayerStyle {
+            layer,
+            style,
+            active,
+            ..
+        } => crate::style_dialog::render(ws, layer, *style, active, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {
@@ -352,17 +358,17 @@ fn canvas_size(
 
 /// One slider row's description, shared by the filter and adjustment
 /// dialogs (both render the same control from the same shape).
-struct SliderSpec {
-    id: &'static str,
-    label: &'static str,
-    value: f32,
-    min: f32,
-    max: f32,
-    suffix: &'static str,
+pub(crate) struct SliderSpec {
+    pub(crate) id: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) value: f32,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+    pub(crate) suffix: &'static str,
 }
 
 /// A labelled slider row used by the filter and adjustment dialogs.
-fn param_slider(
+pub(crate) fn param_slider(
     spec: SliderSpec,
     on_change: impl Fn(&mut Workspace, f32, &mut Context<Workspace>) + Clone + 'static,
     cx: &mut Context<Workspace>,

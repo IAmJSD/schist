@@ -11,6 +11,7 @@ pub mod history;
 pub mod layer;
 pub mod resample;
 pub mod selection;
+pub mod style;
 pub mod tile;
 
 pub use blend::BlendMode;
@@ -21,10 +22,14 @@ pub use geom::IntRect;
 pub use history::{Edit, EditOp, History, LayerProps};
 pub use layer::{
     AdjustmentData, AdjustmentKind, GroupLayer, Layer, LayerId, LayerKind, LayerMask, LayerPath,
-    LayerTree, RasterLayer, RawBlock,
+    LayerTree, RasterLayer, RawBlock, StyledRaster,
 };
 pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
+pub use style::{
+    BevelStyle, BevelStyle_, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
+    GradientShape, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, Technique,
+};
 pub use tile::{MaskTileMap, TileBuf, TileCoord, TileMap, TILE_PIXELS, TILE_SIZE};
 
 pub use photoslop_color as color;

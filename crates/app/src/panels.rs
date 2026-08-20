@@ -91,6 +91,7 @@ enum AppItem {
     ScreenModeItem,
     Preferences,
     CheckForUpdates,
+    LayerStyleItem,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -156,6 +157,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Cmd("layer.new"),
                 Cmd("layer.duplicate"),
                 Cmd("layer.delete"),
+                Sep,
+                App("Layer Style…", LayerStyleItem, None),
                 Sep,
                 Cmd("layer.group"),
                 Cmd("layer.merge_down"),
@@ -345,6 +348,11 @@ fn run_app_item(
         AppItem::ClearGuides => ws.clear_guides(cx),
         AppItem::ScreenModeItem => ws.cycle_screen_mode(cx),
         AppItem::Preferences => ws.open_modal(Modal::Preferences, cx),
+        AppItem::LayerStyleItem => {
+            if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
+                ws.show_layer_style(id, cx);
+            }
+        }
         AppItem::CheckForUpdates => ws.check_for_update(cx),
         AppItem::FreeTransform => ws.activate_tool("transform", cx),
         AppItem::Crop => {
@@ -1165,6 +1173,8 @@ struct LayerRow {
     visible: bool,
     active: bool,
     open: bool,
+    /// The layer has effects switched on, shown as Photoshop's fx badge.
+    fx: bool,
 }
 
 enum RowKind {
@@ -1193,6 +1203,7 @@ fn flatten_layers(
             visible: layer.visible,
             active: Some(layer.id) == active,
             open,
+            fx: !layer.style.is_empty(),
         });
         if let LayerKind::Group(g) = &layer.kind {
             if g.open {
@@ -1462,7 +1473,23 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                     _ => icon("adjust", 13.0, TEXT_DIM).into_any_element(),
                                 }),
                         )
-                        .child(div().text_size(px(12.0)).overflow_hidden().child(row.name))
+                        .child(
+                            div()
+                                .flex_grow()
+                                .text_size(px(12.0))
+                                .overflow_hidden()
+                                .child(row.name),
+                        )
+                        .children(row.fx.then(|| {
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .rounded_sm()
+                                .text_size(px(10.0))
+                                .text_color(gpui::rgb(TEXT_DIM))
+                                .bg(gpui::rgb(0x2A2A2A))
+                                .child("fx")
+                        }))
                 })),
         )
         .child(
@@ -1639,6 +1666,7 @@ enum ContextEntry {
 #[derive(Clone, Copy)]
 enum ContextAction {
     LayerProperties(LayerId),
+    LayerStyle(LayerId),
     ToggleVisibility(LayerId),
     ZoomFit,
     ZoomActual,
@@ -1652,6 +1680,7 @@ fn context_entries(target: ContextTarget) -> Vec<ContextEntry> {
     use ContextEntry::*;
     match target {
         ContextTarget::Layer(id) => vec![
+            App("Blending Options…", LayerStyle(id)),
             App("Layer Properties…", LayerProperties(id)),
             App("Show/Hide Layer", ToggleVisibility(id)),
             Sep,
@@ -1696,6 +1725,7 @@ fn context_entries(target: ContextTarget) -> Vec<ContextEntry> {
 fn run_context_action(ws: &mut Workspace, action: ContextAction, cx: &mut Context<Workspace>) {
     match action {
         ContextAction::LayerProperties(id) => ws.open_layer_properties(id, cx),
+        ContextAction::LayerStyle(id) => ws.show_layer_style(id, cx),
         ContextAction::ToggleVisibility(id) => {
             if let Some(doc) = &mut ws.doc {
                 let mut edit = doc.begin_edit("Toggle Visibility");

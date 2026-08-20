@@ -274,6 +274,24 @@ impl Document {
                 self.add_damage(bounds);
                 self.structure_changed();
             }
+            EditOp::LayerStyleSet {
+                layer,
+                before,
+                after,
+            } => {
+                let style = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    l.style = **style;
+                    // The cached raster belongs to the old style.
+                    l.styled = None;
+                }
+                self.damage_all();
+                self.structure_changed();
+            }
             EditOp::AdjustmentParams {
                 layer,
                 before,
@@ -547,6 +565,29 @@ impl<'a> EditBuilder<'a> {
 
     /// Record an adjustment layer's parameter change (the caller has
     /// already applied it, e.g. through a live dialog preview).
+    /// Record a change to a layer's effects.
+    pub fn record_layer_style(
+        &mut self,
+        layer: LayerId,
+        before: crate::style::LayerStyle,
+        after: crate::style::LayerStyle,
+    ) {
+        if before == after {
+            return;
+        }
+        if let Some(l) = self.doc.tree.find_mut(layer) {
+            l.style = after;
+            l.styled = None;
+        }
+        self.ops.push(EditOp::LayerStyleSet {
+            layer,
+            before: Box::new(before),
+            after: Box::new(after),
+        });
+        let canvas = self.doc.canvas_rect();
+        self.damage = self.damage.union(&canvas);
+    }
+
     pub fn record_adjustment_params(
         &mut self,
         layer: LayerId,

@@ -386,9 +386,17 @@ fn prepare_common(
 /// Preserved blocks plus a regenerated unicode name.
 fn build_extras(layer: &Layer) -> Vec<([u8; 4], Vec<u8>)> {
     let mut out = vec![(*b"luni", unicode_name_payload(&layer.name))];
+    // Editing a layer's effects supersedes whatever the file said. We do
+    // not encode 'lfx2' descriptors yet, so the honest thing is to drop the
+    // stale block rather than save effects we are no longer showing --
+    // otherwise the file would claim a shadow the canvas does not have.
+    let styled_here = !layer.style.is_empty();
     for block in &layer.extras {
         // 'luni'/'lsct' are regenerated, never echoed back.
         if &block.key == b"luni" || &block.key == b"lsct" {
+            continue;
+        }
+        if styled_here && (&block.key == b"lfx2" || &block.key == b"lrFX") {
             continue;
         }
         out.push((block.key, block.data.clone()));

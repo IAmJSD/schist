@@ -59,6 +59,7 @@ actions!(
         ShowImageSize,
         ShowCanvasSize,
         ShowPreferences,
+        ShowLayerStyle,
         ToggleRulers,
         ToggleGrid,
         ToggleGuides,

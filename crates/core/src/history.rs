@@ -93,6 +93,12 @@ pub enum EditOp {
         before: (Option<String>, Vec<u8>),
         after: (Option<String>, Vec<u8>),
     },
+    /// A layer's effects changed.
+    LayerStyleSet {
+        layer: LayerId,
+        before: Box<crate::style::LayerStyle>,
+        after: Box<crate::style::LayerStyle>,
+    },
     /// Canvas dimensions changed (Image Size / Canvas Size). Pixel moves
     /// and rescales ride along as ordinary tile writes in the same edit.
     DocSize {

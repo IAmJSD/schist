@@ -6,6 +6,7 @@ mod crash;
 mod dialogs;
 mod keymap;
 mod panels;
+mod style_dialog;
 mod ui;
 mod workspace;
 

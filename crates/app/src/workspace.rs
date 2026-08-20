@@ -263,6 +263,17 @@ pub enum Modal {
         /// Show the result on the canvas while the dialog is open.
         preview: bool,
     },
+    /// Layer effects for one layer. Boxed because the style is by far the
+    /// largest thing any dialog carries.
+    LayerStyle {
+        layer: photoslop_core::LayerId,
+        style: Box<photoslop_core::LayerStyle>,
+        /// What to put back on Cancel, and the "before" for the history
+        /// entry recorded on OK.
+        original: Box<photoslop_core::LayerStyle>,
+        /// Which effect's settings are showing.
+        active: &'static str,
+    },
     /// The third-party plugin manager.
     PluginManager,
     /// Application preferences.
@@ -642,7 +653,129 @@ impl Workspace {
 
     // ----- change propagation -----
 
+    /// Open the Layer Style dialog for the active layer.
+    pub fn show_layer_style(&mut self, layer: photoslop_core::LayerId, cx: &mut Context<Self>) {
+        let Some(style) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.tree.find(layer))
+            .map(|l| l.style)
+        else {
+            return;
+        };
+        self.open_modal(
+            Modal::LayerStyle {
+                layer,
+                style: Box::new(style),
+                original: Box::new(style),
+                // Photoshop opens on whatever is on; Drop Shadow otherwise.
+                active: crate::style_dialog::EFFECTS
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| style_enabled(&style, k))
+                    .map(|(k, _)| *k)
+                    .unwrap_or("drop_shadow"),
+            },
+            cx,
+        );
+    }
+
+    /// Push the dialog's style onto the layer so the canvas shows it.
+    pub fn preview_layer_style(
+        &mut self,
+        layer: photoslop_core::LayerId,
+        style: photoslop_core::LayerStyle,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = self.doc.as_mut() {
+            if let Some(l) = doc.tree.find_mut(layer) {
+                l.style = style;
+            }
+            doc.damage_all();
+        }
+        self.after_change(cx);
+    }
+
+    /// Re-apply the open dialog's style. Used by the controls that fire
+    /// without a context of their own.
+    pub fn restyle_from_modal(&mut self) {
+        let mut next = None;
+        if let Some(Modal::LayerStyle { layer, style, .. }) = self.modal.as_ref() {
+            next = Some((*layer, **style));
+        }
+        if let Some((layer, style)) = next {
+            if let Some(doc) = self.doc.as_mut() {
+                if let Some(l) = doc.tree.find_mut(layer) {
+                    l.style = style;
+                }
+                doc.damage_all();
+            }
+            self.refresh_layer_styles();
+        }
+    }
+
+    /// Record the whole dialog session as one history entry.
+    pub fn commit_layer_style(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::LayerStyle {
+            layer,
+            style,
+            original,
+            ..
+        }) = self.modal.clone()
+        else {
+            return;
+        };
+        self.modal = None;
+        if let Some(doc) = self.doc.as_mut() {
+            // Restore the pre-dialog style so the edit records the right
+            // "before"; the live preview already moved the layer on.
+            if let Some(l) = doc.tree.find_mut(layer) {
+                l.style = *original;
+            }
+            let mut edit = doc.begin_edit("Layer Style");
+            edit.record_layer_style(layer, *original, *style);
+            edit.commit();
+            doc.damage_all();
+        }
+        self.status = "Layer Style".into();
+        self.after_change(cx);
+    }
+
+    /// Put the pre-dialog style back (Cancel).
+    fn revert_layer_style(&mut self) {
+        let Some(Modal::LayerStyle {
+            layer, original, ..
+        }) = self.modal.clone()
+        else {
+            return;
+        };
+        if let Some(doc) = self.doc.as_mut() {
+            if let Some(l) = doc.tree.find_mut(layer) {
+                l.style = *original;
+            }
+            doc.damage_all();
+        }
+        self.refresh_layer_styles();
+    }
+
+    /// Re-rasterize any layer whose effects are stale.
+    ///
+    /// The styled raster is derived from the layer's pixels plus its
+    /// style, so it has to be rebuilt whenever either moves. Layers with
+    /// no effects keep `styled == None` and cost nothing.
+    fn refresh_layer_styles(&mut self) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let mut grew = Vec::new();
+        restyle_layers(&mut doc.tree.layers, &mut grew);
+        // A shadow can appear outside the layer's old bounds, so the
+        // newly covered area has to be repainted too.
+        for rect in grew {
+            doc.add_damage(rect);
+        }
+    }
+
     pub fn after_change(&mut self, cx: &mut Context<Self>) {
+        self.refresh_layer_styles();
         if let Some(doc) = &mut self.doc {
             let damage = doc.take_damage();
             for rect in &damage {
@@ -1084,6 +1217,9 @@ impl Workspace {
         // is going away, so put the original pixels back. Committing a
         // filter clears the preview first, so this only fires on cancel.
         self.cancel_filter_preview(cx);
+        // Same for a cancelled Layer Style session: OK clears the modal
+        // itself before it gets here, so reaching this means Cancel.
+        self.revert_layer_style();
         self.modal = None;
         self.focused_field = None;
         self.field_buffer.clear();
@@ -1199,7 +1335,8 @@ impl Workspace {
                 }
             }
             // These dialogs have no typed fields.
-            Modal::Filter { .. }
+            Modal::LayerStyle { .. }
+            | Modal::Filter { .. }
             | Modal::Adjustment { .. }
             | Modal::PluginManager
             | Modal::Preferences
@@ -3152,6 +3289,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ClearGuides, _w, cx| ws.clear_guides(cx)))
             .on_action(cx.listener(|ws, _: &CycleScreenMode, _w, cx| ws.cycle_screen_mode(cx)))
             .on_action(cx.listener(|ws, _: &TogglePanels, _w, cx| ws.cycle_screen_mode(cx)))
+            .on_action(cx.listener(|ws, _: &ShowLayerStyle, _w, cx| {
+                if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
+                    ws.show_layer_style(id, cx);
+                }
+            }))
             .on_action(cx.listener(|ws, _: &ShowPreferences, _w, cx| {
                 ws.open_modal(Modal::Preferences, cx);
             }))
@@ -3228,5 +3370,68 @@ fn blend_region_tile(
                 ),
             );
         }
+    }
+}
+
+/// Walk the layer tree rebuilding stale styled rasters, collecting the
+/// areas that changed so they can be repainted.
+fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
+    for layer in layers.iter_mut() {
+        if let photoslop_core::LayerKind::Group(g) = &mut layer.kind {
+            restyle_layers(&mut g.children, damage);
+        }
+        let wanted = !layer.style.is_empty();
+        if !wanted {
+            if let Some(old) = layer.styled.take() {
+                damage.push(old.bounds);
+            }
+            continue;
+        }
+        // `fx_key` changes whenever anything the raster depends on does.
+        let key = fx_key(layer);
+        if layer.styled.as_ref().map(|s| s.key) == Some(key) {
+            continue;
+        }
+        let before = layer.styled.as_ref().map(|s| s.bounds);
+        layer.styled = photoslop_layer_fx::render(layer).map(|mut r| {
+            r.key = key;
+            Arc::new(r)
+        });
+        if let Some(b) = before {
+            damage.push(b);
+        }
+        if let Some(s) = layer.styled.as_ref() {
+            damage.push(s.bounds);
+        }
+    }
+}
+
+/// A cheap fingerprint of everything the styled raster is derived from.
+fn fx_key(layer: &Layer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    // The style itself, via its debug form: these are small plain structs
+    // with float fields, so there is nothing cheaper that is also correct.
+    format!("{:?}", layer.style).hash(&mut h);
+    layer.fill_opacity.to_bits().hash(&mut h);
+    if let Some(r) = layer.as_raster() {
+        r.tiles.fingerprint().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Whether one named effect is switched on, for the dialog's initial tab.
+fn style_enabled(style: &photoslop_core::LayerStyle, key: &str) -> bool {
+    match key {
+        "bevel" => style.bevel.enabled,
+        "stroke" => style.stroke.enabled,
+        "inner_shadow" => style.inner_shadow.enabled,
+        "inner_glow" => style.inner_glow.enabled,
+        "satin" => style.satin.enabled,
+        "color_overlay" => style.color_overlay.enabled,
+        "gradient_overlay" => style.gradient_overlay.enabled,
+        "outer_glow" => style.outer_glow.enabled,
+        "drop_shadow" => style.drop_shadow.enabled,
+        _ => false,
     }
 }
