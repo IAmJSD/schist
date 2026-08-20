@@ -13,7 +13,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
-use photoslop_color::Depth;
+use photoslop_color::{Depth, Rgba};
 use photoslop_compositor::TileCache;
 use photoslop_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE};
 use photoslop_plugin_api::{
@@ -127,6 +127,36 @@ pub struct Workspace {
     pub color: photoslop_colormgmt::ColorSettings,
     display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
     proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
+}
+
+/// Which Select ▸ Modify operation a dialog is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyKind {
+    Expand,
+    Contract,
+    Border,
+    Smooth,
+    Feather,
+}
+
+impl ModifyKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            ModifyKind::Expand => "Expand Selection",
+            ModifyKind::Contract => "Contract Selection",
+            ModifyKind::Border => "Border Selection",
+            ModifyKind::Smooth => "Smooth Selection",
+            ModifyKind::Feather => "Feather Selection",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ModifyKind::Feather => "Radius",
+            ModifyKind::Border => "Width",
+            _ => "Amount",
+        }
+    }
 }
 
 /// Pixels a filter dialog is previewing over, so each slider tick can
@@ -274,6 +304,10 @@ pub enum Modal {
         /// Which effect's settings are showing.
         active: &'static str,
     },
+    /// Select ▸ Modify, which all take one amount.
+    SelectModify { kind: ModifyKind, amount: f32 },
+    /// Select ▸ Color Range.
+    ColorRange { tolerance: f32, target: Rgba },
     /// The third-party plugin manager.
     PluginManager,
     /// Application preferences.
@@ -758,6 +792,80 @@ impl Workspace {
         self.refresh_layer_styles();
     }
 
+    /// Run a Select ▸ Modify operation as one history entry.
+    pub fn apply_select_modify(&mut self, kind: ModifyKind, amount: f32, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.selection.is_empty() {
+            self.status = "Select something first".into();
+            cx.notify();
+            return;
+        }
+        let n = amount.round().max(0.0) as i32;
+        let mut edit = doc.begin_edit(kind.title());
+        edit.change_selection(|sel, canvas| match kind {
+            ModifyKind::Expand => sel.expand(n, canvas),
+            ModifyKind::Contract => sel.contract(n, canvas),
+            ModifyKind::Border => sel.border(n, canvas),
+            ModifyKind::Smooth => sel.smooth(n, canvas),
+            ModifyKind::Feather => sel.feather(amount.max(0.0)),
+        });
+        edit.commit();
+        self.status = kind.title().into();
+        self.after_change(cx);
+    }
+
+    /// Select ▸ Color Range: every pixel within `tolerance` of `target`.
+    pub fn apply_color_range(&mut self, tolerance: f32, target: Rgba, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(raster) = doc
+            .active_layer
+            .and_then(|id| doc.tree.find(id))
+            .and_then(|l| l.as_raster())
+        else {
+            self.status = "Color Range needs a pixel layer".into();
+            cx.notify();
+            return;
+        };
+        let canvas = doc.canvas_rect();
+        let tol = tolerance / 255.0;
+        // Coverage falls off across the tolerance band rather than
+        // cutting hard, which is what makes Photoshop's Fuzziness feather
+        // the edges of a colour selection.
+        let mut cov = vec![0u8; (canvas.width() * canvas.height()) as usize];
+        let w = canvas.width() as usize;
+        for y in canvas.top..canvas.bottom {
+            for x in canvas.left..canvas.right {
+                let c = raster.tiles.pixel(x, y);
+                let d = (c.r - target.r)
+                    .abs()
+                    .max((c.g - target.g).abs())
+                    .max((c.b - target.b).abs());
+                let v = if tol <= 0.0 {
+                    if d == 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (1.0 - d / tol).clamp(0.0, 1.0)
+                };
+                cov[(y - canvas.top) as usize * w + (x - canvas.left) as usize] =
+                    (v * 255.0).round() as u8;
+            }
+        }
+        let mut edit = doc.begin_edit("Color Range");
+        edit.change_selection(|sel, canvas| {
+            sel.deselect();
+            sel.activate();
+            sel.apply_shape(canvas, photoslop_core::SelectOp::Replace, |x, y| {
+                cov[(y - canvas.top) as usize * w + (x - canvas.left) as usize]
+            });
+        });
+        edit.commit();
+        self.status = "Color Range".into();
+        self.after_change(cx);
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its
@@ -790,6 +898,9 @@ impl Workspace {
     }
 
     pub fn run_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Grow, Similar and Color Range take their tolerance from the
+        // magic wand, exactly as Photoshop does.
+        self.sync_wand_tolerance();
         let Some(doc) = self.doc.as_mut() else { return };
         if let Some(command) = self.registry.command(id) {
             let mut ctx = CommandCtx {
@@ -802,6 +913,18 @@ impl Workspace {
             log::warn!("unknown command {id}");
         }
         self.after_change(cx);
+    }
+
+    /// Mirror the magic wand's tolerance into the shared editor state.
+    pub fn sync_wand_tolerance(&mut self) {
+        if let Some(t) = self
+            .registry
+            .tools()
+            .find(|t| t.id() == "wand")
+            .and_then(|t| t.options().into_iter().find(|o| o.key == "wand-tolerance"))
+        {
+            self.editor.tolerance = t.value.num().round().clamp(0.0, 255.0) as u8;
+        }
     }
 
     pub fn activate_tool(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1335,7 +1458,9 @@ impl Workspace {
                 }
             }
             // These dialogs have no typed fields.
-            Modal::LayerStyle { .. }
+            Modal::SelectModify { .. }
+            | Modal::ColorRange { .. }
+            | Modal::LayerStyle { .. }
             | Modal::Filter { .. }
             | Modal::Adjustment { .. }
             | Modal::PluginManager

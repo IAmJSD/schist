@@ -1,13 +1,76 @@
-//! Selection tools: rectangular & elliptical marquee, lasso, magic wand.
+//! Selection tools: marquees, the three lassos, magic wand, quick
+//! selection and object selection.
 //!
 //! Modifier convention (Photoshop): Shift = add to selection, Alt =
 //! subtract, Shift+Alt = intersect, no modifier = replace.
 
 use photoslop_core::{Document, IntRect, LayerKind, SelectOp, TileCoord, TILE_SIZE};
 use photoslop_plugin_api::{
-    EditorState, Modifiers, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
-    ToolPlugin,
+    EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
+    ToolCtx, ToolOption, ToolPlugin,
 };
+
+/// Write a set of pixel coordinates into a selection under `op`.
+///
+/// Shared by every tool that produces a pixel set rather than a shape:
+/// the wand, quick selection and object selection.
+fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &str) {
+    if pixels.is_empty() {
+        return;
+    }
+    let mut edit = ctx.doc.begin_edit(name.to_string());
+    edit.change_selection(|sel, _| {
+        if op == SelectOp::Replace {
+            sel.deselect();
+        }
+        let effective = if op == SelectOp::Replace {
+            SelectOp::Add
+        } else {
+            op
+        };
+        if effective == SelectOp::Intersect {
+            let keep: std::collections::HashSet<(i32, i32)> = pixels.iter().copied().collect();
+            let coords: Vec<_> = sel.mask.iter().map(|(c, _)| *c).collect();
+            for coord in coords {
+                let rect = coord.rect();
+                let buf = sel.mask.get_mut_or_insert(coord);
+                for ly in 0..TILE_SIZE {
+                    for lx in 0..TILE_SIZE {
+                        let ix = (ly * TILE_SIZE + lx) as usize;
+                        if buf[ix] > 0 && !keep.contains(&(rect.left + lx, rect.top + ly)) {
+                            buf[ix] = 0;
+                        }
+                    }
+                }
+            }
+        } else {
+            for &(px, py) in pixels {
+                let coord = TileCoord::containing(px, py);
+                let buf = sel.mask.get_mut_or_insert(coord);
+                let lx = px.rem_euclid(TILE_SIZE) as usize;
+                let ly = py.rem_euclid(TILE_SIZE) as usize;
+                let ix = ly * TILE_SIZE as usize + lx;
+                match effective {
+                    SelectOp::Add => buf[ix] = 255,
+                    SelectOp::Subtract => buf[ix] = 0,
+                    _ => {}
+                }
+            }
+        }
+        sel.activate();
+        sel.recompute_bounds();
+    });
+    edit.commit();
+}
+
+/// The active layer's pixels, if it has any.
+fn active_raster(doc: &Document) -> Option<&photoslop_core::RasterLayer> {
+    let layer = doc.active_layer.and_then(|id| doc.tree.find(id))?;
+    match &layer.kind {
+        LayerKind::Raster(r) => Some(r),
+        _ => None,
+    }
+}
 
 fn op_from(modifiers: Modifiers) -> SelectOp {
     match (modifiers.shift, modifiers.alt) {
@@ -145,66 +208,257 @@ impl ToolPlugin for MarqueeTool {
     }
 }
 
+/// Which of Photoshop's three lassos this instance is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LassoKind {
+    /// Drag to trace freehand.
+    Free,
+    /// Click to drop corners; click the first point, double-click or press
+    /// Enter to close.
+    Polygonal,
+    /// Drag near an edge and the path snaps to it.
+    Magnetic,
+}
+
 pub struct LassoTool {
+    kind: LassoKind,
     points: Vec<(f32, f32)>,
+    /// Where the cursor is, so an in-progress polygon can show its next
+    /// edge before it is committed.
+    cursor: Option<(f32, f32)>,
     modifiers: Modifiers,
+    /// Magnetic: how far either side of the path to look for an edge.
+    width: f32,
+    /// Magnetic: how strong an edge has to be to attract the path.
+    contrast: f32,
+    /// Magnetic: pixels between automatically dropped anchor points.
+    frequency: f32,
 }
 
 impl LassoTool {
-    fn new() -> Self {
+    fn new(kind: LassoKind) -> Self {
         LassoTool {
+            kind,
             points: Vec::new(),
+            cursor: None,
             modifiers: Modifiers::default(),
-        }
-    }
-}
-
-impl ToolPlugin for LassoTool {
-    fn id(&self) -> &'static str {
-        "lasso"
-    }
-    fn name(&self) -> &'static str {
-        "Lasso"
-    }
-    fn icon(&self) -> &'static str {
-        "lasso"
-    }
-    fn shortcut(&self) -> Option<&'static str> {
-        Some("l")
-    }
-
-    fn on_pointer_down(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
-        self.modifiers = input.modifiers;
-        self.points = vec![(input.x, input.y)];
-    }
-
-    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
-        if !self.points.is_empty() {
-            self.points.push((input.x, input.y));
+            width: 10.0,
+            contrast: 10.0,
+            frequency: 8.0,
         }
     }
 
-    fn on_pointer_up(&mut self, ctx: &mut ToolCtx, _input: PointerInput) {
+    fn commit(&mut self, ctx: &mut ToolCtx) {
         let points = std::mem::take(&mut self.points);
+        self.cursor = None;
         if points.len() < 3 {
             return;
         }
         let op = op_from(self.modifiers);
-        let mut edit = ctx.doc.begin_edit("Lasso Select");
+        let name = match self.kind {
+            LassoKind::Free => "Lasso Select",
+            LassoKind::Polygonal => "Polygonal Lasso",
+            LassoKind::Magnetic => "Magnetic Lasso",
+        };
+        let mut edit = ctx.doc.begin_edit(name);
         edit.change_selection(|sel, _| sel.select_polygon(&points, op));
         edit.commit();
     }
 
+    /// True when `p` is close enough to the first anchor to close the path.
+    fn closes_at(&self, p: (f32, f32)) -> bool {
+        match self.points.first() {
+            Some(first) if self.points.len() >= 3 => (first.0 - p.0).hypot(first.1 - p.1) <= 6.0,
+            _ => false,
+        }
+    }
+
+    /// Slide `to` onto the strongest edge near the straight line from the
+    /// last anchor, which is what makes the magnetic lasso feel magnetic.
+    fn snap_to_edge(&self, doc: &Document, to: (f32, f32)) -> (f32, f32) {
+        let Some(raster) = active_raster(doc) else {
+            return to;
+        };
+        let Some(&from) = self.points.last() else {
+            return to;
+        };
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let len = dx.hypot(dy);
+        if len < 1e-3 {
+            return to;
+        }
+        // Search perpendicular to the direction of travel.
+        let (nx, ny) = (-dy / len, dx / len);
+        let reach = self.width.max(1.0);
+        let mut best = (to, -1.0f32);
+        let mut t = -reach;
+        while t <= reach {
+            let p = (to.0 + nx * t, to.1 + ny * t);
+            let g = gradient_at(raster, p.0 as i32, p.1 as i32);
+            // Prefer strong edges, but break ties towards the cursor.
+            let score = g - (t.abs() / reach) * self.contrast * 0.5;
+            if g >= self.contrast && score > best.1 {
+                best = (p, score);
+            }
+            t += 1.0;
+        }
+        best.0
+    }
+}
+
+/// Sobel-ish edge strength at a pixel, 0..=255-ish.
+fn gradient_at(raster: &photoslop_core::RasterLayer, x: i32, y: i32) -> f32 {
+    let lum = |x: i32, y: i32| {
+        let p = raster.tiles.pixel(x, y);
+        (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * p.a * 255.0
+    };
+    let gx = lum(x + 1, y) - lum(x - 1, y);
+    let gy = lum(x, y + 1) - lum(x, y - 1);
+    gx.hypot(gy)
+}
+
+impl ToolPlugin for LassoTool {
+    fn id(&self) -> &'static str {
+        match self.kind {
+            LassoKind::Free => "lasso",
+            LassoKind::Polygonal => "lasso.polygonal",
+            LassoKind::Magnetic => "lasso.magnetic",
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self.kind {
+            LassoKind::Free => "Lasso",
+            LassoKind::Polygonal => "Polygonal Lasso",
+            LassoKind::Magnetic => "Magnetic Lasso",
+        }
+    }
+    fn icon(&self) -> &'static str {
+        match self.kind {
+            LassoKind::Free => "lasso",
+            LassoKind::Polygonal => "lasso-poly",
+            LassoKind::Magnetic => "lasso-magnetic",
+        }
+    }
+    fn shortcut(&self) -> Option<&'static str> {
+        matches!(self.kind, LassoKind::Free).then_some("l")
+    }
+    fn group(&self) -> &'static str {
+        "lasso"
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        match self.kind {
+            LassoKind::Magnetic => vec![
+                ToolOption::slider("lasso-width", "Width", self.width, 1.0, 40.0, " px"),
+                ToolOption::slider("lasso-contrast", "Contrast", self.contrast, 1.0, 100.0, ""),
+                ToolOption::slider(
+                    "lasso-frequency",
+                    "Frequency",
+                    self.frequency,
+                    1.0,
+                    100.0,
+                    "",
+                ),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "lasso-width" => self.width = value.num(),
+            "lasso-contrast" => self.contrast = value.num(),
+            "lasso-frequency" => self.frequency = value.num(),
+            _ => {}
+        }
+    }
+
+    fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        let p = (input.x, input.y);
+        match self.kind {
+            LassoKind::Free => {
+                self.modifiers = input.modifiers;
+                self.points = vec![p];
+            }
+            LassoKind::Polygonal | LassoKind::Magnetic => {
+                if self.points.is_empty() {
+                    // First click of a new path: the modifiers that were
+                    // held then decide how it combines.
+                    self.modifiers = input.modifiers;
+                    self.points.push(p);
+                } else if self.closes_at(p) {
+                    self.commit(ctx);
+                } else {
+                    self.points.push(p);
+                }
+            }
+        }
+    }
+
+    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        let p = (input.x, input.y);
+        self.cursor = Some(p);
+        match self.kind {
+            LassoKind::Free => {
+                if !self.points.is_empty() {
+                    self.points.push(p);
+                }
+            }
+            LassoKind::Polygonal => {}
+            LassoKind::Magnetic => {
+                if self.points.is_empty() {
+                    return;
+                }
+                // Drop an anchor every `frequency` pixels, snapped to the
+                // nearest strong edge.
+                let last = *self.points.last().unwrap();
+                if (last.0 - p.0).hypot(last.1 - p.1) >= self.frequency.max(1.0) {
+                    let snapped = self.snap_to_edge(ctx.doc, p);
+                    self.points.push(snapped);
+                }
+            }
+        }
+    }
+
+    fn on_pointer_up(&mut self, ctx: &mut ToolCtx, _input: PointerInput) {
+        // Only the freehand lasso finishes on release; the others keep
+        // collecting anchors until the path is closed or committed.
+        if self.kind == LassoKind::Free {
+            self.commit(ctx);
+        }
+    }
+
+    fn on_commit(&mut self, ctx: &mut ToolCtx) {
+        self.commit(ctx);
+    }
+
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
         self.points.clear();
+        self.cursor = None;
+    }
+
+    fn on_deactivate(&mut self, _ctx: &mut ToolCtx) {
+        self.points.clear();
+        self.cursor = None;
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
-        if self.points.len() > 1 {
-            vec![Overlay::AntsPolygon(self.points.clone())]
-        } else {
-            Vec::new()
+        if self.points.len() < 2 && self.cursor.is_none() {
+            return Vec::new();
         }
+        let mut pts = self.points.clone();
+        // Show the edge that would be added by clicking where the cursor is.
+        if self.kind != LassoKind::Free {
+            if let Some(c) = self.cursor {
+                if !pts.is_empty() {
+                    pts.push(c);
+                }
+            }
+        }
+        if pts.len() < 2 {
+            return Vec::new();
+        }
+        vec![Overlay::AntsPolygon(pts)]
     }
 }
 
@@ -212,15 +466,26 @@ impl ToolPlugin for LassoTool {
 pub struct WandTool {
     /// 0..=255 max per-channel distance.
     pub tolerance: u8,
+    /// Off selects every matching pixel, not just the connected blob.
+    pub contiguous: bool,
 }
 
 impl WandTool {
     fn new() -> Self {
-        WandTool { tolerance: 32 }
+        WandTool {
+            tolerance: 32,
+            contiguous: true,
+        }
     }
 }
 
-fn wand_select(doc: &Document, x: i32, y: i32, tolerance: u8) -> Option<Vec<(i32, i32)>> {
+fn wand_select(
+    doc: &Document,
+    x: i32,
+    y: i32,
+    tolerance: u8,
+    contiguous: bool,
+) -> Option<Vec<(i32, i32)>> {
     let layer = doc.active_layer.and_then(|id| doc.tree.find(id))?;
     let LayerKind::Raster(raster) = &layer.kind else {
         return None;
@@ -236,6 +501,18 @@ fn wand_select(doc: &Document, x: i32, y: i32, tolerance: u8) -> Option<Vec<(i32
             .zip(target.iter())
             .all(|(&a, &b)| (a as i32 - b as i32).abs() <= tol)
     };
+    if !contiguous {
+        // Global match: every pixel within tolerance, connected or not.
+        let mut out = Vec::new();
+        for py in canvas.top..canvas.bottom {
+            for px in canvas.left..canvas.right {
+                if matches(raster.tiles.pixel(px, py).to_u8()) {
+                    out.push((px, py));
+                }
+            }
+        }
+        return Some(out);
+    }
     let w = canvas.width() as usize;
     let mut visited = vec![false; w * canvas.height() as usize];
     let mut out = Vec::new();
@@ -277,59 +554,381 @@ impl ToolPlugin for WandTool {
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         let x = input.x.floor() as i32;
         let y = input.y.floor() as i32;
-        let Some(pixels) = wand_select(ctx.doc, x, y, self.tolerance) else {
+        let Some(pixels) = wand_select(ctx.doc, x, y, self.tolerance, self.contiguous) else {
             return;
         };
         let op = op_from(input.modifiers);
-        let mut edit = ctx.doc.begin_edit("Magic Wand");
-        edit.change_selection(|sel, _| {
-            if op == SelectOp::Replace {
-                sel.deselect();
-            }
-            // Write matched pixels directly into the mask.
-            let effective = if op == SelectOp::Replace {
-                SelectOp::Add
-            } else {
-                op
-            };
-            for &(px, py) in &pixels {
-                let coord = TileCoord::containing(px, py);
-                let buf = sel.mask.get_mut_or_insert(coord);
-                let lx = px.rem_euclid(TILE_SIZE) as usize;
-                let ly = py.rem_euclid(TILE_SIZE) as usize;
-                let ix = ly * TILE_SIZE as usize + lx;
-                match effective {
-                    SelectOp::Add => buf[ix] = 255,
-                    SelectOp::Subtract => buf[ix] = 0,
-                    SelectOp::Intersect => {} // handled below
-                    SelectOp::Replace => unreachable!(),
-                }
-            }
-            if effective == SelectOp::Intersect {
-                // Intersect: keep only previously-selected wand pixels.
-                let keep: std::collections::HashSet<(i32, i32)> = pixels.iter().copied().collect();
-                let coords: Vec<_> = sel.mask.iter().map(|(c, _)| *c).collect();
-                for coord in coords {
-                    let rect = coord.rect();
-                    let buf = sel.mask.get_mut_or_insert(coord);
-                    for ly in 0..TILE_SIZE {
-                        for lx in 0..TILE_SIZE {
-                            let ix = (ly * TILE_SIZE + lx) as usize;
-                            if buf[ix] > 0 && !keep.contains(&(rect.left + lx, rect.top + ly)) {
-                                buf[ix] = 0;
-                            }
-                        }
-                    }
-                }
-            }
-            sel.activate();
-            sel.recompute_bounds();
-        });
-        edit.commit();
+        commit_pixels(ctx, &pixels, op, "Magic Wand");
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::slider(
+                "wand-tolerance",
+                "Tolerance",
+                self.tolerance as f32,
+                0.0,
+                255.0,
+                "",
+            ),
+            ToolOption::toggle("wand-contiguous", "Contiguous", self.contiguous),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "wand-tolerance" => self.tolerance = value.num().round().clamp(0.0, 255.0) as u8,
+            "wand-contiguous" => self.contiguous = value.bool(),
+            _ => {}
+        }
     }
 
     fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
     fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
+}
+
+/// Quick Selection: paint over a region and it grows to fill whatever
+/// looks like the same material.
+///
+/// Photoshop's version is a graph cut. This is a flood fill seeded by the
+/// brush stroke that matches against the running mean colour of everything
+/// already selected, which handles gradients and texture far better than
+/// the wand's fixed reference pixel while staying honest about what it is.
+pub struct QuickSelectTool {
+    radius: f32,
+    tolerance: f32,
+    /// Alt-dragging removes from the selection, as in Photoshop.
+    subtract: bool,
+    dragging: bool,
+    /// Running mean of the colours the stroke has accepted, and how many.
+    seed: [f64; 3],
+    seen: u32,
+    /// Everything the current stroke has selected, so each dab extends the
+    /// same region rather than restarting.
+    stroke: std::collections::HashSet<(i32, i32)>,
+}
+
+impl QuickSelectTool {
+    fn new() -> Self {
+        QuickSelectTool {
+            radius: 20.0,
+            tolerance: 28.0,
+            subtract: false,
+            dragging: false,
+            seed: [0.0; 3],
+            seen: 0,
+            stroke: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Grow the region from a dab centred on (x, y).
+    fn grow(&mut self, doc: &Document, x: i32, y: i32) -> Vec<(i32, i32)> {
+        let Some(raster) = active_raster(doc) else {
+            return Vec::new();
+        };
+        let canvas = doc.canvas_rect();
+        let r = self.radius.max(1.0) as i32;
+        let mut stack = Vec::new();
+        // Seed with the dab itself, learning its colours as we go.
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy > r * r {
+                    continue;
+                }
+                let (px, py) = (x + dx, y + dy);
+                if !canvas.contains(px, py) {
+                    continue;
+                }
+                let c = raster.tiles.pixel(px, py);
+                if c.a <= 0.0 {
+                    continue;
+                }
+                self.seed[0] += c.r as f64;
+                self.seed[1] += c.g as f64;
+                self.seed[2] += c.b as f64;
+                self.seen += 1;
+                if self.stroke.insert((px, py)) {
+                    stack.push((px, py));
+                }
+            }
+        }
+        if self.seen == 0 {
+            return Vec::new();
+        }
+        let mean = [
+            (self.seed[0] / self.seen as f64) as f32,
+            (self.seed[1] / self.seen as f64) as f32,
+            (self.seed[2] / self.seen as f64) as f32,
+        ];
+        let tol = self.tolerance / 255.0;
+        // Flood outwards while pixels still look like the mean.
+        let mut added: Vec<(i32, i32)> = stack.clone();
+        while let Some((cx, cy)) = stack.pop() {
+            for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                if !canvas.contains(nx, ny) || self.stroke.contains(&(nx, ny)) {
+                    continue;
+                }
+                let c = raster.tiles.pixel(nx, ny);
+                let d = (c.r - mean[0])
+                    .abs()
+                    .max((c.g - mean[1]).abs())
+                    .max((c.b - mean[2]).abs());
+                if d <= tol && c.a > 0.0 {
+                    self.stroke.insert((nx, ny));
+                    added.push((nx, ny));
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        added
+    }
+}
+
+impl ToolPlugin for QuickSelectTool {
+    fn id(&self) -> &'static str {
+        "quick_select"
+    }
+    fn name(&self) -> &'static str {
+        "Quick Selection"
+    }
+    fn icon(&self) -> &'static str {
+        "quick-select"
+    }
+    fn shortcut(&self) -> Option<&'static str> {
+        None
+    }
+    fn group(&self) -> &'static str {
+        "wand"
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![
+            ToolOption::slider("qs-size", "Size", self.radius, 1.0, 120.0, " px"),
+            ToolOption::slider("qs-tolerance", "Tolerance", self.tolerance, 1.0, 128.0, ""),
+        ]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "qs-size" => self.radius = value.num(),
+            "qs-tolerance" => self.tolerance = value.num(),
+            _ => {}
+        }
+    }
+
+    fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        self.dragging = true;
+        self.subtract = input.modifiers.alt;
+        self.seed = [0.0; 3];
+        self.seen = 0;
+        self.stroke.clear();
+        let added = self.grow(ctx.doc, input.x as i32, input.y as i32);
+        // A plain drag starts a new selection; shift extends the old one.
+        let op = if self.subtract {
+            SelectOp::Subtract
+        } else if input.modifiers.shift {
+            SelectOp::Add
+        } else {
+            SelectOp::Replace
+        };
+        commit_pixels(ctx, &added, op, "Quick Selection");
+    }
+
+    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        if !self.dragging {
+            return;
+        }
+        let added = self.grow(ctx.doc, input.x as i32, input.y as i32);
+        let op = if self.subtract {
+            SelectOp::Subtract
+        } else {
+            SelectOp::Add
+        };
+        commit_pixels(ctx, &added, op, "Quick Selection");
+    }
+
+    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {
+        self.dragging = false;
+        self.stroke.clear();
+    }
+
+    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+        self.dragging = false;
+        self.stroke.clear();
+    }
+}
+
+/// Object Selection: drag a box around something and it finds the object
+/// inside it.
+///
+/// Photoshop CC 2020 does this with a segmentation model. This does not:
+/// it takes the border of the drawn box as a sample of the background,
+/// then keeps the pixels inside that do not look like it, cleaned up by a
+/// majority filter. That handles a subject against a distinguishable
+/// background, which is most of what the tool is used for, and it degrades
+/// predictably rather than mysteriously when it does not.
+pub struct ObjectSelectTool {
+    anchor: Option<(f32, f32)>,
+    current: Option<(f32, f32)>,
+    modifiers: Modifiers,
+    tolerance: f32,
+}
+
+impl ObjectSelectTool {
+    fn new() -> Self {
+        ObjectSelectTool {
+            anchor: None,
+            current: None,
+            modifiers: Modifiers::default(),
+            tolerance: 24.0,
+        }
+    }
+
+    fn find_object(&self, doc: &Document, rect: IntRect) -> Vec<(i32, i32)> {
+        let Some(raster) = active_raster(doc) else {
+            return Vec::new();
+        };
+        let rect = rect.intersect(&doc.canvas_rect());
+        if rect.width() < 3 || rect.height() < 3 {
+            return Vec::new();
+        }
+        // Sample the box's border as "background".
+        let mut bg: Vec<[f32; 3]> = Vec::new();
+        for x in rect.left..rect.right {
+            for y in [rect.top, rect.bottom - 1] {
+                let c = raster.tiles.pixel(x, y);
+                bg.push([c.r, c.g, c.b]);
+            }
+        }
+        for y in rect.top..rect.bottom {
+            for x in [rect.left, rect.right - 1] {
+                let c = raster.tiles.pixel(x, y);
+                bg.push([c.r, c.g, c.b]);
+            }
+        }
+        if bg.is_empty() {
+            return Vec::new();
+        }
+        let tol = self.tolerance / 255.0;
+        let looks_like_bg = |c: [f32; 3]| {
+            bg.iter().any(|b| {
+                (c[0] - b[0])
+                    .abs()
+                    .max((c[1] - b[1]).abs())
+                    .max((c[2] - b[2]).abs())
+                    <= tol
+            })
+        };
+
+        let (w, h) = (rect.width() as usize, rect.height() as usize);
+        let mut fg = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let c = raster
+                    .tiles
+                    .pixel(rect.left + x as i32, rect.top + y as i32);
+                fg[y * w + x] = c.a > 0.0 && !looks_like_bg([c.r, c.g, c.b]);
+            }
+        }
+        // Majority filter: fills pinholes and drops isolated speckle.
+        let mut clean = fg.clone();
+        for y in 1..h.saturating_sub(1) {
+            for x in 1..w.saturating_sub(1) {
+                let mut on = 0;
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let sx = (x as i32 + dx) as usize;
+                        let sy = (y as i32 + dy) as usize;
+                        on += fg[sy * w + sx] as u32;
+                    }
+                }
+                clean[y * w + x] = on >= 5;
+            }
+        }
+        let mut out = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if clean[y * w + x] {
+                    out.push((rect.left + x as i32, rect.top + y as i32));
+                }
+            }
+        }
+        out
+    }
+}
+
+impl ToolPlugin for ObjectSelectTool {
+    fn id(&self) -> &'static str {
+        "object_select"
+    }
+    fn name(&self) -> &'static str {
+        "Object Selection"
+    }
+    fn icon(&self) -> &'static str {
+        "object-select"
+    }
+    fn group(&self) -> &'static str {
+        "wand"
+    }
+
+    fn options(&self) -> Vec<ToolOption> {
+        vec![ToolOption::slider(
+            "os-tolerance",
+            "Tolerance",
+            self.tolerance,
+            1.0,
+            128.0,
+            "",
+        )]
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        if key == "os-tolerance" {
+            self.tolerance = value.num();
+        }
+    }
+
+    fn on_pointer_down(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
+        self.anchor = Some((input.x, input.y));
+        self.current = Some((input.x, input.y));
+        self.modifiers = input.modifiers;
+    }
+
+    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
+        if self.anchor.is_some() {
+            self.current = Some((input.x, input.y));
+        }
+    }
+
+    fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        let Some(a) = self.anchor.take() else { return };
+        self.current = None;
+        let rect = IntRect::new(
+            a.0.min(input.x).floor() as i32,
+            a.1.min(input.y).floor() as i32,
+            a.0.max(input.x).ceil() as i32,
+            a.1.max(input.y).ceil() as i32,
+        );
+        let pixels = self.find_object(ctx.doc, rect);
+        commit_pixels(ctx, &pixels, op_from(self.modifiers), "Object Selection");
+    }
+
+    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+        self.anchor = None;
+        self.current = None;
+    }
+
+    fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
+        match (self.anchor, self.current) {
+            (Some(a), Some(c)) => vec![Overlay::AntsRect(IntRect::new(
+                a.0.min(c.0) as i32,
+                a.1.min(c.1) as i32,
+                a.0.max(c.0) as i32,
+                a.1.max(c.1) as i32,
+            ))],
+            _ => Vec::new(),
+        }
+    }
 }
 
 pub struct SelectToolsPlugin;
@@ -342,8 +941,12 @@ impl PluginManifest for SelectToolsPlugin {
     fn register(&self, registry: &mut PluginRegistry) {
         registry.register_tool(Box::new(MarqueeTool::new(MarqueeShape::Rect)));
         registry.register_tool(Box::new(MarqueeTool::new(MarqueeShape::Ellipse)));
-        registry.register_tool(Box::new(LassoTool::new()));
+        registry.register_tool(Box::new(LassoTool::new(LassoKind::Free)));
+        registry.register_tool(Box::new(LassoTool::new(LassoKind::Polygonal)));
+        registry.register_tool(Box::new(LassoTool::new(LassoKind::Magnetic)));
         registry.register_tool(Box::new(WandTool::new()));
+        registry.register_tool(Box::new(QuickSelectTool::new()));
+        registry.register_tool(Box::new(ObjectSelectTool::new()));
     }
 }
 
@@ -457,7 +1060,7 @@ mod tests {
     fn lasso_selects_polygon() {
         let mut doc = Document::new("t", 100, 100, Depth::Eight);
         let mut state = EditorState::default();
-        let mut tool = LassoTool::new();
+        let mut tool = LassoTool::new(LassoKind::Free);
         let mut ctx = ToolCtx {
             doc: &mut doc,
             state: &mut state,
@@ -508,5 +1111,242 @@ mod tests {
             0,
             "blue side not selected"
         );
+    }
+}
+
+#[cfg(test)]
+mod new_tool_tests {
+    use super::*;
+    use photoslop_color::{Depth, Rgba};
+    use photoslop_core::{Layer, TileCoord};
+
+    fn input(x: f32, y: f32, m: Modifiers) -> PointerInput {
+        PointerInput {
+            x,
+            y,
+            pressure: 1.0,
+            modifiers: m,
+        }
+    }
+
+    /// 200x200 white, with a solid blue disc of radius 30 at (100,100).
+    fn doc_with_disc() -> Document {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut layer = Layer::new_raster("bg");
+        {
+            let raster = layer.as_raster_mut().unwrap();
+            for y in 0..200i32 {
+                for x in 0..200i32 {
+                    let inside = (x - 100).pow(2) + (y - 100).pow(2) <= 30 * 30;
+                    let c = if inside {
+                        Rgba::new(0.1, 0.2, 0.9, 1.0)
+                    } else {
+                        Rgba::new(1.0, 1.0, 1.0, 1.0)
+                    };
+                    let coord = TileCoord::containing(x, y);
+                    let trect = coord.rect();
+                    let buf = raster.tiles.get_mut_or_insert(coord, Depth::Eight);
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    buf.set(ix, c);
+                }
+            }
+        }
+        doc.push_layer(layer);
+        doc
+    }
+
+    #[test]
+    fn polygonal_lasso_closes_on_the_first_point() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = LassoTool::new(LassoKind::Polygonal);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        let m = Modifiers::default();
+        // Three corners, then click back on the first to close.
+        for p in [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0)] {
+            tool.on_pointer_down(&mut ctx, input(p.0, p.1, m));
+            tool.on_pointer_up(&mut ctx, input(p.0, p.1, m));
+        }
+        assert!(ctx.doc.selection.is_empty(), "closed too early");
+        tool.on_pointer_down(&mut ctx, input(21.0, 21.0, m));
+        assert_eq!(
+            ctx.doc.selection.coverage(50, 30),
+            255,
+            "polygon did not commit on closing"
+        );
+        assert_eq!(ctx.doc.selection.coverage(150, 150), 0, "leaked outside");
+    }
+
+    #[test]
+    fn polygonal_lasso_does_not_finish_on_a_plain_release() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = LassoTool::new(LassoKind::Polygonal);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        let m = Modifiers::default();
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0, m));
+        tool.on_pointer_up(&mut ctx, input(20.0, 20.0, m));
+        tool.on_pointer_down(&mut ctx, input(80.0, 20.0, m));
+        tool.on_pointer_up(&mut ctx, input(80.0, 20.0, m));
+        assert!(
+            ctx.doc.selection.is_empty(),
+            "a two-point path should not have committed"
+        );
+    }
+
+    #[test]
+    fn enter_commits_an_open_polygon() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = LassoTool::new(LassoKind::Polygonal);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        let m = Modifiers::default();
+        for p in [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0)] {
+            tool.on_pointer_down(&mut ctx, input(p.0, p.1, m));
+            tool.on_pointer_up(&mut ctx, input(p.0, p.1, m));
+        }
+        tool.on_commit(&mut ctx);
+        assert_eq!(ctx.doc.selection.coverage(60, 30), 255);
+    }
+
+    #[test]
+    fn magnetic_lasso_pulls_anchors_onto_the_edge() {
+        let mut doc = doc_with_disc();
+        let mut state = EditorState::default();
+        let mut tool = LassoTool::new(LassoKind::Magnetic);
+        tool.set_option("lasso-width", OptionValue::Num(12.0));
+        tool.set_option("lasso-contrast", OptionValue::Num(10.0));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        let m = Modifiers::default();
+        // Start on the disc's left edge, then drag along it but 6px off.
+        tool.on_pointer_down(&mut ctx, input(70.0, 100.0, m));
+        tool.on_pointer_move(&mut ctx, input(74.0, 76.0, m));
+        let anchors = tool.points.clone();
+        assert!(anchors.len() >= 2, "no anchor was dropped");
+        let last = *anchors.last().unwrap();
+        // The disc's edge near y=76 is about 24px from the centre in x.
+        let dist = ((last.0 - 100.0).hypot(last.1 - 100.0) - 30.0).abs();
+        assert!(
+            dist < 6.0,
+            "anchor at {last:?} is {dist} px off the edge, so it did not snap"
+        );
+    }
+
+    #[test]
+    fn quick_selection_grows_to_fill_the_disc() {
+        let mut doc = doc_with_disc();
+        let mut state = EditorState::default();
+        let mut tool = QuickSelectTool::new();
+        tool.set_option("qs-size", OptionValue::Num(4.0));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(100.0, 100.0, Modifiers::default()));
+        tool.on_pointer_up(&mut ctx, input(100.0, 100.0, Modifiers::default()));
+
+        assert_eq!(ctx.doc.selection.coverage(100, 100), 255, "centre missed");
+        assert_eq!(
+            ctx.doc.selection.coverage(100, 75),
+            255,
+            "did not reach the top of the disc"
+        );
+        assert_eq!(
+            ctx.doc.selection.coverage(100, 60),
+            0,
+            "spilled past the disc into the background"
+        );
+    }
+
+    #[test]
+    fn object_selection_finds_the_subject_inside_the_box() {
+        let mut doc = doc_with_disc();
+        let mut state = EditorState::default();
+        let mut tool = ObjectSelectTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        let m = Modifiers::default();
+        // A box with a comfortable margin of background around the disc.
+        tool.on_pointer_down(&mut ctx, input(55.0, 55.0, m));
+        tool.on_pointer_up(&mut ctx, input(145.0, 145.0, m));
+
+        assert_eq!(ctx.doc.selection.coverage(100, 100), 255, "missed the disc");
+        assert_eq!(
+            ctx.doc.selection.coverage(60, 60),
+            0,
+            "selected the background corner too"
+        );
+        // The edge of the disc should be roughly where the selection ends.
+        let b = ctx.doc.selection.bounds();
+        assert!(
+            b.width() > 50 && b.width() < 70,
+            "selection bounds {b:?} do not match the disc"
+        );
+    }
+
+    #[test]
+    fn non_contiguous_wand_matches_across_the_canvas() {
+        let mut doc = Document::new("t", 100, 100, Depth::Eight);
+        let mut layer = Layer::new_raster("bg");
+        {
+            let raster = layer.as_raster_mut().unwrap();
+            for y in 0..100i32 {
+                for x in 0..100i32 {
+                    // Two separate red squares on white.
+                    let red = (10..30).contains(&x) && (10..30).contains(&y)
+                        || (70..90).contains(&x) && (70..90).contains(&y);
+                    let c = if red {
+                        Rgba::new(1.0, 0.0, 0.0, 1.0)
+                    } else {
+                        Rgba::new(1.0, 1.0, 1.0, 1.0)
+                    };
+                    let coord = TileCoord::containing(x, y);
+                    let trect = coord.rect();
+                    let buf = raster.tiles.get_mut_or_insert(coord, Depth::Eight);
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    buf.set(ix, c);
+                }
+            }
+        }
+        doc.push_layer(layer);
+        let mut state = EditorState::default();
+        let mut tool = WandTool::new();
+        tool.set_option("wand-tolerance", OptionValue::Num(10.0));
+
+        // Contiguous: only the square that was clicked.
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 20.0, Modifiers::default()));
+        }
+        assert_eq!(doc.selection.coverage(20, 20), 255);
+        assert_eq!(doc.selection.coverage(80, 80), 0, "should not have reached");
+
+        // Non-contiguous: both.
+        tool.set_option("wand-contiguous", OptionValue::Bool(false));
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 20.0, Modifiers::default()));
+        }
+        assert_eq!(doc.selection.coverage(80, 80), 255, "missed the far square");
     }
 }

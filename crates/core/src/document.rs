@@ -57,6 +57,10 @@ pub struct Document {
     pub guides: Vec<Guide>,
     /// The last non-empty selection, so Reselect can bring it back.
     pub last_selection: Option<Selection>,
+    /// Named selections stashed by Select ▸ Save Selection. Photoshop
+    /// keeps these as alpha channels; we have no channels panel yet, so
+    /// they live here and are not written to PSD.
+    pub saved_selections: Vec<(String, Selection)>,
     /// Damaged document-space regions since the last `take_damage()`.
     damage: Vec<IntRect>,
     /// Unsaved changes?
@@ -83,6 +87,7 @@ impl Document {
             revision: 0,
             guides: Vec::new(),
             last_selection: None,
+            saved_selections: Vec::new(),
             damage: Vec::new(),
             dirty: false,
         }

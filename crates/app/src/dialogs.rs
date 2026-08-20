@@ -55,6 +55,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             active,
             ..
         } => crate::style_dialog::render(ws, layer, *style, active, cx).into_any_element(),
+        Modal::SelectModify { kind, amount } => {
+            modify_dialog(&state, kind, amount, cx).into_any_element()
+        }
+        Modal::ColorRange { tolerance, target } => {
+            color_range_dialog(&state, tolerance, target, cx).into_any_element()
+        }
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {
@@ -513,6 +519,170 @@ fn filter_dialog(
             cx,
         ));
     ui::modal_frame(name, 360.0, body, actions)
+}
+
+/// Select ▸ Modify: one amount and an OK.
+fn modify_dialog(
+    _state: &DialogState,
+    kind: crate::workspace::ModifyKind,
+    amount: f32,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    use crate::workspace::ModifyKind;
+    let max = match kind {
+        ModifyKind::Smooth => 100.0,
+        ModifyKind::Feather => 250.0,
+        _ => 500.0,
+    };
+    let body = div().flex().flex_col().gap_1().child(param_slider(
+        SliderSpec {
+            id: "modify-amount",
+            label: kind.label(),
+            value: amount,
+            min: if kind == ModifyKind::Feather {
+                0.0
+            } else {
+                1.0
+            },
+            max,
+            suffix: " px",
+        },
+        |ws, v, _cx| {
+            ws.update_modal(|m| {
+                if let Modal::SelectModify { amount, .. } = m {
+                    *amount = v;
+                }
+            });
+        },
+        cx,
+    ));
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            move |ws, _w, cx| {
+                let mut run = None;
+                ws.update_modal(|m| {
+                    if let Modal::SelectModify { kind, amount } = m {
+                        run = Some((*kind, *amount));
+                    }
+                });
+                ws.close_modal(cx);
+                if let Some((kind, amount)) = run {
+                    ws.apply_select_modify(kind, amount, cx);
+                }
+            },
+            cx,
+        ));
+    ui::modal_frame(kind.title(), 320.0, body, actions)
+}
+
+/// Select ▸ Color Range.
+fn color_range_dialog(
+    _state: &DialogState,
+    tolerance: f32,
+    target: photoslop_color::Rgba,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let swatch = {
+        let q = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
+        (q(target.r) << 16) | (q(target.g) << 8) | q(target.b)
+    };
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(ui::field_row(
+            "Sampled",
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .size(px(18.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(gpui::rgb(0x3A3A3A))
+                        .bg(gpui::rgb(swatch)),
+                )
+                .child(ui::button(
+                    "Use Foreground",
+                    false,
+                    |ws, _w, cx| {
+                        let fg = ws.editor.foreground;
+                        ws.update_modal(|m| {
+                            if let Modal::ColorRange { target, .. } = m {
+                                *target = fg;
+                            }
+                        });
+                        cx.notify();
+                    },
+                    cx,
+                )),
+        ))
+        .child(param_slider(
+            SliderSpec {
+                id: "color-range-fuzziness",
+                label: "Fuzziness",
+                value: tolerance,
+                min: 0.0,
+                max: 200.0,
+                suffix: "",
+            },
+            |ws, v, _cx| {
+                ws.update_modal(|m| {
+                    if let Modal::ColorRange { tolerance, .. } = m {
+                        *tolerance = v;
+                    }
+                });
+            },
+            cx,
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child("Selects pixels near the sampled colour on the active layer."),
+        );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            move |ws, _w, cx| {
+                let mut run = None;
+                ws.update_modal(|m| {
+                    if let Modal::ColorRange { tolerance, target } = m {
+                        run = Some((*tolerance, *target));
+                    }
+                });
+                ws.close_modal(cx);
+                if let Some((tolerance, target)) = run {
+                    ws.apply_color_range(tolerance, target, cx);
+                }
+            },
+            cx,
+        ));
+    ui::modal_frame("Color Range", 360.0, body, actions)
 }
 
 fn adjustment_dialog(

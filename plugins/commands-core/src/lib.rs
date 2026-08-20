@@ -25,6 +25,115 @@ fn cmd(
 }
 
 /// Path just above the active layer (or top of stack).
+/// Select ▸ Grow and Select ▸ Similar.
+///
+/// Both extend the selection to pixels that resemble what is already
+/// selected; Grow only reaches pixels touching the selection, Similar
+/// sweeps the whole layer. Photoshop drives both from the magic wand's
+/// tolerance, which is what `state.tolerance` carries.
+fn grow_selection(ctx: &mut CommandCtx, contiguous: bool) {
+    if ctx.doc.selection.is_empty() {
+        return;
+    }
+    let canvas = ctx.doc.canvas_rect();
+    let Some(layer) = ctx.doc.active_layer.and_then(|id| ctx.doc.tree.find(id)) else {
+        return;
+    };
+    let LayerKind::Raster(raster) = &layer.kind else {
+        return;
+    };
+    // Average colour of what is currently selected.
+    let bounds = ctx.doc.selection.bounds().intersect(&canvas);
+    let mut acc = [0f64; 3];
+    let mut n = 0u64;
+    for y in bounds.top..bounds.bottom {
+        for x in bounds.left..bounds.right {
+            if ctx.doc.selection.coverage(x, y) < 128 {
+                continue;
+            }
+            let c = raster.tiles.pixel(x, y);
+            acc[0] += c.r as f64;
+            acc[1] += c.g as f64;
+            acc[2] += c.b as f64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return;
+    }
+    let mean = [
+        (acc[0] / n as f64) as f32,
+        (acc[1] / n as f64) as f32,
+        (acc[2] / n as f64) as f32,
+    ];
+    let tol = ctx.state.tolerance as f32 / 255.0;
+    let alike = |x: i32, y: i32| {
+        let c = raster.tiles.pixel(x, y);
+        (c.r - mean[0])
+            .abs()
+            .max((c.g - mean[1]).abs())
+            .max((c.b - mean[2]).abs())
+            <= tol
+    };
+
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    if contiguous {
+        // Flood outwards from the selection's own edge.
+        let w = canvas.width() as usize;
+        let mut seen = vec![false; w * canvas.height() as usize];
+        let mut stack = Vec::new();
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                if ctx.doc.selection.coverage(x, y) >= 128 {
+                    seen[(y - canvas.top) as usize * w + (x - canvas.left) as usize] = true;
+                    stack.push((x, y));
+                }
+            }
+        }
+        while let Some((cx, cy)) = stack.pop() {
+            for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                if !canvas.contains(nx, ny) {
+                    continue;
+                }
+                let ix = (ny - canvas.top) as usize * w + (nx - canvas.left) as usize;
+                if seen[ix] {
+                    continue;
+                }
+                seen[ix] = true;
+                if alike(nx, ny) {
+                    out.push((nx, ny));
+                    stack.push((nx, ny));
+                }
+            }
+        }
+    } else {
+        for y in canvas.top..canvas.bottom {
+            for x in canvas.left..canvas.right {
+                if ctx.doc.selection.coverage(x, y) < 128 && alike(x, y) {
+                    out.push((x, y));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        return;
+    }
+    let name = if contiguous { "Grow" } else { "Similar" };
+    let mut edit = ctx.doc.begin_edit(name);
+    edit.change_selection(|sel, _| {
+        for (x, y) in &out {
+            let coord = TileCoord::containing(*x, *y);
+            let buf = sel.mask.get_mut_or_insert(coord);
+            let lx = x.rem_euclid(TILE_SIZE) as usize;
+            let ly = y.rem_euclid(TILE_SIZE) as usize;
+            buf[ly * TILE_SIZE as usize + lx] = 255;
+        }
+        sel.activate();
+        sel.recompute_bounds();
+    });
+    edit.commit();
+}
+
 fn insert_path_above_active(doc: &Document) -> LayerPath {
     match doc.active_layer.and_then(|id| doc.tree.path_of(id)) {
         Some(mut path) => {
@@ -446,6 +555,30 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd("select.feather", "Feather Selection", None, |ctx| {
                 let mut edit = ctx.doc.begin_edit("Feather");
                 edit.change_selection(|sel, _| sel.feather(2.0));
+                edit.commit();
+            }),
+            cmd("select.grow", "Grow", None, |ctx| {
+                grow_selection(ctx, true);
+            }),
+            cmd("select.similar", "Similar", None, |ctx| {
+                grow_selection(ctx, false);
+            }),
+            cmd("select.save", "Save Selection", None, |ctx| {
+                if ctx.doc.selection.is_empty() {
+                    return;
+                }
+                let n = ctx.doc.saved_selections.len() + 1;
+                let sel = ctx.doc.selection.clone();
+                ctx.doc.saved_selections.push((format!("Alpha {n}"), sel));
+            }),
+            cmd("select.load", "Load Selection", None, |ctx| {
+                // Loads the most recently saved one; the dialog picks by
+                // name once there is a channels panel to name them in.
+                let Some((_, sel)) = ctx.doc.saved_selections.last().cloned() else {
+                    return;
+                };
+                let mut edit = ctx.doc.begin_edit("Load Selection");
+                edit.change_selection(|s, _| *s = sel);
                 edit.commit();
             }),
             // --- Layer ordering ---

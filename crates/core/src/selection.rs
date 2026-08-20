@@ -304,6 +304,126 @@ impl Selection {
         self.recompute_bounds();
     }
 
+    /// Grow the selection outwards by `radius` pixels (Select ▸ Modify ▸
+    /// Expand). Works on the thresholded shape, matching Photoshop, which
+    /// hardens a feathered edge when you expand it.
+    pub fn expand(&mut self, radius: i32, canvas: IntRect) {
+        self.morph(radius, canvas, true);
+    }
+
+    /// Shrink the selection by `radius` pixels (Modify ▸ Contract).
+    pub fn contract(&mut self, radius: i32, canvas: IntRect) {
+        self.morph(radius, canvas, false);
+    }
+
+    /// A band `width` pixels wide straddling the selection's edge
+    /// (Modify ▸ Border), which is what you fill to outline a selection.
+    pub fn border(&mut self, width: i32, canvas: IntRect) {
+        if width <= 0 || !self.active {
+            return;
+        }
+        let half = (width / 2).max(1);
+        let mut outer = self.clone();
+        outer.expand(half, canvas);
+        let mut inner = self.clone();
+        inner.contract(width - half, canvas);
+        let rect = outer.bounds();
+        let mut out = Selection::new();
+        out.active = true;
+        out.apply_shape(rect, SelectOp::Replace, |x, y| {
+            outer.coverage(x, y).saturating_sub(inner.coverage(x, y))
+        });
+        self.mask = out.mask;
+        self.recompute_bounds();
+    }
+
+    /// Round off corners and remove specks (Modify ▸ Smooth): a majority
+    /// filter over a disc of the given radius.
+    pub fn smooth(&mut self, radius: i32, canvas: IntRect) {
+        if radius <= 0 || !self.active {
+            return;
+        }
+        let rect = self.grown_bounds(radius, canvas);
+        let before = self.clone();
+        let r2 = radius * radius;
+        let mut offsets = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= r2 {
+                    offsets.push((dx, dy));
+                }
+            }
+        }
+        let need = offsets.len() / 2;
+        self.mask = MaskTileMap::new();
+        self.active = true;
+        self.apply_shape(rect, SelectOp::Replace, |x, y| {
+            let hits = offsets
+                .iter()
+                .filter(|(dx, dy)| before.coverage(x + dx, y + dy) >= 128)
+                .count();
+            if hits > need {
+                255
+            } else {
+                0
+            }
+        });
+    }
+
+    /// The selection's bounds grown by `by`, clipped to the canvas.
+    fn grown_bounds(&self, by: i32, canvas: IntRect) -> IntRect {
+        let b = self.bounds();
+        IntRect::new(b.left - by, b.top - by, b.right + by, b.bottom + by).intersect(&canvas)
+    }
+
+    /// Shared implementation of expand and contract: a disc-shaped
+    /// dilation, or the same erosion applied to the complement.
+    fn morph(&mut self, radius: i32, canvas: IntRect, grow: bool) {
+        if radius <= 0 || !self.active {
+            return;
+        }
+        let before = self.clone();
+        let rect = if grow {
+            self.grown_bounds(radius, canvas)
+        } else {
+            self.bounds()
+        };
+        let r2 = radius * radius;
+        let mut offsets = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= r2 {
+                    offsets.push((dx, dy));
+                }
+            }
+        }
+        self.mask = MaskTileMap::new();
+        self.active = true;
+        self.apply_shape(rect, SelectOp::Replace, |x, y| {
+            // Dilation: on if any sample under the disc is on.
+            // Erosion: on only if every sample is on.
+            let inside = |dx: i32, dy: i32| {
+                let (sx, sy) = (x + dx, y + dy);
+                if !canvas.contains(sx, sy) {
+                    // Outside the canvas counts as unselected, so a
+                    // selection touching the edge does not erode away.
+                    return !grow;
+                }
+                before.coverage(sx, sy) >= 128
+            };
+            let hit = if grow {
+                offsets.iter().any(|(dx, dy)| inside(*dx, *dy))
+            } else {
+                offsets.iter().all(|(dx, dy)| inside(*dx, *dy))
+            };
+            if hit {
+                255
+            } else {
+                0
+            }
+        });
+    }
+
     /// Trace the selection's boundary as polylines in document space.
     ///
     /// This is what "marching ants" actually are: the edges between
@@ -490,6 +610,76 @@ mod tests {
         sel.select_polygon(&[(0.0, 0.0), (40.0, 0.0), (0.0, 40.0)], SelectOp::Replace);
         assert!(sel.coverage(5, 5) > 200);
         assert_eq!(sel.coverage(35, 35), 0);
+    }
+}
+
+#[cfg(test)]
+mod modify_tests {
+    use super::*;
+
+    const CANVAS: IntRect = IntRect {
+        left: 0,
+        top: 0,
+        right: 100,
+        bottom: 100,
+    };
+
+    fn square() -> Selection {
+        let mut s = Selection::new();
+        s.select_rect(IntRect::new(40, 40, 60, 60), SelectOp::Replace);
+        s
+    }
+
+    #[test]
+    fn expand_grows_the_edges_by_the_radius() {
+        let mut s = square();
+        s.expand(5, CANVAS);
+        assert_eq!(s.coverage(36, 50), 255, "left edge did not grow");
+        assert_eq!(s.coverage(63, 50), 255, "right edge did not grow");
+        assert_eq!(s.coverage(30, 50), 0, "grew further than asked");
+        assert_eq!(s.bounds(), IntRect::new(35, 35, 65, 65));
+    }
+
+    #[test]
+    fn contract_shrinks_the_edges_by_the_radius() {
+        let mut s = square();
+        s.contract(5, CANVAS);
+        assert_eq!(s.coverage(50, 50), 255, "middle should survive");
+        assert_eq!(s.coverage(41, 50), 0, "left edge did not shrink");
+        assert_eq!(s.bounds(), IntRect::new(45, 45, 55, 55));
+    }
+
+    #[test]
+    fn contract_by_more_than_the_size_clears_it() {
+        let mut s = square();
+        s.contract(20, CANVAS);
+        assert!(s.bounds().is_empty(), "should have vanished");
+    }
+
+    #[test]
+    fn border_keeps_only_a_band_at_the_edge() {
+        let mut s = square();
+        s.border(6, CANVAS);
+        assert_eq!(s.coverage(50, 50), 0, "middle should be hollow");
+        assert_eq!(s.coverage(40, 50), 255, "the edge itself is in the band");
+        assert_eq!(s.coverage(20, 50), 0, "band reached too far out");
+    }
+
+    #[test]
+    fn smooth_removes_a_lone_speck() {
+        let mut s = square();
+        s.select_rect(IntRect::new(10, 10, 12, 12), SelectOp::Add);
+        assert_eq!(s.coverage(11, 11), 255);
+        s.smooth(4, CANVAS);
+        assert_eq!(s.coverage(11, 11), 0, "speck survived smoothing");
+        assert_eq!(s.coverage(50, 50), 255, "smoothing ate the square");
+    }
+
+    #[test]
+    fn modifying_an_inactive_selection_does_nothing() {
+        let mut s = Selection::new();
+        s.expand(5, CANVAS);
+        assert!(s.is_empty(), "expand activated an empty selection");
     }
 }
 

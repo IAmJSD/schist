@@ -92,6 +92,12 @@ enum AppItem {
     Preferences,
     CheckForUpdates,
     LayerStyleItem,
+    SelectExpand,
+    SelectContract,
+    SelectBorder,
+    SelectSmooth,
+    SelectFeatherItem,
+    ColorRangeItem,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -148,7 +154,24 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
             vec![
                 Cmd("select.all"),
                 Cmd("select.deselect"),
+                Cmd("select.reselect"),
                 Cmd("select.inverse"),
+                Sep,
+                App("Color Range…", ColorRangeItem, None),
+                Sep,
+                // Photoshop nests these under Modify; the menu bar has no
+                // submenus yet, so they sit in their own block.
+                App("Modify: Border…", SelectBorder, None),
+                App("Modify: Smooth…", SelectSmooth, None),
+                App("Modify: Expand…", SelectExpand, None),
+                App("Modify: Contract…", SelectContract, None),
+                App("Modify: Feather…", SelectFeatherItem, None),
+                Sep,
+                Cmd("select.grow"),
+                Cmd("select.similar"),
+                Sep,
+                Cmd("select.save"),
+                Cmd("select.load"),
             ],
         ),
         (
@@ -348,6 +371,51 @@ fn run_app_item(
         AppItem::ClearGuides => ws.clear_guides(cx),
         AppItem::ScreenModeItem => ws.cycle_screen_mode(cx),
         AppItem::Preferences => ws.open_modal(Modal::Preferences, cx),
+        AppItem::SelectExpand => ws.open_modal(
+            Modal::SelectModify {
+                kind: crate::workspace::ModifyKind::Expand,
+                amount: 4.0,
+            },
+            cx,
+        ),
+        AppItem::SelectContract => ws.open_modal(
+            Modal::SelectModify {
+                kind: crate::workspace::ModifyKind::Contract,
+                amount: 4.0,
+            },
+            cx,
+        ),
+        AppItem::SelectBorder => ws.open_modal(
+            Modal::SelectModify {
+                kind: crate::workspace::ModifyKind::Border,
+                amount: 6.0,
+            },
+            cx,
+        ),
+        AppItem::SelectSmooth => ws.open_modal(
+            Modal::SelectModify {
+                kind: crate::workspace::ModifyKind::Smooth,
+                amount: 4.0,
+            },
+            cx,
+        ),
+        AppItem::SelectFeatherItem => ws.open_modal(
+            Modal::SelectModify {
+                kind: crate::workspace::ModifyKind::Feather,
+                amount: 2.0,
+            },
+            cx,
+        ),
+        AppItem::ColorRangeItem => {
+            let fg = ws.editor.foreground;
+            ws.open_modal(
+                Modal::ColorRange {
+                    tolerance: 40.0,
+                    target: fg,
+                },
+                cx,
+            )
+        }
         AppItem::LayerStyleItem => {
             if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
                 ws.show_layer_style(id, cx);

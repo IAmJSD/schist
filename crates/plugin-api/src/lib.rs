@@ -61,6 +61,9 @@ pub struct EditorState {
     pub zoom: f32,
     /// Resampling filter used when committing transforms.
     pub resample: photoslop_core::Filter,
+    /// Colour tolerance, 0..=255. Mirrored from the magic wand, which is
+    /// where Photoshop's Grow, Similar and Color Range take theirs from.
+    pub tolerance: u8,
 }
 
 impl Default for EditorState {
@@ -75,6 +78,7 @@ impl Default for EditorState {
             clipboard: None,
             zoom: 1.0,
             resample: photoslop_core::Filter::Bicubic,
+            tolerance: 32,
         }
     }
 }
