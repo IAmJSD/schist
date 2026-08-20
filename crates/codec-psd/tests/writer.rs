@@ -554,3 +554,62 @@ fn cmyk_files_carry_four_colour_channels() {
     // Header channel count: four inks plus alpha.
     assert_eq!(u16::from_be_bytes([bytes[12], bytes[13]]), 5);
 }
+
+#[test]
+fn shape_layers_round_trip_as_vectors() {
+    // The point of a shape layer is that it stays a shape. If it came back
+    // as a picture of itself, resizing it would be lossy.
+    use photoslop_core::{Anchor, SubPath, VectorPath, VectorShape};
+
+    let mut doc = Document::new("t", 200, 100, Depth::Eight);
+    let mut path = VectorPath::new("Rect");
+    path.subpaths.push(SubPath {
+        anchors: vec![
+            Anchor::corner(20.0, 10.0),
+            Anchor::corner(180.0, 10.0),
+            Anchor::corner(180.0, 90.0),
+            Anchor::corner(20.0, 90.0),
+        ],
+        closed: true,
+    });
+    let mut layer = Layer::new_raster("Shape");
+    layer.shape = Some(Box::new(VectorShape::new(
+        path,
+        Rgba::new(0.2, 0.4, 0.8, 1.0),
+    )));
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let shape = back.tree.layers[0]
+        .shape
+        .as_deref()
+        .expect("the shape came back as pixels only");
+    assert_eq!(shape.path.subpaths.len(), 1);
+    assert!(shape.path.subpaths[0].closed);
+    let pts: Vec<(f32, f32)> = shape.path.anchors().map(|(_, _, a)| a.point).collect();
+    assert_eq!(pts.len(), 4);
+    assert!((pts[0].0 - 20.0).abs() < 0.05, "corner moved: {:?}", pts[0]);
+    assert!((pts[2].1 - 90.0).abs() < 0.05, "corner moved: {:?}", pts[2]);
+    assert!(
+        (shape.fill.b - 0.8).abs() < 0.01,
+        "fill colour lost: {:?}",
+        shape.fill
+    );
+}
+
+#[test]
+fn an_ordinary_layer_gains_no_vector_blocks() {
+    let mut doc = Document::new("t", 32, 32, Depth::Eight);
+    doc.push_layer(solid_layer(
+        "plain",
+        IntRect::new(0, 0, 32, 32),
+        [1, 2, 3, 255],
+        Depth::Eight,
+    ));
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert!(back.tree.layers[0].shape.is_none());
+    assert!(
+        !back.tree.layers[0].extras.iter().any(|b| &b.key == b"vmsk"),
+        "a vector mask appeared from nowhere"
+    );
+}

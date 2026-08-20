@@ -152,7 +152,7 @@ fn parse_layer_info(cur: &mut Cursor, header: &Header) -> Result<(Vec<Layer>, bo
         parsed.push((rec, tiles, mask_tiles));
     }
 
-    Ok((fold_groups(parsed), merged_alpha))
+    Ok((fold_groups(parsed, header), merged_alpha))
 }
 
 fn check_rect(rect: IntRect, what: &str) -> Result<(), PsdError> {
@@ -480,7 +480,7 @@ fn decode_layer_channels(
 /// appears BELOW a group's children (i.e. first, since PSD stores bottom-to-
 /// top), and the visible group header record (type 1 open / 2 closed) comes
 /// AFTER them, closing the accumulated children into a folder.
-fn fold_groups(parsed: Vec<(Rec, TileMap, Option<MaskTileMap>)>) -> Vec<Layer> {
+fn fold_groups(parsed: Vec<(Rec, TileMap, Option<MaskTileMap>)>, header: &Header) -> Vec<Layer> {
     let mut root: Vec<Layer> = Vec::new();
     let mut stack: Vec<Vec<Layer>> = Vec::new();
 
@@ -505,6 +505,7 @@ fn fold_groups(parsed: Vec<(Rec, TileMap, Option<MaskTileMap>)>) -> Vec<Layer> {
                     rec,
                     mask_tiles,
                     LayerKind::Group(GroupLayer { children, open }),
+                    header,
                 );
                 group.blend = blend;
                 push_to(&mut stack, &mut root, group);
@@ -518,7 +519,7 @@ fn fold_groups(parsed: Vec<(Rec, TileMap, Option<MaskTileMap>)>) -> Vec<Layer> {
                     // the raw blocks riding along in `extras` (PLAN.md §4).
                     None => LayerKind::Raster(RasterLayer { tiles }),
                 };
-                let mut layer = make_layer(rec, mask_tiles, kind);
+                let mut layer = make_layer(rec, mask_tiles, kind, header);
                 layer.blend = blend;
                 push_to(&mut stack, &mut root, layer);
             }
@@ -549,7 +550,15 @@ fn blend_from_key(key: &[u8; 4], layer_name: &str) -> BlendMode {
     })
 }
 
-fn make_layer(rec: Rec, mask_tiles: Option<MaskTileMap>, kind: LayerKind) -> Layer {
+fn make_layer(
+    rec: Rec,
+    mask_tiles: Option<MaskTileMap>,
+    kind: LayerKind,
+    header: &Header,
+) -> Layer {
+    // A shape layer's path, so the shape stays editable rather than
+    // arriving as a flat picture of itself.
+    let shape = shape_from_blocks(&rec.extras, header);
     let mask = rec.mask.map(|m| LayerMask {
         tiles: mask_tiles.unwrap_or_default(),
         enabled: !m.disabled,
@@ -577,6 +586,11 @@ fn make_layer(rec: Rec, mask_tiles: Option<MaskTileMap>, kind: LayerKind) -> Lay
             .and_then(|b| crate::effects::read_lfx2(&b.data))
             .unwrap_or_default(),
         extras: rec.extras,
+        // A shape layer's path, so the shape stays editable rather than
+        // arriving as a flat picture of itself. The fill colour comes from
+        // its 'SoCo' payload where there is one, and defaults to black.
+        shape,
+        shape_key: 0,
         is_frame: false,
         smart: None,
         styled: None,
@@ -644,4 +658,37 @@ fn convert_lab_planes(planes: &mut ColorPlanes) {
     planes.r = Some(r);
     planes.g = Some(g);
     planes.b = Some(b);
+}
+
+/// Rebuild a vector shape from a layer's `vmsk`/`vsms` and `SoCo` blocks.
+fn shape_from_blocks(
+    extras: &[RawBlock],
+    header: &Header,
+) -> Option<Box<photoslop_core::VectorShape>> {
+    let mask = extras
+        .iter()
+        .find(|b| &b.key == b"vmsk" || &b.key == b"vsms")?;
+    let path = crate::vector::read_vector_mask(&mask.data, header.width, header.height)?;
+    // Photoshop stores the fill as a solid-colour adjustment payload.
+    let fill = extras
+        .iter()
+        .find(|b| &b.key == b"SoCo")
+        .and_then(|b| {
+            // 'SoCo' carries a u32 descriptor version and then the
+            // descriptor; some blocks put a u16 block version in front of
+            // that, which is what `parse_versioned` expects. Try both.
+            photoslop_psd_descriptor::parse(b.data.get(4..)?)
+                .or_else(|| photoslop_psd_descriptor::parse_versioned(&b.data))
+        })
+        .and_then(|d| {
+            let c = d.get("Clr ")?.as_object()?;
+            Some(photoslop_color::Rgba::new(
+                (c.number("Rd  ")? / 255.0) as f32,
+                (c.number("Grn ")? / 255.0) as f32,
+                (c.number("Bl  ")? / 255.0) as f32,
+                1.0,
+            ))
+        })
+        .unwrap_or(photoslop_color::Rgba::new(0.0, 0.0, 0.0, 1.0));
+    Some(Box::new(photoslop_core::VectorShape::new(path, fill)))
 }

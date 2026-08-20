@@ -28,7 +28,7 @@ pub use layer::{
     AdjustmentData, AdjustmentKind, GroupLayer, Layer, LayerId, LayerKind, LayerMask, LayerPath,
     LayerTree, RasterLayer, RawBlock, StyledRaster,
 };
-pub use path::{Anchor, SubPath, VectorPath};
+pub use path::{Anchor, SubPath, VectorPath, VectorShape};
 pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
 pub use smart::SmartObject;

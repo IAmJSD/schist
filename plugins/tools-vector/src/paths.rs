@@ -79,11 +79,33 @@ fn path_overlays(path: &VectorPath, detail: bool) -> Vec<Overlay> {
     out
 }
 
+/// The path the arrows edit.
+///
+/// A shape layer's own path takes precedence over the Paths panel's
+/// selection, so clicking a shape and dragging its anchors edits the
+/// shape rather than some unrelated stored path.
 fn active(doc: &Document) -> Option<&VectorPath> {
+    if let Some(shape) = doc
+        .active_layer
+        .and_then(|id| doc.tree.find(id))
+        .and_then(|l| l.shape.as_deref())
+    {
+        return Some(&shape.path);
+    }
     doc.active_path.and_then(|i| doc.paths.get(i))
 }
 
 fn active_mut(doc: &mut Document) -> Option<&mut VectorPath> {
+    if let Some(id) = doc.active_layer {
+        let is_shape = doc.tree.find(id).is_some_and(|l| l.shape.is_some());
+        if is_shape {
+            return doc
+                .tree
+                .find_mut(id)
+                .and_then(|l| l.shape.as_deref_mut())
+                .map(|s| &mut s.path);
+        }
+    }
     let i = doc.active_path?;
     doc.paths.get_mut(i)
 }

@@ -382,17 +382,19 @@ fn prepare_common(
         flags: 0b1000 | if layer.visible { 0 } else { 0b10 },
         mask,
         name: layer.name.clone(),
-        extras: build_extras(layer),
+        extras: build_extras(layer, doc),
     }
 }
 
 /// Preserved blocks plus a regenerated unicode name.
-fn build_extras(layer: &Layer) -> Vec<([u8; 4], Vec<u8>)> {
+fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
     let mut out = vec![(*b"luni", unicode_name_payload(&layer.name))];
     // Effects are re-encoded from the layer's own style, so any preserved
     // block is stale by definition. 'lrFX' is the pre-CS legacy form,
     // which we never write.
     let encoded = crate::effects::write_lfx2(&layer.style);
+    // A live shape regenerates its own blocks, so preserved ones are stale.
+    let vector = layer.shape.is_some();
     for block in &layer.extras {
         // 'luni'/'lsct' are regenerated, never echoed back.
         if &block.key == b"luni" || &block.key == b"lsct" {
@@ -401,11 +403,33 @@ fn build_extras(layer: &Layer) -> Vec<([u8; 4], Vec<u8>)> {
         if &block.key == b"lfx2" || &block.key == b"lrFX" {
             continue;
         }
+        if vector && (&block.key == b"vmsk" || &block.key == b"vsms" || &block.key == b"SoCo") {
+            continue;
+        }
         out.push((block.key, block.data.clone()));
     }
     if let Some(payload) = encoded {
         out.push((*b"lfx2", payload));
     }
+    out.extend(shape_blocks(layer, doc));
+    out
+}
+
+/// Vector mask and fill blocks for a shape layer, so the shape survives as
+/// a shape rather than as a picture of one.
+fn shape_blocks(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
+    let Some(shape) = layer.shape.as_deref() else {
+        return Vec::new();
+    };
+    let mut out = vec![(
+        *b"vmsk",
+        crate::vector::write_vector_mask(&shape.path, doc.width, doc.height),
+    )];
+    // The fill, as the solid-colour payload Photoshop expects.
+    let mut b = photoslop_psd_descriptor::Builder::new("null");
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as f64;
+    b.color("Clr ", q(shape.fill.r), q(shape.fill.g), q(shape.fill.b));
+    out.push((*b"SoCo", b.finish_versioned()));
     out
 }
 

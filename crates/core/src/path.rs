@@ -72,6 +72,14 @@ impl VectorPath {
         self.subpaths.iter().all(|s| s.anchors.is_empty())
     }
 
+    /// Append an open subpath of anchors.
+    pub fn push_open_anchors(&mut self, anchors: Vec<Anchor>) {
+        self.subpaths.push(SubPath {
+            anchors,
+            closed: false,
+        });
+    }
+
     pub fn translate(&mut self, dx: f32, dy: f32) {
         for sub in &mut self.subpaths {
             for a in &mut sub.anchors {
@@ -153,5 +161,65 @@ impl VectorPath {
                 sub.anchors[i].handle_out = (hx, hy);
             }
         }
+    }
+}
+
+/// A live vector shape: the artwork a shape layer is generated from.
+///
+/// Photoshop models these as a fill layer plus a vector mask, which is
+/// also how they are written to PSD. Here the layer keeps its shape and
+/// re-rasterizes whenever the path, fill or stroke changes -- so a shape
+/// stays editable and stays sharp at any size, which is the whole reason
+/// to have one rather than a pile of pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorShape {
+    pub path: VectorPath,
+    pub fill: photoslop_color::Rgba,
+    /// Stroke colour and width, when the shape has one.
+    pub stroke: Option<(photoslop_color::Rgba, f32)>,
+    /// Even-odd rather than nonzero, for shapes with holes.
+    pub even_odd: bool,
+}
+
+impl VectorShape {
+    pub fn new(path: VectorPath, fill: photoslop_color::Rgba) -> VectorShape {
+        VectorShape {
+            path,
+            fill,
+            stroke: None,
+            even_odd: false,
+        }
+    }
+
+    /// A cheap fingerprint of everything the rasterization depends on, so
+    /// a re-render can be skipped when nothing has moved.
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        for (_, _, a) in self.path.anchors() {
+            a.point.0.to_bits().hash(&mut h);
+            a.point.1.to_bits().hash(&mut h);
+            a.handle_in.0.to_bits().hash(&mut h);
+            a.handle_in.1.to_bits().hash(&mut h);
+            a.handle_out.0.to_bits().hash(&mut h);
+            a.handle_out.1.to_bits().hash(&mut h);
+        }
+        for sub in &self.path.subpaths {
+            sub.anchors.len().hash(&mut h);
+            sub.closed.hash(&mut h);
+        }
+        for v in [self.fill.r, self.fill.g, self.fill.b, self.fill.a] {
+            v.to_bits().hash(&mut h);
+        }
+        match self.stroke {
+            Some((c, w)) => {
+                for v in [c.r, c.g, c.b, c.a, w] {
+                    v.to_bits().hash(&mut h);
+                }
+            }
+            None => 0u8.hash(&mut h),
+        }
+        self.even_odd.hash(&mut h);
+        h.finish()
     }
 }

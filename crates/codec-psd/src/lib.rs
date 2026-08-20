@@ -17,6 +17,7 @@
 pub mod effects;
 pub mod error;
 mod reader;
+pub mod vector;
 mod writer;
 pub mod zip;
 

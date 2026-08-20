@@ -2006,6 +2006,11 @@ impl Workspace {
     fn refresh_layer_styles(&mut self) {
         let Some(doc) = self.doc.as_mut() else { return };
         let mut grew = Vec::new();
+        // Shape layers first: their pixels are derived from their path,
+        // and any effects are derived from those pixels in turn.
+        let depth = doc.depth;
+        let canvas = doc.canvas_rect();
+        reshape_layers(&mut doc.tree.layers, depth, canvas, &mut grew);
         restyle_layers(&mut doc.tree.layers, &mut grew);
         // A shadow can appear outside the layer's old bounds, so the
         // newly covered area has to be repainted too.
@@ -4822,4 +4827,33 @@ fn subtract_into(
     sel.apply_shape(rect, photoslop_core::SelectOp::Replace, |x, y| {
         keep.coverage(x, y).saturating_sub(other.coverage(x, y))
     });
+}
+
+/// Re-rasterize any shape layer whose path, fill or stroke has moved.
+///
+/// This is what keeps a vector shape sharp: the pixels are a cache of the
+/// path, thrown away and rebuilt rather than resampled.
+fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &mut Vec<IntRect>) {
+    for layer in layers.iter_mut() {
+        if let photoslop_core::LayerKind::Group(g) = &mut layer.kind {
+            reshape_layers(&mut g.children, depth, canvas, damage);
+        }
+        let Some(shape) = layer.shape.as_deref() else {
+            continue;
+        };
+        let key = shape.key();
+        if layer.shape_key == key {
+            continue;
+        }
+        let before = layer.content_bounds();
+        let tiles = photoslop_tools_vector::render_shape(shape, depth, canvas);
+        if let Some(raster) = layer.as_raster_mut() {
+            raster.tiles = tiles;
+        }
+        layer.shape_key = key;
+        // The style cache was built from the old pixels.
+        layer.styled = None;
+        damage.push(before);
+        damage.push(layer.content_bounds());
+    }
 }

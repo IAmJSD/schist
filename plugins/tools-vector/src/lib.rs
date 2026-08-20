@@ -24,6 +24,104 @@ pub fn fill_path(doc: &mut Document, path: &Path, color: Rgba, rule: FillRule, n
     commit_shape(doc, path, color, rule, name)
 }
 
+/// Rasterize a vector shape: fill, then stroke on top.
+///
+/// The single implementation, used both when a shape layer is created and
+/// whenever its path is edited afterwards, so the two can never drift.
+pub fn render_shape(
+    shape: &photoslop_core::VectorShape,
+    depth: photoslop_color::Depth,
+    canvas: IntRect,
+) -> photoslop_core::TileMap {
+    let flat = crate::paths::flatten(&shape.path);
+    let rule = if shape.even_odd {
+        FillRule::EvenOdd
+    } else {
+        FillRule::NonZero
+    };
+    let mut tiles = photoslop_core::TileMap::new();
+    rasterize_into(&mut tiles, &flat, rule, shape.fill, depth, canvas);
+    if let Some((colour, width)) = shape.stroke {
+        let stroked = photoslop_vector::stroke_path(
+            &flat,
+            photoslop_vector::StrokeStyle::new(width)
+                .with_cap(photoslop_vector::LineCap::Round)
+                .with_join(photoslop_vector::LineJoin::Round),
+        );
+        rasterize_into(
+            &mut tiles,
+            &stroked,
+            FillRule::NonZero,
+            colour,
+            depth,
+            canvas,
+        );
+    }
+    tiles
+}
+
+/// Composite a filled path onto a tile map.
+fn rasterize_into(
+    tiles: &mut photoslop_core::TileMap,
+    path: &Path,
+    rule: FillRule,
+    colour: Rgba,
+    depth: photoslop_color::Depth,
+    canvas: IntRect,
+) {
+    let bounds = path.bounds().intersect(&canvas);
+    if bounds.is_empty() {
+        return;
+    }
+    let mask = photoslop_vector::rasterize(path, bounds, rule);
+    let w = bounds.width() as usize;
+    for coord in TileCoord::covering(&bounds) {
+        let trect = coord.rect();
+        let clip = trect.intersect(&bounds);
+        if clip.is_empty() {
+            continue;
+        }
+        let buf = tiles.get_mut_or_insert(coord, depth);
+        for y in clip.top..clip.bottom {
+            for x in clip.left..clip.right {
+                let cov = mask[(y - bounds.top) as usize * w + (x - bounds.left) as usize];
+                if cov == 0 {
+                    continue;
+                }
+                let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                let under = buf.get(ix);
+                let a = colour.a * cov as f32 / 255.0;
+                buf.set(ix, Rgba { a, ..colour }.over(under));
+            }
+        }
+    }
+}
+
+/// Insert a live shape layer. Its pixels are left empty: the app's
+/// re-rasterization pass fills them in from the shape on the next frame,
+/// and again whenever the shape changes.
+pub(crate) fn commit_shape_layer(
+    doc: &mut Document,
+    shape: photoslop_core::VectorShape,
+    name: &str,
+) {
+    let mut layer = Layer::new_raster(name);
+    // Rasterize straight away rather than waiting for the next frame's
+    // refresh, so the shape appears the moment it is drawn.
+    let key = shape.key();
+    if let Some(raster) = layer.as_raster_mut() {
+        raster.tiles = render_shape(&shape, doc.depth, doc.canvas_rect());
+    }
+    layer.shape_key = key;
+    layer.shape = Some(Box::new(shape));
+    let id = layer.id;
+    let path = photoslop_core::LayerPath(vec![doc.tree.layers.len()]);
+    let mut edit = doc.begin_edit(format!("{name} Layer"));
+    edit.insert_layer(path, layer);
+    edit.commit();
+    doc.active_layer = Some(id);
+}
+
 pub(crate) fn commit_shape(
     doc: &mut Document,
     path: &Path,
@@ -128,6 +226,8 @@ pub struct ShapeTool {
     pub sides: u32,
     /// Line thickness, Photoshop's "Weight". Independent of the brush.
     weight: f32,
+    /// Photoshop's tool mode: a live shape layer, or plain pixels.
+    vector: bool,
     arrow_start: bool,
     arrow_end: bool,
     anchor: Option<(f32, f32)>,
@@ -141,6 +241,7 @@ impl ShapeTool {
             kind,
             sides: 5,
             weight: 1.0,
+            vector: true,
             arrow_start: false,
             arrow_end: false,
             anchor: None,
@@ -184,6 +285,104 @@ impl ShapeTool {
             (base.0 + nx, base.1 + ny),
             (base.0 - nx, base.1 - ny),
         ])
+    }
+
+    /// The shape as vector anchors rather than a flattened path, for the
+    /// Shape mode. Returns `None` for shapes with no vector form here.
+    fn vector_shape(
+        &self,
+        from: (f32, f32),
+        to: (f32, f32),
+        colour: Rgba,
+    ) -> Option<photoslop_core::VectorShape> {
+        let to = self.constrained(from, to);
+        let r = drag_rect(from.0, from.1, to.0, to.1, self.square);
+        let (l, t, rr, b) = (r.left as f32, r.top as f32, r.right as f32, r.bottom as f32);
+        let mut path = photoslop_core::VectorPath::new(self.kind.label());
+        match self.kind {
+            ShapeKind::Rectangle => {
+                path.subpaths.push(photoslop_core::SubPath {
+                    anchors: vec![
+                        photoslop_core::Anchor::corner(l, t),
+                        photoslop_core::Anchor::corner(rr, t),
+                        photoslop_core::Anchor::corner(rr, b),
+                        photoslop_core::Anchor::corner(l, b),
+                    ],
+                    closed: true,
+                });
+            }
+            ShapeKind::Ellipse => {
+                // Four cubic arcs, the standard circle-to-Bezier fit.
+                const K: f32 = 0.552_284_8;
+                let (cx, cy) = ((l + rr) / 2.0, (t + b) / 2.0);
+                let (rx, ry) = ((rr - l) / 2.0, (b - t) / 2.0);
+                let (ox, oy) = (rx * K, ry * K);
+                path.subpaths.push(photoslop_core::SubPath {
+                    anchors: vec![
+                        photoslop_core::Anchor::smooth(cx, t, ox, 0.0),
+                        photoslop_core::Anchor::smooth(rr, cy, 0.0, oy),
+                        photoslop_core::Anchor::smooth(cx, b, -ox, 0.0),
+                        photoslop_core::Anchor::smooth(l, cy, 0.0, -oy),
+                    ],
+                    closed: true,
+                });
+            }
+            ShapeKind::Polygon => {
+                let n = self.sides.max(3) as usize;
+                let (cx, cy) = ((l + rr) / 2.0, (t + b) / 2.0);
+                let (rx, ry) = ((rr - l) / 2.0, (b - t) / 2.0);
+                path.subpaths.push(photoslop_core::SubPath {
+                    anchors: (0..n)
+                        .map(|i| {
+                            // Start at the top, as Photoshop's polygon does.
+                            let a = -std::f32::consts::FRAC_PI_2
+                                + i as f32 * std::f32::consts::TAU / n as f32;
+                            photoslop_core::Anchor::corner(cx + rx * a.cos(), cy + ry * a.sin())
+                        })
+                        .collect(),
+                    closed: true,
+                });
+            }
+            ShapeKind::Line => {
+                // The line itself is an open subpath, so it contributes
+                // nothing to the fill (a two-point ring has no area) and
+                // everything to the stroke. Arrowheads are closed
+                // subpaths, so they are the other way round.
+                path.push_open_anchors(vec![
+                    photoslop_core::Anchor::corner(from.0, from.1),
+                    photoslop_core::Anchor::corner(to.0, to.1),
+                ]);
+                if self.arrow_start {
+                    if let Some(head) = self.arrow_head(to, from) {
+                        path.subpaths.push(photoslop_core::SubPath {
+                            anchors: head
+                                .iter()
+                                .map(|(x, y)| photoslop_core::Anchor::corner(*x, *y))
+                                .collect(),
+                            closed: true,
+                        });
+                    }
+                }
+                if self.arrow_end {
+                    if let Some(head) = self.arrow_head(from, to) {
+                        path.subpaths.push(photoslop_core::SubPath {
+                            anchors: head
+                                .iter()
+                                .map(|(x, y)| photoslop_core::Anchor::corner(*x, *y))
+                                .collect(),
+                            closed: true,
+                        });
+                    }
+                }
+                let mut shape = photoslop_core::VectorShape::new(path, colour);
+                shape.stroke = Some((colour, self.weight));
+                return Some(shape);
+            }
+        }
+        if path.is_empty() {
+            return None;
+        }
+        Some(photoslop_core::VectorShape::new(path, colour))
     }
 
     fn path_for(&self, from: (f32, f32), to: (f32, f32)) -> Path {
@@ -285,10 +484,18 @@ impl ToolPlugin for ShapeTool {
         if (to.0 - anchor.0).abs() < 0.5 && (to.1 - anchor.1).abs() < 0.5 {
             return; // a click, not a drag
         }
+        let color = ctx.state.foreground;
+        if self.vector {
+            // A live shape layer: the path is kept and the pixels are
+            // derived from it, so it stays editable and stays sharp.
+            if let Some(shape) = self.vector_shape(anchor, to, color) {
+                commit_shape_layer(ctx.doc, shape, self.kind.label());
+                return;
+            }
+        }
         let path = self.path_for(anchor, to);
         // Stroke outlines self-overlap at joins, so every shape fills with
         // the nonzero rule.
-        let color = ctx.state.foreground;
         commit_shape(ctx.doc, &path, color, FillRule::NonZero, self.kind.label());
     }
 
@@ -298,7 +505,13 @@ impl ToolPlugin for ShapeTool {
     }
 
     fn options(&self) -> Vec<ToolOption> {
-        match self.kind {
+        let mut out = vec![ToolOption::choice(
+            "shape-mode",
+            "Mode",
+            &["Shape", "Pixels"],
+            (!self.vector) as usize,
+        )];
+        out.extend(match self.kind {
             ShapeKind::Line => vec![
                 ToolOption::slider("shape-weight", "Weight", self.weight, 1.0, 100.0, " px"),
                 ToolOption::toggle("shape-arrow-start", "Start", self.arrow_start),
@@ -313,11 +526,13 @@ impl ToolPlugin for ShapeTool {
                 "",
             )],
             _ => Vec::new(),
-        }
+        });
+        out
     }
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
+            "shape-mode" => self.vector = value.index() == 0,
             "shape-weight" => self.weight = value.num().clamp(1.0, 100.0),
             "shape-arrow-start" => self.arrow_start = value.bool(),
             "shape-arrow-end" => self.arrow_end = value.bool(),
@@ -732,7 +947,30 @@ mod tests {
     }
 
     #[test]
-    fn shapes_respect_the_selection() {
+    fn shapes_in_pixels_mode_respect_the_selection() {
+        let mut doc = doc();
+        doc.selection
+            .select_rect(IntRect::from_xywh(0, 0, 30, 100), SelectOp::Replace);
+        let mut state = red();
+        let mut tool = ShapeTool::new(ShapeKind::Rectangle);
+        // Pixels mode is clipped by the selection, as painting is.
+        tool.set_option("shape-mode", OptionValue::Choice(1));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
+        tool.on_pointer_move(&mut ctx, input(60.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(60.0, 60.0));
+        assert_eq!(top_px(&doc, 20, 20), [255, 0, 0, 255], "inside selection");
+        assert_eq!(top_px(&doc, 45, 20)[3], 0, "clipped outside selection");
+    }
+
+    #[test]
+    fn a_shape_layer_is_not_clipped_by_the_selection() {
+        // Photoshop's shape layers carry their own vector mask and ignore
+        // the selection; only Pixels mode is clipped by it. Both are
+        // tested so the difference is deliberate rather than accidental.
         let mut doc = doc();
         doc.selection
             .select_rect(IntRect::from_xywh(0, 0, 30, 100), SelectOp::Replace);
@@ -743,10 +981,13 @@ mod tests {
             state: &mut state,
         };
         tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
-        tool.on_pointer_move(&mut ctx, input(60.0, 60.0));
         tool.on_pointer_up(&mut ctx, input(60.0, 60.0));
-        assert_eq!(top_px(&doc, 20, 20), [255, 0, 0, 255], "inside selection");
-        assert_eq!(top_px(&doc, 45, 20)[3], 0, "clipped outside selection");
+        assert_eq!(top_px(&doc, 20, 20)[3], 255, "inside the selection");
+        assert_eq!(
+            top_px(&doc, 45, 20)[3],
+            255,
+            "a shape layer should not be clipped by the selection"
+        );
     }
 
     #[test]

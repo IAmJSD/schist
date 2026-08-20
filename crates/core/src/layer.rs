@@ -211,6 +211,11 @@ pub struct Layer {
     pub extras: Vec<RawBlock>,
     /// Layer effects. Empty by default, so a layer costs nothing extra.
     pub style: crate::style::LayerStyle,
+    /// Set when this layer is a vector shape: its pixels are generated
+    /// from `shape` and regenerated whenever the shape changes.
+    pub shape: Option<Box<crate::path::VectorShape>>,
+    /// Fingerprint of the shape the current pixels were rasterized from.
+    pub shape_key: u64,
     /// True for layers made by the Frame tool: their mask is the frame's
     /// shape, so anything pasted in is clipped to it.
     pub is_frame: bool,
@@ -247,6 +252,8 @@ impl Layer {
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
             style: crate::style::LayerStyle::default(),
+            shape: None,
+            shape_key: 0,
             is_frame: false,
             smart: None,
             styled: None,
