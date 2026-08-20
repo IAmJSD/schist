@@ -20,13 +20,38 @@ pub enum FillRule {
 /// A path flattened to polylines, in document coordinates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Path {
-    /// Each subpath is an implicitly closed polygon.
+    /// Filling always treats a subpath as closed; this is the geometry.
     pub subpaths: Vec<Vec<(f32, f32)>>,
+    /// Whether each subpath was explicitly closed. Only stroking reads
+    /// this -- filling always treats a subpath as closed -- so a `Path`
+    /// assembled by hand fills exactly as it always did. Entries beyond
+    /// the end of this vector count as open, which for stroking means
+    /// caps rather than a phantom segment back to the first point.
+    pub closed: Vec<bool>,
 }
 
 impl Path {
     pub fn is_empty(&self) -> bool {
         self.subpaths.iter().all(|s| s.len() < 3)
+    }
+
+    /// Whether subpath `i` is closed. Unknown subpaths count as open.
+    pub fn is_closed(&self, i: usize) -> bool {
+        self.closed.get(i).copied().unwrap_or(false)
+    }
+
+    /// Append an open subpath (a polyline with two distinct ends).
+    pub fn push_open(&mut self, points: Vec<(f32, f32)>) {
+        self.closed.resize(self.subpaths.len(), false);
+        self.subpaths.push(points);
+        self.closed.push(false);
+    }
+
+    /// Append a closed subpath (a ring).
+    pub fn push_closed(&mut self, points: Vec<(f32, f32)>) {
+        self.closed.resize(self.subpaths.len(), false);
+        self.subpaths.push(points);
+        self.closed.push(true);
     }
 
     /// Bounding box, rounded outwards.
@@ -53,6 +78,7 @@ impl Path {
                 .iter()
                 .map(|s| s.iter().map(|&(x, y)| (x + dx, y + dy)).collect())
                 .collect(),
+            closed: self.closed.clone(),
         }
     }
 }
@@ -156,6 +182,7 @@ impl PathBuilder {
     pub fn build(&self, tolerance: f32) -> Path {
         let tol = tolerance.max(0.01);
         let mut subpaths: Vec<Vec<(f32, f32)>> = Vec::new();
+        let mut closed: Vec<bool> = Vec::new();
         let mut current: Vec<(f32, f32)> = Vec::new();
         let mut cursor = (0.0f32, 0.0f32);
         for seg in &self.segments {
@@ -163,6 +190,7 @@ impl PathBuilder {
                 Segment::MoveTo(x, y) => {
                     if current.len() >= 2 {
                         subpaths.push(std::mem::take(&mut current));
+                        closed.push(false);
                     } else {
                         current.clear();
                     }
@@ -180,6 +208,7 @@ impl PathBuilder {
                 Segment::Close => {
                     if current.len() >= 2 {
                         subpaths.push(std::mem::take(&mut current));
+                        closed.push(true);
                     } else {
                         current.clear();
                     }
@@ -188,8 +217,9 @@ impl PathBuilder {
         }
         if current.len() >= 2 {
             subpaths.push(current);
+            closed.push(false);
         }
-        Path { subpaths }
+        Path { subpaths, closed }
     }
 }
 
@@ -320,37 +350,262 @@ fn add_span(row: &mut [f32], x0: f32, x1: f32, weight: f32, w: usize) {
 /// plus a disc at each joint, filled with the nonzero rule so overlaps
 /// merge. Good enough for shape outlines and pen strokes; it does not do
 /// miter joins or dashes.
+/// How a stroke terminates at the free end of an open subpath.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineCap {
+    /// Stop dead on the endpoint. Photoshop's Line tool default.
+    #[default]
+    Butt,
+    /// Semicircle centred on the endpoint.
+    Round,
+    /// Half-square extending half the stroke width past the endpoint.
+    Square,
+}
+
+/// How a stroke turns a corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineJoin {
+    #[default]
+    Round,
+    Miter,
+    Bevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrokeStyle {
+    pub width: f32,
+    pub cap: LineCap,
+    pub join: LineJoin,
+    /// Miter joins longer than this multiple of the width fall back to bevel.
+    pub miter_limit: f32,
+}
+
+impl Default for StrokeStyle {
+    fn default() -> Self {
+        StrokeStyle {
+            width: 1.0,
+            cap: LineCap::default(),
+            join: LineJoin::default(),
+            miter_limit: 4.0,
+        }
+    }
+}
+
+impl StrokeStyle {
+    pub fn new(width: f32) -> StrokeStyle {
+        StrokeStyle {
+            width,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_cap(mut self, cap: LineCap) -> StrokeStyle {
+        self.cap = cap;
+        self
+    }
+
+    pub fn with_join(mut self, join: LineJoin) -> StrokeStyle {
+        self.join = join;
+        self
+    }
+}
+
+/// Expand a path's outline into a fillable path, round caps and joins.
+///
+/// Kept for callers that only care about width. Equivalent to
+/// [`stroke_path`] with a round cap and join.
 pub fn stroke_to_path(path: &Path, width: f32) -> Path {
-    let hw = (width / 2.0).max(0.05);
+    stroke_path(
+        path,
+        StrokeStyle::new(width)
+            .with_cap(LineCap::Round)
+            .with_join(LineJoin::Round),
+    )
+}
+
+/// Expand a path's outline into a path that can be filled with
+/// [`FillRule::NonZero`] to draw the stroke.
+///
+/// Every piece emitted here -- segment quads, join wedges, caps -- is wound
+/// the same way, because under the nonzero rule opposite windings cancel
+/// and punch holes where pieces overlap.
+pub fn stroke_path(path: &Path, style: StrokeStyle) -> Path {
+    let hw = (style.width / 2.0).max(0.05);
     let mut out = Path::default();
-    for sub in &path.subpaths {
-        if sub.len() < 2 {
+    for (i, sub) in path.subpaths.iter().enumerate() {
+        let pts = dedup(sub);
+        if pts.len() < 2 {
+            // A degenerate subpath still draws a dot, but only for caps
+            // that have any area of their own.
+            if let (1, LineCap::Round) = (pts.len(), style.cap) {
+                push_wound(&mut out, disc(pts[0].0, pts[0].1, hw));
+            }
             continue;
         }
-        for i in 0..sub.len() {
-            let (x0, y0) = sub[i];
-            let (x1, y1) = sub[(i + 1) % sub.len()];
+        let closed = path.is_closed(i) && pts.len() >= 3;
+        let n = pts.len();
+        let last = if closed { n } else { n - 1 };
+
+        for k in 0..last {
+            let (x0, y0) = pts[k];
+            let (x1, y1) = pts[(k + 1) % n];
             let (dx, dy) = (x1 - x0, y1 - y0);
             let len = dx.hypot(dy);
             if len < 1e-6 {
                 continue;
             }
             let (nx, ny) = (-dy / len * hw, dx / len * hw);
-            out.subpaths.push(vec![
-                (x0 + nx, y0 + ny),
-                (x1 + nx, y1 + ny),
-                (x1 - nx, y1 - ny),
-                (x0 - nx, y0 - ny),
-            ]);
-            out.subpaths.push(disc(x1, y1, hw));
+            push_wound(
+                &mut out,
+                vec![
+                    (x0 + nx, y0 + ny),
+                    (x1 + nx, y1 + ny),
+                    (x1 - nx, y1 - ny),
+                    (x0 - nx, y0 - ny),
+                ],
+            );
         }
-        out.subpaths.push(disc(sub[0].0, sub[0].1, hw));
+
+        // Joins at every interior vertex, and at the seam when closed.
+        let joins: Vec<usize> = if closed {
+            (0..n).collect()
+        } else {
+            (1..n - 1).collect()
+        };
+        for &j in &joins {
+            let prev = pts[(j + n - 1) % n];
+            let here = pts[j];
+            let next = pts[(j + 1) % n];
+            push_join(&mut out, prev, here, next, hw, style);
+        }
+
+        if !closed {
+            push_cap(&mut out, pts[1], pts[0], hw, style.cap);
+            push_cap(&mut out, pts[n - 2], pts[n - 1], hw, style.cap);
+        }
     }
     out
 }
 
+/// Drop consecutive duplicate points, which would otherwise produce
+/// zero-length segments and undefined normals.
+fn dedup(pts: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(pts.len());
+    for &p in pts {
+        if out
+            .last()
+            .is_none_or(|l| (l.0 - p.0).abs() > 1e-6 || (l.1 - p.1).abs() > 1e-6)
+        {
+            out.push(p);
+        }
+    }
+    // A closed ring may repeat its first point at the end.
+    if out.len() > 1 {
+        let (f, l) = (out[0], out[out.len() - 1]);
+        if (f.0 - l.0).abs() <= 1e-6 && (f.1 - l.1).abs() <= 1e-6 {
+            out.pop();
+        }
+    }
+    out
+}
+
+fn push_join(
+    out: &mut Path,
+    prev: (f32, f32),
+    here: (f32, f32),
+    next: (f32, f32),
+    hw: f32,
+    style: StrokeStyle,
+) {
+    match style.join {
+        LineJoin::Round => push_wound(out, disc(here.0, here.1, hw)),
+        LineJoin::Bevel | LineJoin::Miter => {
+            let Some(a) = unit(here.0 - prev.0, here.1 - prev.1) else {
+                return;
+            };
+            let Some(b) = unit(next.0 - here.0, next.1 - here.1) else {
+                return;
+            };
+            // Outer side of the turn: the side the normals point away from.
+            let cross = a.0 * b.1 - a.1 * b.0;
+            if cross.abs() < 1e-6 {
+                return; // collinear, nothing to fill
+            }
+            let sign = if cross > 0.0 { -1.0 } else { 1.0 };
+            let na = (-a.1 * hw * sign, a.0 * hw * sign);
+            let nb = (-b.1 * hw * sign, b.0 * hw * sign);
+            let p1 = (here.0 + na.0, here.1 + na.1);
+            let p2 = (here.0 + nb.0, here.1 + nb.1);
+            let mut wedge = vec![here, p1, p2];
+            if style.join == LineJoin::Miter {
+                // Miter tip sits where the two offset edges meet.
+                let cos_half = ((1.0 + (a.0 * b.0 + a.1 * b.1)) / 2.0).max(1e-6).sqrt();
+                if 1.0 / cos_half <= style.miter_limit {
+                    let Some(m) = unit(na.0 + nb.0, na.1 + nb.1) else {
+                        return;
+                    };
+                    let tip = (here.0 + m.0 * hw / cos_half, here.1 + m.1 * hw / cos_half);
+                    wedge = vec![here, p1, tip, p2];
+                }
+            }
+            push_wound(out, wedge);
+        }
+    }
+}
+
+/// Cap the free end at `end`, given the neighbouring point `from`.
+fn push_cap(out: &mut Path, from: (f32, f32), end: (f32, f32), hw: f32, cap: LineCap) {
+    match cap {
+        LineCap::Butt => {}
+        LineCap::Round => push_wound(out, disc(end.0, end.1, hw)),
+        LineCap::Square => {
+            let Some(d) = unit(end.0 - from.0, end.1 - from.1) else {
+                return;
+            };
+            let n = (-d.1 * hw, d.0 * hw);
+            let e = (d.0 * hw, d.1 * hw);
+            push_wound(
+                out,
+                vec![
+                    (end.0 + n.0, end.1 + n.1),
+                    (end.0 + n.0 + e.0, end.1 + n.1 + e.1),
+                    (end.0 - n.0 + e.0, end.1 - n.1 + e.1),
+                    (end.0 - n.0, end.1 - n.1),
+                ],
+            );
+        }
+    }
+}
+
+fn unit(x: f32, y: f32) -> Option<(f32, f32)> {
+    let len = x.hypot(y);
+    (len > 1e-6).then(|| (x / len, y / len))
+}
+
+/// Signed area, positive for one winding direction and negative for the other.
+fn signed_area(poly: &[(f32, f32)]) -> f32 {
+    let n = poly.len();
+    let mut acc = 0.0;
+    for i in 0..n {
+        let (x0, y0) = poly[i];
+        let (x1, y1) = poly[(i + 1) % n];
+        acc += x0 * y1 - x1 * y0;
+    }
+    acc / 2.0
+}
+
+/// Push a polygon, flipping it if needed so that every piece of a stroke
+/// shares one winding direction. Mixed windings cancel under the nonzero
+/// rule and leave holes where pieces overlap.
+fn push_wound(out: &mut Path, mut poly: Vec<(f32, f32)>) {
+    if signed_area(&poly) < 0.0 {
+        poly.reverse();
+    }
+    out.subpaths.push(poly);
+}
+
 fn disc(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
-    let steps = ((r * 2.0) as usize).clamp(6, 24);
+    let steps = ((r * 2.0) as usize).clamp(8, 48);
     (0..steps)
         .map(|i| {
             let a = i as f32 * std::f32::consts::TAU / steps as f32;

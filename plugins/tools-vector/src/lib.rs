@@ -8,7 +8,8 @@
 use photoslop_color::Rgba;
 use photoslop_core::{Document, IntRect, Layer, LayerPath, TileCoord, TILE_SIZE};
 use photoslop_plugin_api::{
-    EditorState, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolPlugin,
+    EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
+    ToolOption, ToolPlugin,
 };
 use photoslop_vector::{FillRule, Path, PathBuilder};
 
@@ -110,6 +111,10 @@ pub struct ShapeTool {
     kind: ShapeKind,
     /// Number of sides for the polygon shape.
     pub sides: u32,
+    /// Line thickness, Photoshop's "Weight". Independent of the brush.
+    weight: f32,
+    arrow_start: bool,
+    arrow_end: bool,
     anchor: Option<(f32, f32)>,
     current: Option<(f32, f32)>,
     square: bool,
@@ -120,13 +125,54 @@ impl ShapeTool {
         ShapeTool {
             kind,
             sides: 5,
+            weight: 1.0,
+            arrow_start: false,
+            arrow_end: false,
             anchor: None,
             current: None,
             square: false,
         }
     }
 
-    fn path_for(&self, from: (f32, f32), to: (f32, f32), stroke_width: f32) -> Path {
+    /// Where the drag actually ends, after Shift constrains it. Rectangles,
+    /// ellipses and polygons constrain to a square bounding box; a line
+    /// constrains its angle to the nearest 45 degrees, like Photoshop.
+    fn constrained(&self, from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
+        if !self.square || self.kind != ShapeKind::Line {
+            return to;
+        }
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let len = dx.hypot(dy);
+        if len < 1e-6 {
+            return to;
+        }
+        let step = std::f32::consts::FRAC_PI_4;
+        let angle = (dy.atan2(dx) / step).round() * step;
+        (from.0 + len * angle.cos(), from.1 + len * angle.sin())
+    }
+
+    /// Arrowhead as a triangle at `tip`, pointing away from `from`.
+    fn arrow_head(&self, from: (f32, f32), tip: (f32, f32)) -> Option<Vec<(f32, f32)>> {
+        let (dx, dy) = (tip.0 - from.0, tip.1 - from.1);
+        let len = dx.hypot(dy);
+        if len < 1e-6 {
+            return None;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        // Photoshop's defaults: length 300% and width 500% of the weight.
+        let along = (self.weight * 3.0).max(3.0);
+        let across = (self.weight * 2.5).max(2.5);
+        let base = (tip.0 - ux * along, tip.1 - uy * along);
+        let (nx, ny) = (-uy * across, ux * across);
+        Some(vec![
+            tip,
+            (base.0 + nx, base.1 + ny),
+            (base.0 - nx, base.1 - ny),
+        ])
+    }
+
+    fn path_for(&self, from: (f32, f32), to: (f32, f32)) -> Path {
+        let to = self.constrained(from, to);
         let mut b = PathBuilder::new();
         match self.kind {
             ShapeKind::Rectangle => {
@@ -143,7 +189,23 @@ impl ShapeTool {
             }
             ShapeKind::Line => {
                 b.move_to(from.0, from.1).line_to(to.0, to.1);
-                return photoslop_vector::stroke_to_path(&b.build(0.25), stroke_width);
+                // Butt caps: a line should end exactly where the drag did.
+                let mut path = photoslop_vector::stroke_path(
+                    &b.build(0.25),
+                    photoslop_vector::StrokeStyle::new(self.weight)
+                        .with_cap(photoslop_vector::LineCap::Butt),
+                );
+                if self.arrow_start {
+                    if let Some(head) = self.arrow_head(to, from) {
+                        path.push_closed(head);
+                    }
+                }
+                if self.arrow_end {
+                    if let Some(head) = self.arrow_head(from, to) {
+                        path.push_closed(head);
+                    }
+                }
+                return path;
             }
         }
         b.build(0.25)
@@ -208,7 +270,7 @@ impl ToolPlugin for ShapeTool {
         if (to.0 - anchor.0).abs() < 0.5 && (to.1 - anchor.1).abs() < 0.5 {
             return; // a click, not a drag
         }
-        let path = self.path_for(anchor, to, ctx.state.brush_size);
+        let path = self.path_for(anchor, to);
         // Stroke outlines self-overlap at joins, so every shape fills with
         // the nonzero rule.
         let color = ctx.state.foreground;
@@ -220,17 +282,49 @@ impl ToolPlugin for ShapeTool {
         self.current = None;
     }
 
+    fn options(&self) -> Vec<ToolOption> {
+        match self.kind {
+            ShapeKind::Line => vec![
+                ToolOption::slider("shape-weight", "Weight", self.weight, 1.0, 100.0, " px"),
+                ToolOption::toggle("shape-arrow-start", "Start", self.arrow_start),
+                ToolOption::toggle("shape-arrow-end", "End", self.arrow_end),
+            ],
+            ShapeKind::Polygon => vec![ToolOption::slider(
+                "shape-sides",
+                "Sides",
+                self.sides as f32,
+                3.0,
+                24.0,
+                "",
+            )],
+            _ => Vec::new(),
+        }
+    }
+
+    fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "shape-weight" => self.weight = value.num().clamp(1.0, 100.0),
+            "shape-arrow-start" => self.arrow_start = value.bool(),
+            "shape-arrow-end" => self.arrow_end = value.bool(),
+            "shape-sides" => self.sides = value.num().round().clamp(3.0, 24.0) as u32,
+            _ => {}
+        }
+    }
+
     fn overlays(&self, _doc: &Document, state: &EditorState) -> Vec<Overlay> {
         let (Some(a), Some(c)) = (self.anchor, self.current) else {
             return Vec::new();
         };
         match self.kind {
-            ShapeKind::Line => vec![Overlay::Line {
-                x1: a.0,
-                y1: a.1,
-                x2: c.0,
-                y2: c.1,
-            }],
+            ShapeKind::Line => {
+                let c = self.constrained(a, c);
+                vec![Overlay::Line {
+                    x1: a.0,
+                    y1: a.1,
+                    x2: c.0,
+                    y2: c.1,
+                }]
+            }
             _ => {
                 let r = drag_rect(a.0, a.1, c.0, c.1, self.square);
                 let _ = state;
@@ -517,13 +611,16 @@ mod tests {
     }
 
     #[test]
-    fn line_tool_strokes_with_brush_width() {
+    fn line_tool_strokes_at_its_own_weight() {
         let mut doc = doc();
+        // Weight is the line tool's own setting; the brush size is a red
+        // herring and must not affect it.
         let mut state = EditorState {
-            brush_size: 6.0,
+            brush_size: 60.0,
             ..red()
         };
         let mut tool = ShapeTool::new(ShapeKind::Line);
+        tool.set_option("shape-weight", OptionValue::Num(6.0));
         let mut ctx = ToolCtx {
             doc: &mut doc,
             state: &mut state,
@@ -534,6 +631,82 @@ mod tests {
         assert_eq!(top_px(&doc, 40, 50), [255, 0, 0, 255], "on the line");
         assert!(top_px(&doc, 40, 52)[3] > 0, "within the stroke width");
         assert_eq!(top_px(&doc, 40, 60)[3], 0, "outside it");
+    }
+
+    #[test]
+    fn line_tool_has_no_hole_at_the_start() {
+        // The stroker used to cancel the start cap against the shaft.
+        let mut doc = doc();
+        let mut state = red();
+        let mut tool = ShapeTool::new(ShapeKind::Line);
+        tool.set_option("shape-weight", OptionValue::Num(10.0));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 50.0));
+        tool.on_pointer_move(&mut ctx, input(80.0, 50.0));
+        tool.on_pointer_up(&mut ctx, input(80.0, 50.0));
+        assert_eq!(top_px(&doc, 22, 50)[3], 255, "just inside the start");
+        assert_eq!(top_px(&doc, 50, 50)[3], 255, "middle of the shaft");
+        assert_eq!(top_px(&doc, 78, 50)[3], 255, "just inside the end");
+    }
+
+    #[test]
+    fn shift_constrains_a_line_to_45_degrees() {
+        let mut doc = doc();
+        let mut state = red();
+        let mut tool = ShapeTool::new(ShapeKind::Line);
+        tool.set_option("shape-weight", OptionValue::Num(4.0));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        // A shallow drag: 60 across, 8 down. With shift it must flatten.
+        let shift = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        tool.on_pointer_down(
+            &mut ctx,
+            PointerInput {
+                modifiers: shift,
+                ..input(10.0, 50.0)
+            },
+        );
+        tool.on_pointer_up(
+            &mut ctx,
+            PointerInput {
+                modifiers: shift,
+                ..input(70.0, 58.0)
+            },
+        );
+        // Snapped to horizontal, so the far end sits at y = 50, not 58.
+        assert!(top_px(&doc, 68, 50)[3] > 0, "line snapped to horizontal");
+        assert_eq!(top_px(&doc, 68, 58)[3], 0, "not left on the raw angle");
+    }
+
+    #[test]
+    fn line_tool_can_draw_an_arrowhead() {
+        fn draw(arrow: bool) -> Document {
+            let mut doc = doc();
+            let mut state = red();
+            let mut tool = ShapeTool::new(ShapeKind::Line);
+            tool.set_option("shape-weight", OptionValue::Num(4.0));
+            if arrow {
+                tool.set_option("shape-arrow-end", OptionValue::Bool(true));
+            }
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 50.0));
+            tool.on_pointer_up(&mut ctx, input(80.0, 50.0));
+            doc
+        }
+        // The bare line is 4px wide, so nothing reaches this far off-axis.
+        assert_eq!(top_px(&draw(false), 74, 54)[3], 0, "no arrowhead");
+        assert!(top_px(&draw(true), 74, 54)[3] > 0, "arrowhead flares out");
     }
 
     #[test]

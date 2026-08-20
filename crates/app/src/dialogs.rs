@@ -39,9 +39,11 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             height,
             anchor,
         } => canvas_size(ws, &state, width, height, anchor, cx).into_any_element(),
-        Modal::Filter { id, values } => {
-            filter_dialog(ws, &state, id, values, cx).into_any_element()
-        }
+        Modal::Filter {
+            id,
+            values,
+            preview,
+        } => filter_dialog(ws, &state, id, values, preview, cx).into_any_element(),
         Modal::Adjustment {
             layer,
             params,
@@ -154,7 +156,7 @@ fn image_size(
             ui::checkbox(
                 "Keep proportions",
                 link,
-                |ws| {
+                |ws, _cx| {
                     ws.update_modal(|m| {
                         if let Modal::ImageSize { link, .. } = m {
                             *link = !*link;
@@ -362,7 +364,7 @@ struct SliderSpec {
 /// A labelled slider row used by the filter and adjustment dialogs.
 fn param_slider(
     spec: SliderSpec,
-    on_change: impl Fn(&mut Workspace, f32) + Clone + 'static,
+    on_change: impl Fn(&mut Workspace, f32, &mut Context<Workspace>) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let SliderSpec {
@@ -392,7 +394,7 @@ fn param_slider(
                 id,
                 ratio,
                 120.0,
-                move |ws, r| set(ws, min + r * span),
+                move |ws, r, cx| set(ws, min + r * span, cx),
                 cx,
             ))
             .child(
@@ -405,11 +407,13 @@ fn param_slider(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter_dialog(
     ws: &mut Workspace,
     _state: &DialogState,
     id: &'static str,
     values: photoslop_plugin_api::FilterValues,
+    preview: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let (name, specs) = ws
@@ -431,22 +435,56 @@ fn filter_dialog(
                 max: spec.max,
                 suffix: spec.suffix,
             },
-            move |ws, v| {
+            move |ws, v, cx| {
+                let mut next = None;
                 ws.update_modal(|m| {
-                    if let Modal::Filter { values, .. } = m {
+                    if let Modal::Filter {
+                        values, preview, ..
+                    } = m
+                    {
                         values.set(key, v);
+                        if *preview {
+                            next = Some(values.clone());
+                        }
                     }
                 });
+                if let Some(values) = next {
+                    ws.preview_filter(id, Some(&values), cx);
+                }
             },
             cx,
         ));
     }
-    body = body.child(
-        div()
-            .text_size(px(11.0))
-            .text_color(gpui::rgb(ui::TEXT_DIM))
-            .child("Applies to the active layer, inside the selection."),
-    );
+    body = body
+        .child(ui::checkbox(
+            "Preview",
+            preview,
+            move |ws, cx| {
+                let mut next = None;
+                ws.update_modal(|m| {
+                    if let Modal::Filter {
+                        values, preview, ..
+                    } = m
+                    {
+                        *preview = !*preview;
+                        next = Some((*preview, values.clone()));
+                    }
+                });
+                match next {
+                    Some((true, values)) => ws.preview_filter(id, Some(&values), cx),
+                    // Unticking shows the untouched pixels again.
+                    Some((false, _)) => ws.preview_filter(id, None, cx),
+                    None => {}
+                }
+            },
+            cx,
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child("Applies to the active layer, inside the selection."),
+        );
 
     let apply_values = values.clone();
     let actions = div()
@@ -491,7 +529,7 @@ fn adjustment_dialog(
                 max: spec.max,
                 suffix: spec.suffix,
             },
-            move |ws, v| {
+            move |ws, v, _cx| {
                 // Live preview: write straight onto the layer as the
                 // slider moves, then commit one history entry on OK.
                 let mut updated = None;
@@ -584,7 +622,7 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                     ui::checkbox(
                         if enabled { "Enabled" } else { "Disabled" },
                         enabled,
-                        move |ws| {
+                        move |ws, _cx| {
                             let id = id.clone();
                             ws.pending_plugin_toggle = Some((id, !enabled));
                         },
@@ -693,7 +731,7 @@ fn export_dialog(
                 max: 100.0,
                 suffix: "",
             },
-            |ws, v| {
+            |ws, v, _cx| {
                 ws.update_modal(|m| {
                     if let Modal::Export { options, .. } = m {
                         options.quality = v.clamp(1.0, 100.0) as u8;
@@ -708,7 +746,7 @@ fn export_dialog(
         ui::checkbox(
             "Dither when reducing to 8-bit",
             options.dither,
-            |ws| {
+            |ws, _cx| {
                 ws.update_modal(|m| {
                     if let Modal::Export { options, .. } = m {
                         options.dither = !options.dither;
@@ -891,7 +929,7 @@ fn preferences(
             ui::checkbox(
                 "Snap to guides, grid and canvas edges",
                 view.snap,
-                |ws| {
+                |ws, _cx| {
                     ws.view.snap = !ws.view.snap;
                     ws.save_view_options();
                 },
@@ -924,7 +962,7 @@ fn preferences(
             ui::checkbox(
                 "Zoom with scroll wheel",
                 view.zoom_with_scroll,
-                |ws| {
+                |ws, _cx| {
                     ws.view.zoom_with_scroll = !ws.view.zoom_with_scroll;
                     ws.save_view_options();
                 },
@@ -936,7 +974,7 @@ fn preferences(
             ui::checkbox(
                 "Write a local crash report on panic",
                 view.crash_reports,
-                |ws| {
+                |ws, _cx| {
                     ws.view.crash_reports = !ws.view.crash_reports;
                     ws.save_view_options();
                 },

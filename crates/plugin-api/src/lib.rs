@@ -168,6 +168,115 @@ pub trait ToolPlugin: Send {
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
         Vec::new()
     }
+
+    /// Controls this tool wants in the options bar, left to right. The
+    /// shell renders them generically and calls `set_option` on change, so
+    /// a tool can carry settings without the shell knowing about it.
+    fn options(&self) -> Vec<ToolOption> {
+        Vec::new()
+    }
+
+    /// Apply a change made in the options bar. `key` is the one given in
+    /// [`ToolOption`].
+    fn set_option(&mut self, _key: &str, _value: OptionValue) {}
+}
+
+/// A control the options bar should show for the active tool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolOption {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub kind: OptionKind,
+    pub value: OptionValue,
+}
+
+impl ToolOption {
+    pub fn slider(
+        key: &'static str,
+        label: &'static str,
+        value: f32,
+        min: f32,
+        max: f32,
+        suffix: &'static str,
+    ) -> ToolOption {
+        ToolOption {
+            key,
+            label,
+            kind: OptionKind::Slider { min, max, suffix },
+            value: OptionValue::Num(value),
+        }
+    }
+
+    pub fn toggle(key: &'static str, label: &'static str, value: bool) -> ToolOption {
+        ToolOption {
+            key,
+            label,
+            kind: OptionKind::Toggle,
+            value: OptionValue::Bool(value),
+        }
+    }
+
+    pub fn choice(
+        key: &'static str,
+        label: &'static str,
+        options: &'static [&'static str],
+        value: usize,
+    ) -> ToolOption {
+        ToolOption {
+            key,
+            label,
+            kind: OptionKind::Choice(options),
+            value: OptionValue::Choice(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OptionKind {
+    /// Continuous value shown as a drag track.
+    Slider {
+        min: f32,
+        max: f32,
+        /// Appended to the readout, e.g. " px" or "%".
+        suffix: &'static str,
+    },
+    /// On/off checkbox.
+    Toggle,
+    /// One of a fixed list, shown as a dropdown.
+    Choice(&'static [&'static str]),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OptionValue {
+    Num(f32),
+    Bool(bool),
+    Choice(usize),
+}
+
+impl OptionValue {
+    pub fn num(self) -> f32 {
+        match self {
+            OptionValue::Num(v) => v,
+            OptionValue::Bool(b) => b as u8 as f32,
+            OptionValue::Choice(i) => i as f32,
+        }
+    }
+
+    pub fn bool(self) -> bool {
+        match self {
+            OptionValue::Bool(b) => b,
+            OptionValue::Num(v) => v != 0.0,
+            OptionValue::Choice(i) => i != 0,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            OptionValue::Choice(i) => i,
+            OptionValue::Num(v) => v.max(0.0) as usize,
+            OptionValue::Bool(b) => b as usize,
+        }
+    }
 }
 
 /// Encoder settings chosen in the export dialog.

@@ -6,11 +6,12 @@
 //! are monochrome SVGs from the embedded asset source, tinted by text
 //! color — no emoji.
 
+use crate::ui;
 use crate::workspace::{ContextTarget, Modal, Popup, Workspace};
 use gpui::{
     canvas, deferred, div, img, px, svg, Context, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, RenderImage,
-    StatefulInteractiveElement as _, Styled, Window,
+    SharedString, StatefulInteractiveElement as _, Styled, Window,
 };
 use photoslop_color::Rgba;
 use photoslop_core::{BlendMode, Layer, LayerId, LayerKind};
@@ -557,6 +558,13 @@ pub fn menu_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SliderTarget {
+    /// A control the active tool declared for itself, mapped from the
+    /// slider's 0..=1 ratio into the option's own range.
+    ToolOption {
+        key: &'static str,
+        min: f32,
+        max: f32,
+    },
     BrushSize,
     BrushHardness,
     ToolOpacity,
@@ -568,6 +576,16 @@ pub enum SliderTarget {
 
 fn slider_get(ws: &Workspace, target: SliderTarget) -> f32 {
     match target {
+        SliderTarget::ToolOption { key, min, max } => {
+            let v = ws
+                .registry
+                .tools()
+                .find(|t| t.id() == ws.editor.active_tool)
+                .and_then(|t| t.options().into_iter().find(|o| o.key == key))
+                .map(|o| o.value.num())
+                .unwrap_or(min);
+            ((v - min) / (max - min).max(1e-6)).clamp(0.0, 1.0)
+        }
         SliderTarget::BrushSize => ((ws.editor.brush_size - 1.0) / 299.0).clamp(0.0, 1.0),
         SliderTarget::BrushHardness => ws.editor.brush_hardness,
         SliderTarget::ToolOpacity => ws.editor.tool_opacity,
@@ -585,6 +603,15 @@ fn slider_get(ws: &Workspace, target: SliderTarget) -> f32 {
 
 fn slider_set(ws: &mut Workspace, target: SliderTarget, ratio: f32, cx: &mut Context<Workspace>) {
     match target {
+        SliderTarget::ToolOption { key, min, max } => {
+            let tool_id = ws.editor.active_tool;
+            if let Some(tool) = ws.registry.tool_mut(tool_id) {
+                tool.set_option(
+                    key,
+                    photoslop_plugin_api::OptionValue::Num(min + ratio * (max - min)),
+                );
+            }
+        }
         SliderTarget::BrushSize => ws.editor.brush_size = 1.0 + ratio * 299.0,
         SliderTarget::BrushHardness => ws.editor.brush_hardness = ratio,
         SliderTarget::ToolOpacity => ws.editor.tool_opacity = ratio,
@@ -736,14 +763,96 @@ pub fn tool_options_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl
                 cx,
             ));
     }
-    bar.child(slider(
+    bar = bar.child(slider(
         "opt-opacity",
         "Opacity",
         format!("{:.0}%", ws.editor.tool_opacity * 100.0),
         SliderTarget::ToolOpacity,
         ws,
         cx,
-    ))
+    ));
+    // Whatever else the active tool asked for.
+    for opt in ws
+        .registry
+        .tools()
+        .find(|t| t.id() == tool_id)
+        .map(|t| t.options())
+        .unwrap_or_default()
+    {
+        bar = bar.child(tool_option_control(ws, opt, cx));
+    }
+    bar
+}
+
+/// Render one plugin-declared option. The shell knows the three kinds, not
+/// the tools.
+fn tool_option_control(
+    ws: &Workspace,
+    opt: photoslop_plugin_api::ToolOption,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    use photoslop_plugin_api::OptionKind;
+    let key = opt.key;
+    match opt.kind {
+        OptionKind::Slider { min, max, suffix } => {
+            let v = opt.value.num();
+            // Coarse ranges read better without decimals.
+            let display = if max - min > 20.0 {
+                format!("{v:.0}{suffix}")
+            } else {
+                format!("{v:.1}{suffix}")
+            };
+            slider(
+                key,
+                opt.label,
+                display,
+                SliderTarget::ToolOption { key, min, max },
+                ws,
+                cx,
+            )
+            .into_any_element()
+        }
+        OptionKind::Toggle => {
+            let on = opt.value.bool();
+            ui::checkbox(
+                opt.label,
+                on,
+                move |ws, _cx| {
+                    let tool_id = ws.editor.active_tool;
+                    if let Some(tool) = ws.registry.tool_mut(tool_id) {
+                        tool.set_option(key, photoslop_plugin_api::OptionValue::Bool(!on));
+                    }
+                },
+                cx,
+            )
+            .into_any_element()
+        }
+        OptionKind::Choice(labels) => {
+            let current = opt.value.index().min(labels.len().saturating_sub(1));
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field(key),
+                    is_open: ws.open_popup == Some(Popup::Field(key)),
+                    current,
+                    label: labels.get(current).copied().unwrap_or("").into(),
+                    width: 104.0,
+                    options: labels
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| (SharedString::from(*l), i))
+                        .collect(),
+                },
+                move |ws, i| {
+                    let tool_id = ws.editor.active_tool;
+                    if let Some(tool) = ws.registry.tool_mut(tool_id) {
+                        tool.set_option(key, photoslop_plugin_api::OptionValue::Choice(i));
+                    }
+                },
+                cx,
+            )
+            .into_any_element()
+        }
+    }
 }
 
 // ===== toolbar =====
@@ -1854,7 +1963,7 @@ pub fn navigator(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     "nav-zoom",
                     zoom_ratio,
                     150.0,
-                    |ws, r| {
+                    |ws, r, _cx| {
                         // Log scale: 0.8% .. 3200%.
                         let zoom = 2f32.powf(r * 12.0 - 7.0);
                         ws.set_zoom(zoom);

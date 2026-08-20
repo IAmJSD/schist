@@ -78,6 +78,7 @@ pub struct Workspace {
     pub status: SharedString,
     /// Which transient popup (menu / dropdown) is open.
     pub open_popup: Option<Popup>,
+    pub filter_preview: Option<FilterPreview>,
     /// Live bounds of slider tracks, recorded each frame by their canvases.
     slider_bounds: FxHashMap<&'static str, Bounds<Pixels>>,
     /// Slider drag in progress: (slider id, value before the drag) — used
@@ -126,6 +127,15 @@ pub struct Workspace {
     pub color: photoslop_colormgmt::ColorSettings,
     display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
     proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
+}
+
+/// Pixels a filter dialog is previewing over, so each slider tick can
+/// re-run from the untouched original and Cancel can put it back.
+#[derive(Clone)]
+pub struct FilterPreview {
+    pub layer: photoslop_core::LayerId,
+    pub region: IntRect,
+    pub original: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +260,8 @@ pub enum Modal {
     Filter {
         id: &'static str,
         values: photoslop_plugin_api::FilterValues,
+        /// Show the result on the canvas while the dialog is open.
+        preview: bool,
     },
     /// The third-party plugin manager.
     PluginManager,
@@ -316,6 +328,7 @@ impl Workspace {
             pointer_down: false,
             status: "Ready".into(),
             open_popup: None,
+            filter_preview: None,
             slider_bounds: FxHashMap::default(),
             active_slider: None,
             thumbs: FxHashMap::default(),
@@ -1067,6 +1080,10 @@ impl Workspace {
     }
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
+        // Any filter preview still on the canvas belongs to the dialog that
+        // is going away, so put the original pixels back. Committing a
+        // filter clears the preview first, so this only fires on cancel.
+        self.cancel_filter_preview(cx);
         self.modal = None;
         self.focused_field = None;
         self.field_buffer.clear();
@@ -1820,45 +1837,34 @@ impl Workspace {
 
     /// Run a registered filter over the active layer, confined to the
     /// selection, as one undoable edit.
-    pub fn apply_filter(
-        &mut self,
-        id: &str,
-        values: &photoslop_plugin_api::FilterValues,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(doc) = self.doc.as_mut() else { return };
-        let Some(layer_id) = doc.active_layer else {
-            self.status = "Select a layer first".into();
-            return;
-        };
-        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
-            log::warn!("unknown filter {id}");
-            return;
+    /// The pixels a filter would touch: the layer's content clipped to the
+    /// canvas, or to the selection when there is one.
+    fn filter_region(&self, layer_id: photoslop_core::LayerId) -> IntRect {
+        let Some(doc) = self.doc.as_ref() else {
+            return IntRect::EMPTY;
         };
         let canvas = doc.canvas_rect();
-        let content = doc
-            .tree
-            .find(layer_id)
-            .map(|l| l.content_bounds())
-            .unwrap_or(IntRect::EMPTY);
-        let region = if doc.selection.is_empty() {
-            content.intersect(&canvas)
+        if doc.selection.is_empty() {
+            doc.tree
+                .find(layer_id)
+                .map(|l| l.content_bounds())
+                .unwrap_or(IntRect::EMPTY)
+                .intersect(&canvas)
         } else {
             doc.selection.bounds().intersect(&canvas)
-        };
-        if region.is_empty() {
-            self.status = "Nothing to filter".into();
-            return;
         }
-        let Some(raster) = doc.tree.find(layer_id).and_then(|l| l.as_raster()) else {
-            self.status = "Filters need a pixel layer".into();
-            return;
-        };
+    }
 
-        // Pull the region into a flat buffer, filter it, then blend back
-        // through the selection so partial coverage feathers the result.
-        let w = region.width() as usize;
-        let h = region.height() as usize;
+    /// Pull `region` out of a raster layer into a flat straight-alpha
+    /// f32 RGBA buffer, the shape every filter works on.
+    fn read_region(&self, layer_id: photoslop_core::LayerId, region: IntRect) -> Option<Vec<f32>> {
+        let raster = self
+            .doc
+            .as_ref()?
+            .tree
+            .find(layer_id)
+            .and_then(|l| l.as_raster())?;
+        let (w, h) = (region.width() as usize, region.height() as usize);
         let mut buf = vec![0.0f32; w * h * 4];
         for y in 0..h {
             for x in 0..w {
@@ -1872,43 +1878,187 @@ impl Workspace {
                 buf[at + 3] = px.a;
             }
         }
-        let original = buf.clone();
-        filter.apply(&mut buf, w, h, values);
-        let name = filter.name().to_string();
-        let selection = doc.selection.clone();
+        Some(buf)
+    }
 
-        let mut edit = doc.begin_edit(name.clone());
-        for coord in TileCoord::covering(&region) {
-            let trect = coord.rect();
-            let clip = trect.intersect(&region);
-            if clip.is_empty() {
-                continue;
-            }
-            let Some(tile) = edit.writable_tile(layer_id, coord) else {
-                break;
-            };
-            for y in clip.top..clip.bottom {
-                for x in clip.left..clip.right {
-                    let cov = selection.coverage(x, y) as f32 / 255.0;
-                    if cov <= 0.0 {
-                        continue;
-                    }
-                    let src = ((y - region.top) as usize * w + (x - region.left) as usize) * 4;
-                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
-                    let mix = |a: f32, b: f32| a + (b - a) * cov;
-                    tile.set(
-                        ix,
-                        photoslop_color::Rgba::new(
-                            mix(original[src], buf[src]),
-                            mix(original[src + 1], buf[src + 1]),
-                            mix(original[src + 2], buf[src + 2]),
-                            mix(original[src + 3], buf[src + 3]),
-                        ),
-                    );
+    /// Blend `filtered` back over `original` through the selection, so
+    /// partial coverage feathers the result.
+    ///
+    /// With `record` the write becomes one history entry; without it the
+    /// pixels change but the history does not, which is what a live
+    /// preview needs.
+    fn write_region(
+        &mut self,
+        layer_id: photoslop_core::LayerId,
+        region: IntRect,
+        original: &[f32],
+        filtered: &[f32],
+        label: &str,
+        record: bool,
+    ) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let selection = doc.selection.clone();
+        let depth = doc.depth;
+        let coords: Vec<TileCoord> = TileCoord::covering(&region).collect();
+
+        if record {
+            let mut edit = doc.begin_edit(label.to_string());
+            for coord in coords {
+                let clip = coord.rect().intersect(&region);
+                if clip.is_empty() {
+                    continue;
                 }
+                let Some(tile) = edit.writable_tile(layer_id, coord) else {
+                    break;
+                };
+                blend_region_tile(tile, coord, clip, region, original, filtered, &selection);
             }
+            edit.commit();
+        } else {
+            let Some(raster) = doc.tree.find_mut(layer_id).and_then(|l| l.as_raster_mut()) else {
+                return;
+            };
+            for coord in coords {
+                let clip = coord.rect().intersect(&region);
+                if clip.is_empty() {
+                    continue;
+                }
+                let tile = raster.tiles.get_mut_or_insert(coord, depth);
+                blend_region_tile(tile, coord, clip, region, original, filtered, &selection);
+            }
+            doc.add_damage(region);
         }
-        edit.commit();
+    }
+
+    /// Snapshot what a filter dialog is about to change, so the preview can
+    /// be re-run from the original on every slider tick and undone on
+    /// cancel. Returns false when there is nothing to filter.
+    pub fn begin_filter_preview(&mut self) -> bool {
+        self.filter_preview = None;
+        let Some(layer_id) = self.doc.as_ref().and_then(|d| d.active_layer) else {
+            self.status = "Select a layer first".into();
+            return false;
+        };
+        if self
+            .doc
+            .as_ref()
+            .and_then(|d| d.tree.find(layer_id))
+            .and_then(|l| l.as_raster())
+            .is_none()
+        {
+            self.status = "Filters need a pixel layer".into();
+            return false;
+        }
+        let region = self.filter_region(layer_id);
+        if region.is_empty() {
+            self.status = "Nothing to filter".into();
+            return false;
+        }
+        let Some(original) = self.read_region(layer_id, region) else {
+            return false;
+        };
+        self.filter_preview = Some(FilterPreview {
+            layer: layer_id,
+            region,
+            original,
+        });
+        true
+    }
+
+    /// Re-run the filter on the canvas from the snapshot, without touching
+    /// history. `None` values restore the untouched pixels.
+    pub fn preview_filter(
+        &mut self,
+        id: &str,
+        values: Option<&photoslop_plugin_api::FilterValues>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = self.filter_preview.clone() else {
+            return;
+        };
+        let mut buf = preview.original.clone();
+        if let Some(values) = values {
+            let (w, h) = (
+                preview.region.width() as usize,
+                preview.region.height() as usize,
+            );
+            let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+                return;
+            };
+            filter.apply(&mut buf, w, h, values);
+        }
+        self.write_region(
+            preview.layer,
+            preview.region,
+            &preview.original,
+            &buf,
+            "",
+            false,
+        );
+        self.after_change(cx);
+    }
+
+    /// Drop a preview, restoring the pixels it was drawn over.
+    pub fn cancel_filter_preview(&mut self, cx: &mut Context<Self>) {
+        if self.filter_preview.is_none() {
+            return;
+        }
+        self.preview_filter("", None, cx);
+        self.filter_preview = None;
+    }
+
+    pub fn apply_filter(
+        &mut self,
+        id: &str,
+        values: &photoslop_plugin_api::FilterValues,
+        cx: &mut Context<Self>,
+    ) {
+        // A live preview has already changed these pixels; put them back so
+        // the recorded edit has the right "before".
+        if self.filter_preview.is_some() {
+            self.preview_filter("", None, cx);
+        }
+        let preview = self.filter_preview.take();
+        let Some(layer_id) = self.doc.as_ref().and_then(|d| d.active_layer) else {
+            self.status = "Select a layer first".into();
+            return;
+        };
+        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            log::warn!("unknown filter {id}");
+            return;
+        };
+        let name = filter.name().to_string();
+        if self
+            .doc
+            .as_ref()
+            .and_then(|d| d.tree.find(layer_id))
+            .and_then(|l| l.as_raster())
+            .is_none()
+        {
+            self.status = "Filters need a pixel layer".into();
+            return;
+        }
+        // Reuse the preview's region so what was previewed is what lands.
+        let region = preview
+            .filter(|p| p.layer == layer_id)
+            .map(|p| p.region)
+            .unwrap_or_else(|| self.filter_region(layer_id));
+        if region.is_empty() {
+            self.status = "Nothing to filter".into();
+            return;
+        }
+        let Some(original) = self.read_region(layer_id, region) else {
+            return;
+        };
+        let mut buf = original.clone();
+        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
+        filter.apply(
+            &mut buf,
+            region.width() as usize,
+            region.height() as usize,
+            values,
+        );
+        self.write_region(layer_id, region, &original, &buf, &name, true);
         self.status = name.into();
         self.after_change(cx);
     }
@@ -2045,7 +2195,19 @@ impl Workspace {
             self.apply_filter(id, &values, cx);
             return;
         }
-        self.open_modal(Modal::Filter { id, values }, cx);
+        if !self.begin_filter_preview() {
+            cx.notify();
+            return;
+        }
+        self.preview_filter(id, Some(&values), cx);
+        self.open_modal(
+            Modal::Filter {
+                id,
+                values,
+                preview: true,
+            },
+            cx,
+        );
     }
 
     /// Insert an adjustment layer above the active layer.
@@ -3030,5 +3192,41 @@ impl Render for Workspace {
             .children(tool_flyout)
             .children(context_menu)
             .children(modal)
+    }
+}
+
+/// Blend one tile's worth of a filtered region back over the original,
+/// weighted by selection coverage.
+#[allow(clippy::too_many_arguments)]
+fn blend_region_tile(
+    tile: &mut photoslop_core::TileBuf,
+    coord: TileCoord,
+    clip: IntRect,
+    region: IntRect,
+    original: &[f32],
+    filtered: &[f32],
+    selection: &photoslop_core::Selection,
+) {
+    let trect = coord.rect();
+    let w = region.width() as usize;
+    for y in clip.top..clip.bottom {
+        for x in clip.left..clip.right {
+            let cov = selection.coverage(x, y) as f32 / 255.0;
+            if cov <= 0.0 {
+                continue;
+            }
+            let src = ((y - region.top) as usize * w + (x - region.left) as usize) * 4;
+            let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+            let mix = |a: f32, b: f32| a + (b - a) * cov;
+            tile.set(
+                ix,
+                photoslop_color::Rgba::new(
+                    mix(original[src], filtered[src]),
+                    mix(original[src + 1], filtered[src + 1]),
+                    mix(original[src + 2], filtered[src + 2]),
+                    mix(original[src + 3], filtered[src + 3]),
+                ),
+            );
+        }
     }
 }

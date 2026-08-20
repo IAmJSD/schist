@@ -139,7 +139,7 @@ fn step_button(
 pub fn checkbox(
     label: impl Into<SharedString>,
     checked: bool,
-    on_toggle: impl Fn(&mut Workspace) + 'static,
+    on_toggle: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     div()
@@ -151,7 +151,7 @@ pub fn checkbox(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, _e, _w, cx| {
-                on_toggle(ws);
+                on_toggle(ws, cx);
                 cx.notify();
             }),
         )
@@ -271,7 +271,7 @@ pub fn slider_track(
     id: &'static str,
     ratio: f32,
     width: f32,
-    on_change: impl Fn(&mut Workspace, f32) + Clone + 'static,
+    on_change: impl Fn(&mut Workspace, f32, &mut Context<Workspace>) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let entity = cx.entity();
@@ -309,7 +309,7 @@ pub fn slider_track(
             cx.listener(move |ws, ev: &gpui::MouseDownEvent, _w, cx| {
                 ws.begin_slider(id, ratio);
                 if let Some(r) = ws.slider_ratio(id, ev.position) {
-                    down(ws, r);
+                    down(ws, r, cx);
                 }
                 cx.notify();
             }),
@@ -317,7 +317,7 @@ pub fn slider_track(
         .on_mouse_move(cx.listener(move |ws, ev: &gpui::MouseMoveEvent, _w, cx| {
             if ev.pressed_button == Some(MouseButton::Left) && ws.dragging_slider(id) {
                 if let Some(r) = ws.slider_ratio(id, ev.position) {
-                    moved(ws, r);
+                    moved(ws, r, cx);
                     cx.notify();
                 }
             }
@@ -367,6 +367,10 @@ pub fn modal_frame(
         .items_center()
         .justify_center()
         .bg(gpui::rgba(0x00000080))
+        // The backdrop must swallow the pointer, or the canvas underneath
+        // keeps its hit box and the active tool edits the document while
+        // the dialog is open -- dragging a slider would also drag the layer.
+        .occlude()
         .child(
             div()
                 .flex()
