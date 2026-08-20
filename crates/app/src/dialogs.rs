@@ -49,6 +49,9 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         } => adjustment_dialog(layer, params, original, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
+        Modal::LayerProperties { layer, name } => {
+            layer_properties(&state, layer, name, cx).into_any_element()
+        }
         Modal::Export { codec, options } => {
             export_dialog(ws, &state, codec, options, cx).into_any_element()
         }
@@ -951,4 +954,73 @@ fn preferences(
         cx,
     ));
     ui::modal_frame("Preferences", 400.0, body, actions)
+}
+
+/// Layer Properties: rename a layer.
+fn layer_properties(
+    state: &DialogState,
+    layer: photoslop_core::LayerId,
+    name: String,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let focused = state.focused_field == Some("layer-name");
+    let shown = if focused && !state.field_buffer.is_empty() {
+        state.field_buffer.clone()
+    } else {
+        name.clone()
+    };
+    let body = ui::field_row(
+        "Name",
+        div()
+            .w(px(200.0))
+            .h(px(22.0))
+            .px_1()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .bg(gpui::rgb(ui::FIELD_BG))
+            .border_1()
+            .border_color(gpui::rgb(if focused { ui::ACCENT } else { ui::FIELD_BG }))
+            .text_size(px(12.0))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|ws, _e, _w, cx| {
+                    ws.focus_field("layer-name");
+                    cx.notify();
+                }),
+            )
+            // A caret makes it obvious the field takes typing.
+            .child(if focused {
+                format!("{shown}|")
+            } else {
+                shown.clone()
+            }),
+    );
+
+    let committed = name;
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "OK",
+            true,
+            move |ws, _w, cx| {
+                let name = if ws.field_buffer.is_empty() {
+                    committed.clone()
+                } else {
+                    ws.field_buffer.clone()
+                };
+                ws.rename_layer(layer, name, cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    ui::modal_frame("Layer Properties", 340.0, body, actions)
 }

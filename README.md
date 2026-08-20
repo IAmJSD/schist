@@ -49,7 +49,9 @@ dithering when exporting to 8-bit.
 
 **Editor.** Rulers with drag-out guides, grid and snapping, screen modes,
 light/dark themes, navigator, history with click-to-jump, unlimited undo,
-crash recovery, and a fully remappable keymap.
+crash recovery, and a fully remappable keymap. Right-click the layers,
+history, colour or navigator panels — or the canvas — for Photoshop-style
+context menus (layer properties, duplicate, clipping mask, reorder, merge…).
 
 ## Keyboard
 

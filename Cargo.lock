@@ -4196,6 +4196,7 @@ dependencies = [
  "photoslop-tools-type",
  "photoslop-tools-vector",
  "photoslop-vector",
+ "rayon",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",

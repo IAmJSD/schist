@@ -20,6 +20,7 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 image.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
+rayon.workspace = true
 
 photoslop-core.workspace = true
 photoslop-color.workspace = true

@@ -61,6 +61,14 @@ layer tree bottom-up per tile — groups isolate unless pass-through, masks
 multiply source alpha, clipped layers are confined to their base's alpha,
 adjustment layers re-colour the backdrop beneath them.
 
+Painting is deliberately *not* per tile. GPUI's sprite atlas has no padding
+between entries, so drawing one quad per tile let the sampler bleed past
+each tile's slot at fractional zoom and drew a dark line at every tile
+boundary. The canvas instead assembles the visible tiles into a single
+image — resampled (nearest when zoomed in, so pixels stay crisp; bilinear
+when zoomed out, to damp aliasing) and checkered — and paints that. Colour
+management stays cached per tile, since converting is the expensive part.
+
 Interactivity comes from doing less, not from a GPU: only damaged, visible
 tiles recomposite. On a 100 MP document with three full-canvas blend layers
 plus a curves adjustment, a 1920×1080 viewport recomposites in ~16 ms and a

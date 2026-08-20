@@ -19,6 +19,7 @@ use photoslop_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE}
 use photoslop_plugin_api::{
     CommandCtx, EditorState, Modifiers, Overlay, PluginRegistry, PointerInput, ToolCtx,
 };
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
 use std::path::PathBuf;
@@ -56,7 +57,15 @@ pub struct Workspace {
     pub editor: EditorState,
     pub doc: Option<Document>,
     cache: TileCache,
-    tile_images: FxHashMap<TileCoord, Arc<RenderImage>>,
+    /// Composited tiles after colour management, ready to sample.
+    display_tiles: FxHashMap<TileCoord, Arc<Vec<u8>>>,
+    /// The single texture the canvas paints, plus the state it was built
+    /// for. One image means no seams: GPUI's sprite atlas has no padding,
+    /// so painting a quad per tile let the sampler bleed past each tile's
+    /// slot at fractional zoom and drew a dark line at every boundary.
+    viewport_image: Option<(ViewportKey, Arc<RenderImage>)>,
+    /// Images replaced this frame; freed from the sprite atlas after paint.
+    retired_images: Vec<Arc<RenderImage>>,
     preview: Preview,
     pub zoom: f32,
     /// Screen offset of document origin within the canvas element.
@@ -77,6 +86,8 @@ pub struct Workspace {
     /// Layer thumbnails keyed by layer id, tagged with the doc revision
     /// they were rendered at.
     thumbs: FxHashMap<photoslop_core::LayerId, (u64, Arc<RenderImage>)>,
+    /// The open right-click menu, if any.
+    pub context_menu: Option<ContextMenu>,
     /// The open modal dialog, if any.
     pub modal: Option<Modal>,
     /// Numeric field currently accepting digits, and its edit buffer.
@@ -97,6 +108,9 @@ pub struct Workspace {
     /// The canvas takes focus on the first frame so keyboard shortcuts work
     /// before the user clicks anything.
     focused_once: bool,
+    /// Bumped whenever colour settings change, so cached pixels drawn with
+    /// the old transform are rebuilt.
+    color_epoch: u64,
     /// Colour management settings and the compiled display transform.
     pub color: photoslop_colormgmt::ColorSettings,
     display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
@@ -170,6 +184,34 @@ impl Default for ViewOptions {
     }
 }
 
+/// What a context menu was opened on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextTarget {
+    Layer(photoslop_core::LayerId),
+    History,
+    Color,
+    Navigator,
+    Canvas,
+}
+
+/// An open right-click menu.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextMenu {
+    pub position: Point<Pixels>,
+    pub target: ContextTarget,
+}
+
+/// Identifies the state a viewport image was assembled for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewportKey {
+    revision: u64,
+    /// Zoom and pan as raw bits, so any change invalidates.
+    zoom: u32,
+    offset: (i32, i32),
+    size: (u32, u32),
+    color_epoch: u64,
+}
+
 /// Which modal dialog is open.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
@@ -204,6 +246,11 @@ pub enum Modal {
         convert: bool,
         selected: usize,
     },
+    /// Rename a layer (Layer Properties).
+    LayerProperties {
+        layer: photoslop_core::LayerId,
+        name: String,
+    },
     /// Editing an existing adjustment layer's parameters. `original` is
     /// what the layer held before the dialog opened, so Cancel can put it
     /// back exactly.
@@ -236,7 +283,9 @@ impl Workspace {
             editor: EditorState::default(),
             doc: None,
             cache: TileCache::new(),
-            tile_images: FxHashMap::default(),
+            display_tiles: FxHashMap::default(),
+            viewport_image: None,
+            retired_images: Vec::new(),
             preview: Preview::default(),
             zoom: 1.0,
             offset: point(px(0.0), px(0.0)),
@@ -250,6 +299,7 @@ impl Workspace {
             slider_bounds: FxHashMap::default(),
             active_slider: None,
             thumbs: FxHashMap::default(),
+            context_menu: None,
             modal: None,
             focused_field: None,
             field_buffer: String::new(),
@@ -260,6 +310,7 @@ impl Workspace {
             dragging_guide: None,
             nav_thumb: None,
             focused_once: false,
+            color_epoch: 0,
             color: photoslop_colormgmt::ColorSettings::default(),
             display_transform: None,
             proof_transform: None,
@@ -299,7 +350,8 @@ impl Workspace {
         self.doc = Some(doc);
         self.rebuild_color_transforms();
         self.cache.invalidate_all();
-        self.tile_images.clear();
+        self.display_tiles.clear();
+        self.viewport_image = None;
         self.preview = Preview::default();
         self.zoom = 1.0;
         self.offset = point(px(40.0), px(40.0));
@@ -557,7 +609,7 @@ impl Workspace {
             for rect in &damage {
                 self.cache.invalidate(rect);
                 for coord in TileCoord::covering(rect) {
-                    self.tile_images.remove(&coord);
+                    self.display_tiles.remove(&coord);
                 }
                 self.preview.dirty.push(*rect);
             }
@@ -730,10 +782,71 @@ impl Workspace {
         cx.notify();
     }
 
+    // ----- context menus -----
+
+    /// Open a right-click menu at `position`.
+    pub fn open_context_menu(
+        &mut self,
+        target: ContextTarget,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        // Right-clicking a layer selects it first, like Photoshop.
+        if let (ContextTarget::Layer(id), Some(doc)) = (target, self.doc.as_mut()) {
+            doc.active_layer = Some(id);
+        }
+        self.context_menu = Some(ContextMenu { position, target });
+        self.open_popup = None;
+        cx.notify();
+    }
+
+    pub fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Open Layer Properties for the given layer.
+    pub fn open_layer_properties(
+        &mut self,
+        layer: photoslop_core::LayerId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.tree.find(layer))
+            .map(|l| l.name.clone())
+        else {
+            return;
+        };
+        self.open_modal(Modal::LayerProperties { layer, name }, cx);
+    }
+
+    /// Commit a rename from the Layer Properties dialog.
+    pub fn rename_layer(
+        &mut self,
+        layer: photoslop_core::LayerId,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = self.doc.as_mut() {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let mut edit = doc.begin_edit("Rename Layer");
+            edit.change_props(layer, |l| l.name = trimmed.to_string());
+            edit.commit();
+        }
+        self.after_change(cx);
+    }
+
     // ----- modals and numeric fields -----
 
     pub fn open_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
         self.modal = Some(modal);
+        self.context_menu = None;
         self.focused_field = None;
         self.field_buffer.clear();
         self.open_popup = None;
@@ -766,7 +879,11 @@ impl Workspace {
         let Some(id) = self.focused_field else {
             return false;
         };
+        // Text fields (layer names) take any printable character; numeric
+        // fields only digits.
+        let textual = id == "layer-name";
         match key {
+            "space" if textual => self.field_buffer.push(' '),
             "backspace" => {
                 self.field_buffer.pop();
             }
@@ -780,7 +897,11 @@ impl Workspace {
                 return true;
             }
             _ => match text {
-                Some(t) if t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty() => {
+                Some(t)
+                    if !t.is_empty()
+                        && !t.chars().any(char::is_control)
+                        && (textual || t.chars().all(|c| c.is_ascii_digit())) =>
+                {
                     self.field_buffer.push_str(t)
                 }
                 _ => return false,
@@ -798,6 +919,15 @@ impl Workspace {
     }
 
     fn commit_field_value(&mut self, id: &'static str) {
+        let buffer = self.field_buffer.clone();
+        if id == "layer-name" {
+            self.update_modal(|m| {
+                if let Modal::LayerProperties { name, .. } = m {
+                    *name = buffer;
+                }
+            });
+            return;
+        }
         let Ok(value) = self.field_buffer.parse::<f32>() else {
             return;
         };
@@ -831,6 +961,11 @@ impl Workspace {
                     *width = value as u32;
                 } else if id == "canvas-size-h" {
                     *height = value as u32;
+                }
+            }
+            Modal::LayerProperties { name, .. } => {
+                if id == "layer-name" {
+                    *name = buffer;
                 }
             }
             // These dialogs have no typed fields.
@@ -886,6 +1021,10 @@ impl Workspace {
     }
 
     pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.is_some() {
+            self.close_context_menu(cx);
+            return;
+        }
         if self.modal.is_some() {
             self.close_modal(cx);
             return;
@@ -1364,9 +1503,11 @@ impl Workspace {
         self.display_transform = (!transform.is_identity()).then(|| Arc::new(transform));
         self.proof_transform = self.color.proof_transform(icc.as_deref()).map(Arc::new);
         self.cache.invalidate_all();
-        self.tile_images.clear();
+        self.display_tiles.clear();
+        self.viewport_image = None;
         self.preview = Preview::default();
         self.thumbs.clear();
+        self.color_epoch += 1;
     }
 
     /// Run composited pixels through the proof and display transforms.
@@ -1821,61 +1962,211 @@ impl Workspace {
 
     // ----- painting -----
 
-    /// Convert a straight-alpha RGBA tile to GPUI's premultiplied BGRA,
-    /// compositing transparency over the checkerboard inside the canvas and
-    /// over the app background outside it.
-    fn tile_to_render_image(rgba: &[u8], coord: TileCoord, canvas_rect: IntRect) -> RenderImage {
-        let trect = coord.rect();
-        let mut bgra = vec![0u8; rgba.len()];
-        for p in 0..(TILE_SIZE * TILE_SIZE) as usize {
-            let x = trect.left + (p as i32 % TILE_SIZE);
-            let y = trect.top + (p as i32 / TILE_SIZE);
-            let s = &rgba[p * 4..p * 4 + 4];
-            let (r, g, b, a) = (s[0] as u32, s[1] as u32, s[2] as u32, s[3] as u32);
-            let bg = if canvas_rect.contains(x, y) {
-                // 8px checkerboard.
-                if ((x >> 3) + (y >> 3)) & 1 == 0 {
-                    0xFFu32
-                } else {
-                    0xCCu32
-                }
-            } else {
-                0x26u32 // outside the document: app background
-            };
-            let inv = 255 - a;
-            let d = &mut bgra[p * 4..p * 4 + 4];
-            d[0] = ((b * a + bg * inv) / 255) as u8;
-            d[1] = ((g * a + bg * inv) / 255) as u8;
-            d[2] = ((r * a + bg * inv) / 255) as u8;
-            d[3] = 255;
-        }
-        let buffer = image::RgbaImage::from_raw(TILE_SIZE as u32, TILE_SIZE as u32, bgra).unwrap();
-        RenderImage::new(smallvec![image::Frame::new(buffer)])
-    }
-
-    fn tile_image(&mut self, coord: TileCoord) -> Option<Arc<RenderImage>> {
-        if let Some(img) = self.tile_images.get(&coord) {
-            return Some(img.clone());
+    /// A composited tile after colour management, cached per tile.
+    ///
+    /// Colour conversion is the expensive part, so it stays tile-cached;
+    /// only the cheap assembly below runs per frame.
+    fn display_tile(&mut self, coord: TileCoord) -> Option<Arc<Vec<u8>>> {
+        if let Some(tile) = self.display_tiles.get(&coord) {
+            return Some(tile.clone());
         }
         let doc = self.doc.as_ref()?;
-        let canvas_rect = doc.canvas_rect();
         let rgba = self.cache.get(doc, coord);
-        // Colour management happens exactly here: at the boundary between
-        // document pixels and screen pixels.
-        let managed;
-        let rgba: &[u8] = if self.color_managed() {
+        let managed = if self.color_managed() {
             let mut buf: Vec<f32> = rgba.iter().map(|&v| v as f32 / 255.0).collect();
             self.to_display(&mut buf);
-            managed = buf
-                .iter()
-                .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-                .collect::<Vec<u8>>();
-            &managed
+            Arc::new(
+                buf.iter()
+                    .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+                    .collect::<Vec<u8>>(),
+            )
         } else {
-            &rgba
+            rgba
         };
-        let img = Arc::new(Self::tile_to_render_image(rgba, coord, canvas_rect));
-        self.tile_images.insert(coord, img.clone());
+        self.display_tiles.insert(coord, managed.clone());
+        Some(managed)
+    }
+
+    /// Assemble everything visible into one BGRA image the size of the
+    /// canvas element, resampling on the way.
+    ///
+    /// Zooming in uses nearest-neighbour so pixels stay crisp (what an
+    /// image editor wants); zooming out uses bilinear to damp aliasing.
+    /// Transparency is checkered at a fixed *screen* size, like Photoshop.
+    fn assemble_viewport(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> Option<Arc<RenderImage>> {
+        let sf = scale_factor.max(0.01);
+        let width = (f32::from(bounds.size.width) * sf).round().max(1.0) as usize;
+        let height = (f32::from(bounds.size.height) * sf).round().max(1.0) as usize;
+        // A sanity cap: a hostile window size shouldn't allocate gigabytes.
+        if width * height > 64 << 20 {
+            return None;
+        }
+        let doc = self.doc.as_ref()?;
+        let revision = doc.revision;
+        let canvas_rect = doc.canvas_rect();
+        let key = ViewportKey {
+            revision,
+            zoom: self.zoom.to_bits(),
+            offset: (
+                (f32::from(self.offset.x) * sf).round() as i32,
+                (f32::from(self.offset.y) * sf).round() as i32,
+            ),
+            size: (width as u32, height as u32),
+            color_epoch: self.color_epoch,
+        };
+        if let Some((cached_key, image)) = &self.viewport_image {
+            if *cached_key == key {
+                return Some(image.clone());
+            }
+        }
+
+        // Which document pixels can land on screen?
+        let zoom = self.zoom;
+        let inv_zoom = 1.0 / zoom;
+        let origin = (f32::from(self.offset.x) * sf, f32::from(self.offset.y) * sf);
+        let doc_at = |dx: f32, dy: f32| -> (f32, f32) {
+            (
+                (dx - origin.0) * inv_zoom / sf,
+                (dy - origin.1) * inv_zoom / sf,
+            )
+        };
+        let (x0, y0) = doc_at(0.0, 0.0);
+        let (x1, y1) = doc_at(width as f32, height as f32);
+        let visible = IntRect::new(
+            x0.floor() as i32 - 1,
+            y0.floor() as i32 - 1,
+            x1.ceil() as i32 + 1,
+            y1.ceil() as i32 + 1,
+        )
+        .intersect(&canvas_rect);
+        if visible.is_empty() {
+            // Nothing but background: a 1x1 image keeps the paint path simple.
+            let buffer = image::RgbaImage::from_raw(1, 1, vec![0x26, 0x26, 0x26, 255])?;
+            let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
+            self.viewport_image = Some((key, img.clone()));
+            return Some(img);
+        }
+
+        // Composite the visible tiles, then index them by grid position so
+        // sampling is an array lookup rather than a hash per pixel.
+        let coords: Vec<TileCoord> = TileCoord::covering(&visible).collect();
+        if let Some(doc) = self.doc.as_ref() {
+            self.cache.prewarm(doc, &coords);
+        }
+        let (tx0, ty0) = (
+            visible.left.div_euclid(TILE_SIZE),
+            visible.top.div_euclid(TILE_SIZE),
+        );
+        let cols = ((visible.right - 1).div_euclid(TILE_SIZE) - tx0 + 1).max(1) as usize;
+        let rows = ((visible.bottom - 1).div_euclid(TILE_SIZE) - ty0 + 1).max(1) as usize;
+        let mut grid: Vec<Option<Arc<Vec<u8>>>> = vec![None; cols * rows];
+        for coord in coords {
+            let ix = (coord.ty - ty0) as usize * cols + (coord.tx - tx0) as usize;
+            if let Some(slot) = grid.get_mut(ix) {
+                *slot = self.display_tile(coord);
+            }
+        }
+
+        let sample = |x: i32, y: i32| -> [u8; 4] {
+            if !canvas_rect.contains(x, y) {
+                return [0, 0, 0, 0];
+            }
+            let tx = x.div_euclid(TILE_SIZE) - tx0;
+            let ty = y.div_euclid(TILE_SIZE) - ty0;
+            if tx < 0 || ty < 0 || tx as usize >= cols || ty as usize >= rows {
+                return [0, 0, 0, 0];
+            }
+            match &grid[ty as usize * cols + tx as usize] {
+                Some(tile) => {
+                    let lx = x.rem_euclid(TILE_SIZE) as usize;
+                    let ly = y.rem_euclid(TILE_SIZE) as usize;
+                    let at = (ly * TILE_SIZE as usize + lx) * 4;
+                    [tile[at], tile[at + 1], tile[at + 2], tile[at + 3]]
+                }
+                None => [0, 0, 0, 0],
+            }
+        };
+
+        let magnify = zoom >= 1.0;
+        let mut bgra = vec![0u8; width * height * 4];
+        bgra.par_chunks_mut(width * 4)
+            .enumerate()
+            .for_each(|(row, line)| {
+                let dy = row as f32 + 0.5;
+                for col in 0..width {
+                    let dx = col as f32 + 0.5;
+                    let (fx, fy) = doc_at(dx, dy);
+                    let px = if magnify {
+                        // Nearest: one document pixel becomes a crisp block.
+                        sample(fx.floor() as i32, fy.floor() as i32)
+                    } else {
+                        // Bilinear over the four neighbours, in
+                        // premultiplied space so edges don't fringe.
+                        let (sx, sy) = (fx - 0.5, fy - 0.5);
+                        let (ix, iy) = (sx.floor(), sy.floor());
+                        let (tx, ty) = (sx - ix, sy - iy);
+                        let mut acc = [0.0f32; 4];
+                        for (dxi, wx) in [(0, 1.0 - tx), (1, tx)] {
+                            for (dyi, wy) in [(0, 1.0 - ty), (1, ty)] {
+                                let w = wx * wy;
+                                if w <= 0.0 {
+                                    continue;
+                                }
+                                let s = sample(ix as i32 + dxi, iy as i32 + dyi);
+                                let a = s[3] as f32 / 255.0;
+                                acc[0] += s[0] as f32 * a * w;
+                                acc[1] += s[1] as f32 * a * w;
+                                acc[2] += s[2] as f32 * a * w;
+                                acc[3] += a * w;
+                            }
+                        }
+                        if acc[3] <= 1e-6 {
+                            [0, 0, 0, 0]
+                        } else {
+                            [
+                                (acc[0] / acc[3]).round().clamp(0.0, 255.0) as u8,
+                                (acc[1] / acc[3]).round().clamp(0.0, 255.0) as u8,
+                                (acc[2] / acc[3]).round().clamp(0.0, 255.0) as u8,
+                                (acc[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+                            ]
+                        }
+                    };
+
+                    // Transparency shows the checkerboard inside the canvas
+                    // and the app background outside it.
+                    let inside = {
+                        let (fx, fy) = (fx.floor() as i32, fy.floor() as i32);
+                        canvas_rect.contains(fx, fy)
+                    };
+                    let bg = if inside {
+                        if ((col >> 3) + (row >> 3)) & 1 == 0 {
+                            0xFFu32
+                        } else {
+                            0xCCu32
+                        }
+                    } else {
+                        0x26u32
+                    };
+                    let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
+                    let inv = 255 - a;
+                    let at = col * 4;
+                    line[at] = ((b * a + bg * inv) / 255) as u8;
+                    line[at + 1] = ((g * a + bg * inv) / 255) as u8;
+                    line[at + 2] = ((r * a + bg * inv) / 255) as u8;
+                    line[at + 3] = 255;
+                }
+            });
+
+        let buffer = image::RgbaImage::from_raw(width as u32, height as u32, bgra)?;
+        let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
+        // Release the previous frame's atlas slot.
+        if let Some((_, old)) = self.viewport_image.replace((key, img.clone())) {
+            self.retired_images.push(old);
+        }
         Some(img)
     }
 
@@ -1993,30 +2284,18 @@ impl Workspace {
         };
 
         if zoom <= PREVIEW_ZOOM_CUTOFF {
+            // Far out, compositing every tile would be wasteful; the
+            // downscaled preview is already one seamless image.
             if let Some(img) = self.refresh_preview() {
                 job.tiles.push((snapped_bounds(canvas_rect), img));
             }
-        } else {
-            // Visible document rect.
-            let (dx0, dy0) = self.doc_pos(point(px(0.0), px(0.0)));
-            let (dx1, dy1) = self.doc_pos(point(bounds.size.width, bounds.size.height));
-            let visible = IntRect::new(
-                dx0.floor() as i32 - 1,
-                dy0.floor() as i32 - 1,
-                dx1.ceil() as i32 + 1,
-                dy1.ceil() as i32 + 1,
-            )
-            .intersect(&canvas_rect);
-            let coords: Vec<TileCoord> = TileCoord::covering(&visible).collect();
-            if let Some(doc) = self.doc.as_ref() {
-                self.cache.prewarm(doc, &coords);
-            }
-            for coord in coords {
-                if let Some(img) = self.tile_image(coord) {
-                    job.tiles.push((snapped_bounds(coord.rect()), img));
-                }
-            }
+        } else if let Some(img) = self.assemble_viewport(bounds, scale_factor) {
+            // One image covering the whole canvas element, already
+            // resampled and checkered, so there are no tile edges to seam.
+            job.tiles.push((bounds, img));
         }
+
+        job.retired = std::mem::take(&mut self.retired_images);
 
         // Document border.
         job.outlines
@@ -2148,6 +2427,12 @@ impl Workspace {
                 MouseButton::Middle,
                 cx.listener(|ws, ev, w, cx| ws.on_mouse_down(ev, w, cx)),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
+                    ws.open_context_menu(ContextTarget::Canvas, ev.position, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|ws, ev, w, cx| ws.on_mouse_move(ev, w, cx)))
             .on_mouse_up(
                 MouseButton::Left,
@@ -2191,6 +2476,11 @@ impl Workspace {
                         for (bounds, img) in job.tiles {
                             let _ =
                                 window.paint_image(bounds, gpui::Corners::default(), img, 0, false);
+                        }
+                        // Release the atlas slots of images this frame
+                        // replaced, so repainting doesn't grow the atlas.
+                        for old in job.retired {
+                            let _ = window.drop_image(old);
                         }
                         // Grid lines and guides sit above the artwork but
                         // below selection ants and tool overlays.
@@ -2243,6 +2533,8 @@ pub struct PaintJob {
     circles: Vec<Bounds<Pixels>>,
     /// Thin filled rectangles: grid lines, guides and ruler ticks.
     lines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
+    /// Images superseded this frame, freed after painting.
+    retired: Vec<Arc<RenderImage>>,
 }
 
 impl Focusable for Workspace {
@@ -2265,6 +2557,7 @@ impl Render for Workspace {
         let captures_keys = self.tool_captures_keys() || self.modal.is_some();
         let chrome = self.screen_mode == ScreenMode::Standard;
         let modal = crate::dialogs::render(self, cx);
+        let context_menu = panels::context_menu(self, window.viewport_size(), cx);
         div()
             .size_full()
             .flex()
@@ -2423,6 +2716,7 @@ impl Render for Workspace {
                     .children(chrome.then(|| panels::side_panels(self, cx))),
             )
             .children(chrome.then(|| panels::status_bar(self)))
+            .children(context_menu)
             .children(modal)
     }
 }
