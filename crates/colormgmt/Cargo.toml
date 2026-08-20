@@ -1,0 +1,12 @@
+[package]
+name = "photoslop-colormgmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-color.workspace = true
+moxcms = "0.8"
+anyhow.workspace = true
+serde.workspace = true
+log.workspace = true

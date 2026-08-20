@@ -67,6 +67,10 @@ pub struct Workspace {
     /// Plugin enable/disable requested from the manager UI, applied on the
     /// next render pass (the checkbox callback has no context to do it).
     pub pending_plugin_toggle: Option<(String, bool)>,
+    /// Colour management settings and the compiled display transform.
+    pub color: photoslop_colormgmt::ColorSettings,
+    display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
+    proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,17 @@ pub enum Modal {
     },
     /// The third-party plugin manager.
     PluginManager,
+    /// Export with format options.
+    Export {
+        codec: &'static str,
+        options: photoslop_plugin_api::ExportOptions,
+    },
+    /// Assign or convert to a colour profile.
+    Profile {
+        /// True = convert (rewrites pixels), false = assign.
+        convert: bool,
+        selected: usize,
+    },
     /// Editing an existing adjustment layer's parameters. `original` is
     /// what the layer held before the dialog opened, so Cancel can put it
     /// back exactly.
@@ -149,6 +164,9 @@ impl Workspace {
             field_buffer: String::new(),
             plugins,
             pending_plugin_toggle: None,
+            color: photoslop_colormgmt::ColorSettings::default(),
+            display_transform: None,
+            proof_transform: None,
         };
         ws.new_document();
         // Periodic crash-recovery snapshot; the task ends with the entity.
@@ -183,6 +201,7 @@ impl Workspace {
 
     pub fn install_document(&mut self, doc: Document) {
         self.doc = Some(doc);
+        self.rebuild_color_transforms();
         self.cache.invalidate_all();
         self.tile_images.clear();
         self.preview = Preview::default();
@@ -701,7 +720,11 @@ impl Workspace {
                 }
             }
             // These dialogs have no typed fields.
-            Modal::Filter { .. } | Modal::Adjustment { .. } | Modal::PluginManager => {}
+            Modal::Filter { .. }
+            | Modal::Adjustment { .. }
+            | Modal::PluginManager
+            | Modal::Export { .. }
+            | Modal::Profile { .. } => {}
         });
     }
 
@@ -962,6 +985,111 @@ impl Workspace {
         cx.notify();
     }
 
+    // ----- colour management -----
+
+    /// Rebuild the display (and proofing) transforms after the document or
+    /// the colour settings change, and drop cached pixels drawn with the
+    /// old ones.
+    pub fn rebuild_color_transforms(&mut self) {
+        let icc = self.doc.as_ref().and_then(|d| d.icc_profile.clone());
+        let transform = self.color.transform_for(icc.as_deref());
+        self.display_transform = (!transform.is_identity()).then(|| Arc::new(transform));
+        self.proof_transform = self.color.proof_transform(icc.as_deref()).map(Arc::new);
+        self.cache.invalidate_all();
+        self.tile_images.clear();
+        self.preview = Preview::default();
+        self.thumbs.clear();
+    }
+
+    /// Run composited pixels through the proof and display transforms.
+    fn to_display(&self, pixels: &mut [f32]) {
+        if let Some(proof) = &self.proof_transform {
+            proof.apply(pixels);
+        }
+        if let Some(display) = &self.display_transform {
+            display.apply(pixels);
+        }
+    }
+
+    fn color_managed(&self) -> bool {
+        self.display_transform.is_some() || self.proof_transform.is_some()
+    }
+
+    /// Assign a profile: same numbers, new interpretation.
+    pub fn assign_profile(
+        &mut self,
+        profile: photoslop_colormgmt::Profile,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = self.doc.as_mut() {
+            doc.icc_profile = profile.icc_bytes().map(|b| b.to_vec());
+            doc.dirty = true;
+            doc.damage_all();
+        }
+        self.status = format!("Assigned {}", profile.name()).into();
+        self.rebuild_color_transforms();
+        self.after_change(cx);
+    }
+
+    /// Convert to a profile: rewrite pixels so the appearance is preserved.
+    pub fn convert_to_profile(
+        &mut self,
+        profile: photoslop_colormgmt::Profile,
+        cx: &mut Context<Self>,
+    ) {
+        let intent = self.color.intent;
+        let Some(doc) = self.doc.as_mut() else { return };
+        let source = match &doc.icc_profile {
+            Some(bytes) => photoslop_colormgmt::Profile::from_bytes(bytes)
+                .unwrap_or_else(|_| self.color.working.clone()),
+            None => self.color.working.clone(),
+        };
+        let transform = match photoslop_colormgmt::ColorTransform::new(&source, &profile, intent) {
+            Ok(t) => t,
+            Err(err) => {
+                self.status = format!("Convert failed: {err}").into();
+                return;
+            }
+        };
+
+        let mut edit = doc.begin_edit(format!("Convert to {}", profile.name()));
+        for id in edit.raster_layer_ids() {
+            let Some(raster) = edit.doc().tree.find(id).and_then(|l| l.as_raster()) else {
+                continue;
+            };
+            let coords: Vec<photoslop_core::TileCoord> = raster.tiles.coords().collect();
+            for coord in coords {
+                let Some(tile) = edit.writable_tile(id, coord) else {
+                    break;
+                };
+                let mut buf = vec![0.0f32; photoslop_core::TILE_PIXELS * 4];
+                tile.decode_f32(&mut buf);
+                transform.apply(&mut buf);
+                tile.encode_f32(&buf);
+            }
+        }
+        edit.commit();
+        doc.icc_profile = profile.icc_bytes().map(|b| b.to_vec());
+        self.status = format!("Converted to {}", profile.name()).into();
+        self.rebuild_color_transforms();
+        self.after_change(cx);
+    }
+
+    /// Toggle soft proofing against a device profile.
+    pub fn toggle_proof(&mut self, profile: photoslop_colormgmt::Profile, cx: &mut Context<Self>) {
+        self.color.proof = match &self.color.proof {
+            Some(_) => None,
+            None => Some(profile),
+        };
+        self.status = if self.color.proof.is_some() {
+            "Proof colors on".into()
+        } else {
+            "Proof colors off".into()
+        };
+        self.rebuild_color_transforms();
+        self.after_change(cx);
+    }
+
     // ----- filters and adjustments -----
 
     /// Run a registered filter over the active layer, confined to the
@@ -1057,6 +1185,64 @@ impl Workspace {
         edit.commit();
         self.status = name.into();
         self.after_change(cx);
+    }
+
+    /// Export the flattened document with explicit encoder settings.
+    pub fn export_with(
+        &mut self,
+        codec_id: &str,
+        options: photoslop_plugin_api::ExportOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(codec) = self.registry.codecs().find(|c| c.id() == codec_id) else {
+            return;
+        };
+        let ext = codec.extensions().first().copied().unwrap_or("png");
+        let doc = self.doc.as_ref();
+        let stem = doc
+            .map(|d| {
+                std::path::Path::new(&d.title)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "untitled".into())
+            })
+            .unwrap_or_else(|| "untitled".into());
+        let dir = doc
+            .and_then(|d| d.path.as_ref())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let suggested = format!("{stem}.{ext}");
+        let codec_id = codec_id.to_string();
+        let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update_in(cx, |ws, _window, cx| {
+                    let result = (|| -> anyhow::Result<()> {
+                        let doc = ws
+                            .doc
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("no document"))?;
+                        let codec = ws
+                            .registry
+                            .codecs()
+                            .find(|c| c.id() == codec_id)
+                            .ok_or_else(|| anyhow::anyhow!("codec vanished"))?;
+                        let bytes = codec.export_with(doc, &options)?;
+                        std::fs::write(&path, bytes)?;
+                        Ok(())
+                    })();
+                    ws.status = match result {
+                        Ok(()) => format!("Exported {}", path.display()).into(),
+                        Err(err) => format!("Export failed: {err}").into(),
+                    };
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Enable or disable a third-party plugin.
@@ -1270,7 +1456,21 @@ impl Workspace {
         let doc = self.doc.as_ref()?;
         let canvas_rect = doc.canvas_rect();
         let rgba = self.cache.get(doc, coord);
-        let img = Arc::new(Self::tile_to_render_image(&rgba, coord, canvas_rect));
+        // Colour management happens exactly here: at the boundary between
+        // document pixels and screen pixels.
+        let managed;
+        let rgba: &[u8] = if self.color_managed() {
+            let mut buf: Vec<f32> = rgba.iter().map(|&v| v as f32 / 255.0).collect();
+            self.to_display(&mut buf);
+            managed = buf
+                .iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+                .collect::<Vec<u8>>();
+            &managed
+        } else {
+            &rgba
+        };
+        let img = Arc::new(Self::tile_to_render_image(rgba, coord, canvas_rect));
         self.tile_images.insert(coord, img.clone());
         Some(img)
     }

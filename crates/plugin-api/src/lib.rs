@@ -156,6 +156,27 @@ pub trait ToolPlugin: Send {
     }
 }
 
+/// Encoder settings chosen in the export dialog.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExportOptions {
+    /// 1..=100 for lossy formats; ignored by lossless ones.
+    pub quality: u8,
+    /// Bits per channel to write, where the format supports a choice.
+    pub bit_depth: u8,
+    /// Dither when reducing depth, to avoid banding.
+    pub dither: bool,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        ExportOptions {
+            quality: 90,
+            bit_depth: 8,
+            dither: true,
+        }
+    }
+}
+
 /// An image format importer/exporter.
 pub trait CodecPlugin: Send + Sync {
     fn id(&self) -> &'static str;
@@ -170,6 +191,15 @@ pub trait CodecPlugin: Send + Sync {
     }
     fn export(&self, _doc: &Document) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("{} cannot export", self.name())
+    }
+    /// Export with explicit settings. Defaults to the plain export for
+    /// formats that have nothing to tune.
+    fn export_with(&self, doc: &Document, _options: &ExportOptions) -> anyhow::Result<Vec<u8>> {
+        self.export(doc)
+    }
+    /// Whether the export dialog should offer a quality slider.
+    fn supports_quality(&self) -> bool {
+        false
     }
 }
 

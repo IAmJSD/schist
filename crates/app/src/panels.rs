@@ -77,6 +77,10 @@ enum AppItem {
     FreeTransform,
     Crop,
     Plugins,
+    Export,
+    AssignProfile,
+    ConvertProfile,
+    ProofColors,
 }
 
 fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
@@ -90,6 +94,7 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Open…", Open, Some("cmd-o")),
                 App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
+                App("Export…", Export, Some("cmd-shift-alt-s")),
                 Sep,
                 App("Plugins…", Plugins, None),
                 Sep,
@@ -121,6 +126,9 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Canvas Size…", CanvasSize, Some("cmd-alt-c")),
                 Sep,
                 App("Crop to Selection", Crop, None),
+                Sep,
+                App("Assign Profile…", AssignProfile, None),
+                App("Convert to Profile…", ConvertProfile, None),
             ],
         ),
         (
@@ -158,6 +166,8 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Zoom Out", ZoomOut, Some("cmd--")),
                 App("Fit on Screen", ZoomFit, Some("cmd-0")),
                 App("100%", ZoomActual, Some("cmd-1")),
+                Sep,
+                App("Proof Colors", ProofColors, None),
             ],
         ),
     ]
@@ -258,6 +268,41 @@ fn run_app_item(
             }
         }
         AppItem::Plugins => ws.open_modal(Modal::PluginManager, cx),
+        AppItem::Export => {
+            let codec = ws
+                .registry
+                .codecs()
+                .find(|c| c.can_export() && c.extensions().contains(&"png"))
+                .or_else(|| ws.registry.codecs().find(|c| c.can_export()))
+                .map(|c| c.id());
+            if let Some(codec) = codec {
+                ws.open_modal(
+                    Modal::Export {
+                        codec,
+                        options: photoslop_plugin_api::ExportOptions::default(),
+                    },
+                    cx,
+                );
+            }
+        }
+        AppItem::AssignProfile => ws.open_modal(
+            Modal::Profile {
+                convert: false,
+                selected: 0,
+            },
+            cx,
+        ),
+        AppItem::ConvertProfile => ws.open_modal(
+            Modal::Profile {
+                convert: true,
+                selected: 0,
+            },
+            cx,
+        ),
+        AppItem::ProofColors => {
+            let profile = photoslop_colormgmt::Profile::srgb();
+            ws.toggle_proof(profile, cx);
+        }
         AppItem::FreeTransform => ws.activate_tool("transform", cx),
         AppItem::Crop => {
             let rect = ws

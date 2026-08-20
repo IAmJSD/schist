@@ -37,3 +37,4 @@ photoslop-commands-core.workspace = true
 photoslop-filters-core.workspace = true
 photoslop-adjustments.workspace = true
 photoslop-plugin-host-wasm.workspace = true
+photoslop-colormgmt.workspace = true

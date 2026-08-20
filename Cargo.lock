@@ -4119,6 +4119,7 @@ dependencies = [
  "photoslop-codec-psd",
  "photoslop-codecs-common",
  "photoslop-color",
+ "photoslop-colormgmt",
  "photoslop-commands-core",
  "photoslop-compositor",
  "photoslop-core",
@@ -4159,6 +4160,7 @@ dependencies = [
  "anyhow",
  "image",
  "photoslop-color",
+ "photoslop-colormgmt",
  "photoslop-compositor",
  "photoslop-core",
  "photoslop-plugin-api",
@@ -4168,6 +4170,17 @@ dependencies = [
 name = "photoslop-color"
 version = "0.1.0"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "photoslop-colormgmt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "moxcms",
+ "photoslop-color",
  "serde",
 ]
 

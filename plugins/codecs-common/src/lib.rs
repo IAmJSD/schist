@@ -6,7 +6,7 @@ use anyhow::Context as _;
 use image::ImageFormat;
 use photoslop_color::Depth;
 use photoslop_core::{blit_rgba8, Document, IntRect, Layer};
-use photoslop_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
+use photoslop_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
 
 fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result<Document> {
     let img = image::load_from_memory_with_format(bytes, format)
@@ -28,17 +28,39 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
     Ok(doc)
 }
 
-fn export_flat(doc: &Document, format: ImageFormat) -> anyhow::Result<Vec<u8>> {
+fn export_flat(
+    doc: &Document,
+    format: ImageFormat,
+    options: &ExportOptions,
+) -> anyhow::Result<Vec<u8>> {
     let region = doc.canvas_rect();
-    let rgba = photoslop_compositor::composite_region_rgba8(doc, region);
+    let mut pixels = photoslop_compositor::composite_region_f32(doc, region);
+    // Reducing to 8 bits per channel bands smooth gradients; dither unless
+    // the user turned it off.
+    if options.dither && options.bit_depth <= 8 {
+        photoslop_colormgmt::dither_to_depth(
+            &mut pixels,
+            doc.width as usize,
+            1 << options.bit_depth,
+        );
+    }
+    let rgba: Vec<u8> = pixels
+        .iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        .collect();
     let img: image::RgbaImage =
         image::ImageBuffer::from_raw(doc.width, doc.height, rgba).context("buffer size")?;
     let mut out = std::io::Cursor::new(Vec::new());
     match format {
-        // JPEG has no alpha.
-        ImageFormat::Jpeg => image::DynamicImage::ImageRgba8(img)
-            .to_rgb8()
-            .write_to(&mut out, format)?,
+        // JPEG has no alpha and takes a quality setting.
+        ImageFormat::Jpeg => {
+            let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut out,
+                options.quality.clamp(1, 100),
+            );
+            encoder.encode_image(&rgb)?;
+        }
         _ => img.write_to(&mut out, format)?,
     }
     Ok(out.into_inner())
@@ -69,7 +91,17 @@ macro_rules! simple_codec {
                 true
             }
             fn export(&self, doc: &Document) -> anyhow::Result<Vec<u8>> {
-                export_flat(doc, $format)
+                export_flat(doc, $format, &ExportOptions::default())
+            }
+            fn export_with(
+                &self,
+                doc: &Document,
+                options: &ExportOptions,
+            ) -> anyhow::Result<Vec<u8>> {
+                export_flat(doc, $format, options)
+            }
+            fn supports_quality(&self) -> bool {
+                matches!($format, ImageFormat::Jpeg)
             }
         }
     };

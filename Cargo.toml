@@ -15,6 +15,7 @@ members = [
     "crates/adjustments",
     "crates/plugin-host-wasm",
     "crates/plugin-sdk",
+    "crates/colormgmt",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
@@ -45,6 +46,7 @@ photoslop-text-engine = { path = "crates/text-engine" }
 photoslop-adjustments = { path = "crates/adjustments" }
 photoslop-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
 photoslop-plugin-sdk = { path = "crates/plugin-sdk" }
+photoslop-colormgmt = { path = "crates/colormgmt" }
 photoslop-codecs-common = { path = "plugins/codecs-common" }
 photoslop-tools-basic = { path = "plugins/tools-basic" }
 photoslop-tools-paint = { path = "plugins/tools-paint" }

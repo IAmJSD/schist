@@ -1,0 +1,479 @@
+//! ICC colour management (M10).
+//!
+//! Three jobs:
+//!
+//! * **Display transform** — composited pixels are in the *document's*
+//!   space; the screen has its own. Everything drawn goes through a
+//!   document→display transform so a wide-gamut file looks right on an
+//!   sRGB panel and vice versa.
+//! * **Assign vs. convert** — assigning a profile reinterprets the same
+//!   numbers, converting rewrites the pixels to preserve appearance. They
+//!   are different operations and the UI keeps them separate.
+//! * **Soft proof** — preview how the document will look on some other
+//!   device by routing document→proof→display.
+//!
+//! Profiles are parsed by `moxcms` (pure Rust, no C toolchain).
+
+use anyhow::{anyhow, Result};
+use moxcms::{ColorProfile, Layout, RenderingIntent, TransformExecutor, TransformOptions};
+use std::sync::Arc;
+
+/// How out-of-gamut colours are handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Intent {
+    #[default]
+    Perceptual,
+    RelativeColorimetric,
+    Saturation,
+    AbsoluteColorimetric,
+}
+
+impl Intent {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Intent::Perceptual => "Perceptual",
+            Intent::RelativeColorimetric => "Relative Colorimetric",
+            Intent::Saturation => "Saturation",
+            Intent::AbsoluteColorimetric => "Absolute Colorimetric",
+        }
+    }
+
+    pub fn all() -> &'static [Intent] {
+        &[
+            Intent::Perceptual,
+            Intent::RelativeColorimetric,
+            Intent::Saturation,
+            Intent::AbsoluteColorimetric,
+        ]
+    }
+
+    fn to_mox(self) -> RenderingIntent {
+        match self {
+            Intent::Perceptual => RenderingIntent::Perceptual,
+            Intent::RelativeColorimetric => RenderingIntent::RelativeColorimetric,
+            Intent::Saturation => RenderingIntent::Saturation,
+            Intent::AbsoluteColorimetric => RenderingIntent::AbsoluteColorimetric,
+        }
+    }
+}
+
+/// A named constructor for one of the built-in profiles.
+pub type BuiltinProfile = (&'static str, fn() -> Profile);
+
+/// A parsed ICC profile plus the bytes it came from (documents store the
+/// bytes so a file round-trips with the exact profile it arrived with).
+#[derive(Clone)]
+pub struct Profile {
+    profile: Arc<ColorProfile>,
+    bytes: Option<Arc<Vec<u8>>>,
+    name: String,
+}
+
+impl std::fmt::Debug for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Profile").field("name", &self.name).finish()
+    }
+}
+
+impl Profile {
+    /// Parse an embedded ICC profile.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Profile> {
+        let profile = ColorProfile::new_from_slice(bytes)
+            .map_err(|e| anyhow!("unreadable ICC profile: {e:?}"))?;
+        // moxcms doesn't surface the profile description tag, so embedded
+        // profiles are shown generically until it does.
+        let name = "Embedded profile".to_string();
+        Ok(Profile {
+            profile: Arc::new(profile),
+            bytes: Some(Arc::new(bytes.to_vec())),
+            name,
+        })
+    }
+
+    pub fn srgb() -> Profile {
+        Profile {
+            profile: Arc::new(ColorProfile::new_srgb()),
+            bytes: None,
+            name: "sRGB".into(),
+        }
+    }
+
+    pub fn display_p3() -> Profile {
+        Profile {
+            profile: Arc::new(ColorProfile::new_display_p3()),
+            bytes: None,
+            name: "Display P3".into(),
+        }
+    }
+
+    /// Built-in profiles offered in the UI.
+    pub fn builtins() -> Vec<BuiltinProfile> {
+        vec![("sRGB", Profile::srgb), ("Display P3", Profile::display_p3)]
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Profile {
+        self.name = name.into();
+        self
+    }
+
+    /// The bytes to embed when saving, if this profile came from a file.
+    pub fn icc_bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_ref().map(|b| b.as_slice())
+    }
+}
+
+/// A compiled document→display (or document→proof→display) transform over
+/// straight-alpha f32 RGBA buffers.
+pub struct ColorTransform {
+    executor: Arc<dyn TransformExecutor<f32> + Send + Sync>,
+    /// True when source and destination match, so callers can skip work.
+    identity: bool,
+}
+
+impl std::fmt::Debug for ColorTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColorTransform")
+            .field("identity", &self.identity)
+            .finish()
+    }
+}
+
+impl ColorTransform {
+    /// Build a transform between two profiles.
+    pub fn new(src: &Profile, dst: &Profile, intent: Intent) -> Result<ColorTransform> {
+        let options = TransformOptions {
+            rendering_intent: intent.to_mox(),
+            ..Default::default()
+        };
+        let executor = src
+            .profile
+            .create_transform_f32(Layout::Rgba, &dst.profile, Layout::Rgba, options)
+            .map_err(|e| anyhow!("cannot build colour transform: {e:?}"))?;
+        Ok(ColorTransform {
+            executor,
+            identity: false,
+        })
+    }
+
+    /// A transform that does nothing (source and destination agree).
+    pub fn identity() -> ColorTransform {
+        struct Noop;
+        impl TransformExecutor<f32> for Noop {
+            fn transform(&self, src: &[f32], dst: &mut [f32]) -> Result<(), moxcms::CmsError> {
+                dst.copy_from_slice(src);
+                Ok(())
+            }
+        }
+        ColorTransform {
+            executor: Arc::new(Noop),
+            identity: true,
+        }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.identity
+    }
+
+    /// Convert a straight-alpha f32 RGBA buffer in place.
+    ///
+    /// Alpha is carried through untouched: it is coverage, not colour.
+    pub fn apply(&self, pixels: &mut [f32]) {
+        if self.identity || pixels.is_empty() {
+            return;
+        }
+        let src = pixels.to_vec();
+        if let Err(err) = self.executor.transform(&src, pixels) {
+            log::warn!("colour transform failed: {err:?}");
+            pixels.copy_from_slice(&src);
+            return;
+        }
+        // Extended-range output can exceed 0..1; clamp for display and
+        // restore alpha, which a matrix transform may have touched.
+        for (out, inp) in pixels.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            out[0] = out[0].clamp(0.0, 1.0);
+            out[1] = out[1].clamp(0.0, 1.0);
+            out[2] = out[2].clamp(0.0, 1.0);
+            out[3] = inp[3];
+        }
+    }
+}
+
+/// The colour pipeline a document is displayed through.
+#[derive(Debug, Clone)]
+pub struct ColorSettings {
+    /// Profile assigned to documents that carry none.
+    pub working: Profile,
+    /// The monitor's profile.
+    pub display: Profile,
+    pub intent: Intent,
+    /// When set, preview through this device before hitting the display.
+    pub proof: Option<Profile>,
+}
+
+impl Default for ColorSettings {
+    fn default() -> Self {
+        ColorSettings {
+            working: Profile::srgb(),
+            display: Profile::srgb(),
+            intent: Intent::Perceptual,
+            proof: None,
+        }
+    }
+}
+
+impl ColorSettings {
+    /// Build the transform for a document with the given embedded profile.
+    ///
+    /// Soft proofing runs document→proof→display; the two hops are baked
+    /// into one executor chain by applying them in sequence.
+    pub fn transform_for(&self, document_icc: Option<&[u8]>) -> ColorTransform {
+        let source = match document_icc {
+            Some(bytes) => match Profile::from_bytes(bytes) {
+                Ok(p) => p,
+                Err(err) => {
+                    log::warn!("{err:#}; falling back to the working space");
+                    self.working.clone()
+                }
+            },
+            None => self.working.clone(),
+        };
+        match ColorTransform::new(&source, &self.display, self.intent) {
+            Ok(t) => t,
+            Err(err) => {
+                log::warn!("{err:#}; displaying without conversion");
+                ColorTransform::identity()
+            }
+        }
+    }
+
+    /// The proofing hop, if soft proofing is on.
+    pub fn proof_transform(&self, document_icc: Option<&[u8]>) -> Option<ColorTransform> {
+        let proof = self.proof.as_ref()?;
+        let source = match document_icc {
+            Some(bytes) => Profile::from_bytes(bytes).unwrap_or_else(|_| self.working.clone()),
+            None => self.working.clone(),
+        };
+        // Proofing is colorimetric by definition: it must show the target's
+        // gamut clipping rather than re-map it pleasingly.
+        ColorTransform::new(&source, proof, Intent::RelativeColorimetric).ok()
+    }
+}
+
+/// Convert pixels from one profile to another, preserving appearance
+/// (Image ▸ Convert to Profile).
+pub fn convert_pixels(
+    pixels: &mut [f32],
+    from: &Profile,
+    to: &Profile,
+    intent: Intent,
+) -> Result<()> {
+    let transform = ColorTransform::new(from, to, intent)?;
+    transform.apply(pixels);
+    Ok(())
+}
+
+/// Reduce a buffer to a lower bit depth with ordered dithering.
+///
+/// Straight truncation bands smooth gradients badly at 8 bits; a 4x4 Bayer
+/// matrix costs nothing and hides it.
+pub fn dither_to_depth(pixels: &mut [f32], width: usize, levels: u32) {
+    if levels < 2 || width == 0 {
+        return;
+    }
+    const BAYER: [[f32; 4]; 4] = [
+        [0.0, 8.0, 2.0, 10.0],
+        [12.0, 4.0, 14.0, 6.0],
+        [3.0, 11.0, 1.0, 9.0],
+        [15.0, 7.0, 13.0, 5.0],
+    ];
+    let steps = (levels - 1) as f32;
+    for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+        let x = i % width;
+        let y = i / width;
+        // Centre the threshold on zero so dithering doesn't shift levels.
+        let threshold = (BAYER[y % 4][x % 4] / 16.0) - 0.5;
+        for channel in px.iter_mut().take(3) {
+            let scaled = *channel * steps + threshold;
+            *channel = (scaled.round() / steps).clamp(0.0, 1.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgba(r: f32, g: f32, b: f32) -> Vec<f32> {
+        vec![r, g, b, 1.0]
+    }
+
+    #[test]
+    fn builtin_profiles_load() {
+        assert_eq!(Profile::srgb().name(), "sRGB");
+        assert_eq!(Profile::display_p3().name(), "Display P3");
+        assert_eq!(Profile::builtins().len(), 2);
+    }
+
+    #[test]
+    fn srgb_to_srgb_is_a_no_op() {
+        let t = ColorTransform::new(&Profile::srgb(), &Profile::srgb(), Intent::Perceptual)
+            .expect("transform builds");
+        let mut px = rgba(0.2, 0.5, 0.9);
+        let before = px.clone();
+        t.apply(&mut px);
+        for (a, b) in px.iter().zip(before.iter()) {
+            assert!((a - b).abs() < 0.01, "{px:?} vs {before:?}");
+        }
+    }
+
+    #[test]
+    fn identity_transform_short_circuits() {
+        let t = ColorTransform::identity();
+        assert!(t.is_identity());
+        let mut px = rgba(0.1, 0.2, 0.3);
+        t.apply(&mut px);
+        assert_eq!(px, rgba(0.1, 0.2, 0.3));
+    }
+
+    #[test]
+    fn p3_to_srgb_expands_saturated_colors() {
+        // Pure red in P3 is outside sRGB's gamut, so converting it into
+        // sRGB must push the channel up (and clip), not leave it alone.
+        let t = ColorTransform::new(
+            &Profile::display_p3(),
+            &Profile::srgb(),
+            Intent::RelativeColorimetric,
+        )
+        .expect("transform builds");
+        let mut px = rgba(1.0, 0.0, 0.0);
+        t.apply(&mut px);
+        assert!(px[0] > 0.9, "red stays red: {px:?}");
+        assert!(
+            px[1] < 0.35 && px[2] < 0.35,
+            "P3 red maps to a saturated sRGB red: {px:?}"
+        );
+        assert_eq!(px[3], 1.0, "alpha untouched");
+    }
+
+    #[test]
+    fn round_tripping_through_p3_returns_close_to_the_original() {
+        let to_p3 = ColorTransform::new(
+            &Profile::srgb(),
+            &Profile::display_p3(),
+            Intent::RelativeColorimetric,
+        )
+        .unwrap();
+        let back = ColorTransform::new(
+            &Profile::display_p3(),
+            &Profile::srgb(),
+            Intent::RelativeColorimetric,
+        )
+        .unwrap();
+        let original = rgba(0.35, 0.6, 0.8);
+        let mut px = original.clone();
+        to_p3.apply(&mut px);
+        assert_ne!(px, original, "the conversion changed the numbers");
+        back.apply(&mut px);
+        for (a, b) in px.iter().zip(original.iter()) {
+            assert!((a - b).abs() < 0.02, "round trip: {px:?} vs {original:?}");
+        }
+    }
+
+    #[test]
+    fn grey_stays_neutral_across_profiles() {
+        let t = ColorTransform::new(
+            &Profile::display_p3(),
+            &Profile::srgb(),
+            Intent::RelativeColorimetric,
+        )
+        .unwrap();
+        let mut px = rgba(0.5, 0.5, 0.5);
+        t.apply(&mut px);
+        assert!(
+            (px[0] - px[1]).abs() < 0.01 && (px[1] - px[2]).abs() < 0.01,
+            "neutral stays neutral: {px:?}"
+        );
+    }
+
+    #[test]
+    fn settings_without_an_embedded_profile_use_the_working_space() {
+        let settings = ColorSettings {
+            working: Profile::display_p3(),
+            display: Profile::srgb(),
+            ..Default::default()
+        };
+        let t = settings.transform_for(None);
+        assert!(!t.is_identity());
+        let mut px = rgba(1.0, 0.0, 0.0);
+        t.apply(&mut px);
+        assert!(px[1] < 0.4, "treated as P3 source: {px:?}");
+    }
+
+    #[test]
+    fn a_corrupt_embedded_profile_falls_back_instead_of_failing() {
+        let settings = ColorSettings::default();
+        let t = settings.transform_for(Some(b"not an icc profile"));
+        let mut px = rgba(0.3, 0.3, 0.3);
+        t.apply(&mut px); // must not panic
+        assert!(px.iter().all(|c| c.is_finite()));
+    }
+
+    #[test]
+    fn soft_proof_transform_only_exists_when_proofing() {
+        let mut settings = ColorSettings::default();
+        assert!(settings.proof_transform(None).is_none());
+        settings.proof = Some(Profile::display_p3());
+        assert!(settings.proof_transform(None).is_some());
+    }
+
+    #[test]
+    fn dithering_keeps_the_average_but_breaks_up_banding() {
+        // A flat value halfway between two 4-level steps must dither into
+        // both neighbours rather than snapping everything one way.
+        let width = 4;
+        let mut pixels: Vec<f32> = (0..16).flat_map(|_| [0.5f32, 0.5, 0.5, 1.0]).collect();
+        dither_to_depth(&mut pixels, width, 4);
+        let values: Vec<f32> = pixels.chunks_exact(4).map(|p| p[0]).collect();
+        let distinct: Vec<f32> = {
+            let mut v = values.clone();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v.dedup();
+            v
+        };
+        assert!(
+            distinct.len() >= 2,
+            "dither produced variation: {distinct:?}"
+        );
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        assert!((mean - 0.5).abs() < 0.12, "mean preserved: {mean}");
+    }
+
+    #[test]
+    fn dithering_leaves_exact_levels_alone() {
+        let mut pixels = vec![0.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        dither_to_depth(&mut pixels, 2, 256);
+        assert_eq!(pixels[0], 0.0);
+        assert_eq!(pixels[4], 1.0);
+    }
+
+    #[test]
+    fn convert_pixels_matches_a_manual_transform() {
+        let mut a = rgba(0.4, 0.2, 0.7);
+        let mut b = a.clone();
+        convert_pixels(
+            &mut a,
+            &Profile::srgb(),
+            &Profile::display_p3(),
+            Intent::Perceptual,
+        )
+        .unwrap();
+        ColorTransform::new(&Profile::srgb(), &Profile::display_p3(), Intent::Perceptual)
+            .unwrap()
+            .apply(&mut b);
+        assert_eq!(a, b);
+    }
+}

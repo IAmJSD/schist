@@ -10,4 +10,5 @@ photoslop-plugin-api.workspace = true
 anyhow.workspace = true
 image.workspace = true
 photoslop-color.workspace = true
+photoslop-colormgmt.workspace = true
 photoslop-compositor.workspace = true

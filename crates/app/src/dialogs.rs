@@ -31,6 +31,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             original,
         } => adjustment_dialog(layer, params, original, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
+        Modal::Export { codec, options } => {
+            export_dialog(ws, codec, options, cx).into_any_element()
+        }
+        Modal::Profile { convert, selected } => {
+            profile_dialog(convert, selected, cx).into_any_element()
+        }
     })
 }
 
@@ -587,3 +593,188 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
 }
 
 use gpui::prelude::FluentBuilder as _;
+
+fn export_dialog(
+    ws: &mut Workspace,
+    codec_id: &'static str,
+    options: photoslop_plugin_api::ExportOptions,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let codecs: Vec<(SharedString, &'static str)> = ws
+        .registry
+        .codecs()
+        .filter(|c| c.can_export())
+        .map(|c| (SharedString::from(c.name().to_string()), c.id()))
+        .collect();
+    let current_name = codecs
+        .iter()
+        .find(|(_, id)| *id == codec_id)
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| "PNG".into());
+    let supports_quality = ws
+        .registry
+        .codecs()
+        .find(|c| c.id() == codec_id)
+        .map(|c| c.supports_quality())
+        .unwrap_or(false);
+
+    let mut body = div().flex().flex_col().gap_1().child(ui::field_row(
+        "Format",
+        ui::dropdown(
+            Popup::Field("export-format"),
+            &codec_id,
+            current_name,
+            150.0,
+            codecs,
+            |ws, value| {
+                ws.update_modal(|m| {
+                    if let Modal::Export { codec, .. } = m {
+                        *codec = value;
+                    }
+                });
+            },
+            cx,
+        ),
+    ));
+    if supports_quality {
+        body = body.child(param_slider(
+            SliderSpec {
+                id: "export-quality",
+                label: "Quality",
+                value: options.quality as f32,
+                min: 1.0,
+                max: 100.0,
+                suffix: "",
+            },
+            |ws, v| {
+                ws.update_modal(|m| {
+                    if let Modal::Export { options, .. } = m {
+                        options.quality = v.clamp(1.0, 100.0) as u8;
+                    }
+                });
+            },
+            cx,
+        ));
+    }
+    body = body.child(ui::field_row(
+        "Dither",
+        ui::checkbox(
+            "Dither when reducing to 8-bit",
+            options.dither,
+            |ws| {
+                ws.update_modal(|m| {
+                    if let Modal::Export { options, .. } = m {
+                        options.dither = !options.dither;
+                    }
+                });
+            },
+            cx,
+        ),
+    ));
+
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "Export…",
+            true,
+            move |ws, window, cx| {
+                ws.close_modal(cx);
+                ws.export_with(codec_id, options, window, cx);
+            },
+            cx,
+        ));
+    ui::modal_frame("Export", 360.0, body, actions)
+}
+
+fn profile_dialog(convert: bool, selected: usize, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let builtins = photoslop_colormgmt::Profile::builtins();
+    let options: Vec<(SharedString, usize)> = builtins
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (SharedString::from(*name), i))
+        .collect();
+    let current = builtins
+        .get(selected)
+        .map(|(n, _)| SharedString::from(*n))
+        .unwrap_or_else(|| "sRGB".into());
+
+    let explanation = if convert {
+        "Rewrites pixel values so colours keep their appearance."
+    } else {
+        "Reinterprets the existing pixel values under the new profile."
+    };
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(ui::field_row(
+            "Profile",
+            ui::dropdown(
+                Popup::Field("profile-pick"),
+                &selected,
+                current,
+                150.0,
+                options,
+                |ws, value| {
+                    ws.update_modal(|m| {
+                        if let Modal::Profile { selected, .. } = m {
+                            *selected = value;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child(explanation),
+        );
+
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            if convert { "Convert" } else { "Assign" },
+            true,
+            move |ws, _w, cx| {
+                let profile = photoslop_colormgmt::Profile::builtins()
+                    .get(selected)
+                    .map(|(_, make)| make())
+                    .unwrap_or_else(photoslop_colormgmt::Profile::srgb);
+                if convert {
+                    ws.convert_to_profile(profile, cx);
+                } else {
+                    ws.assign_profile(profile, cx);
+                }
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    ui::modal_frame(
+        if convert {
+            "Convert to Profile"
+        } else {
+            "Assign Profile"
+        },
+        340.0,
+        body,
+        actions,
+    )
+}
