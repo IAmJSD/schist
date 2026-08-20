@@ -36,7 +36,10 @@ const RES_RESOLUTION_INFO: u16 = 0x03ED;
 const RES_ICC_PROFILE: u16 = 0x040F;
 
 const MODE_GRAYSCALE: u16 = 1;
+const MODE_INDEXED: u16 = 2;
 const MODE_RGB: u16 = 3;
+const MODE_CMYK: u16 = 4;
+const MODE_LAB: u16 = 9;
 
 /// Serialize a document to PSD, or PSB when its dimensions require it.
 pub fn write_psd(doc: &Document) -> Result<Vec<u8>, PsdError> {
@@ -65,12 +68,12 @@ pub fn write_psd_with(doc: &Document, psb: bool) -> Result<Vec<u8>, PsdError> {
     let mode = match doc.mode {
         ColorMode::Rgb => MODE_RGB,
         ColorMode::Grayscale => MODE_GRAYSCALE,
+        ColorMode::Cmyk => MODE_CMYK,
+        ColorMode::Lab => MODE_LAB,
+        ColorMode::Indexed => MODE_INDEXED,
     };
     // Channel count of the *merged* image: colour channels plus alpha.
-    let channels: u16 = match doc.mode {
-        ColorMode::Rgb => 4,
-        ColorMode::Grayscale => 2,
-    };
+    let channels: u16 = doc.mode.channels() as u16 + 1;
 
     let mut b = Buf::new();
     // --- File header ---
@@ -428,10 +431,8 @@ fn lsct_payload(divider: u32, blend: Option<&[u8; 4]>) -> Vec<u8> {
 /// Zero-area colour channels (compression word only) for records with no
 /// pixels: group headers, dividers, adjustment layers, empty layers.
 fn empty_channels(doc: &Document) -> Vec<(i16, Vec<u8>)> {
-    let ids: &[i16] = match doc.mode {
-        ColorMode::Rgb => &[-1, 0, 1, 2],
-        ColorMode::Grayscale => &[-1, 0],
-    };
+    let mut ids: Vec<i16> = vec![-1];
+    ids.extend(0..doc.mode.channels() as i16);
     ids.iter().map(|&id| (id, vec![0, 0])).collect()
 }
 
@@ -446,6 +447,70 @@ fn mask_bounds(mask: &LayerMask) -> IntRect {
 }
 
 /// Extract R,G,B,A planes for `rect` at the document's depth, big-endian.
+/// The colour channels a document of this mode stores, converted from the
+/// RGBA the tiles hold.
+///
+/// Everything is edited as RGBA; a CMYK or Lab document converts here on
+/// the way out and in the reader on the way back, so the file is genuinely
+/// in its mode even though the editing was not.
+fn colour_planes(tiles: &TileMap, rect: IntRect, doc: &Document) -> Vec<Vec<u8>> {
+    let depth = doc.depth;
+    let w = rect.width().max(0) as usize;
+    let h = rect.height().max(0) as usize;
+    let bpc = depth.bytes_per_channel();
+    let n = doc.mode.channels();
+    let mut planes: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; w * h * bpc]).collect();
+    if matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale) {
+        // The fast path: no conversion, just the first `n` of RGBA.
+        let rgba = extract_planes(tiles, rect, depth);
+        for (i, p) in planes.iter_mut().enumerate() {
+            p.clone_from(&rgba[i]);
+        }
+        return planes;
+    }
+    for coord in TileCoord::covering(&rect) {
+        let Some(buf) = tiles.get(coord) else {
+            continue;
+        };
+        let trect = coord.rect();
+        let clip = trect.intersect(&rect);
+        if clip.is_empty() {
+            continue;
+        }
+        for y in clip.top..clip.bottom {
+            for x in clip.left..clip.right {
+                let px = buf
+                    .get((y - trect.top) as usize * TILE_SIZE as usize + (x - trect.left) as usize);
+                let at = ((y - rect.top) as usize * w + (x - rect.left) as usize) * bpc;
+                let values: Vec<f32> = match doc.mode {
+                    ColorMode::Cmyk => {
+                        // PSD stores CMYK inverted: 0 means full ink.
+                        photoslop_color::convert::rgb_to_cmyk(px)
+                            .iter()
+                            .map(|v| 1.0 - v)
+                            .collect()
+                    }
+                    ColorMode::Lab => {
+                        let lab = photoslop_color::convert::rgb_to_lab(px);
+                        vec![
+                            lab[0] / 100.0,
+                            (lab[1] + 128.0) / 255.0,
+                            (lab[2] + 128.0) / 255.0,
+                        ]
+                    }
+                    // Indexed has no palette here, so its single plane is
+                    // the luminance -- the same thing the reader shows.
+                    _ => vec![0.299 * px.r + 0.587 * px.g + 0.114 * px.b],
+                };
+                for (i, v) in values.into_iter().take(n).enumerate() {
+                    write_sample(&mut planes[i][at..at + bpc], v.clamp(0.0, 1.0), depth);
+                }
+            }
+        }
+    }
+    planes
+}
+
 fn extract_planes(tiles: &TileMap, rect: IntRect, depth: Depth) -> [Vec<u8>; 4] {
     let w = rect.width() as usize;
     let h = rect.height() as usize;
@@ -498,22 +563,17 @@ fn encode_color_channels(
     doc: &Document,
     psb: bool,
 ) -> Vec<(i16, Vec<u8>)> {
-    let planes = extract_planes(tiles, bounds, doc.depth);
+    let alpha = extract_planes(tiles, bounds, doc.depth)[3].clone();
+    let colour = colour_planes(tiles, bounds, doc);
     let h = bounds.height() as usize;
     let row_bytes = bounds.width() as usize * doc.depth.bytes_per_channel();
-    let mut out = Vec::with_capacity(4);
-    out.push((-1, encode_channel(&planes[3], row_bytes, h, doc.depth, psb)));
-    match doc.mode {
-        ColorMode::Rgb => {
-            for (i, id) in [(0usize, 0i16), (1, 1), (2, 2)] {
-                out.push((id, encode_channel(&planes[i], row_bytes, h, doc.depth, psb)));
-            }
-        }
-        // Grayscale documents keep luminance in R (the reader replicates the
-        // single channel across RGB on the way in).
-        ColorMode::Grayscale => {
-            out.push((0, encode_channel(&planes[0], row_bytes, h, doc.depth, psb)));
-        }
+    let mut out = Vec::with_capacity(colour.len() + 1);
+    out.push((-1, encode_channel(&alpha, row_bytes, h, doc.depth, psb)));
+    for (i, plane) in colour.iter().enumerate() {
+        out.push((
+            i as i16,
+            encode_channel(plane, row_bytes, h, doc.depth, psb),
+        ));
     }
     out
 }
@@ -593,26 +653,44 @@ fn write_merged_image(b: &mut Buf, doc: &Document, channels: u16, psb: bool) {
     let row_bytes = w * bpc;
 
     // Channel order in the merged section is colour first, then alpha.
-    let order: Vec<usize> = match doc.mode {
-        ColorMode::Rgb => vec![0, 1, 2, 3],
-        ColorMode::Grayscale => vec![0, 3],
-    };
-    debug_assert_eq!(order.len(), channels as usize);
-
-    let planes: Vec<Vec<u8>> = order
-        .iter()
-        .map(|&ch| {
-            let mut plane = vec![0u8; w * h * bpc];
-            for i in 0..w * h {
-                write_sample(
-                    &mut plane[i * bpc..(i + 1) * bpc],
-                    composite[i * 4 + ch],
-                    doc.depth,
-                );
+    // Non-RGB modes convert here, the same way the layer channels do.
+    let n = doc.mode.channels();
+    let mut planes: Vec<Vec<u8>> = (0..n + 1).map(|_| vec![0u8; w * h * bpc]).collect();
+    for i in 0..w * h {
+        let px = photoslop_color::Rgba::new(
+            composite[i * 4],
+            composite[i * 4 + 1],
+            composite[i * 4 + 2],
+            composite[i * 4 + 3],
+        );
+        let values: Vec<f32> = match doc.mode {
+            ColorMode::Rgb => vec![px.r, px.g, px.b],
+            ColorMode::Grayscale | ColorMode::Indexed => {
+                vec![0.299 * px.r + 0.587 * px.g + 0.114 * px.b]
             }
-            plane
-        })
-        .collect();
+            ColorMode::Cmyk => photoslop_color::convert::rgb_to_cmyk(px)
+                .iter()
+                .map(|v| 1.0 - v)
+                .collect(),
+            ColorMode::Lab => {
+                let lab = photoslop_color::convert::rgb_to_lab(px);
+                vec![
+                    lab[0] / 100.0,
+                    (lab[1] + 128.0) / 255.0,
+                    (lab[2] + 128.0) / 255.0,
+                ]
+            }
+        };
+        for (c, v) in values.into_iter().take(n).enumerate() {
+            write_sample(
+                &mut planes[c][i * bpc..(i + 1) * bpc],
+                v.clamp(0.0, 1.0),
+                doc.depth,
+            );
+        }
+        write_sample(&mut planes[n][i * bpc..(i + 1) * bpc], px.a, doc.depth);
+    }
+    debug_assert_eq!(planes.len(), channels as usize);
 
     if doc.depth != Depth::Eight {
         b.u16(0); // raw

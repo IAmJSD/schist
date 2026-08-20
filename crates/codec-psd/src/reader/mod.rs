@@ -107,10 +107,63 @@ fn background_from_composite(
             planes.g = to_f32(1);
             planes.b = to_f32(2);
         }
-        ColorMode::Grayscale => {
+        ColorMode::Grayscale | ColorMode::Indexed => {
+            // Indexed files store one plane of palette indices plus a
+            // colour table in the Color Mode Data section. Without the
+            // table the plane is the closest thing to the image there is,
+            // and it reads as greyscale.
             planes.r = to_f32(0);
             planes.g.clone_from(&planes.r);
             planes.b.clone_from(&planes.r);
+        }
+        ColorMode::Cmyk => {
+            // PSD stores CMYK *inverted*: 0 is full ink.
+            let (c, m, y, k) = (to_f32(0), to_f32(1), to_f32(2), to_f32(3));
+            let n = c.as_ref().map(|p| p.len()).unwrap_or(0);
+            let mut r = vec![0.0f32; n];
+            let mut g = vec![0.0f32; n];
+            let mut b = vec![0.0f32; n];
+            for i in 0..n {
+                let at = |p: &Option<Vec<f32>>| {
+                    1.0 - p.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(1.0)
+                };
+                let px =
+                    photoslop_color::convert::cmyk_to_rgb([at(&c), at(&m), at(&y), at(&k)], 1.0);
+                r[i] = px.r;
+                g[i] = px.g;
+                b[i] = px.b;
+            }
+            planes.r = Some(r);
+            planes.g = Some(g);
+            planes.b = Some(b);
+        }
+        ColorMode::Lab => {
+            let (l, a, bb) = (to_f32(0), to_f32(1), to_f32(2));
+            let n = l.as_ref().map(|p| p.len()).unwrap_or(0);
+            let mut r = vec![0.0f32; n];
+            let mut g = vec![0.0f32; n];
+            let mut b = vec![0.0f32; n];
+            for i in 0..n {
+                let get = |p: &Option<Vec<f32>>| {
+                    p.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(0.0)
+                };
+                // Channels arrive 0..=1: L maps to 0..=100, a and b to
+                // -128..=127 with 128 as the neutral point.
+                let px = photoslop_color::convert::lab_to_rgb(
+                    [
+                        get(&l) * 100.0,
+                        get(&a) * 255.0 - 128.0,
+                        get(&bb) * 255.0 - 128.0,
+                    ],
+                    1.0,
+                );
+                r[i] = px.r;
+                g[i] = px.g;
+                b[i] = px.b;
+            }
+            planes.r = Some(r);
+            planes.g = Some(g);
+            planes.b = Some(b);
         }
     }
     if merged_alpha && header.channels as usize > base {

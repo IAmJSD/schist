@@ -361,6 +361,8 @@ fn decode_layer_channels(
 ) -> Result<(TileMap, Option<MaskTileMap>), PsdError> {
     let mut planes = ColorPlanes::default();
     let mut mask_bytes: Option<Vec<u8>> = None;
+    // CMYK's black plane, which has no slot in `ColorPlanes`.
+    let mut key: Option<Vec<f32>> = None;
 
     for &(id, declared_len) in &rec.channels {
         let declared_len = cur.checked_len(declared_len)?;
@@ -376,11 +378,14 @@ fn decode_layer_channels(
             Alpha,
             Mask,
         }
+        // CMYK's fourth ink has nowhere to live in an RGB plane set, so
+        // it is held aside until the conversion below.
         let target = match (id, header.mode) {
             (-1, _) => Target::Alpha,
             (-2, _) => Target::Mask,
-            (0, ColorMode::Grayscale) => Target::Color(0),
-            (0..=2, ColorMode::Rgb) => Target::Color(id as u8),
+            (0, ColorMode::Grayscale) | (0, ColorMode::Indexed) => Target::Color(0),
+            (0..=2, ColorMode::Rgb) | (0..=2, ColorMode::Lab) => Target::Color(id as u8),
+            (0..=3, ColorMode::Cmyk) => Target::Color(id as u8),
             _ => continue,
         };
         let (rect, sample_bytes) = match target {
@@ -436,14 +441,21 @@ fn decode_layer_channels(
             Target::Alpha => planes.a = Some(plane_to_f32(&bytes, header.depth)),
             Target::Color(0) => planes.r = Some(plane_to_f32(&bytes, header.depth)),
             Target::Color(1) => planes.g = Some(plane_to_f32(&bytes, header.depth)),
-            Target::Color(_) => planes.b = Some(plane_to_f32(&bytes, header.depth)),
+            Target::Color(2) => planes.b = Some(plane_to_f32(&bytes, header.depth)),
+            Target::Color(_) => key = Some(plane_to_f32(&bytes, header.depth)),
         }
     }
 
-    // Grayscale documents: replicate gray into RGB.
-    if header.mode == ColorMode::Grayscale {
-        planes.g.clone_from(&planes.r);
-        planes.b.clone_from(&planes.r);
+    // Convert whatever the file's mode stores into the RGBA everything
+    // downstream works in.
+    match header.mode {
+        ColorMode::Grayscale | ColorMode::Indexed => {
+            planes.g.clone_from(&planes.r);
+            planes.b.clone_from(&planes.r);
+        }
+        ColorMode::Cmyk => convert_cmyk_planes(&mut planes, key.as_deref()),
+        ColorMode::Lab => convert_lab_planes(&mut planes),
+        ColorMode::Rgb => {}
     }
 
     let mut tiles = TileMap::new();
@@ -569,4 +581,66 @@ fn make_layer(rec: Rec, mask_tiles: Option<MaskTileMap>, kind: LayerKind) -> Lay
         styled: None,
         render_offset: (0, 0),
     }
+}
+
+/// Turn CMYK planes (stored inverted: 0 means full ink) into RGB.
+fn convert_cmyk_planes(planes: &mut ColorPlanes, key: Option<&[f32]>) {
+    let n = planes.r.as_ref().map(|p| p.len()).unwrap_or(0);
+    if n == 0 {
+        return;
+    }
+    let take = |p: &Option<Vec<f32>>, i: usize| {
+        1.0 - p.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(1.0)
+    };
+    let mut r = vec![0.0f32; n];
+    let mut g = vec![0.0f32; n];
+    let mut b = vec![0.0f32; n];
+    for i in 0..n {
+        let k = 1.0 - key.and_then(|v| v.get(i)).copied().unwrap_or(1.0);
+        let px = photoslop_color::convert::cmyk_to_rgb(
+            [
+                take(&planes.r, i),
+                take(&planes.g, i),
+                take(&planes.b, i),
+                k,
+            ],
+            1.0,
+        );
+        r[i] = px.r;
+        g[i] = px.g;
+        b[i] = px.b;
+    }
+    planes.r = Some(r);
+    planes.g = Some(g);
+    planes.b = Some(b);
+}
+
+/// Turn Lab planes into RGB. Channels arrive 0..=1: L covers 0..=100, and
+/// a/b cover -128..=127 with 128 as the neutral point.
+fn convert_lab_planes(planes: &mut ColorPlanes) {
+    let n = planes.r.as_ref().map(|p| p.len()).unwrap_or(0);
+    if n == 0 {
+        return;
+    }
+    let take =
+        |p: &Option<Vec<f32>>, i: usize| p.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(0.0);
+    let mut r = vec![0.0f32; n];
+    let mut g = vec![0.0f32; n];
+    let mut b = vec![0.0f32; n];
+    for i in 0..n {
+        let px = photoslop_color::convert::lab_to_rgb(
+            [
+                take(&planes.r, i) * 100.0,
+                take(&planes.g, i) * 255.0 - 128.0,
+                take(&planes.b, i) * 255.0 - 128.0,
+            ],
+            1.0,
+        );
+        r[i] = px.r;
+        g[i] = px.g;
+        b[i] = px.b;
+    }
+    planes.r = Some(r);
+    planes.g = Some(g);
+    planes.b = Some(b);
 }

@@ -471,7 +471,8 @@ fn corrupt_zip_channel_errors_cleanly() {
 
 #[test]
 fn unsupported_color_modes_rejected_clearly() {
-    for (mode, needle) in [(0u16, "Bitmap"), (2, "Indexed"), (4, "CMYK"), (9, "Lab")] {
+    // CMYK, Lab and Indexed open now; Bitmap and Multichannel still do not.
+    for (mode, needle) in [(0u16, "Bitmap"), (7, "Multichannel")] {
         let mut psd = Psd::rgb8(8, 8);
         psd.mode = mode;
         match read_psd(&psd.build()) {

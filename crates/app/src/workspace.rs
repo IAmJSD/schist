@@ -1246,7 +1246,9 @@ impl Workspace {
         if doc.mode == mode {
             return;
         }
-        if mode == photoslop_color::ColorMode::Grayscale {
+        if mode == photoslop_color::ColorMode::Grayscale
+            || mode == photoslop_color::ColorMode::Indexed
+        {
             // Flatten colour out of every layer, which is what the mode
             // change actually means for the pixels.
             let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
@@ -1278,11 +1280,7 @@ impl Workspace {
             doc.mode = mode;
             doc.damage_all();
         }
-        self.status = match mode {
-            photoslop_color::ColorMode::Rgb => "RGB Color",
-            photoslop_color::ColorMode::Grayscale => "Grayscale",
-        }
-        .into();
+        self.status = mode.display_name().into();
         self.after_change(cx);
     }
 

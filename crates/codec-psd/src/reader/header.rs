@@ -4,7 +4,7 @@ use super::cursor::Cursor;
 use crate::error::PsdError;
 use photoslop_color::{ColorMode, Depth};
 
-/// PSD color mode numbers (we only *open* Rgb and Grayscale in v1).
+/// PSD colour mode numbers.
 pub const MODE_BITMAP: u16 = 0;
 pub const MODE_GRAYSCALE: u16 = 1;
 pub const MODE_INDEXED: u16 = 2;
@@ -30,10 +30,7 @@ pub struct Header {
 impl Header {
     /// Number of color channels (before any alpha) for the color mode.
     pub fn base_channels(&self) -> u16 {
-        match self.mode {
-            ColorMode::Rgb => 3,
-            ColorMode::Grayscale => 1,
-        }
+        self.mode.channels() as u16
     }
 }
 
@@ -87,12 +84,15 @@ pub fn parse_header(cur: &mut Cursor) -> Result<Header, PsdError> {
     let mode = match mode_num {
         MODE_RGB => ColorMode::Rgb,
         MODE_GRAYSCALE => ColorMode::Grayscale,
+        MODE_CMYK => ColorMode::Cmyk,
+        MODE_LAB => ColorMode::Lab,
+        MODE_INDEXED => ColorMode::Indexed,
+        // Duotone files store a single ink plane plus a colour table; the
+        // plane on its own reads exactly like greyscale, which is what
+        // Photoshop shows for a duotone with no table applied.
+        MODE_DUOTONE => ColorMode::Grayscale,
         MODE_BITMAP => return Err(unsupported_mode("Bitmap")),
-        MODE_INDEXED => return Err(unsupported_mode("Indexed")),
-        MODE_CMYK => return Err(unsupported_mode("CMYK")),
         MODE_MULTICHANNEL => return Err(unsupported_mode("Multichannel")),
-        MODE_DUOTONE => return Err(unsupported_mode("Duotone")),
-        MODE_LAB => return Err(unsupported_mode("Lab")),
         m => return Err(PsdError::Corrupt(format!("unknown color mode {m}"))),
     };
 

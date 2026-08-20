@@ -500,3 +500,57 @@ fn editing_effects_replaces_the_preserved_block() {
     assert!(back.tree.layers[0].style.color_overlay.enabled);
     assert!((back.tree.layers[0].style.color_overlay.settings.color.g - 1.0).abs() < 0.01);
 }
+
+#[test]
+fn round_trips_cmyk_and_lab_documents() {
+    // These modes used to be a hard Unsupported on the way in. Pixels are
+    // still edited as RGBA, so what is checked here is that the file is
+    // genuinely written in its mode and comes back looking the same.
+    for mode in [ColorMode::Cmyk, ColorMode::Lab] {
+        let mut doc = Document::new("t", 32, 24, Depth::Eight);
+        doc.mode = mode;
+        doc.push_layer(solid_layer(
+            "c",
+            IntRect::new(0, 0, 32, 24),
+            [200, 90, 40, 255],
+            Depth::Eight,
+        ));
+        let bytes = write_psd(&doc).expect("write");
+        // The header's mode number must actually say so.
+        let mode_num = u16::from_be_bytes([bytes[24], bytes[25]]);
+        assert_eq!(
+            mode_num,
+            match mode {
+                ColorMode::Cmyk => 4,
+                _ => 9,
+            },
+            "{mode:?} was not written in its own mode"
+        );
+        let back = read_psd(&bytes).expect("read");
+        assert_eq!(back.mode, mode, "{mode:?} mode lost");
+        let px = pixel(&back, 0, 10, 10);
+        for c in 0..3 {
+            let want = [200i32, 90, 40][c];
+            assert!(
+                (px[c] as i32 - want).abs() <= 6,
+                "{mode:?} channel {c}: {} vs {want}",
+                px[c]
+            );
+        }
+    }
+}
+
+#[test]
+fn cmyk_files_carry_four_colour_channels() {
+    let mut doc = Document::new("t", 16, 16, Depth::Eight);
+    doc.mode = ColorMode::Cmyk;
+    doc.push_layer(solid_layer(
+        "c",
+        IntRect::new(0, 0, 16, 16),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    let bytes = write_psd(&doc).unwrap();
+    // Header channel count: four inks plus alpha.
+    assert_eq!(u16::from_be_bytes([bytes[12], bytes[13]]), 5);
+}

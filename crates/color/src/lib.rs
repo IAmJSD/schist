@@ -25,12 +25,44 @@ impl Depth {
     }
 }
 
-/// Color mode of a document. V1 edits RGB and Grayscale natively; other PSD
-/// modes are converted on import.
+/// Colour mode of a document.
+///
+/// Pixels are always held as RGBA f32 -- one pipeline rather than five --
+/// and converted at the boundaries: on open, on Image ▸ Mode, and on save.
+/// So a CMYK file opens, edits and saves as CMYK, but the editing itself
+/// happens in RGB. See `convert`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColorMode {
     Rgb,
     Grayscale,
+    /// Four-ink separation. Pixels are still edited as RGBA; the mode
+    /// records how the file is stored and how it converts on save.
+    Cmyk,
+    /// CIELAB. Same arrangement as CMYK: converted at the boundaries.
+    Lab,
+    /// A palette of at most 256 colours.
+    Indexed,
+}
+
+impl ColorMode {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ColorMode::Rgb => "RGB Color",
+            ColorMode::Grayscale => "Grayscale",
+            ColorMode::Cmyk => "CMYK Color",
+            ColorMode::Lab => "Lab Color",
+            ColorMode::Indexed => "Indexed Color",
+        }
+    }
+
+    /// How many colour channels a file in this mode stores.
+    pub fn channels(self) -> usize {
+        match self {
+            ColorMode::Rgb | ColorMode::Lab => 3,
+            ColorMode::Grayscale | ColorMode::Indexed => 1,
+            ColorMode::Cmyk => 4,
+        }
+    }
 }
 
 /// Straight-alpha RGBA, f32 components in 0.0..=1.0.
@@ -153,6 +185,186 @@ mod tests {
     fn u16_round_trip() {
         for v in [0u16, 1, 32768, 65534, 65535] {
             assert_eq!(f32_to_u16(u16_to_f32(v)), v);
+        }
+    }
+}
+
+/// Conversions between the working RGB space and the other document
+/// modes.
+///
+/// Photoslop edits in RGBA f32 whatever the document's mode says, and
+/// converts at the boundaries: on open, on Image ▸ Mode, and on save. That
+/// keeps one pipeline rather than four, at the cost of not editing CMYK
+/// channels individually -- which is stated in the docs rather than
+/// implied by silence.
+pub mod convert {
+    use super::Rgba;
+
+    /// Naive CMYK, the same transform Photoshop calls "U.S. Web Coated"
+    /// only in the loosest sense: no ink limits, no dot gain, no profile.
+    /// Good enough to round-trip a file and to preview; not a substitute
+    /// for a real separation, which is what the ICC path is for.
+    pub fn rgb_to_cmyk(px: Rgba) -> [f32; 4] {
+        let k = 1.0 - px.r.max(px.g).max(px.b);
+        if k >= 1.0 - 1e-6 {
+            return [0.0, 0.0, 0.0, 1.0];
+        }
+        let d = 1.0 - k;
+        [
+            (1.0 - px.r - k) / d,
+            (1.0 - px.g - k) / d,
+            (1.0 - px.b - k) / d,
+            k,
+        ]
+    }
+
+    pub fn cmyk_to_rgb(c: [f32; 4], alpha: f32) -> Rgba {
+        let k = c[3].clamp(0.0, 1.0);
+        let f = |v: f32| ((1.0 - v.clamp(0.0, 1.0)) * (1.0 - k)).clamp(0.0, 1.0);
+        Rgba::new(f(c[0]), f(c[1]), f(c[2]), alpha)
+    }
+
+    /// sRGB companding, needed because Lab is defined on linear light.
+    fn to_linear(v: f32) -> f32 {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn from_linear(v: f32) -> f32 {
+        if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    /// D65 white point in XYZ.
+    const WHITE: [f32; 3] = [0.950_47, 1.0, 1.088_83];
+
+    fn lab_f(t: f32) -> f32 {
+        const D: f32 = 6.0 / 29.0;
+        if t > D * D * D {
+            t.cbrt()
+        } else {
+            t / (3.0 * D * D) + 4.0 / 29.0
+        }
+    }
+
+    fn lab_f_inv(t: f32) -> f32 {
+        const D: f32 = 6.0 / 29.0;
+        if t > D {
+            t * t * t
+        } else {
+            3.0 * D * D * (t - 4.0 / 29.0)
+        }
+    }
+
+    /// sRGB to CIELAB. `L` is 0..=100, `a` and `b` roughly -128..=127.
+    pub fn rgb_to_lab(px: Rgba) -> [f32; 3] {
+        let (r, g, b) = (to_linear(px.r), to_linear(px.g), to_linear(px.b));
+        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / WHITE[0];
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / WHITE[2];
+        let (fx, fy, fz) = (lab_f(x), lab_f(y), lab_f(z));
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    }
+
+    pub fn lab_to_rgb(lab: [f32; 3], alpha: f32) -> Rgba {
+        let fy = (lab[0] + 16.0) / 116.0;
+        let fx = fy + lab[1] / 500.0;
+        let fz = fy - lab[2] / 200.0;
+        let x = lab_f_inv(fx) * WHITE[0];
+        let y = lab_f_inv(fy);
+        let z = lab_f_inv(fz) * WHITE[2];
+        let r = 3.2406 * x - 1.5372 * y - 0.4986 * z;
+        let g = -0.9689 * x + 1.8758 * y + 0.0415 * z;
+        let b = 0.0557 * x - 0.2040 * y + 1.0570 * z;
+        Rgba::new(
+            from_linear(r).clamp(0.0, 1.0),
+            from_linear(g).clamp(0.0, 1.0),
+            from_linear(b).clamp(0.0, 1.0),
+            alpha,
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn close(a: f32, b: f32, tol: f32, what: &str) {
+            assert!((a - b).abs() < tol, "{what}: {a} != {b}");
+        }
+
+        #[test]
+        fn cmyk_round_trips() {
+            for px in [
+                Rgba::new(0.0, 0.0, 0.0, 1.0),
+                Rgba::new(1.0, 1.0, 1.0, 1.0),
+                Rgba::new(0.2, 0.6, 0.9, 1.0),
+                Rgba::new(0.8, 0.1, 0.4, 1.0),
+            ] {
+                let back = cmyk_to_rgb(rgb_to_cmyk(px), 1.0);
+                close(back.r, px.r, 1e-4, "red");
+                close(back.g, px.g, 1e-4, "green");
+                close(back.b, px.b, 1e-4, "blue");
+            }
+        }
+
+        #[test]
+        fn lab_round_trips() {
+            for px in [
+                Rgba::new(0.0, 0.0, 0.0, 1.0),
+                Rgba::new(1.0, 1.0, 1.0, 1.0),
+                Rgba::new(0.2, 0.6, 0.9, 1.0),
+                Rgba::new(0.75, 0.25, 0.05, 1.0),
+            ] {
+                let back = lab_to_rgb(rgb_to_lab(px), 1.0);
+                close(back.r, px.r, 2e-3, "red");
+                close(back.g, px.g, 2e-3, "green");
+                close(back.b, px.b, 2e-3, "blue");
+            }
+        }
+
+        #[test]
+        fn lab_lightness_matches_expectations() {
+            // Black is 0, white is 100, mid grey lands near 53 -- the
+            // usual sanity check on a Lab implementation.
+            close(
+                rgb_to_lab(Rgba::new(0.0, 0.0, 0.0, 1.0))[0],
+                0.0,
+                0.01,
+                "black",
+            );
+            close(
+                rgb_to_lab(Rgba::new(1.0, 1.0, 1.0, 1.0))[0],
+                100.0,
+                0.01,
+                "white",
+            );
+            close(
+                rgb_to_lab(Rgba::new(0.5, 0.5, 0.5, 1.0))[0],
+                53.4,
+                1.0,
+                "mid grey",
+            );
+        }
+
+        #[test]
+        fn a_neutral_colour_has_no_chroma() {
+            let lab = rgb_to_lab(Rgba::new(0.5, 0.5, 0.5, 1.0));
+            close(lab[1], 0.0, 0.01, "a");
+            close(lab[2], 0.0, 0.01, "b");
+        }
+
+        #[test]
+        fn pure_black_is_all_key() {
+            assert_eq!(
+                rgb_to_cmyk(Rgba::new(0.0, 0.0, 0.0, 1.0)),
+                [0.0, 0.0, 0.0, 1.0]
+            );
         }
     }
 }
