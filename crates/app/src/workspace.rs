@@ -81,6 +81,14 @@ pub struct Workspace {
     /// Path to the open submenu in the menu bar, e.g. [2, 4] for the fifth
     /// row of the third menu. Empty means none.
     pub open_submenu: Vec<usize>,
+    /// Marching-ants animation step, advanced on a timer.
+    /// View rotation in radians. Display only: the pixels are untouched,
+    /// so this is a change of viewpoint rather than an edit.
+    pub rotation: f32,
+    pub ant_phase: u32,
+    /// Whether the last frame drew any tool overlay, so the ants timer
+    /// knows to keep repainting for tools that draw their own.
+    pub tool_has_overlay: bool,
     /// Which curve the Curves editor is showing.
     pub curve_channel: photoslop_adjustments::CurveChannel,
     /// Index of the control point being dragged in the curve editor.
@@ -381,6 +389,7 @@ struct ViewportKey {
     offset: (i32, i32),
     size: (u32, u32),
     color_epoch: u64,
+    rotation: u32,
 }
 
 /// Which modal dialog is open.
@@ -508,6 +517,9 @@ impl Workspace {
             status: "Ready".into(),
             open_popup: None,
             open_submenu: Vec::new(),
+            rotation: 0.0,
+            ant_phase: 0,
+            tool_has_overlay: false,
             curve_channel: Default::default(),
             curve_drag: None,
             filter_preview: None,
@@ -543,6 +555,26 @@ impl Workspace {
                 .timer(std::time::Duration::from_secs(AUTOSAVE_SECS))
                 .await;
             if this.update(cx, |ws, _| ws.autosave()).is_err() {
+                break;
+            }
+        })
+        .detach();
+        // March the selection ants. Eight steps a second is what
+        // Photoshop looks like, and it only repaints while there is a
+        // selection to march.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(125))
+                .await;
+            let keep = this.update(cx, |ws, cx| {
+                let marching =
+                    ws.doc.as_ref().is_some_and(|d| !d.selection.is_empty()) || ws.tool_has_overlay;
+                if marching {
+                    ws.ant_phase = ws.ant_phase.wrapping_add(1);
+                    cx.notify();
+                }
+            });
+            if keep.is_err() {
                 break;
             }
         })
@@ -812,10 +844,41 @@ impl Workspace {
     }
 
     fn doc_pos(&self, canvas_local: Point<Pixels>) -> (f32, f32) {
+        // The inverse of what `assemble_viewport` draws, so a click lands
+        // where the pixel under the cursor actually is, rotation and all.
+        let (x, y) = self.unrotate(f32::from(canvas_local.x), f32::from(canvas_local.y));
         (
-            (f32::from(canvas_local.x) - f32::from(self.offset.x)) / self.zoom,
-            (f32::from(canvas_local.y) - f32::from(self.offset.y)) / self.zoom,
+            (x - f32::from(self.offset.x)) / self.zoom,
+            (y - f32::from(self.offset.y)) / self.zoom,
         )
+    }
+
+    /// Undo the view rotation for a point in canvas-element coordinates.
+    fn unrotate(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.rotation == 0.0 {
+            return (x, y);
+        }
+        let cx = f32::from(self.canvas_bounds.size.width) / 2.0;
+        let cy = f32::from(self.canvas_bounds.size.height) / 2.0;
+        let (s, c) = (-self.rotation).sin_cos();
+        let (ox, oy) = (x - cx, y - cy);
+        (ox * c - oy * s + cx, ox * s + oy * c + cy)
+    }
+
+    /// Turn the view by `delta` radians.
+    pub fn rotate_view(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.rotation = (self.rotation + delta).rem_euclid(std::f32::consts::TAU);
+        self.viewport_image = None;
+        self.status = format!("Rotate View {:.0}\u{b0}", self.rotation.to_degrees()).into();
+        cx.notify();
+    }
+
+    /// Put the view back upright.
+    pub fn reset_view_rotation(&mut self, cx: &mut Context<Self>) {
+        self.rotation = 0.0;
+        self.viewport_image = None;
+        self.status = "View reset".into();
+        cx.notify();
     }
 
     fn to_local(&self, window_pos: Point<Pixels>) -> Point<Pixels> {
@@ -1865,6 +1928,76 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Push the internal clipboard out to the system clipboard as a PNG.
+    ///
+    /// Photoslop's own copy/paste has always worked between its documents;
+    /// this is what makes it work with everything else.
+    pub fn sync_clipboard_out(&mut self, cx: &mut Context<Self>) {
+        let Some(clip) = self.editor.clipboard.clone() else {
+            return;
+        };
+        let (w, h) = (clip.rect.width() as u32, clip.rect.height() as u32);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let Some(codec) = self.registry.codecs().find(|c| c.id() == "png") else {
+            return;
+        };
+        // Codecs export documents, so the clipboard becomes a one-layer one.
+        let mut doc = Document::new("clipboard", w, h, Depth::Eight);
+        let mut layer = Layer::new_raster("clipboard");
+        photoslop_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(w, h),
+            &clip.rgba,
+        );
+        doc.push_layer(layer);
+        match codec.export(&doc) {
+            Ok(bytes) => {
+                let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes);
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+            }
+            Err(e) => log::error!("clipboard export: {e}"),
+        }
+    }
+
+    /// Pull an image off the system clipboard into the internal one.
+    ///
+    /// Returns false when the clipboard holds nothing we can use, so the
+    /// caller can fall back to whatever was copied inside the app.
+    pub fn sync_clipboard_in(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        for entry in item.entries() {
+            let gpui::ClipboardEntry::Image(image) = entry else {
+                continue;
+            };
+            if image.bytes.is_empty() {
+                continue;
+            }
+            // Route it through the codecs, so anything Photoslop can open
+            // it can also paste.
+            let Some(codec) = self.registry.codecs().find(|c| c.probe(&image.bytes)) else {
+                continue;
+            };
+            match codec.import(&image.bytes) {
+                Ok(doc) => {
+                    let rect = doc.canvas_rect();
+                    let rgba = photoslop_compositor::composite_region_rgba8(&doc, rect);
+                    self.editor.clipboard = Some(Arc::new(photoslop_plugin_api::ClipboardImage {
+                        rect,
+                        rgba,
+                    }));
+                    return true;
+                }
+                Err(e) => log::error!("clipboard import: {e}"),
+            }
+        }
+        false
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its
@@ -1900,6 +2033,12 @@ impl Workspace {
         // Grow, Similar and Color Range take their tolerance from the
         // magic wand, exactly as Photoshop does.
         self.sync_wand_tolerance();
+        // Pasting prefers whatever is on the system clipboard, so copying
+        // in another application and pasting here works. If there is no
+        // image there, the internal clipboard is used unchanged.
+        if id.starts_with("edit.paste") {
+            self.sync_clipboard_in(cx);
+        }
         let Some(doc) = self.doc.as_mut() else { return };
         if let Some(command) = self.registry.command(id) {
             let mut ctx = CommandCtx {
@@ -1908,6 +2047,10 @@ impl Workspace {
             };
             (command.run)(&mut ctx);
             self.status = command.title.into();
+            // ...and copying makes the pixels available everywhere else.
+            if id.starts_with("edit.copy") || id == "edit.cut" {
+                self.sync_clipboard_out(cx);
+            }
         } else {
             log::warn!("unknown command {id}");
         }
@@ -3701,6 +3844,7 @@ impl Workspace {
             ),
             size: (width as u32, height as u32),
             color_epoch: self.color_epoch,
+            rotation: self.rotation.to_bits(),
         };
         if let Some((cached_key, image)) = &self.viewport_image {
             if *cached_key == key {
@@ -3712,21 +3856,36 @@ impl Workspace {
         let zoom = self.zoom;
         let inv_zoom = 1.0 / zoom;
         let origin = (f32::from(self.offset.x) * sf, f32::from(self.offset.y) * sf);
+        // Rotation is about the middle of the viewport, which is what
+        // makes spinning the view feel like turning a sheet of paper.
+        let centre = (width as f32 / 2.0, height as f32 / 2.0);
+        let (rs, rc) = (-self.rotation).sin_cos();
         let doc_at = |dx: f32, dy: f32| -> (f32, f32) {
+            let (ox, oy) = (dx - centre.0, dy - centre.1);
+            let (rx, ry) = (ox * rc - oy * rs + centre.0, ox * rs + oy * rc + centre.1);
             (
-                (dx - origin.0) * inv_zoom / sf,
-                (dy - origin.1) * inv_zoom / sf,
+                (rx - origin.0) * inv_zoom / sf,
+                (ry - origin.1) * inv_zoom / sf,
             )
         };
-        let (x0, y0) = doc_at(0.0, 0.0);
-        let (x1, y1) = doc_at(width as f32, height as f32);
-        let visible = IntRect::new(
-            x0.floor() as i32 - 1,
-            y0.floor() as i32 - 1,
-            x1.ceil() as i32 + 1,
-            y1.ceil() as i32 + 1,
-        )
-        .intersect(&canvas_rect);
+        // With rotation, the visible region is the union of all four
+        // corners rather than the span between two of them.
+        let mut span = IntRect::EMPTY;
+        for (cx, cy) in [
+            (0.0, 0.0),
+            (width as f32, 0.0),
+            (width as f32, height as f32),
+            (0.0, height as f32),
+        ] {
+            let (x, y) = doc_at(cx, cy);
+            span = span.union(&IntRect::new(
+                x.floor() as i32 - 1,
+                y.floor() as i32 - 1,
+                x.ceil() as i32 + 1,
+                y.ceil() as i32 + 1,
+            ));
+        }
+        let visible = span.intersect(&canvas_rect);
         if visible.is_empty() {
             // Nothing but background: a 1x1 image keeps the paint path simple.
             let buffer = image::RgbaImage::from_raw(1, 1, vec![0x26, 0x26, 0x26, 255])?;
@@ -3930,6 +4089,7 @@ impl Workspace {
         // Immutable-phase data, captured by value so the mutable phase
         // below (preview/tile-image builds) doesn't fight the borrows.
         let selection_generation = doc.selection.generation();
+        let ant_phase = self.ant_phase;
         let has_selection = !doc.selection.is_empty() && !doc.selection.bounds().is_empty();
         let mut guides = doc.guides.clone();
         if let Some(dragging) = self.dragging_guide {
@@ -3941,6 +4101,7 @@ impl Workspace {
             .tool_mut(tool_id)
             .map(|t| t.overlays(doc, &self.editor))
             .unwrap_or_default();
+        self.tool_has_overlay = !overlays.is_empty();
         // The active stored path is always visible, whichever tool is in
         // use -- otherwise a path drawn with the pen would vanish the
         // moment you switched to something else.
@@ -3957,8 +4118,24 @@ impl Workspace {
             f32::from(bounds.origin.x) + f32::from(self.offset.x),
             f32::from(bounds.origin.y) + f32::from(self.offset.y),
         );
+        // Overlays are drawn in window space, so they rotate about the
+        // canvas element's centre exactly as the pixels do.
+        let rot = self.rotation;
+        let rot_centre = (
+            f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0,
+            f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0,
+        );
         let to_screen = move |x: f32, y: f32| -> Point<Pixels> {
-            point(px(origin.0 + x * zoom), px(origin.1 + y * zoom))
+            let (sx, sy) = (origin.0 + x * zoom, origin.1 + y * zoom);
+            if rot == 0.0 {
+                return point(px(sx), px(sy));
+            }
+            let (s, c) = rot.sin_cos();
+            let (ox, oy) = (sx - rot_centre.0, sy - rot_centre.1);
+            point(
+                px(ox * c - oy * s + rot_centre.0),
+                px(ox * s + oy * c + rot_centre.1),
+            )
         };
         // Snap a document-space coordinate to the device-pixel grid.
         // Abutting quads MUST share bit-identical edges or fractional
@@ -3993,12 +4170,30 @@ impl Workspace {
 
         job.retired = std::mem::take(&mut self.retired_images);
 
-        // Document border.
-        job.outlines
-            .push((snapped_bounds(canvas_rect), gpui::rgb(0x000000).into()));
+        // Document border. An axis-aligned rectangle cannot follow a
+        // rotated view, so when the view is turned it is drawn as a path
+        // through `to_screen` instead.
+        if self.rotation == 0.0 {
+            job.outlines
+                .push((snapped_bounds(canvas_rect), gpui::rgb(0x000000).into()));
+        } else {
+            let corners = [
+                (canvas_rect.left as f32, canvas_rect.top as f32),
+                (canvas_rect.right as f32, canvas_rect.top as f32),
+                (canvas_rect.right as f32, canvas_rect.bottom as f32),
+                (canvas_rect.left as f32, canvas_rect.bottom as f32),
+                (canvas_rect.left as f32, canvas_rect.top as f32),
+            ];
+            job.polylines.push((
+                corners.iter().map(|(x, y)| to_screen(*x, *y)).collect(),
+                gpui::rgb(0x000000).into(),
+            ));
+        }
 
-        // Grid, then guides: both are view chrome, hidden by ⌘H.
-        if self.view.extras {
+        // Grid, then guides: both are view chrome, hidden by ⌘H. They are
+        // drawn as thin axis-aligned quads, so a rotated view hides them
+        // rather than showing them pointing the wrong way.
+        if self.view.extras && self.rotation == 0.0 {
             let view = self.view;
             let canvas_w = canvas_rect.width() as f32;
             let canvas_h = canvas_rect.height() as f32;
@@ -4062,7 +4257,7 @@ impl Workspace {
             let outline = self.selection_outline(selection_generation);
             for run in outline.iter() {
                 let pts: Vec<Point<Pixels>> = run.iter().map(|&(x, y)| to_screen(x, y)).collect();
-                push_ants(&mut job.ants, &pts);
+                push_ants(&mut job.ants, &pts, ant_phase);
             }
         }
 
@@ -4081,7 +4276,7 @@ impl Workspace {
                 Overlay::AntsPolygon(points) => {
                     let pts: Vec<Point<Pixels>> =
                         points.iter().map(|&(x, y)| to_screen(x, y)).collect();
-                    push_ants(&mut job.ants, &pts);
+                    push_ants(&mut job.ants, &pts, ant_phase);
                 }
                 Overlay::Line { x1, y1, x2, y2 } => {
                     job.polylines.push((
@@ -4242,11 +4437,14 @@ impl Workspace {
 /// distance along the polyline. A traced selection arrives as hundreds of
 /// short runs, and per-run phase would restart every few pixels — leaving
 /// the whole outline one colour.
-fn push_ants(ants: &mut Ants, pts: &[Point<Pixels>]) {
+fn push_ants(ants: &mut Ants, pts: &[Point<Pixels>], phase: u32) {
     const DASH: f32 = 4.0;
     if pts.len() < 2 {
         return;
     }
+    // Phase is measured in dashes, so the pattern slides one dash per
+    // tick and wraps every two.
+    let offset = (phase % 2) as f32 * DASH;
     for pair in pts.windows(2) {
         let (a, b) = (pair[0], pair[1]);
         let (ax, ay) = (f32::from(a.x), f32::from(a.y));
@@ -4261,7 +4459,10 @@ fn push_ants(ants: &mut Ants, pts: &[Point<Pixels>]) {
             let lerp = |v0: f32, v1: f32, f: f32| v0 + (v1 - v0) * f;
             let (sx, sy) = (lerp(ax, bx, t / len), lerp(ay, by, t / len));
             let (ex, ey) = (lerp(ax, bx, next / len), lerp(ay, by, next / len));
-            let dark = (((sx + sy) / DASH).floor() as i64).rem_euclid(2) == 1;
+            // Position-based rather than per-segment: a traced outline
+            // arrives as hundreds of short runs, and phase-per-run would
+            // start every one of them on the same colour.
+            let dark = ((((sx + sy) + offset) / DASH).floor() as i64).rem_euclid(2) == 1;
             let seg = [point(px(sx), px(sy)), point(px(ex), px(ey))];
             if dark {
                 ants.dark.push(seg);

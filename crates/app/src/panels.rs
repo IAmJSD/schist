@@ -128,6 +128,9 @@ enum AppItem {
     NewLayerComp,
     ExportArtboards,
     ExportSlices,
+    RotateViewCw,
+    RotateViewCcw,
+    ResetView,
     ClearNotes,
     ClearCounts,
     ApplyLayerComp(usize),
@@ -324,6 +327,10 @@ fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
         (
             "View",
             vec![
+                App("Rotate View Clockwise", RotateViewCw, None),
+                App("Rotate View Counter Clockwise", RotateViewCcw, None),
+                App("Reset View", ResetView, None),
+                Sep,
                 App("Zoom In", ZoomIn, Some("cmd-=")),
                 App("Zoom Out", ZoomOut, Some("cmd--")),
                 App("Fit on Screen", ZoomFit, Some("cmd-0")),
@@ -677,6 +684,9 @@ fn run_app_item(
         AppItem::DeleteLayerComp(i) => ws.delete_layer_comp(i, cx),
         AppItem::ExportArtboards => ws.export_regions(false, window, cx),
         AppItem::ExportSlices => ws.export_regions(true, window, cx),
+        AppItem::RotateViewCw => ws.rotate_view(std::f32::consts::FRAC_PI_8, cx),
+        AppItem::RotateViewCcw => ws.rotate_view(-std::f32::consts::FRAC_PI_8, cx),
+        AppItem::ResetView => ws.reset_view_rotation(cx),
         AppItem::ClearNotes => {
             if let Some(doc) = ws.doc.as_mut() {
                 doc.notes.clear();
