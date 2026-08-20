@@ -10,8 +10,8 @@ use crate::panels;
 use gpui::{
     canvas, div, point, px, size, App, Bounds, Context, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Point, Render, RenderImage,
-    ScrollWheelEvent, SharedString, Styled as _, Window,
+    MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
+    ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
 use photoslop_color::Depth;
 use photoslop_compositor::TileCache;
@@ -824,6 +824,23 @@ impl Workspace {
         } else {
             self.offset = point(self.offset.x + delta.x, self.offset.y + delta.y);
         }
+        cx.notify();
+    }
+
+    /// Trackpad pinch-to-zoom.
+    ///
+    /// Unlike the scroll path this is unconditional: a pinch has only one
+    /// sensible meaning, so it ignores the zoom-with-scroll preference and
+    /// any modifiers. Only macOS and Wayland deliver these, which is why
+    /// modifier+scroll zoom stays.
+    fn on_pinch(&mut self, ev: &PinchEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // `delta` is already the multiplicative change since the previous
+        // event of the gesture, so it composes straight into `zoom_by`.
+        if ev.phase != TouchPhase::Moved || !(ev.delta.is_finite() && ev.delta > 0.0) {
+            return;
+        }
+        let local = self.to_local(ev.position);
+        self.zoom_by(ev.delta, Some(local));
         cx.notify();
     }
 
@@ -2656,6 +2673,7 @@ impl Workspace {
                 cx.listener(|ws, ev, w, cx| ws.on_mouse_up(ev, w, cx)),
             )
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
+            .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
                 if ws.field_key(&ev.keystroke.key, ev.keystroke.key_char.as_deref()) {
                     cx.notify();

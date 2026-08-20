@@ -58,6 +58,7 @@ automation. All are plugin-shaped and can come later.
 |---|---|---|
 | Language | Rust (stable, 2024 edition) | Requirement; safety + performance |
 | UI framework | `gpui` | Requirement; retained/immediate hybrid, GPU-rendered, built-in **actions + keymap** system that maps perfectly onto "all the keybinds", element system for panels |
+| — pinned to | [IAmJSD/gpui](https://github.com/IAmJSD/gpui), a fork of gpui 0.2.2 | Upstream surfaces no trackpad pinch event on any platform; the fork adds `PinchEvent`/`on_pinch` (macOS + Wayland). Pinned by revision, re-vendored per `UPSTREAM.md` in that repo |
 | Pixel engine (phase 1) | CPU tiles: `rayon` + SIMD (`std::simd`/`wide`) | Correctness first; deterministic, testable, no GPU interop risk |
 | Pixel engine (phase 2) | `wgpu` compute offscreen → texture handoff to GPUI | GPU compositing/filters once semantics are locked by CPU reference impl |
 | Geometry/paths | `kurbo` + `lyon` (tessellation) | Pen tool, shapes, vector masks |

@@ -76,10 +76,16 @@ Two-finger scroll pans; **Ctrl/⌘/Alt + scroll zooms** toward the pointer.
 Prefer it the other way round? **Preferences ▸ Zoom with scroll wheel**
 swaps them, so plain scrolling zooms and the modifier pans.
 
-Pinch-to-zoom is not available: GPUI does not surface trackpad pinch
-gestures on any platform, so the event never reaches the application. Use
-Ctrl+scroll, the zoom-with-scroll preference, ⌘+/⌘- , or the navigator's
-zoom slider.
+**Pinch-to-zoom** works on macOS and Linux/Wayland, zooming about the
+centre of the gesture. Upstream GPUI surfaces no pinch event at all, so
+this is provided by a fork — [IAmJSD/gpui](https://github.com/IAmJSD/gpui),
+which adds `PinchEvent` and `on_pinch` on top of gpui 0.2.2 — pinned by
+revision in the workspace `Cargo.toml`.
+
+There is no pinch under X11: XI2 has no pinch gesture, so touchpad
+pinches are never forwarded to X11 clients, and Windows is not yet
+implemented in the fork. Ctrl+scroll, the zoom-with-scroll preference,
+⌘+/⌘-, and the navigator's zoom slider work everywhere.
 
 Remap anything in `~/.config/photoslop/keymap.json`:
 
