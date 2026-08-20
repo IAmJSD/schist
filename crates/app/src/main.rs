@@ -2,6 +2,7 @@
 
 mod actions;
 mod assets;
+mod color_picker;
 mod crash;
 mod curve_editor;
 mod dialogs;

@@ -16,6 +16,7 @@ macro_rules! icons {
 
 icons!(
     "move",
+    "swap",
     "eyedropper",
     "hand",
     "zoom",

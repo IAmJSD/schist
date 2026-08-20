@@ -66,6 +66,13 @@ pub struct Workspace {
     viewport_image: Option<(ViewportKey, Arc<RenderImage>)>,
     /// Images replaced this frame; freed from the sprite atlas after paint.
     retired_images: Vec<Arc<RenderImage>>,
+    /// Colour-picker imagery. Painted pixel by pixel rather than drawn as
+    /// gradient quads -- see `color_picker::field_image` for why -- so it
+    /// is cached: the square by the hue it was built for, the two
+    /// rainbows forever.
+    pub picker_field: Option<(u32, Arc<RenderImage>)>,
+    pub picker_strip: Option<Arc<RenderImage>>,
+    pub picker_ramp: Option<Arc<RenderImage>>,
     preview: Preview,
     pub zoom: f32,
     /// Screen offset of document origin within the canvas element.
@@ -96,6 +103,8 @@ pub struct Workspace {
     pub curve_channel: photoslop_adjustments::CurveChannel,
     /// Index of the control point being dragged in the curve editor.
     pub curve_drag: Option<usize>,
+    /// Which colour control is being dragged, if any.
+    pub picker_drag: Option<PickerDrag>,
     pub filter_preview: Option<FilterPreview>,
     /// Live bounds of slider tracks, recorded each frame by their canvases.
     slider_bounds: FxHashMap<&'static str, Bounds<Pixels>>,
@@ -454,6 +463,17 @@ pub enum Modal {
     SelectModify { kind: ModifyKind, amount: f32 },
     /// Select ▸ Color Range.
     ColorRange { tolerance: f32, target: Rgba },
+    /// Photoshop's Color Picker.
+    ColorPicker {
+        target: ColorTarget,
+        /// HSB, not RGB. Hue and saturation are not recoverable from a
+        /// black or grey RGB value, so storing RGB would snap the hue
+        /// strip to red the moment brightness reached zero.
+        hsv: (f32, f32, f32),
+        /// What Cancel leaves in place, and the "current" half of the
+        /// dialog's swatch.
+        original: Rgba,
+    },
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -486,6 +506,26 @@ pub enum Modal {
     },
 }
 
+/// Which of the two editor colours a picker is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorTarget {
+    Foreground,
+    Background,
+}
+
+/// Which part of a colour control the pointer is dragging. Held on the
+/// workspace rather than the modal because the Color panel's ramp has no
+/// modal to live in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerDrag {
+    /// The saturation/brightness square.
+    Field,
+    /// The hue strip beside it.
+    Hue,
+    /// The Color panel's spectrum bar.
+    Ramp,
+}
+
 #[derive(Default)]
 struct Preview {
     /// RGBA8 straight, (doc.width >> PREVIEW_SHIFT) x (doc.height >> ...).
@@ -511,6 +551,9 @@ impl Workspace {
             display_tiles: FxHashMap::default(),
             viewport_image: None,
             retired_images: Vec::new(),
+            picker_field: None,
+            picker_strip: None,
+            picker_ramp: None,
             preview: Preview::default(),
             zoom: 1.0,
             offset: point(px(0.0), px(0.0)),
@@ -528,6 +571,7 @@ impl Workspace {
             tool_has_overlay: false,
             curve_channel: Default::default(),
             curve_drag: None,
+            picker_drag: None,
             filter_preview: None,
             slider_bounds: FxHashMap::default(),
             active_slider: None,
@@ -2542,6 +2586,48 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Open Photoshop's Color Picker on one of the two editor colours.
+    pub fn open_color_picker(&mut self, target: ColorTarget, cx: &mut Context<Self>) {
+        let original = match target {
+            ColorTarget::Foreground => self.editor.foreground,
+            ColorTarget::Background => self.editor.background,
+        };
+        let hsv = crate::color_picker::rgb_to_hsv(original.r, original.g, original.b);
+        self.open_modal(
+            Modal::ColorPicker {
+                target,
+                hsv,
+                original,
+            },
+            cx,
+        );
+    }
+
+    /// Take the picker's colour and close it. Cancel does nothing, because
+    /// the picker never wrote to the editor while it was open.
+    pub fn commit_color_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::ColorPicker { target, hsv, .. }) = self.modal.as_ref() else {
+            return;
+        };
+        let (target, (h, s, v)) = (*target, *hsv);
+        let (r, g, b) = crate::color_picker::hsv_to_rgb(h, s, v);
+        let colour = Rgba::new(r, g, b, 1.0);
+        match target {
+            ColorTarget::Foreground => self.editor.foreground = colour,
+            ColorTarget::Background => self.editor.background = colour,
+        }
+        self.close_modal(cx);
+    }
+
+    /// The ± buttons beside a picker component.
+    pub fn nudge_color_component(&mut self, id: &'static str, delta: f32) {
+        self.update_modal(|m| {
+            if let Modal::ColorPicker { hsv, .. } = m {
+                crate::color_picker::nudge(hsv, id, delta);
+            }
+        });
+    }
+
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         // Any filter preview still on the canvas belongs to the dialog that
         // is going away, so put the original pixels back. Committing a
@@ -2575,9 +2661,11 @@ impl Workspace {
         let Some(id) = self.focused_field else {
             return false;
         };
-        // Text fields (layer names) take any printable character; numeric
-        // fields only digits.
+        // Text fields (layer names) take any printable character; the
+        // picker's hex field takes hex digits up to a full triplet;
+        // numeric fields only digits.
         let textual = id == "layer-name";
+        let hex = id == "cp-hex";
         match key {
             "space" if textual => self.field_buffer.push(' '),
             "backspace" => {
@@ -2596,7 +2684,11 @@ impl Workspace {
                 Some(t)
                     if !t.is_empty()
                         && !t.chars().any(char::is_control)
-                        && (textual || t.chars().all(|c| c.is_ascii_digit())) =>
+                        && (textual
+                            || (hex
+                                && self.field_buffer.len() + t.len() <= 6
+                                && t.chars().all(|c| c.is_ascii_hexdigit()))
+                            || (!hex && t.chars().all(|c| c.is_ascii_digit()))) =>
                 {
                     self.field_buffer.push_str(t)
                 }
@@ -2624,9 +2716,38 @@ impl Workspace {
             });
             return;
         }
+        if id == "cp-hex" {
+            if let Some(c) = crate::color_picker::parse_hex(&buffer) {
+                let typed = crate::color_picker::rgb_to_hsv(c.r, c.g, c.b);
+                self.update_modal(|m| {
+                    if let Modal::ColorPicker { hsv, .. } = m {
+                        // A grey has no hue to report, so keep the one the
+                        // dialog already had rather than snapping to red.
+                        if typed.1 > 0.0 {
+                            hsv.0 = typed.0;
+                        }
+                        hsv.1 = typed.1;
+                        hsv.2 = typed.2;
+                    }
+                });
+            }
+            return;
+        }
+        if id.starts_with("cp-") {
+            if let Ok(value) = buffer.parse::<f32>() {
+                self.update_modal(|m| {
+                    if let Modal::ColorPicker { hsv, .. } = m {
+                        crate::color_picker::set_component(hsv, id, value);
+                    }
+                });
+            }
+            return;
+        }
         let Ok(value) = self.field_buffer.parse::<f32>() else {
             return;
         };
+        // Every remaining field is a dimension, and none of them accept
+        // zero.
         let value = value.max(1.0);
         let aspect = self
             .doc
@@ -2682,6 +2803,9 @@ impl Workspace {
             | Modal::LayerStyle { .. }
             | Modal::Filter { .. }
             | Modal::Adjustment { .. }
+            // Handled above, before the numeric parse: a colour component
+            // may legitimately be zero.
+            | Modal::ColorPicker { .. }
             | Modal::PluginManager
             | Modal::Preferences
             | Modal::Export { .. }
@@ -2786,6 +2910,12 @@ impl Workspace {
 
     /// Position within a recorded box as a 0..=1 pair, with y measured
     /// upwards so it matches how a curve is drawn.
+    /// Hand back an image that has just been replaced, so its atlas slot
+    /// is freed once the frame that still references it has been painted.
+    pub fn retire_image(&mut self, image: Arc<RenderImage>) {
+        self.retired_images.push(image);
+    }
+
     pub fn box_position(&self, id: &'static str, window_pos: Point<Pixels>) -> Option<(f32, f32)> {
         let b = self.slider_bounds.get(id)?;
         let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));

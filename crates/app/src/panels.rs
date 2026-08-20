@@ -7,7 +7,7 @@
 //! color — no emoji.
 
 use crate::ui;
-use crate::workspace::{ContextTarget, Modal, Popup, Workspace};
+use crate::workspace::{ColorTarget, ContextTarget, Modal, Popup, Workspace};
 use gpui::{
     canvas, deferred, div, img, px, svg, Context, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, RenderImage,
@@ -1533,7 +1533,13 @@ fn color_wells(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .size(px(18.0))
                 .bg(swatch_hex(ws.editor.background))
                 .border_1()
-                .border_color(gpui::rgb(0x777777)),
+                .border_color(gpui::rgb(0x777777))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _ev, _w, cx| {
+                        ws.open_color_picker(ColorTarget::Background, cx)
+                    }),
+                ),
         )
         .child(
             div()
@@ -1543,14 +1549,30 @@ fn color_wells(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .size(px(18.0))
                 .bg(swatch_hex(ws.editor.foreground))
                 .border_1()
-                .border_color(gpui::rgb(0xEEEEEE)),
+                .border_color(gpui::rgb(0xEEEEEE))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _ev, _w, cx| {
+                        ws.open_color_picker(ColorTarget::Foreground, cx)
+                    }),
+                ),
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|ws, _ev, _w, cx| {
-                std::mem::swap(&mut ws.editor.foreground, &mut ws.editor.background);
-                cx.notify();
-            }),
+        // The empty corner between the two wells, which is where
+        // Photoshop puts the swap arrows too.
+        .child(
+            div()
+                .absolute()
+                .top(px(-1.0))
+                .right(px(-1.0))
+                .size(px(11.0))
+                .child(icon("swap", 11.0, TEXT_DIM))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _ev, _w, cx| {
+                        std::mem::swap(&mut ws.editor.foreground, &mut ws.editor.background);
+                        cx.notify();
+                    }),
+                ),
         )
 }
 
@@ -1647,10 +1669,32 @@ fn color_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         ))
         .child(
             div()
-                .text_size(px(10.0))
-                .text_color(gpui::rgb(TEXT_DIM))
-                .child(format!("#{:02X}{:02X}{:02X}", fg[0], fg[1], fg[2])),
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(gpui::rgb(TEXT_DIM))
+                        .child(format!("#{:02X}{:02X}{:02X}", fg[0], fg[1], fg[2])),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(gpui::rgb(TEXT_DIM))
+                        .hover(|s| s.text_color(gpui::rgb(TEXT)))
+                        .child("Picker\u{2026}")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _e, _w, cx| {
+                                ws.open_color_picker(ColorTarget::Foreground, cx)
+                            }),
+                        ),
+                ),
         )
+        // Photoshop's spectrum bar: drag along it to take a hue directly.
+        .child(crate::color_picker::hue_ramp(ws, cx))
 }
 
 fn panel_title(name: &'static str) -> impl IntoElement {
