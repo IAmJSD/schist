@@ -16,6 +16,15 @@ pub struct DocumentId(pub u64);
 
 static NEXT_DOC_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A ruler guide: a full-canvas line at a fixed position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Guide {
+    /// True for a horizontal guide (constant y).
+    pub horizontal: bool,
+    /// Document-space position along the guide's axis.
+    pub position: f32,
+}
+
 /// A PSD image resource preserved verbatim for round-trip.
 #[derive(Debug, Clone)]
 pub struct PreservedResource {
@@ -44,6 +53,10 @@ pub struct Document {
     /// Monotonic counter bumped on every visible change; views compare it
     /// to decide whether to recomposite.
     pub revision: u64,
+    /// Ruler guides.
+    pub guides: Vec<Guide>,
+    /// The last non-empty selection, so Reselect can bring it back.
+    pub last_selection: Option<Selection>,
     /// Damaged document-space regions since the last `take_damage()`.
     damage: Vec<IntRect>,
     /// Unsaved changes?
@@ -68,6 +81,8 @@ impl Document {
             history: History::new(),
             preserved_resources: Vec::new(),
             revision: 0,
+            guides: Vec::new(),
+            last_selection: None,
             damage: Vec::new(),
             dirty: false,
         }
@@ -620,6 +635,10 @@ impl<'a> EditBuilder<'a> {
     pub fn change_selection(&mut self, f: impl FnOnce(&mut Selection, IntRect)) {
         let canvas = self.doc.canvas_rect();
         let before = Box::new(self.doc.selection.clone());
+        // Remember what we had, so Reselect can restore it after a deselect.
+        if !before.is_empty() {
+            self.doc.last_selection = Some((*before).clone());
+        }
         f(&mut self.doc.selection, canvas);
         let after = Box::new(self.doc.selection.clone());
         self.ops.push(EditOp::SelectionSet { before, after });

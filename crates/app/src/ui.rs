@@ -44,17 +44,34 @@ pub fn button(
         .child(label.into())
 }
 
+/// Everything a [`num_field`] needs to draw itself.
+///
+/// State is passed in rather than read from the entity: these render
+/// *during* `Workspace::render`, where reading the entity panics on the
+/// outstanding mutable borrow.
+pub struct NumField {
+    pub id: &'static str,
+    pub value: f32,
+    pub suffix: &'static str,
+    pub step: f32,
+    pub focused: bool,
+    pub buffer: String,
+}
+
 /// A numeric field: click to focus and type digits, or use the ± buttons.
 pub fn num_field(
-    id: &'static str,
-    value: f32,
-    suffix: &'static str,
-    step: f32,
+    field: NumField,
     on_change: impl Fn(&mut Workspace, f32) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let focused = cx.entity().read(cx).focused_field == Some(id);
-    let buffer = cx.entity().read(cx).field_buffer.clone();
+    let NumField {
+        id,
+        value,
+        suffix,
+        step,
+        focused,
+        buffer,
+    } = field;
     let shown = if focused && !buffer.is_empty() {
         buffer
     } else if value.fract().abs() < 0.01 {
@@ -155,17 +172,31 @@ pub fn checkbox(
         .child(label.into())
 }
 
-/// A dropdown button that opens `popup` with the given options.
+/// Placement and state for a [`dropdown`].
+pub struct Dropdown<T> {
+    pub popup: Popup,
+    pub is_open: bool,
+    pub current: T,
+    pub label: SharedString,
+    pub width: f32,
+    pub options: Vec<(SharedString, T)>,
+}
+
+/// A dropdown button that opens its popup with the given options.
 pub fn dropdown<T: Clone + PartialEq + 'static>(
-    popup: Popup,
-    current: &T,
-    label: impl Into<SharedString>,
-    width: f32,
-    options: Vec<(SharedString, T)>,
+    spec: Dropdown<T>,
     on_select: impl Fn(&mut Workspace, T) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let is_open = cx.entity().read(cx).open_popup == Some(popup);
+    let Dropdown {
+        popup,
+        is_open,
+        current,
+        label,
+        width,
+        options,
+    } = spec;
+    let current = &current;
     let mut root = div()
         .relative()
         .flex()
@@ -182,7 +213,7 @@ pub fn dropdown<T: Clone + PartialEq + 'static>(
             MouseButton::Left,
             cx.listener(move |ws, _e, _w, cx| ws.toggle_popup(popup, cx)),
         )
-        .child(label.into())
+        .child(label)
         .child(crate::panels::icon("chevron-down", 11.0, TEXT_DIM));
     if is_open {
         let rows: Vec<gpui::AnyElement> = options

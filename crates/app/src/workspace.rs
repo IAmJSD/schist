@@ -28,6 +28,26 @@ use std::sync::Arc;
 /// of hundreds of tile quads.
 const PREVIEW_ZOOM_CUTOFF: f32 = 0.35;
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
+/// Where view preferences are stored.
+fn prefs_path() -> Option<PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join("photoslop/preferences.json"))
+}
+
+fn load_view_options() -> ViewOptions {
+    prefs_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
 /// How often a dirty document is snapshotted for crash recovery.
 const AUTOSAVE_SECS: u64 = 30;
 
@@ -67,6 +87,16 @@ pub struct Workspace {
     /// Plugin enable/disable requested from the manager UI, applied on the
     /// next render pass (the checkbox callback has no context to do it).
     pub pending_plugin_toggle: Option<(String, bool)>,
+    /// View toggles (rulers, grid, guides, snapping, theme).
+    pub view: ViewOptions,
+    pub screen_mode: ScreenMode,
+    /// A guide being dragged out of a ruler.
+    dragging_guide: Option<photoslop_core::Guide>,
+    /// Navigator thumbnail, tagged with the revision it was rendered at.
+    nav_thumb: Option<(u64, Arc<RenderImage>)>,
+    /// The canvas takes focus on the first frame so keyboard shortcuts work
+    /// before the user clicks anything.
+    focused_once: bool,
     /// Colour management settings and the compiled display transform.
     pub color: photoslop_colormgmt::ColorSettings,
     display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
@@ -79,6 +109,60 @@ pub enum Popup {
     BlendModes,
     /// A dropdown inside a dialog, keyed by field id.
     Field(&'static str),
+}
+
+/// Window chrome mode, cycled with F / toggled with Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenMode {
+    /// Everything visible.
+    #[default]
+    Standard,
+    /// Canvas only.
+    FullCanvas,
+}
+
+/// Light or dark chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Theme::Dark => "Dark",
+            Theme::Light => "Light",
+        }
+    }
+}
+
+/// View toggles that don't belong to the document.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct ViewOptions {
+    pub rulers: bool,
+    pub grid: bool,
+    pub guides: bool,
+    /// Master switch for guides/grid/selection overlays (⌘H).
+    pub extras: bool,
+    pub snap: bool,
+    pub grid_spacing: f32,
+    pub theme: Theme,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        ViewOptions {
+            rulers: true,
+            grid: false,
+            guides: true,
+            extras: true,
+            snap: true,
+            grid_spacing: 64.0,
+            theme: Theme::Dark,
+        }
+    }
 }
 
 /// Which modal dialog is open.
@@ -102,6 +186,8 @@ pub enum Modal {
     },
     /// The third-party plugin manager.
     PluginManager,
+    /// Application preferences.
+    Preferences,
     /// Export with format options.
     Export {
         codec: &'static str,
@@ -164,6 +250,11 @@ impl Workspace {
             field_buffer: String::new(),
             plugins,
             pending_plugin_toggle: None,
+            view: load_view_options(),
+            screen_mode: ScreenMode::default(),
+            dragging_guide: None,
+            nav_thumb: None,
+            focused_once: false,
             color: photoslop_colormgmt::ColorSettings::default(),
             display_transform: None,
             proof_transform: None,
@@ -519,6 +610,9 @@ impl Workspace {
 
     fn tool_input(&self, local: Point<Pixels>, m: gpui::Modifiers, pressure: f32) -> PointerInput {
         let (x, y) = self.doc_pos(local);
+        // Snapping is a view affordance, so it happens here rather than in
+        // every tool.
+        let (x, y) = self.snap_point(x, y);
         PointerInput {
             x,
             y,
@@ -561,6 +655,17 @@ impl Workspace {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging_guide() {
+            let horizontal = self.dragging_guide.map(|g| g.horizontal).unwrap_or(false);
+            let position = if horizontal {
+                self.doc_y_at(f32::from(ev.position.y))
+            } else {
+                self.doc_x_at(f32::from(ev.position.x))
+            };
+            self.update_guide(position);
+            cx.notify();
+            return;
+        }
         if let Some(last) = self.pan_last {
             self.offset = point(
                 self.offset.x + (ev.position.x - last.x),
@@ -584,6 +689,10 @@ impl Workspace {
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging_guide() {
+            self.finish_guide(cx);
+            return;
+        }
         if self.pan_last.take().is_some() {
             return;
         }
@@ -723,6 +832,7 @@ impl Workspace {
             Modal::Filter { .. }
             | Modal::Adjustment { .. }
             | Modal::PluginManager
+            | Modal::Preferences
             | Modal::Export { .. }
             | Modal::Profile { .. } => {}
         });
@@ -973,6 +1083,60 @@ impl Workspace {
         Some(img)
     }
 
+    /// Set an absolute zoom level about the viewport centre.
+    pub fn set_zoom(&mut self, zoom: f32) {
+        let factor = zoom / self.zoom.max(1e-6);
+        self.zoom_by(factor, None);
+    }
+
+    /// A small thumbnail of the whole document for the navigator, cached
+    /// against the document revision.
+    pub fn document_thumbnail(&mut self) -> Option<Arc<RenderImage>> {
+        const MAX: u32 = 220;
+        let doc = self.doc.as_ref()?;
+        let revision = doc.revision;
+        if let Some((rev, img)) = &self.nav_thumb {
+            if *rev == revision {
+                return Some(img.clone());
+            }
+        }
+        let scale = (doc.width as f32 / MAX as f32).max(doc.height as f32 / 84.0);
+        let (w, h) = (
+            ((doc.width as f32 / scale) as u32).clamp(1, MAX),
+            ((doc.height as f32 / scale) as u32).clamp(1, 84),
+        );
+        let rgba = photoslop_compositor::composite_region_rgba8(doc, doc.canvas_rect());
+        let mut bgra = vec![0u8; (w * h * 4) as usize];
+        for ty in 0..h {
+            for tx in 0..w {
+                let sx = ((tx as f32 + 0.5) * scale) as u32;
+                let sy = ((ty as f32 + 0.5) * scale) as u32;
+                let s = ((sy.min(doc.height - 1) * doc.width + sx.min(doc.width - 1)) * 4) as usize;
+                let (r, g, b, a) = (
+                    rgba[s] as u32,
+                    rgba[s + 1] as u32,
+                    rgba[s + 2] as u32,
+                    rgba[s + 3] as u32,
+                );
+                let bg = if ((tx >> 2) + (ty >> 2)) & 1 == 0 {
+                    0xE0
+                } else {
+                    0xB0
+                };
+                let inv = 255 - a;
+                let d = ((ty * w + tx) * 4) as usize;
+                bgra[d] = ((b * a + bg * inv) / 255) as u8;
+                bgra[d + 1] = ((g * a + bg * inv) / 255) as u8;
+                bgra[d + 2] = ((r * a + bg * inv) / 255) as u8;
+                bgra[d + 3] = 255;
+            }
+        }
+        let buffer = image::RgbaImage::from_raw(w, h, bgra)?;
+        let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
+        self.nav_thumb = Some((revision, img.clone()));
+        Some(img)
+    }
+
     /// Toggle a group's expanded state (pure UI state, not undoable).
     pub fn toggle_group_open(&mut self, id: photoslop_core::LayerId, cx: &mut Context<Self>) {
         if let Some(doc) = &mut self.doc {
@@ -983,6 +1147,205 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    // ----- view options, guides and snapping -----
+
+    /// Persist view options so they survive a restart.
+    pub fn save_view_options(&self) {
+        let Some(path) = prefs_path() else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.view) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    pub fn toggle_rulers(&mut self, cx: &mut Context<Self>) {
+        self.view.rulers = !self.view.rulers;
+        self.status = format!("Rulers {}", if self.view.rulers { "on" } else { "off" }).into();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    pub fn toggle_grid(&mut self, cx: &mut Context<Self>) {
+        self.view.grid = !self.view.grid;
+        self.status = format!("Grid {}", if self.view.grid { "on" } else { "off" }).into();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    pub fn toggle_guides(&mut self, cx: &mut Context<Self>) {
+        self.view.guides = !self.view.guides;
+        self.status = format!("Guides {}", if self.view.guides { "on" } else { "off" }).into();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    pub fn toggle_extras(&mut self, cx: &mut Context<Self>) {
+        self.view.extras = !self.view.extras;
+        self.status = format!("Extras {}", if self.view.extras { "on" } else { "off" }).into();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    pub fn toggle_snap(&mut self, cx: &mut Context<Self>) {
+        self.view.snap = !self.view.snap;
+        self.status = if self.view.snap {
+            "Snap on"
+        } else {
+            "Snap off"
+        }
+        .into();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    /// Change the chrome theme and persist it. Callers repaint themselves
+    /// (dialog dropdowns already notify).
+    pub fn set_theme_quiet(&mut self, theme: Theme) {
+        self.view.theme = theme;
+        self.save_view_options();
+    }
+
+    pub fn cycle_screen_mode(&mut self, cx: &mut Context<Self>) {
+        self.screen_mode = match self.screen_mode {
+            ScreenMode::Standard => ScreenMode::FullCanvas,
+            ScreenMode::FullCanvas => ScreenMode::Standard,
+        };
+        cx.notify();
+    }
+
+    /// Thickness of the rulers in screen pixels.
+    pub const RULER_SIZE: f32 = 18.0;
+
+    /// Document x for a window x (used by the rulers).
+    pub fn doc_x_at(&self, window_x: f32) -> f32 {
+        (window_x - f32::from(self.canvas_bounds.origin.x) - f32::from(self.offset.x)) / self.zoom
+    }
+
+    pub fn doc_y_at(&self, window_y: f32) -> f32 {
+        (window_y - f32::from(self.canvas_bounds.origin.y) - f32::from(self.offset.y)) / self.zoom
+    }
+
+    /// Screen x for a document x, inside the canvas element.
+    pub fn screen_x(&self, doc_x: f32) -> f32 {
+        f32::from(self.canvas_bounds.origin.x) + f32::from(self.offset.x) + doc_x * self.zoom
+    }
+
+    pub fn screen_y(&self, doc_y: f32) -> f32 {
+        f32::from(self.canvas_bounds.origin.y) + f32::from(self.offset.y) + doc_y * self.zoom
+    }
+
+    pub fn canvas_bounds(&self) -> Bounds<Pixels> {
+        self.canvas_bounds
+    }
+
+    /// Start dragging a new guide out of a ruler.
+    pub fn begin_guide(&mut self, horizontal: bool, position: f32) {
+        self.dragging_guide = Some(photoslop_core::Guide {
+            horizontal,
+            position,
+        });
+    }
+
+    pub fn update_guide(&mut self, position: f32) {
+        if let Some(guide) = &mut self.dragging_guide {
+            guide.position = position;
+        }
+    }
+
+    /// Drop the dragged guide onto the document (or discard it if it landed
+    /// outside the canvas).
+    pub fn finish_guide(&mut self, cx: &mut Context<Self>) {
+        let Some(guide) = self.dragging_guide.take() else {
+            return;
+        };
+        if let Some(doc) = self.doc.as_mut() {
+            let limit = if guide.horizontal {
+                doc.height as f32
+            } else {
+                doc.width as f32
+            };
+            if guide.position >= 0.0 && guide.position <= limit {
+                doc.guides.push(guide);
+                doc.damage_all();
+            }
+        }
+        self.after_change(cx);
+    }
+
+    pub fn dragging_guide(&self) -> bool {
+        self.dragging_guide.is_some()
+    }
+
+    /// Remove every guide.
+    pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
+        if let Some(doc) = self.doc.as_mut() {
+            doc.guides.clear();
+            doc.damage_all();
+        }
+        self.status = "Guides cleared".into();
+        self.after_change(cx);
+    }
+
+    /// Snap a document-space coordinate to nearby guides and grid lines.
+    fn snap_point(&self, x: f32, y: f32) -> (f32, f32) {
+        if !self.view.snap || !self.view.extras {
+            return (x, y);
+        }
+        // Snap within 6 screen pixels, so the pull feels the same at any
+        // zoom rather than growing with it.
+        let threshold = 6.0 / self.zoom.max(0.01);
+        let mut best = (x, y);
+        let mut best_dist = (threshold, threshold);
+        if let Some(doc) = &self.doc {
+            if self.view.guides {
+                for guide in &doc.guides {
+                    if guide.horizontal {
+                        let d = (guide.position - y).abs();
+                        if d < best_dist.1 {
+                            best_dist.1 = d;
+                            best.1 = guide.position;
+                        }
+                    } else {
+                        let d = (guide.position - x).abs();
+                        if d < best_dist.0 {
+                            best_dist.0 = d;
+                            best.0 = guide.position;
+                        }
+                    }
+                }
+            }
+            // Canvas edges always attract.
+            for edge in [0.0, doc.width as f32] {
+                let d = (edge - x).abs();
+                if d < best_dist.0 {
+                    best_dist.0 = d;
+                    best.0 = edge;
+                }
+            }
+            for edge in [0.0, doc.height as f32] {
+                let d = (edge - y).abs();
+                if d < best_dist.1 {
+                    best_dist.1 = d;
+                    best.1 = edge;
+                }
+            }
+        }
+        if self.view.grid && self.view.grid_spacing > 0.5 {
+            let g = self.view.grid_spacing;
+            let gx = (x / g).round() * g;
+            let gy = (y / g).round() * g;
+            if (gx - x).abs() < best_dist.0 {
+                best.0 = gx;
+            }
+            if (gy - y).abs() < best_dist.1 {
+                best.1 = gy;
+            }
+        }
+        best
     }
 
     // ----- colour management -----
@@ -1552,6 +1915,10 @@ impl Workspace {
         // below (preview/tile-image builds) doesn't fight the borrows.
         let sel_bounds = (!doc.selection.is_empty() && !doc.selection.bounds().is_empty())
             .then(|| doc.selection.bounds());
+        let mut guides = doc.guides.clone();
+        if let Some(dragging) = self.dragging_guide {
+            guides.push(dragging);
+        }
         let tool_id = self.editor.active_tool;
         let overlays = self
             .registry
@@ -1614,9 +1981,68 @@ impl Workspace {
         job.outlines
             .push((snapped_bounds(canvas_rect), gpui::rgb(0x000000).into()));
 
+        // Grid, then guides: both are view chrome, hidden by ⌘H.
+        if self.view.extras {
+            let view = self.view;
+            let canvas_w = canvas_rect.width() as f32;
+            let canvas_h = canvas_rect.height() as f32;
+            let hair = (1.0 / scale_factor.max(0.01)).max(0.5);
+            if view.grid && view.grid_spacing > 0.5 {
+                let spacing_px = view.grid_spacing * zoom;
+                // Skip the grid when it would alias into a solid block.
+                if spacing_px >= 4.0 {
+                    let mut x = 0.0;
+                    while x <= canvas_w {
+                        let sx = snap_x(x);
+                        job.lines.push((
+                            Bounds {
+                                origin: point(px(sx), px(snap_y(0.0))),
+                                size: size(px(hair), px(snap_y(canvas_h) - snap_y(0.0))),
+                            },
+                            gpui::rgba(0x8899AA55).into(),
+                        ));
+                        x += view.grid_spacing;
+                    }
+                    let mut y = 0.0;
+                    while y <= canvas_h {
+                        let sy = snap_y(y);
+                        job.lines.push((
+                            Bounds {
+                                origin: point(px(snap_x(0.0)), px(sy)),
+                                size: size(px(snap_x(canvas_w) - snap_x(0.0)), px(hair)),
+                            },
+                            gpui::rgba(0x8899AA55).into(),
+                        ));
+                        y += view.grid_spacing;
+                    }
+                }
+            }
+            if view.guides {
+                for guide in guides.iter() {
+                    if guide.horizontal {
+                        job.lines.push((
+                            Bounds {
+                                origin: point(px(snap_x(0.0)), px(snap_y(guide.position))),
+                                size: size(px(snap_x(canvas_w) - snap_x(0.0)), px(hair.max(1.0))),
+                            },
+                            gpui::rgb(0x00A0FF).into(),
+                        ));
+                    } else {
+                        job.lines.push((
+                            Bounds {
+                                origin: point(px(snap_x(guide.position)), px(snap_y(0.0))),
+                                size: size(px(hair.max(1.0)), px(snap_y(canvas_h) - snap_y(0.0))),
+                            },
+                            gpui::rgb(0x00A0FF).into(),
+                        ));
+                    }
+                }
+            }
+        }
+
         // Selection marching-ants (static dashes for now: alternating
         // black/white nested outlines).
-        if let Some(b) = sel_bounds {
+        if let Some(b) = sel_bounds.filter(|_| self.view.extras) {
             let bounds_px = snapped_bounds(b);
             job.outlines.push((bounds_px, gpui::rgb(0xFFFFFF).into()));
             job.outlines.push((
@@ -1725,6 +2151,11 @@ impl Workspace {
                             let _ =
                                 window.paint_image(bounds, gpui::Corners::default(), img, 0, false);
                         }
+                        // Grid lines and guides sit above the artwork but
+                        // below selection ants and tool overlays.
+                        for (bounds, color) in job.lines {
+                            window.paint_quad(gpui::fill(bounds, color));
+                        }
                         for (bounds, color) in job.outlines {
                             window.paint_quad(gpui::outline(
                                 bounds,
@@ -1769,6 +2200,8 @@ pub struct PaintJob {
     outlines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
     polylines: Vec<Vec<Point<Pixels>>>,
     circles: Vec<Bounds<Pixels>>,
+    /// Thin filled rectangles: grid lines, guides and ruler ticks.
+    lines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
 }
 
 impl Focusable for Workspace {
@@ -1778,18 +2211,33 @@ impl Focusable for Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focused_once {
+            // The focus handle only exists in the dispatch tree once we've
+            // rendered, so this can't happen at construction time.
+            self.focused_once = true;
+            window.focus(&self.focus);
+        }
         if let Some((id, enabled)) = self.pending_plugin_toggle.take() {
             self.set_plugin_enabled(id, enabled, cx);
         }
         let captures_keys = self.tool_captures_keys() || self.modal.is_some();
+        let chrome = self.screen_mode == ScreenMode::Standard;
         let modal = crate::dialogs::render(self, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui::rgb(0x1E1E1E))
-            .text_color(gpui::rgb(0xD8D8D8))
+            .bg(gpui::rgb(if self.view.theme == Theme::Light {
+                0xE8E8E8
+            } else {
+                0x1E1E1E
+            }))
+            .text_color(gpui::rgb(if self.view.theme == Theme::Light {
+                0x1C1C1C
+            } else {
+                0xD8D8D8
+            }))
             .text_size(px(12.0))
             // While a tool is capturing typing the context loses "editable",
             // which is what single-letter shortcuts are bound against — so
@@ -1875,6 +2323,31 @@ impl Render for Workspace {
                     ws.open_modal(modal, cx);
                 }
             }))
+            .on_action(cx.listener(|ws, action: &AddAdjustment, _w, cx| {
+                let kind = match action.kind.as_str() {
+                    "levels" => photoslop_core::AdjustmentKind::Levels,
+                    "curves" => photoslop_core::AdjustmentKind::Curves,
+                    "hue_saturation" => photoslop_core::AdjustmentKind::HueSaturation,
+                    "invert" => photoslop_core::AdjustmentKind::Invert,
+                    "brightness_contrast" => photoslop_core::AdjustmentKind::BrightnessContrast,
+                    other => {
+                        log::warn!("unknown adjustment {other}");
+                        return;
+                    }
+                };
+                ws.add_adjustment(kind, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &ToggleRulers, _w, cx| ws.toggle_rulers(cx)))
+            .on_action(cx.listener(|ws, _: &ToggleGrid, _w, cx| ws.toggle_grid(cx)))
+            .on_action(cx.listener(|ws, _: &ToggleGuides, _w, cx| ws.toggle_guides(cx)))
+            .on_action(cx.listener(|ws, _: &ToggleExtras, _w, cx| ws.toggle_extras(cx)))
+            .on_action(cx.listener(|ws, _: &ToggleSnap, _w, cx| ws.toggle_snap(cx)))
+            .on_action(cx.listener(|ws, _: &ClearGuides, _w, cx| ws.clear_guides(cx)))
+            .on_action(cx.listener(|ws, _: &CycleScreenMode, _w, cx| ws.cycle_screen_mode(cx)))
+            .on_action(cx.listener(|ws, _: &TogglePanels, _w, cx| ws.cycle_screen_mode(cx)))
+            .on_action(cx.listener(|ws, _: &ShowPreferences, _w, cx| {
+                ws.open_modal(Modal::Preferences, cx);
+            }))
             .on_action(cx.listener(|ws, _: &ShowCanvasSize, _w, cx| {
                 if let Some(doc) = ws.doc.as_ref() {
                     let modal = Modal::CanvasSize {
@@ -1886,19 +2359,29 @@ impl Render for Workspace {
                 }
             }))
             .on_action(|_: &Quit, _w, cx| cx.quit())
-            .child(panels::menu_bar(self, cx))
-            .child(panels::tool_options_bar(self, cx))
+            .children(chrome.then(|| panels::menu_bar(self, cx)))
+            .children(chrome.then(|| panels::tool_options_bar(self, cx)))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .flex_grow()
                     .min_h(px(0.0))
-                    .child(panels::toolbar(self, cx))
-                    .child(self.render_canvas(cx))
-                    .child(panels::side_panels(self, cx)),
+                    .children(chrome.then(|| panels::toolbar(self, cx)))
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_grow()
+                            .size_full()
+                            .child(self.render_canvas(cx))
+                            .children(
+                                (chrome && self.view.rulers).then(|| panels::rulers(self, cx)),
+                            ),
+                    )
+                    .children(chrome.then(|| panels::side_panels(self, cx))),
             )
-            .child(panels::status_bar(self))
+            .children(chrome.then(|| panels::status_bar(self)))
             .children(modal)
     }
 }

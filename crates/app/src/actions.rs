@@ -18,6 +18,13 @@ pub struct ActivateTool {
     pub id: String,
 }
 
+/// Add an adjustment layer of the named kind.
+#[derive(Clone, PartialEq, Debug, serde::Deserialize, gpui::Action)]
+#[action(namespace = photoslop, no_json)]
+pub struct AddAdjustment {
+    pub kind: String,
+}
+
 /// Set tool opacity (digit keys: 1 => 10% … 0 => 100%).
 #[derive(Clone, PartialEq, Debug, serde::Deserialize, gpui::Action)]
 #[action(namespace = photoslop, no_json)]
@@ -44,6 +51,15 @@ actions!(
         CommitGesture,
         ShowImageSize,
         ShowCanvasSize,
+        ShowPreferences,
+        ToggleRulers,
+        ToggleGrid,
+        ToggleGuides,
+        ToggleExtras,
+        ToggleSnap,
+        ClearGuides,
+        CycleScreenMode,
+        TogglePanels,
         Quit,
     ]
 );

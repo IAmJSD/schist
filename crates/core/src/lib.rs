@@ -14,7 +14,9 @@ pub mod selection;
 pub mod tile;
 
 pub use blend::BlendMode;
-pub use document::{blit_rgba8, Document, DocumentId, EditBuilder, PreservedResource, StrokeEdit};
+pub use document::{
+    blit_rgba8, Document, DocumentId, EditBuilder, Guide, PreservedResource, StrokeEdit,
+};
 pub use geom::IntRect;
 pub use history::{Edit, EditOp, History, LayerProps};
 pub use layer::{

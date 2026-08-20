@@ -77,6 +77,44 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         KeyBinding::new(&translate("cmd-q"), Quit, CONTEXT),
         KeyBinding::new(&translate("cmd-alt-i"), ShowImageSize, CONTEXT),
         KeyBinding::new(&translate("cmd-alt-c"), ShowCanvasSize, CONTEXT),
+        KeyBinding::new(&translate("cmd-k"), ShowPreferences, CONTEXT),
+        KeyBinding::new(&translate("cmd-r"), ToggleRulers, CONTEXT),
+        KeyBinding::new(&translate("cmd-'"), ToggleGrid, CONTEXT),
+        KeyBinding::new(&translate("cmd-;"), ToggleGuides, CONTEXT),
+        KeyBinding::new(&translate("cmd-h"), ToggleExtras, CONTEXT),
+        KeyBinding::new(&translate("cmd-shift-;"), ToggleSnap, CONTEXT),
+        KeyBinding::new(&translate("cmd-alt-;"), ClearGuides, CONTEXT),
+        KeyBinding::new("tab", TogglePanels, TYPING_SAFE),
+        KeyBinding::new("f", CycleScreenMode, TYPING_SAFE),
+        // Adjustment layers, matching Photoshop's Image ▸ Adjustments keys.
+        KeyBinding::new(
+            &translate("cmd-l"),
+            AddAdjustment {
+                kind: "levels".into(),
+            },
+            CONTEXT,
+        ),
+        KeyBinding::new(
+            &translate("cmd-m"),
+            AddAdjustment {
+                kind: "curves".into(),
+            },
+            CONTEXT,
+        ),
+        KeyBinding::new(
+            &translate("cmd-u"),
+            AddAdjustment {
+                kind: "hue_saturation".into(),
+            },
+            CONTEXT,
+        ),
+        KeyBinding::new(
+            &translate("cmd-i"),
+            AddAdjustment {
+                kind: "invert".into(),
+            },
+            CONTEXT,
+        ),
     ]);
     // Digit keys -> tool opacity (1 = 10% … 0 = 100%).
     for digit in 0..=9u32 {
@@ -112,8 +150,13 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
     bindings
 }
 
+/// Where user keybinding overrides live.
+pub fn user_keymap_path() -> Option<PathBuf> {
+    Some(dirs_config()?.join("photoslop/keymap.json"))
+}
+
 fn load_user_keymap() -> Option<Vec<(String, String)>> {
-    let path = dirs_config()?.join("photoslop/keymap.json");
+    let path = user_keymap_path()?;
     let text = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str::<std::collections::BTreeMap<String, String>>(&text) {
         Ok(map) => Some(map.into_iter().collect()),

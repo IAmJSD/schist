@@ -9,33 +9,51 @@ use gpui::{
 };
 use photoslop_core::Filter;
 
+/// Workspace state the dialog widgets read while rendering.
+#[derive(Clone)]
+struct DialogState {
+    open_popup: Option<Popup>,
+    focused_field: Option<&'static str>,
+    field_buffer: String,
+}
+
 /// Render whichever modal is open, if any.
 pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::AnyElement> {
     let modal = ws.modal.clone()?;
+    // Snapshot the bits of workspace state the widgets need: they render
+    // inside `Workspace::render`, where reading the entity would panic.
+    let state = DialogState {
+        open_popup: ws.open_popup,
+        focused_field: ws.focused_field,
+        field_buffer: ws.field_buffer.clone(),
+    };
     Some(match modal {
         Modal::ImageSize {
             width,
             height,
             filter,
             link,
-        } => image_size(ws, width, height, filter, link, cx).into_any_element(),
+        } => image_size(ws, &state, width, height, filter, link, cx).into_any_element(),
         Modal::CanvasSize {
             width,
             height,
             anchor,
-        } => canvas_size(ws, width, height, anchor, cx).into_any_element(),
-        Modal::Filter { id, values } => filter_dialog(ws, id, values, cx).into_any_element(),
+        } => canvas_size(ws, &state, width, height, anchor, cx).into_any_element(),
+        Modal::Filter { id, values } => {
+            filter_dialog(ws, &state, id, values, cx).into_any_element()
+        }
         Modal::Adjustment {
             layer,
             params,
             original,
         } => adjustment_dialog(layer, params, original, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
+        Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::Export { codec, options } => {
-            export_dialog(ws, codec, options, cx).into_any_element()
+            export_dialog(ws, &state, codec, options, cx).into_any_element()
         }
         Modal::Profile { convert, selected } => {
-            profile_dialog(convert, selected, cx).into_any_element()
+            profile_dialog(&state, convert, selected, cx).into_any_element()
         }
     })
 }
@@ -50,6 +68,7 @@ fn filter_options() -> Vec<(SharedString, Filter)> {
 
 fn image_size(
     ws: &mut Workspace,
+    state: &DialogState,
     width: u32,
     height: u32,
     filter: Filter,
@@ -70,10 +89,14 @@ fn image_size(
         .child(ui::field_row(
             "Width",
             ui::num_field(
-                "image-size-w",
-                width as f32,
-                " px",
-                10.0,
+                ui::NumField {
+                    id: "image-size-w",
+                    value: width as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("image-size-w"),
+                    buffer: state.field_buffer.clone(),
+                },
                 move |ws, delta| {
                     ws.update_modal(|m| {
                         if let Modal::ImageSize {
@@ -96,10 +119,14 @@ fn image_size(
         .child(ui::field_row(
             "Height",
             ui::num_field(
-                "image-size-h",
-                height as f32,
-                " px",
-                10.0,
+                ui::NumField {
+                    id: "image-size-h",
+                    value: height as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("image-size-h"),
+                    buffer: state.field_buffer.clone(),
+                },
                 move |ws, delta| {
                     ws.update_modal(|m| {
                         if let Modal::ImageSize {
@@ -137,11 +164,14 @@ fn image_size(
         .child(ui::field_row(
             "Resample",
             ui::dropdown(
-                Popup::Field("image-size-filter"),
-                &filter,
-                filter.display_name(),
-                150.0,
-                filter_options(),
+                ui::Dropdown {
+                    popup: Popup::Field("image-size-filter"),
+                    is_open: state.open_popup == Some(Popup::Field("image-size-filter")),
+                    current: filter,
+                    label: (filter.display_name()).into(),
+                    width: 150.0,
+                    options: filter_options(),
+                },
                 |ws, value| {
                     ws.update_modal(|m| {
                         if let Modal::ImageSize { filter, .. } = m {
@@ -222,6 +252,7 @@ fn anchor_grid(anchor: (f32, f32), cx: &mut Context<Workspace>) -> impl IntoElem
 
 fn canvas_size(
     ws: &mut Workspace,
+    state: &DialogState,
     width: u32,
     height: u32,
     anchor: (f32, f32),
@@ -239,10 +270,14 @@ fn canvas_size(
         .child(ui::field_row(
             "Width",
             ui::num_field(
-                "canvas-size-w",
-                width as f32,
-                " px",
-                10.0,
+                ui::NumField {
+                    id: "canvas-size-w",
+                    value: width as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("canvas-size-w"),
+                    buffer: state.field_buffer.clone(),
+                },
                 |ws, delta| {
                     ws.update_modal(|m| {
                         if let Modal::CanvasSize { width, .. } = m {
@@ -256,10 +291,14 @@ fn canvas_size(
         .child(ui::field_row(
             "Height",
             ui::num_field(
-                "canvas-size-h",
-                height as f32,
-                " px",
-                10.0,
+                ui::NumField {
+                    id: "canvas-size-h",
+                    value: height as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("canvas-size-h"),
+                    buffer: state.field_buffer.clone(),
+                },
                 |ws, delta| {
                     ws.update_modal(|m| {
                         if let Modal::CanvasSize { height, .. } = m {
@@ -365,6 +404,7 @@ fn param_slider(
 
 fn filter_dialog(
     ws: &mut Workspace,
+    _state: &DialogState,
     id: &'static str,
     values: photoslop_plugin_api::FilterValues,
     cx: &mut Context<Workspace>,
@@ -596,6 +636,7 @@ use gpui::prelude::FluentBuilder as _;
 
 fn export_dialog(
     ws: &mut Workspace,
+    state: &DialogState,
     codec_id: &'static str,
     options: photoslop_plugin_api::ExportOptions,
     cx: &mut Context<Workspace>,
@@ -621,11 +662,14 @@ fn export_dialog(
     let mut body = div().flex().flex_col().gap_1().child(ui::field_row(
         "Format",
         ui::dropdown(
-            Popup::Field("export-format"),
-            &codec_id,
-            current_name,
-            150.0,
-            codecs,
+            ui::Dropdown {
+                popup: Popup::Field("export-format"),
+                is_open: state.open_popup == Some(Popup::Field("export-format")),
+                current: codec_id,
+                label: (current_name),
+                width: 150.0,
+                options: codecs,
+            },
             |ws, value| {
                 ws.update_modal(|m| {
                     if let Modal::Export { codec, .. } = m {
@@ -694,7 +738,12 @@ fn export_dialog(
     ui::modal_frame("Export", 360.0, body, actions)
 }
 
-fn profile_dialog(convert: bool, selected: usize, cx: &mut Context<Workspace>) -> impl IntoElement {
+fn profile_dialog(
+    state: &DialogState,
+    convert: bool,
+    selected: usize,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
     let builtins = photoslop_colormgmt::Profile::builtins();
     let options: Vec<(SharedString, usize)> = builtins
         .iter()
@@ -718,11 +767,14 @@ fn profile_dialog(convert: bool, selected: usize, cx: &mut Context<Workspace>) -
         .child(ui::field_row(
             "Profile",
             ui::dropdown(
-                Popup::Field("profile-pick"),
-                &selected,
-                current,
-                150.0,
-                options,
+                ui::Dropdown {
+                    popup: Popup::Field("profile-pick"),
+                    is_open: state.open_popup == Some(Popup::Field("profile-pick")),
+                    current: selected,
+                    label: (current),
+                    width: 150.0,
+                    options,
+                },
                 |ws, value| {
                     ws.update_modal(|m| {
                         if let Modal::Profile { selected, .. } = m {
@@ -777,4 +829,108 @@ fn profile_dialog(convert: bool, selected: usize, cx: &mut Context<Workspace>) -
         body,
         actions,
     )
+}
+
+/// Application preferences (⌘K).
+fn preferences(
+    ws: &mut Workspace,
+    state: &DialogState,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let view = ws.view;
+    let intent = ws.color.intent;
+    let keymap_path = crate::keymap::user_keymap_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no config directory)".into());
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(ui::field_row(
+            "Theme",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("pref-theme"),
+                    is_open: state.open_popup == Some(Popup::Field("pref-theme")),
+                    current: view.theme,
+                    label: (view.theme.display_name()).into(),
+                    width: 150.0,
+                    options: vec![
+                        ("Dark".into(), crate::workspace::Theme::Dark),
+                        ("Light".into(), crate::workspace::Theme::Light),
+                    ],
+                },
+                |ws, theme| ws.set_theme_quiet(theme),
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Grid spacing",
+            ui::num_field(
+                ui::NumField {
+                    id: "pref-grid",
+                    value: view.grid_spacing,
+                    suffix: " px",
+                    step: 8.0,
+                    focused: state.focused_field == Some("pref-grid"),
+                    buffer: state.field_buffer.clone(),
+                },
+                |ws, delta| {
+                    ws.view.grid_spacing = (ws.view.grid_spacing + delta).clamp(2.0, 1024.0);
+                    ws.save_view_options();
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Snapping",
+            ui::checkbox(
+                "Snap to guides, grid and canvas edges",
+                view.snap,
+                |ws| {
+                    ws.view.snap = !ws.view.snap;
+                    ws.save_view_options();
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Rendering intent",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("pref-intent"),
+                    is_open: state.open_popup == Some(Popup::Field("pref-intent")),
+                    current: intent,
+                    label: (intent.display_name()).into(),
+                    width: 180.0,
+                    options: photoslop_colormgmt::Intent::all()
+                        .iter()
+                        .map(|i| (SharedString::from(i.display_name()), *i))
+                        .collect(),
+                },
+                |ws, value| {
+                    ws.color.intent = value;
+                    ws.rebuild_color_transforms();
+                },
+                cx,
+            ),
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child(format!("Keyboard shortcuts: {keymap_path}")),
+        );
+
+    let actions = div().flex().flex_row().gap_2().child(ui::button(
+        "Done",
+        true,
+        |ws, _w, cx| {
+            ws.save_view_options();
+            ws.close_modal(cx);
+        },
+        cx,
+    ));
+    ui::modal_frame("Preferences", 400.0, body, actions)
 }

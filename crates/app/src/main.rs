@@ -93,7 +93,7 @@ fn main() {
                     ..Default::default()
                 },
                 |_window, cx| {
-                    cx.new(|cx| {
+                    let workspace = cx.new(|cx| {
                         let mut ws = Workspace::new(registry, plugin_manager, cx);
                         if let Some(path) = std::env::args().nth(1) {
                             ws.load_file(path.into(), cx);
@@ -103,7 +103,8 @@ fn main() {
                             ws.recover_from(recovery, cx);
                         }
                         ws
-                    })
+                    });
+                    workspace
                 },
             )
             .expect("failed to open window");

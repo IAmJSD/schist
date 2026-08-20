@@ -435,6 +435,118 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
                 ctx.doc.active_layer = Some(group_id);
             }),
+            cmd("select.reselect", "Reselect", Some("cmd-shift-d"), |ctx| {
+                let Some(previous) = ctx.doc.last_selection.clone() else {
+                    return;
+                };
+                let mut edit = ctx.doc.begin_edit("Reselect");
+                edit.change_selection(|sel, _| *sel = previous);
+                edit.commit();
+            }),
+            cmd("select.feather", "Feather Selection", None, |ctx| {
+                let mut edit = ctx.doc.begin_edit("Feather");
+                edit.change_selection(|sel, _| sel.feather(2.0));
+                edit.commit();
+            }),
+            // --- Layer ordering ---
+            cmd("layer.raise", "Bring Forward", Some("cmd-]"), |ctx| {
+                move_layer_by(ctx, 1);
+            }),
+            cmd("layer.lower", "Send Backward", Some("cmd-["), |ctx| {
+                move_layer_by(ctx, -1);
+            }),
+            cmd(
+                "layer.to_front",
+                "Bring to Front",
+                Some("cmd-shift-]"),
+                |ctx| {
+                    move_layer_to_end(ctx, true);
+                },
+            ),
+            cmd(
+                "layer.to_back",
+                "Send to Back",
+                Some("cmd-shift-["),
+                |ctx| {
+                    move_layer_to_end(ctx, false);
+                },
+            ),
+            cmd(
+                "layer.clipping_mask",
+                "Create/Release Clipping Mask",
+                Some("cmd-alt-g"),
+                |ctx| {
+                    let Some(id) = ctx.doc.active_layer else {
+                        return;
+                    };
+                    // A clipping mask needs something to clip to.
+                    let Some(path) = ctx.doc.tree.path_of(id) else {
+                        return;
+                    };
+                    if *path.0.last().unwrap() == 0 {
+                        return;
+                    }
+                    let mut edit = ctx.doc.begin_edit("Clipping Mask");
+                    edit.change_props(id, |l| l.clipping = !l.clipping);
+                    edit.commit();
+                },
+            ),
+            cmd(
+                "layer.cut_to_new",
+                "Layer via Cut",
+                Some("cmd-shift-j"),
+                |ctx| {
+                    let Some(clip) = copy_pixels(ctx.doc, false) else {
+                        return;
+                    };
+                    clear_selection(ctx);
+                    let mut layer = Layer::new_raster("Layer via Cut");
+                    blit_rgba8(
+                        &mut layer.as_raster_mut().unwrap().tiles,
+                        ctx.doc.depth,
+                        clip.rect,
+                        &clip.rgba,
+                    );
+                    let id = layer.id;
+                    let path = insert_path_above_active(ctx.doc);
+                    let mut edit = ctx.doc.begin_edit("Layer via Cut");
+                    edit.insert_layer(path, layer);
+                    edit.commit();
+                    ctx.doc.active_layer = Some(id);
+                },
+            ),
+            cmd("layer.add_mask", "Add Layer Mask", None, |ctx| {
+                let Some(id) = ctx.doc.active_layer else {
+                    return;
+                };
+                if ctx.doc.tree.find(id).map(|l| l.mask.is_some()) != Some(false) {
+                    return;
+                }
+                // A mask made from a selection reveals only the selection.
+                let selection = ctx.doc.selection.clone();
+                let canvas = ctx.doc.canvas_rect();
+                let mut mask = photoslop_core::LayerMask::new_revealing();
+                if !selection.is_empty() {
+                    mask.default_value = 0;
+                    mask.bounds = canvas;
+                    for coord in TileCoord::covering(&canvas) {
+                        let rect = coord.rect();
+                        let buf = mask.tiles.get_mut_or_insert(coord);
+                        for y in rect.top..rect.bottom {
+                            for x in rect.left..rect.right {
+                                let ix = ((y - rect.top) * TILE_SIZE + (x - rect.left)) as usize;
+                                buf[ix] = selection.coverage(x, y);
+                            }
+                        }
+                    }
+                }
+                let mut edit = ctx.doc.begin_edit("Add Layer Mask");
+                edit.set_mask(id, Some(mask));
+                edit.commit();
+            }),
+            cmd("layer.flatten", "Flatten Image", None, |ctx| {
+                merge_visible(ctx);
+            }),
             cmd("layer.merge_down", "Merge Down", Some("cmd-e"), merge_down),
             cmd(
                 "layer.merge_visible",
@@ -444,6 +556,67 @@ impl CommandPlugin for CoreCommandsPlugin {
             ),
         ]
     }
+}
+
+/// Move the active layer up (+1) or down (-1) among its siblings.
+fn move_layer_by(ctx: &mut CommandCtx, delta: i32) {
+    let Some(id) = ctx.doc.active_layer else {
+        return;
+    };
+    let Some(path) = ctx.doc.tree.path_of(id) else {
+        return;
+    };
+    let index = *path.0.last().unwrap() as i32;
+    let target = index + delta;
+    if target < 0 {
+        return;
+    }
+    let mut to = path.clone();
+    *to.0.last_mut().unwrap() = target as usize;
+    let mut edit = ctx.doc.begin_edit(if delta > 0 {
+        "Bring Forward"
+    } else {
+        "Send Backward"
+    });
+    edit.move_layer(path, to);
+    edit.commit();
+}
+
+/// Move the active layer to the top or bottom of its group.
+fn move_layer_to_end(ctx: &mut CommandCtx, to_front: bool) {
+    let Some(id) = ctx.doc.active_layer else {
+        return;
+    };
+    let Some(path) = ctx.doc.tree.path_of(id) else {
+        return;
+    };
+    // Siblings are the layers sharing this path prefix.
+    let sibling_count = {
+        let mut layers: &[Layer] = &ctx.doc.tree.layers;
+        for &i in &path.0[..path.0.len() - 1] {
+            match layers.get(i).and_then(|l| l.children()) {
+                Some(children) => layers = children,
+                None => return,
+            }
+        }
+        layers.len()
+    };
+    let mut to = path.clone();
+    *to.0.last_mut().unwrap() = if to_front {
+        sibling_count.saturating_sub(1)
+    } else {
+        0
+    };
+    if to == path {
+        return;
+    }
+    let mut edit = ctx.doc.begin_edit(if to_front {
+        "Bring to Front"
+    } else {
+        "Send to Back"
+    });
+    edit.move_layer(path, to);
+    edit.commit();
 }
 
 /// Remove a layer through the builder but get the removed value back
@@ -644,5 +817,171 @@ mod tests {
         assert!(group.is_group());
         assert_eq!(group.children().unwrap().len(), 1);
         assert_eq!(group.children().unwrap()[0].name, "bg");
+    }
+}
+
+#[cfg(test)]
+mod m11_tests {
+    use super::*;
+    use photoslop_color::Depth;
+    use photoslop_plugin_api::EditorState;
+
+    fn registry() -> PluginRegistry {
+        let mut reg = PluginRegistry::new();
+        CoreCommandsPlugin.register(&mut reg);
+        reg
+    }
+
+    fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
+        let mut ctx = CommandCtx { doc, state };
+        (reg.command(id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+            .run)(&mut ctx);
+    }
+
+    fn doc_with_layers(n: usize) -> Document {
+        let mut doc = Document::new("t", 64, 64, Depth::Eight);
+        for i in 0..n {
+            let mut layer = Layer::new_raster(format!("L{i}"));
+            let buf = [(i * 40) as u8, 0, 0, 255].repeat(16 * 16);
+            blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                Depth::Eight,
+                IntRect::from_xywh(0, 0, 16, 16),
+                &buf,
+            );
+            doc.push_layer(layer);
+        }
+        doc
+    }
+
+    fn names(doc: &Document) -> Vec<String> {
+        doc.tree.layers.iter().map(|l| l.name.clone()).collect()
+    }
+
+    #[test]
+    fn layer_order_commands_move_the_active_layer() {
+        let reg = registry();
+        let mut doc = doc_with_layers(3);
+        let mut state = EditorState::default();
+        doc.active_layer = Some(doc.tree.layers[0].id); // bottom
+
+        run(&reg, "layer.raise", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L1", "L0", "L2"]);
+
+        run(&reg, "layer.to_front", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L1", "L2", "L0"]);
+
+        run(&reg, "layer.to_back", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0", "L1", "L2"]);
+
+        run(&reg, "edit.undo", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L1", "L2", "L0"], "ordering undoes");
+    }
+
+    #[test]
+    fn lowering_the_bottom_layer_is_a_no_op() {
+        let reg = registry();
+        let mut doc = doc_with_layers(2);
+        let mut state = EditorState::default();
+        doc.active_layer = Some(doc.tree.layers[0].id);
+        run(&reg, "layer.lower", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0", "L1"]);
+        assert!(!doc.history.can_undo(), "nothing recorded");
+    }
+
+    #[test]
+    fn clipping_mask_toggles_and_needs_a_layer_below() {
+        let reg = registry();
+        let mut doc = doc_with_layers(2);
+        let mut state = EditorState::default();
+        doc.active_layer = Some(doc.tree.layers[1].id);
+
+        run(&reg, "layer.clipping_mask", &mut doc, &mut state);
+        assert!(doc.tree.layers[1].clipping);
+        run(&reg, "layer.clipping_mask", &mut doc, &mut state);
+        assert!(!doc.tree.layers[1].clipping, "toggles back off");
+
+        // The bottom layer has nothing to clip to.
+        doc.active_layer = Some(doc.tree.layers[0].id);
+        run(&reg, "layer.clipping_mask", &mut doc, &mut state);
+        assert!(!doc.tree.layers[0].clipping);
+    }
+
+    #[test]
+    fn reselect_restores_the_previous_selection() {
+        let reg = registry();
+        let mut doc = doc_with_layers(1);
+        let mut state = EditorState::default();
+        run(&reg, "select.all", &mut doc, &mut state);
+        run(&reg, "select.deselect", &mut doc, &mut state);
+        assert!(doc.selection.is_empty());
+        run(&reg, "select.reselect", &mut doc, &mut state);
+        assert!(!doc.selection.is_empty(), "selection came back");
+        assert_eq!(doc.selection.coverage(10, 10), 255);
+    }
+
+    #[test]
+    fn layer_via_cut_moves_pixels_to_a_new_layer() {
+        let reg = registry();
+        let mut doc = doc_with_layers(1);
+        let mut state = EditorState::default();
+        doc.selection.select_rect(
+            IntRect::from_xywh(0, 0, 8, 8),
+            photoslop_core::SelectOp::Replace,
+        );
+        run(&reg, "layer.cut_to_new", &mut doc, &mut state);
+
+        assert_eq!(doc.tree.layers.len(), 2);
+        let source = doc.tree.layers[0].as_raster().unwrap();
+        assert_eq!(
+            source.tiles.pixel(2, 2).to_u8()[3],
+            0,
+            "cut from the source"
+        );
+        let cut = doc.tree.layers[1].as_raster().unwrap();
+        assert!(
+            cut.tiles.pixel(2, 2).to_u8()[3] > 0,
+            "landed on the new layer"
+        );
+    }
+
+    #[test]
+    fn add_layer_mask_uses_the_selection() {
+        let reg = registry();
+        let mut doc = doc_with_layers(1);
+        let mut state = EditorState::default();
+        doc.selection.select_rect(
+            IntRect::from_xywh(0, 0, 8, 64),
+            photoslop_core::SelectOp::Replace,
+        );
+        run(&reg, "layer.add_mask", &mut doc, &mut state);
+
+        let mask = doc.tree.layers[0].mask.as_ref().expect("mask added");
+        assert_eq!(mask.value(2, 2), 255, "selected area revealed");
+        assert_eq!(mask.value(20, 2), 0, "unselected area hidden");
+        doc.undo();
+        assert!(doc.tree.layers[0].mask.is_none(), "undo removes it");
+    }
+
+    #[test]
+    fn every_command_has_a_unique_id_and_title() {
+        let reg = registry();
+        let mut ids: Vec<&str> = reg.commands().iter().map(|c| c.id).collect();
+        let count = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "duplicate command ids");
+        assert!(reg.commands().iter().all(|c| !c.title.is_empty()));
+    }
+
+    #[test]
+    fn keybindings_do_not_collide() {
+        let reg = registry();
+        let mut binds: Vec<&str> = reg.commands().iter().filter_map(|c| c.keybind).collect();
+        let count = binds.len();
+        binds.sort();
+        binds.dedup();
+        assert_eq!(binds.len(), count, "two commands share a keybinding");
     }
 }
