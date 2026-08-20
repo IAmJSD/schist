@@ -2448,7 +2448,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75d3f1d4e61a192ee9f1a1a720d4a9952317dcd0#75d3f1d4e61a192ee9f1a1a720d4a9952317dcd0"
+source = "git+https://github.com/IAmJSD/gpui?rev=2dd0180e3bba20d9f0cc5bdfba346cafb13eed32#2dd0180e3bba20d9f0cc5bdfba346cafb13eed32"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",

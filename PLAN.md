@@ -26,20 +26,29 @@
 > pointer input to the canvas, the stroker punched a hole through every
 > line's start cap, and open paths were being silently closed.
 >
-> Known deferrals: rotate-view rendering, animated marching ants
-> (static outline), tablet pressure (mouse = 1.0), system clipboard interop,
-> a curves *editor* widget (curves parse, render and round-trip; only the
-> graph UI is missing), vector shape layers saved as vectors (they
-> rasterize), writing `lfx2` effect descriptors (effects render and edit,
-> but a layer whose effects were edited drops its stale block on save
-> rather than writing back something the canvas is not showing), smart
-> objects (preserved verbatim, not interpreted), Filter Gallery / Liquify /
-> Camera Raw / Neural Filters, Transform Selection, the frame tool,
-> artboards, layer comps, CMYK/Lab documents, zip-compressed PSD channels,
-> and the wgpu compositor — the CPU path meets the M8 interactivity target
+> **M14 (the rest of it, 2026-08-20).** Everything left on the parity list
+> except 3D: `lfx2` effects written as well as read, zip-compressed PSD
+> channels, smart objects with lossless repeated transforms (§14.1); the
+> Curves graph editor and Transform Selection (§14.2); Liquify, Puppet
+> Warp, Content-Aware Scale and Vanishing Point (§14.3); the Filter
+> Gallery, Camera Raw and the Neural Filters (§14.4); CMYK, Lab and
+> Indexed documents (§14.5); artboards, frames, slices, notes, counts and
+> layer comps (§14.6); animated marching ants, Rotate View, system
+> clipboard interop, live vector shape layers, and stylus pressure through
+> a second change to the GPUI fork. Six more bugs found by the tests that
+> went with them, including a sign error in the MLS deformation that
+> turned Puppet Warp into a shear and a lossy CMYK round trip in Selective
+> Color.
+>
+> Known deferrals: the wgpu compositor — the CPU path meets the M8 interactivity target
 > on its own (measurements in §7/M8), so the GPU backend would add
-> complexity without a demonstrated win. 3D was never planned; Adobe
-> deprecated it immediately after CC 2020 and removed it in 2022. macOS
+> complexity without a demonstrated win. Tablet pressure is carried end to
+> end and read on macOS; the other three platforms each need their own
+> tablet protocol and hardware to develop against. The Neural Filters,
+> Object Selection and Content-Aware Fill are classical implementations of
+> what Photoshop does with models, documented as such where they live. 3D
+> was never planned; Adobe deprecated it immediately after CC 2020 and
+> removed it in 2022. macOS
 > signing and notarization are wired into the release workflow but
 > unexercised here: this machine has no Apple credentials, so those steps
 > are secret-gated and skip cleanly.

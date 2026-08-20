@@ -2109,6 +2109,11 @@ impl Workspace {
         self.space_held || self.editor.active_tool == "hand"
     }
 
+    /// Build a tool's pointer input.
+    ///
+    /// `pressure` comes straight from the platform event. It is 1.0 for a
+    /// mouse and wherever tablet input is not wired up, so tools multiply
+    /// by it unconditionally.
     fn tool_input(&self, local: Point<Pixels>, m: gpui::Modifiers, pressure: f32) -> PointerInput {
         let (x, y) = self.doc_pos(local);
         // Snapping is a view affordance, so it happens here rather than in
@@ -2143,7 +2148,7 @@ impl Workspace {
             return;
         }
         self.pointer_down = true;
-        let input = self.tool_input(local, ev.modifiers, 1.0);
+        let input = self.tool_input(local, ev.modifiers, ev.pressure);
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
             let mut ctx = ToolCtx {
@@ -2177,7 +2182,7 @@ impl Workspace {
             return;
         }
         let local = self.to_local(ev.position);
-        let input = self.tool_input(local, ev.modifiers, 1.0);
+        let input = self.tool_input(local, ev.modifiers, ev.pressure);
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
             let mut ctx = ToolCtx {
@@ -2202,7 +2207,7 @@ impl Workspace {
         }
         self.pointer_down = false;
         let local = self.to_local(ev.position);
-        let input = self.tool_input(local, ev.modifiers, 1.0);
+        let input = self.tool_input(local, ev.modifiers, ev.pressure);
         let tool_id = self.editor.active_tool;
         if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
             let mut ctx = ToolCtx {

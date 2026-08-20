@@ -7,10 +7,10 @@ menu command is a plugin, including the built-in ones.
 [GPUI]: https://gpui.rs
 
 **Status: v1 feature-complete (milestones M0–M12 of [PLAN.md](PLAN.md)),
-plus a Photoshop-parity pass — 46 tools, 50 filters, 16 adjustments and
-all nine layer effects.** 349 tests, clippy-clean, verified end-to-end
-under a real window. [Gaps.md](#not-there-yet) lists what is still
-missing.
+plus two Photoshop-parity passes — 55 tools, 57 filters, 16 adjustments,
+all nine layer effects, and live vector shapes.** 432 tests,
+clippy-clean, verified end-to-end under a real window. [What is still
+missing](#not-there-yet) is a short list now.
 
 ## Build and run
 
@@ -30,10 +30,12 @@ them all in CI.
 ## What it does
 
 **Documents.** PSD and PSB read *and* write — layers, nested groups, masks,
-all 27 blend modes, adjustment layers, 8/16/32-bit, RGB and greyscale. Every
-block Photoslop doesn't understand (layer effects, text engine data, smart
-objects) is preserved byte-for-byte, so a round trip never loses work. Also
-PNG, JPEG, WebP and TIFF.
+all 27 blend modes, adjustment layers, layer effects, vector shapes,
+8/16/32-bit, RGB, greyscale, CMYK, Lab and Indexed, RLE and zip-compressed
+channels. Every block Photoslop doesn't understand is preserved
+byte-for-byte, so a round trip never loses work. **Smart objects** keep
+their source pixels, so transforming one repeatedly costs no more quality
+than transforming it once. Also PNG, JPEG, WebP and TIFF.
 
 **Selecting.** Rectangular and elliptical marquee; free, polygonal and
 magnetic lassos; magic wand with tolerance and contiguity; quick selection
@@ -53,7 +55,9 @@ skin rather than a blurred blemish.
 *stored*, so Path Selection and Direct Selection can edit them and Layer ▸
 Path can fill, stroke or convert them to a selection. Rectangle, ellipse,
 line (with its own weight, 45° constrain and arrowheads), polygon and six
-custom shapes. Editable text layers.
+custom shapes — as **live shape layers** by default, which keep their
+path, regenerate their pixels from it, and survive a PSD round trip as
+vectors. Editable text layers.
 
 **Non-destructive.** Sixteen adjustments — levels, curves, hue/saturation,
 brightness/contrast, black & white, colour balance, vibrance, exposure,
@@ -67,18 +71,32 @@ glow, satin, colour overlay, gradient overlay, outer glow and drop shadow,
 with Photoshop's Fill-vs-Opacity semantics so "Fill 0% plus a drop shadow"
 does what you expect.
 
-**Filters.** Fifty across eight categories — Blur, Distort, Noise,
-Pixelate, Render, Sharpen, Stylize and Other — all previewing live on the
-canvas inside the selection, with Cancel restoring exactly.
+**Filters.** Fifty-seven across ten categories — Blur, Distort, Noise,
+Pixelate, Render, Sharpen, Stylize, Other, Camera Raw and Neural Filters
+— all previewing live on the canvas inside the selection, with Cancel
+restoring exactly. The **Filter Gallery** stacks several and previews the
+result of the lot.
+
+**Warping.** Liquify with all seven brushes, Puppet Warp (Moving Least
+Squares, so pins hold and nothing shears), Content-Aware Scale (seam
+carving, with the selection as the protect mask), and Vanishing Point,
+which clones along a perspective plane so the copy foreshortens with the
+surface.
+
+**Document furniture.** Artboards and slices, each exportable to its own
+file; frames that clip their contents; notes; the Count tool; and layer
+comps that capture every layer's visibility and appearance under a name.
 
 **Colour.** ICC profiles honoured on open, assign vs. convert as separate
 operations, a document→display transform, soft proofing, and ordered
 dithering when exporting to 8-bit.
 
-**Image.** Mode (RGB, greyscale), Auto Tone / Contrast / Colour, image and
-canvas size, the five rotations and flips, crop and trim.
+**Image.** Mode (RGB, greyscale, CMYK, Lab, Indexed), Auto Tone /
+Contrast / Colour, image and canvas size, the five rotations and flips,
+crop and trim.
 
-**Editor.** Rulers with drag-out guides, grid and snapping, screen modes,
+**Editor.** Rotate View, rulers with drag-out guides, grid and snapping,
+screen modes,
 light/dark themes, navigator, history with click-to-jump, unlimited undo,
 crash recovery, and a fully remappable keymap. Right-click the layers,
 history, colour or navigator panels — or the canvas — for Photoshop-style
@@ -107,10 +125,11 @@ Prefer it the other way round? **Preferences ▸ Zoom with scroll wheel**
 swaps them, so plain scrolling zooms and the modifier pans.
 
 **Pinch-to-zoom** works on macOS and Linux/Wayland, zooming about the
-centre of the gesture. Upstream GPUI surfaces no pinch event at all, so
-this is provided by a fork — [IAmJSD/gpui](https://github.com/IAmJSD/gpui),
-which adds `PinchEvent` and `on_pinch` on top of gpui 0.2.2 — pinned by
-revision in the workspace `Cargo.toml`.
+centre of the gesture, and **stylus pressure** drives brush size on
+macOS. Upstream GPUI surfaces neither, so both come from a fork —
+[IAmJSD/gpui](https://github.com/IAmJSD/gpui), which adds `PinchEvent`,
+`on_pinch` and a `pressure` field on the mouse events on top of gpui
+0.2.2 — pinned by revision in the workspace `Cargo.toml`.
 
 There is no pinch under X11: XI2 has no pinch gesture, so touchpad
 pinches are never forwarded to X11 clients, and Windows is not yet
@@ -125,22 +144,28 @@ Remap anything in `~/.config/photoslop/keymap.json`:
 
 ## Not there yet
 
-Measured against Photoshop CC 2020, the notable gaps are:
-
-- **Smart objects.** The PSD blocks are preserved byte-for-byte on a round
-  trip, but nothing interprets or creates them.
-- **Layer effects in PSD.** Effects render and edit, but `lfx2` descriptors
-  are not *written*: saving a layer whose effects you have edited drops the
-  stale block rather than writing back something the canvas is not showing.
-- **Curves needs a graph editor.** The adjustment works and round-trips;
-  only the sliders are missing, so it has no UI of its own.
-- **Filter Gallery, Liquify, Camera Raw, Neural Filters, Vanishing Point.**
-  Each is its own subsystem rather than a filter.
-- **Transform Selection**, Puppet Warp, Content-Aware Scale.
-- **Frame tool, artboards, layer comps, slices, the Notes and Count tools.**
-- **3D.** Never planned. Adobe deprecated it right after CC 2020 and
-  removed it in 2022.
-- **CMYK and Lab documents**, and zip-compressed PSD channels.
+- **3D.** Never built, and not planned: Adobe deprecated it right after
+  CC 2020 and removed it in 2022.
+- **Tablet pressure off macOS.** The pipeline carries pressure end to
+  end and macOS reads it from `NSEvent`; Wayland, X11 and Windows each
+  need their own tablet protocol and hardware to develop against, so
+  they report full pressure.
+- **Neural Filters are not neural.** They do the tasks Adobe's do, with
+  signal processing rather than a trained model. Skin Smoothing does not
+  know what a face is; it does frequency separation on pixels whose
+  colour falls in the skin-tone range. The module documents each one.
+- **Object Selection and Content-Aware Fill are heuristics**, not the
+  models Photoshop uses — background sampling and diffusion inpainting
+  respectively. They degrade predictably (blurry over texture) rather
+  than mysteriously.
+- **CMYK and Lab edit in RGB.** Files open, edit and save in their own
+  mode, converting at the boundaries; the editing in between is RGB, so
+  individual ink channels are not separately editable.
+- **Text is not on a path**, and the type engine has no OpenType
+  feature controls.
+- **The GPU compositor.** Deliberate: the CPU path already meets the
+  interactivity target (measurements in PLAN.md §7/M8), so a wgpu
+  backend would add complexity without a demonstrated win.
 
 ## Plugins
 
