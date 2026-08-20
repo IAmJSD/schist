@@ -1,0 +1,12 @@
+[package]
+name = "photoslop-neural"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+rayon.workspace = true
+sha2 = "0.10"
+tract-onnx = "0.23"

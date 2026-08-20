@@ -6,6 +6,7 @@ members = [
     "crates/app",
     "crates/core",
     "crates/layer-fx",
+    "crates/neural",
     "crates/psd-descriptor",
     "crates/plugin-api",
     "crates/pixel-ops",
@@ -48,6 +49,7 @@ photoslop-color = { path = "crates/color" }
 photoslop-codec-psd = { path = "crates/codec-psd" }
 photoslop-vector = { path = "crates/vector" }
 photoslop-layer-fx = { path = "crates/layer-fx" }
+photoslop-neural = { path = "crates/neural" }
 photoslop-psd-descriptor = { path = "crates/psd-descriptor" }
 
 # zlib for PSD's zip-compressed channels; pure Rust, no C toolchain.

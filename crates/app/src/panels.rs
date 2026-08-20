@@ -125,6 +125,7 @@ enum AppItem {
     TransformSelection,
     ContentAwareScaleItem,
     FilterGalleryItem,
+    ManageModels,
     NewLayerComp,
     ExportArtboards,
     ExportSlices,
@@ -362,7 +363,17 @@ fn filter_menu_entries() -> Vec<MenuEntry> {
     FILTER_GROUPS
         .iter()
         .map(|(name, ids)| {
-            MenuEntry::Sub(name, ids.iter().map(|id| MenuEntry::Filter(id)).collect())
+            let mut entries: Vec<MenuEntry> = ids.iter().map(|id| MenuEntry::Filter(id)).collect();
+            // The Neural Filters need somewhere to fetch their models.
+            if *name == "Neural Filters" {
+                entries.push(MenuEntry::Sep);
+                entries.push(MenuEntry::App(
+                    "Manage Models…",
+                    AppItem::ManageModels,
+                    None,
+                ));
+            }
+            MenuEntry::Sub(name, entries)
         })
         .collect()
 }
@@ -501,6 +512,7 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
     (
         "Neural Filters",
         &[
+            "filter.neural.style_transfer",
             "filter.neural.skin_smoothing",
             "filter.neural.jpeg_artifacts",
             "filter.neural.colorize",
@@ -679,6 +691,7 @@ fn run_app_item(
             )
         }
         AppItem::FilterGalleryItem => ws.show_filter_gallery(cx),
+        AppItem::ManageModels => ws.open_modal(Modal::ModelManager, cx),
         AppItem::NewLayerComp => ws.new_layer_comp(cx),
         AppItem::ApplyLayerComp(i) => ws.apply_layer_comp(i, cx),
         AppItem::DeleteLayerComp(i) => ws.delete_layer_comp(i, cx),

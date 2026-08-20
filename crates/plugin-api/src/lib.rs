@@ -362,6 +362,12 @@ pub struct FilterParam {
     pub default: f32,
     /// Displayed after the value, e.g. " px" or "%".
     pub suffix: &'static str,
+    /// Names for a parameter whose values are a list rather than a
+    /// quantity. When this is non-empty the value is an index into it and
+    /// the host shows the name instead of the number, which is the
+    /// difference between a control that reads "Mosaic" and one that
+    /// reads "0.00".
+    pub choices: &'static [&'static str],
 }
 
 /// Parameter values keyed by [`FilterParam::key`].
@@ -403,4 +409,11 @@ pub trait FilterPlugin: Send + Sync {
     /// Apply in place to a straight-alpha f32 RGBA buffer of
     /// `width * height` pixels.
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues);
+
+    /// A line shown in the filter's dialog, for anything the user should
+    /// know before running it -- which is mostly whether a neural filter
+    /// found its model or is about to use its fallback.
+    fn info(&self) -> Option<String> {
+        None
+    }
 }

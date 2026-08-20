@@ -150,10 +150,17 @@ Remap anything in `~/.config/photoslop/keymap.json`:
   end and macOS reads it from `NSEvent`; Wayland, X11 and Windows each
   need their own tablet protocol and hardware to develop against, so
   they report full pressure.
-- **Neural Filters are not neural.** They do the tasks Adobe's do, with
-  signal processing rather than a trained model. Skin Smoothing does not
-  know what a face is; it does frequency separation on pixels whose
-  colour falls in the skin-tone range. The module documents each one.
+- **Only two Neural Filters run a network.** Super Zoom uses a small
+  residual CNN trained for this application (`tools/train/detail.py`,
+  80 KB, shipped in the binary); Style Transfer uses the fast
+  neural-style networks from the ONNX Model Zoo, downloaded on demand
+  from Filter ▸ Neural Filters ▸ Manage Models. Inference is
+  [`tract`](https://github.com/sonos/tract) — pure Rust, nothing to
+  install. The rest are signal processing: Skin Smoothing does not know
+  what a face is, it does frequency separation on pixels whose colour
+  falls in the skin-tone range. Each filter says in its own dialog which
+  path it took, and the model-backed ones fall back to the classical one
+  rather than failing.
 - **Object Selection and Content-Aware Fill are heuristics**, not the
   models Photoshop uses — background sampling and diffusion inpainting
   respectively. They degrade predictably (blurry over texture) rather

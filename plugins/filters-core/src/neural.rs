@@ -1,19 +1,55 @@
-//! Photoshop's Neural Filters, implemented classically.
+//! Photoshop's Neural Filters.
 //!
-//! These are the tasks Adobe's Neural Filters do, done with signal
-//! processing rather than a trained model, because there is no model here
-//! to run. The distinction is real and worth stating plainly: Skin
-//! Smoothing does not know what a face is, it smooths pixels whose colour
-//! falls in the skin-tone range; Colorize does not know that grass is
-//! green, it maps luminance through a ramp. On the material each is aimed
-//! at they do a recognisable version of the job, and they fail in
-//! predictable ways rather than surprising ones.
+//! Two of these run a real network. Super Zoom uses `detail.onnx`, a small
+//! residual CNN trained for this application (`tools/train/detail.py`)
+//! and shipped inside the binary; Style Transfer uses the fast
+//! neural-style networks from the ONNX Model Zoo, downloaded on demand.
+//! Both run through `photoslop-neural`, which is `tract` -- pure Rust, so
+//! there is no runtime to install.
 //!
-//! The names match Photoshop's so the menu is familiar; the dialog text
-//! says what each one actually is.
+//! The rest are signal processing, and the distinction is worth stating
+//! plainly rather than leaving to be discovered: Skin Smoothing does not
+//! know what a face is, it does frequency separation on pixels whose
+//! colour falls in the skin-tone range; Colorize does not know that grass
+//! is green, it maps luminance through a ramp. On the material each is
+//! aimed at they do a recognisable version of the job, and they fail
+//! predictably rather than surprisingly.
+//!
+//! Every model-backed filter also works without its model, falling back to
+//! the classical path and saying so in its dialog. Nothing here is a stub
+//! that stops working when a download fails.
+
+/// Copy the RGB of a filter buffer out, run `f` on it, and blend the
+/// result back. Models work on RGB; the filter buffer is RGBA.
+fn through_rgb(px: &mut [f32], f: impl FnOnce(&mut Vec<f32>)) {
+    let n = px.len() / 4;
+    let mut rgb = Vec::with_capacity(n * 3);
+    for p in px.chunks_exact(4) {
+        rgb.extend_from_slice(&p[..3]);
+    }
+    f(&mut rgb);
+    for (i, p) in px.chunks_exact_mut(4).enumerate() {
+        p[..3].copy_from_slice(&rgb[i * 3..i * 3 + 3]);
+    }
+}
+
+/// The note a model-backed filter shows in its dialog.
+fn model_note(id: &str, fallback: &str) -> Option<String> {
+    match photoslop_neural::spec(id) {
+        Some(spec) if photoslop_neural::installed(id) => {
+            Some(format!("Using {} ({}).", spec.name, spec.license))
+        }
+        Some(spec) => Some(format!(
+            "{} is not installed \u{2014} {fallback} Get it from \
+             Filter \u{25b8} Neural Filters \u{25b8} Manage Models.",
+            spec.name
+        )),
+        None => None,
+    }
+}
 
 use crate::util::{at, gaussian_rgba, luma, put, sample};
-use crate::{param, simple_filter};
+use crate::{choice, param, simple_filter};
 use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// How much a colour looks like skin, 0..=1.
@@ -168,48 +204,173 @@ simple_filter!(
     }
 );
 
-simple_filter!(
-    SuperZoom,
-    "filter.neural.super_zoom",
-    "Super Zoom",
-    "Neural Filters",
-    [param("detail", "Detail", 0.0, 100.0, 60.0, "")],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // A filter cannot change the buffer's size, so this is the other
-        // half of an upscale: recover the edge acuity that enlarging an
-        // image loses. Edge-directed -- it sharpens along the gradient
-        // and not across it, which avoids the halos plain sharpening
-        // gives you on an already-soft image.
-        let detail = v.get("detail") / 100.0;
+/// Super Zoom: restore the detail an enlargement loses.
+///
+/// The one filter here whose network ships with the application. A filter
+/// cannot resize its own buffer, so this is the second half of an
+/// upscale -- enlarge with Image Size, then run this to put the high
+/// frequencies back.
+pub struct SuperZoom;
+
+impl FilterPlugin for SuperZoom {
+    fn id(&self) -> &'static str {
+        "filter.neural.super_zoom"
+    }
+    fn name(&self) -> &'static str {
+        "Super Zoom"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![param("detail", "Detail", 0.0, 100.0, 60.0, "")]
+    }
+
+    fn info(&self) -> Option<String> {
+        model_note("detail", "using edge-directed sharpening instead.")
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let detail = (values.get("detail") / 100.0).clamp(0.0, 1.0);
         if detail <= 0.0 {
             return;
         }
-        let src = px.to_vec();
-        for y in 0..h as i32 {
-            for x in 0..w as i32 {
-                let c0 = at(&src, w, h, x, y);
-                let gx = luma(&at(&src, w, h, x + 1, y)) - luma(&at(&src, w, h, x - 1, y));
-                let gy = luma(&at(&src, w, h, x, y + 1)) - luma(&at(&src, w, h, x, y - 1));
-                let mag = gx.hypot(gy);
-                if mag < 1e-4 {
-                    continue;
-                }
-                // Sample along the gradient, where the edge actually runs.
-                let (ux, uy) = (gx / mag, gy / mag);
-                let a = sample(&src, w, h, x as f32 - ux, y as f32 - uy);
-                let b = sample(&src, w, h, x as f32 + ux, y as f32 + uy);
-                let mut out = c0;
-                for c in 0..3 {
-                    let mid = (a[c] + b[c]) / 2.0;
-                    // Push away from the local mean: steepens the edge
-                    // without touching flat areas.
-                    out[c] = (c0[c] + (c0[c] - mid) * detail * 1.5).clamp(0.0, 1.0);
-                }
-                put(px, w, x as usize, y as usize, out);
+        if let Some(model) = photoslop_neural::get("detail") {
+            through_rgb(px, |rgb| {
+                photoslop_neural::run_tiled(&model, rgb, width, height, detail);
+            });
+            return;
+        }
+        edge_directed_sharpen(px, width, height, detail);
+    }
+}
+
+/// The fallback: sharpen along the gradient rather than across it, which
+/// avoids the halos plain sharpening leaves on an already-soft image.
+fn edge_directed_sharpen(px: &mut [f32], w: usize, h: usize, detail: f32) {
+    let src = px.to_vec();
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c0 = at(&src, w, h, x, y);
+            let gx = luma(&at(&src, w, h, x + 1, y)) - luma(&at(&src, w, h, x - 1, y));
+            let gy = luma(&at(&src, w, h, x, y + 1)) - luma(&at(&src, w, h, x, y - 1));
+            let mag = gx.hypot(gy);
+            if mag < 1e-4 {
+                continue;
             }
+            let (ux, uy) = (gx / mag, gy / mag);
+            let a = sample(&src, w, h, x as f32 - ux, y as f32 - uy);
+            let b = sample(&src, w, h, x as f32 + ux, y as f32 + uy);
+            let mut out = c0;
+            for c in 0..3 {
+                let mid = (a[c] + b[c]) / 2.0;
+                out[c] = (c0[c] + (c0[c] - mid) * detail * 1.5).clamp(0.0, 1.0);
+            }
+            put(px, w, x as usize, y as usize, out);
         }
     }
-);
+}
+
+/// The styles this build knows about, in catalogue order.
+const STYLES: &[&str] = &["Mosaic", "Candy", "Udnie"];
+const STYLE_IDS: &[&str] = &["style-mosaic", "style-candy", "style-udnie"];
+
+/// Style Transfer: repaint the image in a learned style.
+///
+/// This is the one that genuinely needs a network -- there is no
+/// signal-processing stand-in for a brushstroke. Without the model it does
+/// the colour half only, which is honest but is not the same thing.
+pub struct StyleTransfer;
+
+impl FilterPlugin for StyleTransfer {
+    fn id(&self) -> &'static str {
+        "filter.neural.style_transfer"
+    }
+    fn name(&self) -> &'static str {
+        "Style Transfer"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            choice("style", "Style", STYLES, 0),
+            param("strength", "Strength", 0.0, 100.0, 100.0, ""),
+        ]
+    }
+
+    fn info(&self) -> Option<String> {
+        // Report on whichever styles are present, since they install
+        // separately.
+        let ready: Vec<&str> = STYLE_IDS
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| photoslop_neural::installed(id))
+            .map(|(i, _)| STYLES[i])
+            .collect();
+        Some(if ready.is_empty() {
+            "No style models installed \u{2014} transferring colour only. \
+             Get them from Filter \u{25b8} Neural Filters \u{25b8} Manage Models."
+                .to_string()
+        } else {
+            format!(
+                "Installed: {} (ONNX Model Zoo, Apache-2.0).",
+                ready.join(", ")
+            )
+        })
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let strength = (values.get("strength") / 100.0).clamp(0.0, 1.0);
+        if strength <= 0.0 {
+            return;
+        }
+        let pick = (values.get("style").round().max(0.0) as usize).min(STYLE_IDS.len() - 1);
+        if let Some(model) = photoslop_neural::get(STYLE_IDS[pick]) {
+            through_rgb(px, |rgb| {
+                photoslop_neural::run_tiled(&model, rgb, width, height, strength);
+            });
+            return;
+        }
+        // Colour-only fallback: push the image towards the style's
+        // dominant hue. It is not style transfer and does not pretend to
+        // be; `info` says so.
+        let hue = [30.0f32, 340.0, 210.0][pick.min(2)].to_radians();
+        colour_shift(px, hue, strength * 0.6);
+    }
+}
+
+/// Push an image's mean chroma towards a hue.
+fn colour_shift(px: &mut [f32], hue: f32, strength: f32) {
+    let n = (px.len() / 4).max(1) as f32;
+    let (mut ma, mut mb) = (0.0f32, 0.0f32);
+    for p in px.chunks_exact(4) {
+        let l = luma(p);
+        ma += p[0] - l;
+        mb += p[2] - l;
+    }
+    ma /= n;
+    mb /= n;
+    let (ta, tb) = (hue.cos() * 0.18, hue.sin() * 0.18);
+    for p in px.chunks_exact_mut(4) {
+        let l = luma(p);
+        let (ca, cb) = (p[0] - l, p[2] - l);
+        let target = [
+            (l + ca - ma + ta).clamp(0.0, 1.0),
+            (l - ((ca - ma + ta) + (cb - mb + tb)) * 0.3).clamp(0.0, 1.0),
+            (l + cb - mb + tb).clamp(0.0, 1.0),
+        ];
+        for c in 0..3 {
+            p[c] += (target[c] - p[c]) * strength;
+        }
+    }
+}
 
 simple_filter!(
     ColorTransfer,
@@ -323,6 +484,7 @@ pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(JpegArtifactRemoval));
     registry.register_filter(Box::new(Colorize));
     registry.register_filter(Box::new(SuperZoom));
+    registry.register_filter(Box::new(StyleTransfer));
     registry.register_filter(Box::new(ColorTransfer));
     registry.register_filter(Box::new(DepthBlur));
 }

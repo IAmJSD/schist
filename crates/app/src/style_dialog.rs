@@ -455,6 +455,7 @@ pub fn render(
                 min: field.min,
                 max: field.max,
                 suffix: field.suffix,
+                ..Default::default()
             },
             move |ws, v, cx| {
                 let v = if pct { v / 100.0 } else { v };

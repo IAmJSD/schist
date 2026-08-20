@@ -83,6 +83,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             preview,
         } => crate::gallery::render(ws, stack, selected, preview, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
+        Modal::ModelManager => model_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
         Modal::LayerProperties { layer, name } => {
             layer_properties(&state, layer, name, cx).into_any_element()
@@ -385,6 +386,7 @@ fn canvas_size(
 
 /// One slider row's description, shared by the filter and adjustment
 /// dialogs (both render the same control from the same shape).
+#[derive(Default)]
 pub(crate) struct SliderSpec {
     pub(crate) id: &'static str,
     pub(crate) label: &'static str,
@@ -392,6 +394,9 @@ pub(crate) struct SliderSpec {
     pub(crate) min: f32,
     pub(crate) max: f32,
     pub(crate) suffix: &'static str,
+    /// If set, the value is an index into these and the row shows the
+    /// name rather than the number. The slider snaps to whole steps.
+    pub(crate) choices: &'static [&'static str],
 }
 
 /// A labelled slider row used by the filter and adjustment dialogs.
@@ -407,14 +412,16 @@ pub(crate) fn param_slider(
         min,
         max,
         suffix,
+        choices,
     } = spec;
     let span = (max - min).max(1e-6);
     let ratio = ((value - min) / span).clamp(0.0, 1.0);
-    let display = if max - min > 20.0 {
-        format!("{value:.0}{suffix}")
-    } else {
-        format!("{value:.2}{suffix}")
+    let display = match choices.get((value.round().max(0.0) as usize).min(choices.len())) {
+        Some(name) => (*name).to_string(),
+        None if max - min > 20.0 => format!("{value:.0}{suffix}"),
+        None => format!("{value:.2}{suffix}"),
     };
+    let snap = !choices.is_empty();
     let set = on_change.clone();
     ui::field_row(
         label,
@@ -427,7 +434,10 @@ pub(crate) fn param_slider(
                 id,
                 ratio,
                 120.0,
-                move |ws, r, cx| set(ws, min + r * span, cx),
+                move |ws, r, cx| {
+                    let v = min + r * span;
+                    set(ws, if snap { v.round() } else { v }, cx)
+                },
                 cx,
             ))
             .child(
@@ -467,6 +477,7 @@ fn filter_dialog(
                 min: spec.min,
                 max: spec.max,
                 suffix: spec.suffix,
+                choices: spec.choices,
             },
             move |ws, v, cx| {
                 let mut next = None;
@@ -487,6 +498,21 @@ fn filter_dialog(
             },
             cx,
         ));
+    }
+    // Anything the filter wants the user to know before running it --
+    // for the neural ones, whether they found their model.
+    if let Some(note) = ws
+        .registry
+        .filters()
+        .find(|f| f.id() == id)
+        .and_then(|f| f.info())
+    {
+        body = body.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child(SharedString::from(note)),
+        );
     }
     body = body
         .child(ui::checkbox(
@@ -575,6 +601,7 @@ fn destructive_adjustment_dialog(
                 min: spec.min,
                 max: spec.max,
                 suffix: spec.suffix,
+                ..Default::default()
             },
             move |ws, v, cx| {
                 let mut next = None;
@@ -653,6 +680,126 @@ fn destructive_adjustment_dialog(
         body,
         actions,
     )
+}
+
+/// Filter ▸ Neural Filters ▸ Manage Models.
+///
+/// The style-transfer networks are megabytes each and are somebody else's
+/// work, so they are fetched here rather than shipped. The one that was
+/// trained for this application is built in and cannot be removed.
+fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let downloading = ws.model_downloads.clone();
+    let rows: Vec<gpui::AnyElement> = photoslop_neural::CATALOG
+        .iter()
+        .map(|spec| {
+            let id = spec.id;
+            let installed = photoslop_neural::installed(id);
+            let busy = downloading.contains(&id);
+            let size = photoslop_neural::installed_size(spec)
+                .map(|b| format!("{:.1} MB", b as f64 / (1 << 20) as f64))
+                .unwrap_or_else(|| format!("{:.1} MB", spec.bytes as f64 / (1 << 20) as f64));
+            let state = if spec.built_in() {
+                "Built in".to_string()
+            } else if busy {
+                "Downloading\u{2026}".to_string()
+            } else if installed {
+                format!("Installed \u{b7} {size}")
+            } else {
+                format!("Not installed \u{b7} {size}")
+            };
+            let action: gpui::AnyElement = if spec.built_in() {
+                div().into_any_element()
+            } else if busy {
+                div()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(ui::TEXT_DIM))
+                    .child("\u{2026}")
+                    .into_any_element()
+            } else if installed {
+                ui::button(
+                    "Remove",
+                    false,
+                    move |ws, _w, cx| ws.remove_model(id, cx),
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                ui::button(
+                    "Download",
+                    true,
+                    move |ws, _w, cx| ws.download_model(id, cx),
+                    cx,
+                )
+                .into_any_element()
+            };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .py_1()
+                .child(
+                    // Fixed rather than flex-grown: the notes are long
+                    // enough to need wrapping, and a grown column sizes to
+                    // its content and gets clipped instead.
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w(px(412.0))
+                        .flex_none()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .child(SharedString::from(spec.name)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(gpui::rgb(ui::TEXT_DIM))
+                                .child(SharedString::from(format!(
+                                    "{state} \u{b7} {}",
+                                    spec.license
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(gpui::rgb(ui::TEXT_DIM))
+                                .child(SharedString::from(spec.note)),
+                        ),
+                )
+                .child(action)
+                .into_any_element()
+        })
+        .collect();
+
+    let body = div()
+        .id("model-manager-body")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w(px(520.0))
+        .max_h(px(360.0))
+        .overflow_y_scroll()
+        .children(rows)
+        .child(
+            div()
+                .pt_2()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .child(SharedString::from(format!(
+                    "Models are kept in {}. Filters that have no model fall \
+                     back to signal processing and say so.",
+                    photoslop_neural::model_dir().display()
+                ))),
+        );
+    let actions = div().flex().flex_row().gap_2().child(ui::button(
+        "Close",
+        true,
+        |ws, _w, cx| ws.close_modal(cx),
+        cx,
+    ));
+    ui::modal_frame("Neural Filter Models", 560.0, body, actions)
 }
 
 /// Edit ▸ Content-Aware Scale.
@@ -765,6 +912,7 @@ fn stroke_dialog(
                 min: 1.0,
                 max: 250.0,
                 suffix: " px",
+                ..Default::default()
             },
             |ws, v, _cx| {
                 ws.update_modal(|m| {
@@ -886,6 +1034,7 @@ fn fill_dialog(
                 min: 0.0,
                 max: 100.0,
                 suffix: "%",
+                ..Default::default()
             },
             |ws, v, _cx| {
                 ws.update_modal(|m| {
@@ -951,6 +1100,7 @@ fn modify_dialog(
             },
             max,
             suffix: " px",
+            ..Default::default()
         },
         |ws, v, _cx| {
             ws.update_modal(|m| {
@@ -1044,6 +1194,7 @@ fn color_range_dialog(
                 min: 0.0,
                 max: 200.0,
                 suffix: "",
+                ..Default::default()
             },
             |ws, v, _cx| {
                 ws.update_modal(|m| {
@@ -1114,6 +1265,7 @@ fn adjustment_dialog(
                 min: spec.min,
                 max: spec.max,
                 suffix: spec.suffix,
+                ..Default::default()
             },
             move |ws, v, _cx| {
                 // Live preview: write straight onto the layer as the
@@ -1316,6 +1468,7 @@ fn export_dialog(
                 min: 1.0,
                 max: 100.0,
                 suffix: "",
+                ..Default::default()
             },
             |ws, v, _cx| {
                 ws.update_modal(|m| {

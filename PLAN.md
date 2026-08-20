@@ -40,13 +40,28 @@
 > turned Puppet Warp into a shear and a lossy CMYK round trip in Selective
 > Color.
 >
+> **M15 (a model behind the Neural Filters, 2026-08-20).** `crates/neural`
+> runs ONNX through `tract`, so inference is pure Rust with nothing to
+> install. Super Zoom gets `detail.onnx`, a 20k-parameter residual CNN
+> trained here on the Kodak suite (`tools/train/detail.py`) and shipped in
+> the binary: +0.70 dB over bicubic on held-out images, at 80 KB. Style
+> Transfer gets the ONNX Model Zoo's fast-neural-style networks, fetched
+> on demand and checked against the hashes upstream publishes. Those are
+> opset 9 and use `Upsample`, which `tract` never implemented, so
+> `crates/neural/src/compat.rs` rewrites the graph to opset 10 in memory
+> rather than re-hosting converted copies — verified bit-identical to the
+> reference toolchain's conversion. Both filters keep their classical path
+> as a fallback and say in the dialog which one ran.
+>
 > Known deferrals: the wgpu compositor — the CPU path meets the M8 interactivity target
 > on its own (measurements in §7/M8), so the GPU backend would add
 > complexity without a demonstrated win. Tablet pressure is carried end to
 > end and read on macOS; the other three platforms each need their own
-> tablet protocol and hardware to develop against. The Neural Filters,
-> Object Selection and Content-Aware Fill are classical implementations of
-> what Photoshop does with models, documented as such where they live. 3D
+> tablet protocol and hardware to develop against. Object Selection and
+> Content-Aware Fill are classical implementations of what Photoshop does
+> with models, documented as such where they live; of the Neural Filters,
+> Super Zoom and Style Transfer now run real networks and the
+> remainder are signal processing. 3D
 > was never planned; Adobe deprecated it immediately after CC 2020 and
 > removed it in 2022. macOS
 > signing and notarization are wired into the release workflow but

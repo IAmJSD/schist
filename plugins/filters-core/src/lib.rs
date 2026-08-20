@@ -33,6 +33,25 @@ pub const fn param(
         max,
         default,
         suffix,
+        choices: &[],
+    }
+}
+
+/// A parameter that picks from a list. The value is the index.
+pub const fn choice(
+    key: &'static str,
+    label: &'static str,
+    choices: &'static [&'static str],
+    default: usize,
+) -> FilterParam {
+    FilterParam {
+        key,
+        label,
+        min: 0.0,
+        max: (choices.len() - 1) as f32,
+        default: default as f32,
+        suffix: "",
+        choices,
     }
 }
 
@@ -170,6 +189,7 @@ impl FilterPlugin for GaussianBlur {
             max: 100.0,
             default: 4.0,
             suffix: " px",
+            choices: &[],
         }]
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {
@@ -197,6 +217,7 @@ impl FilterPlugin for BoxBlur {
             max: 100.0,
             default: 4.0,
             suffix: " px",
+            choices: &[],
         }]
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {
@@ -233,6 +254,7 @@ impl FilterPlugin for MotionBlur {
                 max: 200.0,
                 default: 12.0,
                 suffix: " px",
+                choices: &[],
             },
             FilterParam {
                 key: "angle",
@@ -241,6 +263,7 @@ impl FilterPlugin for MotionBlur {
                 max: 180.0,
                 default: 0.0,
                 suffix: "°",
+                choices: &[],
             },
         ]
     }
@@ -303,6 +326,7 @@ impl FilterPlugin for Sharpen {
             max: 300.0,
             default: 100.0,
             suffix: "%",
+            choices: &[],
         }]
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {
@@ -338,6 +362,7 @@ impl FilterPlugin for UnsharpMask {
                 max: 500.0,
                 default: 100.0,
                 suffix: "%",
+                choices: &[],
             },
             FilterParam {
                 key: "radius",
@@ -346,6 +371,7 @@ impl FilterPlugin for UnsharpMask {
                 max: 50.0,
                 default: 2.0,
                 suffix: " px",
+                choices: &[],
             },
             FilterParam {
                 key: "threshold",
@@ -354,6 +380,7 @@ impl FilterPlugin for UnsharpMask {
                 max: 255.0,
                 default: 0.0,
                 suffix: "",
+                choices: &[],
             },
         ]
     }
@@ -424,6 +451,7 @@ impl FilterPlugin for AddNoise {
                 max: 100.0,
                 default: 10.0,
                 suffix: "%",
+                choices: &[],
             },
             FilterParam {
                 key: "monochrome",
@@ -432,6 +460,7 @@ impl FilterPlugin for AddNoise {
                 max: 1.0,
                 default: 1.0,
                 suffix: "",
+                choices: &[],
             },
         ]
     }
@@ -493,6 +522,7 @@ impl FilterPlugin for Median {
             max: 10.0,
             default: 2.0,
             suffix: " px",
+            choices: &[],
         }]
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {

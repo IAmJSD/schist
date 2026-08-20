@@ -207,6 +207,7 @@ pub fn render(
                     min: spec.min,
                     max: spec.max,
                     suffix: spec.suffix,
+                    choices: spec.choices,
                 },
                 move |ws, v, cx| {
                     edit(ws, cx, |stack, selected| {

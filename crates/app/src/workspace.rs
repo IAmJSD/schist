@@ -85,6 +85,9 @@ pub struct Workspace {
     /// View rotation in radians. Display only: the pixels are untouched,
     /// so this is a change of viewpoint rather than an edit.
     pub rotation: f32,
+    /// Models currently being fetched, so the dialog can say so and a
+    /// second click does not start a second download.
+    pub model_downloads: Vec<&'static str>,
     pub ant_phase: u32,
     /// Whether the last frame drew any tool overlay, so the ants timer
     /// knows to keep repainting for tools that draw their own.
@@ -453,6 +456,8 @@ pub enum Modal {
     ColorRange { tolerance: f32, target: Rgba },
     /// The third-party plugin manager.
     PluginManager,
+    /// Neural Filters model downloads.
+    ModelManager,
     /// Application preferences.
     Preferences,
     /// Export with format options.
@@ -518,6 +523,7 @@ impl Workspace {
             open_popup: None,
             open_submenu: Vec::new(),
             rotation: 0.0,
+            model_downloads: Vec::new(),
             ant_phase: 0,
             tool_has_overlay: false,
             curve_channel: Default::default(),
@@ -1998,6 +2004,55 @@ impl Workspace {
         false
     }
 
+    /// Download a Neural Filters model and install it.
+    ///
+    /// Runs off the UI thread: these are megabytes over the network, and
+    /// the window should stay usable while one arrives.
+    pub fn download_model(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        let Some(spec) = photoslop_neural::spec(id) else {
+            return;
+        };
+        let Some(url) = spec.url else { return };
+        if self.model_downloads.contains(&id) {
+            return;
+        }
+        self.model_downloads.push(id);
+        self.status = format!("Downloading {}\u{2026}", spec.name).into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { fetch_model(url) })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.model_downloads.retain(|d| *d != id);
+                let Some(spec) = photoslop_neural::spec(id) else {
+                    return;
+                };
+                ws.status = match fetched.and_then(|bytes| {
+                    photoslop_neural::install(spec, &bytes).map_err(|e| e.to_string())
+                }) {
+                    Ok(path) => format!("Installed {} to {}", spec.name, path.display()).into(),
+                    Err(e) => format!("{}: {e}", spec.name).into(),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn remove_model(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        let Some(spec) = photoslop_neural::spec(id) else {
+            return;
+        };
+        self.status = match photoslop_neural::uninstall(spec) {
+            Ok(()) => format!("Removed {}", spec.name).into(),
+            Err(e) => format!("{e}").into(),
+        };
+        cx.notify();
+    }
+
     /// Re-rasterize any layer whose effects are stale.
     ///
     /// The styled raster is derived from the layer's pixels plus its
@@ -2618,6 +2673,7 @@ impl Workspace {
             }
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
+            | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }
             | Modal::Fill { .. }
@@ -4861,4 +4917,25 @@ fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &
         damage.push(before);
         damage.push(layer.content_bounds());
     }
+}
+
+/// Fetch a model over HTTP. Blocking, so it runs on a background thread.
+fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    // Models are single-digit megabytes; the cap is a guard against a
+    // redirect to something enormous, not a real limit.
+    const MAX: u64 = 256 << 20;
+    let mut response = ureq::get(url)
+        .header("User-Agent", "photoslop-model-fetch")
+        .call()
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    let reader = response.body_mut().as_reader();
+    std::io::Read::take(reader, MAX)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Err("empty response".into());
+    }
+    Ok(bytes)
 }

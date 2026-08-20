@@ -380,6 +380,9 @@ impl WasmFilter {
                 max: p.max,
                 default: p.default,
                 suffix: Box::leak(p.suffix.clone().into_boxed_str()),
+                // The wasm ABI has no way to declare a list of names yet,
+                // so a plugin's enumerated parameter shows as a number.
+                choices: &[],
             })
             .collect();
         WasmFilter {

@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 photoslop-plugin-api.workspace = true
+photoslop-neural.workspace = true
 photoslop-color.workspace = true
