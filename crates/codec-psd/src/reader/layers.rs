@@ -412,13 +412,17 @@ fn decode_layer_channels(
             }
             1 => unpack_channel(&mut ch, rows, row_bytes, header.psb)?,
             // Note: for 32-bit docs RLE data is simply PackBits over the raw
-            // big-endian f32 byte stream (Photoshop itself prefers zip with
-            // prediction for 32-bit, which lands here as Unsupported).
+            // big-endian f32 byte stream; Photoshop itself prefers zip with
+            // prediction there, which is method 3 below.
             2 | 3 => {
-                return Err(PsdError::Unsupported(format!(
-                    "zip-compressed channel data (method {comp}) in layer \"{}\"",
-                    rec.name
-                )))
+                let rest = ch.remaining();
+                crate::zip::decode_channel(
+                    ch.take(rest)?,
+                    rows,
+                    row_bytes,
+                    header.depth,
+                    comp == 3,
+                )?
             }
             c => {
                 return Err(PsdError::Corrupt(format!(
@@ -552,8 +556,16 @@ fn make_layer(rec: Rec, mask_tiles: Option<MaskTileMap>, kind: LayerKind) -> Lay
         locked: false,
         mask,
         kind,
+        // Effects: decoded so they render, and kept in `extras` too so a
+        // file we never touch still round-trips byte-for-byte.
+        style: rec
+            .extras
+            .iter()
+            .find(|b| &b.key == b"lfx2")
+            .and_then(|b| crate::effects::read_lfx2(&b.data))
+            .unwrap_or_default(),
         extras: rec.extras,
-        style: Default::default(),
+        smart: None,
         styled: None,
         render_offset: (0, 0),
     }

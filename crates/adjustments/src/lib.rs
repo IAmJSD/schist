@@ -8,7 +8,9 @@
 //! Colour math runs on straight-alpha RGB in 0..1; alpha is never touched —
 //! an adjustment recolours, it doesn't reshape coverage.
 
-pub mod descriptor;
+/// PSD descriptor decoding, re-exported so callers that already reach for
+/// it through this crate keep working.
+pub use photoslop_psd_descriptor as descriptor;
 
 use photoslop_color::Rgba;
 use photoslop_core::AdjustmentKind;

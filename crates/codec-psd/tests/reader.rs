@@ -427,14 +427,45 @@ fn resolution_icc_and_resource_preservation() {
 }
 
 #[test]
-fn zip_compressed_channel_is_clean_unsupported_error() {
+fn reads_zip_compressed_channels() {
+    // Photoshop writes 16- and 32-bit files this way by default, so these
+    // used to be files that opened fine there and not here.
+    for predict in [false, true] {
+        let mut psd = Psd::rgb8(8, 8);
+        let mut l = L::solid("Z", (0, 0, 8, 8), [10, 20, 30, 255]);
+        l.zip = true;
+        l.predict = predict;
+        psd.layers.push(l);
+        let doc = read_psd(&psd.build()).expect("zip channels read");
+        let px = doc.tree.layers[0]
+            .as_raster()
+            .unwrap()
+            .tiles
+            .pixel(4, 4)
+            .to_u8();
+        assert_eq!(
+            [px[0], px[1], px[2]],
+            [10, 20, 30],
+            "predict={predict}: wrong pixels"
+        );
+    }
+}
+
+#[test]
+fn corrupt_zip_channel_errors_cleanly() {
     let mut psd = Psd::rgb8(8, 8);
     let mut l = L::solid("Z", (0, 0, 8, 8), [1, 2, 3, 255]);
     l.zip = true;
     psd.layers.push(l);
-    match read_psd(&psd.build()) {
-        Err(PsdError::Unsupported(msg)) => assert!(msg.contains("zip"), "message: {msg}"),
-        other => panic!("expected Unsupported, got {other:?}"),
+    let mut bytes = psd.build();
+    // Corrupt the tail, where the compressed channel data lives.
+    let n = bytes.len();
+    for b in bytes[n - 40..].iter_mut() {
+        *b ^= 0xFF;
+    }
+    match read_psd(&bytes) {
+        Err(PsdError::Corrupt(_)) | Err(PsdError::Unsupported(_)) | Ok(_) => {}
+        other => panic!("expected a clean result, got {other:?}"),
     }
 }
 

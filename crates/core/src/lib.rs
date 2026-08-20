@@ -12,6 +12,7 @@ pub mod layer;
 pub mod path;
 pub mod resample;
 pub mod selection;
+pub mod smart;
 pub mod style;
 pub mod tile;
 
@@ -28,6 +29,7 @@ pub use layer::{
 pub use path::{Anchor, SubPath, VectorPath};
 pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
+pub use smart::SmartObject;
 pub use style::{
     BevelStyle, BevelStyle_, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
     GradientShape, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, Technique,

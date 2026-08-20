@@ -93,6 +93,13 @@ pub enum EditOp {
         before: (Option<String>, Vec<u8>),
         after: (Option<String>, Vec<u8>),
     },
+    /// A layer's smart-object payload changed (converted, rasterized, or
+    /// re-placed by a transform).
+    SmartObjectSet {
+        layer: LayerId,
+        before: Option<Box<crate::smart::SmartObject>>,
+        after: Option<Box<crate::smart::SmartObject>>,
+    },
     /// A layer's effects changed.
     LayerStyleSet {
         layer: LayerId,

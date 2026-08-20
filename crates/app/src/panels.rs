@@ -244,6 +244,9 @@ fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 Cmd("layer.duplicate"),
                 Cmd("layer.delete"),
                 Sep,
+                Cmd("layer.smart_object"),
+                Cmd("layer.rasterize"),
+                Sep,
                 App("Layer Style…", LayerStyleItem, None),
                 Sep,
                 Sub(
@@ -1499,6 +1502,8 @@ struct LayerRow {
     open: bool,
     /// The layer has effects switched on, shown as Photoshop's fx badge.
     fx: bool,
+    /// The layer is a smart object.
+    smart: bool,
 }
 
 enum RowKind {
@@ -1528,6 +1533,7 @@ fn flatten_layers(
             active: Some(layer.id) == active,
             open,
             fx: !layer.style.is_empty(),
+            smart: layer.smart.is_some(),
         });
         if let LayerKind::Group(g) = &layer.kind {
             if g.open {
@@ -1804,6 +1810,16 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                 .overflow_hidden()
                                 .child(row.name),
                         )
+                        .children(row.smart.then(|| {
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .rounded_sm()
+                                .text_size(px(10.0))
+                                .text_color(gpui::rgb(TEXT_DIM))
+                                .bg(gpui::rgb(0x2A2A2A))
+                                .child("SO")
+                        }))
                         .children(row.fx.then(|| {
                             div()
                                 .flex_none()
@@ -2010,6 +2026,9 @@ fn context_entries(target: ContextTarget) -> Vec<ContextEntry> {
             Sep,
             Cmd("layer.duplicate"),
             Cmd("layer.delete"),
+            Sep,
+            Cmd("layer.smart_object"),
+            Cmd("layer.rasterize"),
             Sep,
             Cmd("layer.group"),
             Cmd("layer.clipping_mask"),

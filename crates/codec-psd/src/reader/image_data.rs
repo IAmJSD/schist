@@ -66,9 +66,19 @@ pub fn parse_image_data(
             }
         }
         2 | 3 => {
-            return Err(PsdError::Unsupported(format!(
-                "zip-compressed merged image data (method {comp})"
-            )))
+            // The merged image stores its channels back to back in one
+            // stream, so it is inflated whole and then sliced.
+            let rest = cur.remaining();
+            let all = crate::zip::decode_channel(
+                cur.take(rest)?,
+                rows * channels,
+                row_bytes,
+                header.depth,
+                comp == 3,
+            )?;
+            for ch in 0..channels {
+                planes.push(all[ch * plane_bytes..(ch + 1) * plane_bytes].to_vec());
+            }
         }
         c => {
             return Err(PsdError::Corrupt(format!(

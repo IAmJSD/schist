@@ -413,3 +413,90 @@ fn merged_composite_reads_in_imagemagick() {
         "right half should be blue, got: {text}"
     );
 }
+
+#[test]
+fn round_trips_layer_effects_through_a_file() {
+    use photoslop_core::{StrokePosition, Technique};
+
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "styled",
+        IntRect::new(4, 4, 40, 30),
+        [200, 40, 40, 255],
+        Depth::Eight,
+    );
+    layer.style.drop_shadow.enabled = true;
+    layer.style.drop_shadow.settings.angle = 45.0;
+    layer.style.drop_shadow.settings.distance = 9.0;
+    layer.style.drop_shadow.settings.size = 4.0;
+    layer.style.drop_shadow.settings.color = Rgba::new(0.1, 0.2, 0.3, 1.0);
+    layer.style.stroke.enabled = true;
+    layer.style.stroke.settings.position = StrokePosition::Inside;
+    layer.style.stroke.settings.size = 5.0;
+    layer.style.outer_glow.enabled = true;
+    layer.style.outer_glow.settings.technique = Technique::Precise;
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let style = back.tree.layers[0].style;
+
+    assert!(style.drop_shadow.enabled, "drop shadow lost");
+    assert!((style.drop_shadow.settings.angle - 45.0).abs() < 0.01);
+    assert!((style.drop_shadow.settings.distance - 9.0).abs() < 0.01);
+    assert!((style.drop_shadow.settings.color.b - 0.3).abs() < 0.01);
+    assert!(style.stroke.enabled, "stroke lost");
+    assert_eq!(style.stroke.settings.position, StrokePosition::Inside);
+    assert!((style.stroke.settings.size - 5.0).abs() < 0.01);
+    assert_eq!(style.outer_glow.settings.technique, Technique::Precise);
+}
+
+#[test]
+fn a_layer_with_no_effects_writes_no_effects_block() {
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "plain",
+        IntRect::new(0, 0, 10, 10),
+        [1, 2, 3, 255],
+        Depth::Eight,
+    ));
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert!(
+        back.tree.layers[0].style.is_empty(),
+        "effects appeared from nowhere"
+    );
+    assert!(
+        !back.tree.layers[0].extras.iter().any(|b| &b.key == b"lfx2"),
+        "an empty lfx2 block was written"
+    );
+}
+
+#[test]
+fn editing_effects_replaces_the_preserved_block() {
+    // A file arrives with an effects block we did not write; the user then
+    // changes the effects. The saved file must carry the new ones, and
+    // exactly one lfx2 block.
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "styled",
+        IntRect::new(0, 0, 20, 20),
+        [9, 9, 9, 255],
+        Depth::Eight,
+    );
+    layer.extras.push(RawBlock {
+        key: *b"lfx2",
+        data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    });
+    layer.style.color_overlay.enabled = true;
+    layer.style.color_overlay.settings.color = Rgba::new(0.0, 1.0, 0.0, 1.0);
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let blocks = back.tree.layers[0]
+        .extras
+        .iter()
+        .filter(|b| &b.key == b"lfx2")
+        .count();
+    assert_eq!(blocks, 1, "expected exactly one effects block");
+    assert!(back.tree.layers[0].style.color_overlay.enabled);
+    assert!((back.tree.layers[0].style.color_overlay.settings.color.g - 1.0).abs() < 0.01);
+}

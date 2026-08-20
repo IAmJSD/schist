@@ -209,6 +209,10 @@ pub struct Layer {
     pub extras: Vec<RawBlock>,
     /// Layer effects. Empty by default, so a layer costs nothing extra.
     pub style: crate::style::LayerStyle,
+    /// Set when this layer is a smart object: its `kind` still holds the
+    /// rendered pixels, but they are derived from here and are re-rendered
+    /// from the source whenever the transform changes.
+    pub smart: Option<Box<crate::smart::SmartObject>>,
     /// The layer's pixels with `style` rasterized around them, rebuilt by
     /// `photoslop-layer-fx` whenever the pixels or the style change. This
     /// is a derived cache: never saved, never compared, and dropped as
@@ -238,6 +242,7 @@ impl Layer {
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
             style: crate::style::LayerStyle::default(),
+            smart: None,
             styled: None,
             render_offset: (0, 0),
         }

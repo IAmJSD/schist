@@ -513,6 +513,51 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
                 ctx.doc.active_layer = Some(new_id);
             }),
+            cmd(
+                "layer.smart_object",
+                "Convert to Smart Object",
+                None,
+                |ctx| {
+                    let Some(id) = ctx.doc.active_layer else {
+                        return;
+                    };
+                    let Some(layer) = ctx.doc.tree.find(id) else {
+                        return;
+                    };
+                    if layer.smart.is_some() {
+                        return; // already one
+                    }
+                    let Some(raster) = layer.as_raster() else {
+                        return;
+                    };
+                    // The layer's current pixels become the untouched
+                    // source; what is on the canvas does not change.
+                    let so =
+                        photoslop_core::SmartObject::wrap(raster.tiles.clone(), layer.name.clone());
+                    let mut edit = ctx.doc.begin_edit("Convert to Smart Object");
+                    edit.set_smart_object(id, Some(Box::new(so)));
+                    edit.commit();
+                },
+            ),
+            cmd("layer.rasterize", "Rasterize Layer", None, |ctx| {
+                let Some(id) = ctx.doc.active_layer else {
+                    return;
+                };
+                if ctx
+                    .doc
+                    .tree
+                    .find(id)
+                    .and_then(|l| l.smart.as_ref())
+                    .is_none()
+                {
+                    return;
+                }
+                // Drop the source; the rendered pixels stay exactly as they
+                // are, so this is only a loss of future editability.
+                let mut edit = ctx.doc.begin_edit("Rasterize Layer");
+                edit.set_smart_object(id, None);
+                edit.commit();
+            }),
             cmd("layer.delete", "Delete Layer", None, |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;

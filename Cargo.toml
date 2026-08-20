@@ -6,6 +6,7 @@ members = [
     "crates/app",
     "crates/core",
     "crates/layer-fx",
+    "crates/psd-descriptor",
     "crates/plugin-api",
     "crates/pixel-ops",
     "crates/compositor",
@@ -45,6 +46,10 @@ photoslop-color = { path = "crates/color" }
 photoslop-codec-psd = { path = "crates/codec-psd" }
 photoslop-vector = { path = "crates/vector" }
 photoslop-layer-fx = { path = "crates/layer-fx" }
+photoslop-psd-descriptor = { path = "crates/psd-descriptor" }
+
+# zlib for PSD's zip-compressed channels; pure Rust, no C toolchain.
+miniz_oxide = "0.8"
 photoslop-text-engine = { path = "crates/text-engine" }
 photoslop-adjustments = { path = "crates/adjustments" }
 photoslop-plugin-host-wasm = { path = "crates/plugin-host-wasm" }

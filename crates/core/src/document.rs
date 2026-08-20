@@ -307,6 +307,21 @@ impl Document {
                 self.add_damage(bounds);
                 self.structure_changed();
             }
+            EditOp::SmartObjectSet {
+                layer,
+                before,
+                after,
+            } => {
+                let want = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    l.smart = want.clone();
+                }
+                self.structure_changed();
+            }
             EditOp::LayerStyleSet {
                 layer,
                 before,
@@ -598,6 +613,23 @@ impl<'a> EditBuilder<'a> {
 
     /// Record an adjustment layer's parameter change (the caller has
     /// already applied it, e.g. through a live dialog preview).
+    /// Attach, replace or clear a layer's smart-object payload.
+    pub fn set_smart_object(
+        &mut self,
+        layer: LayerId,
+        after: Option<Box<crate::smart::SmartObject>>,
+    ) {
+        let before = self.doc.tree.find(layer).and_then(|l| l.smart.clone());
+        if let Some(l) = self.doc.tree.find_mut(layer) {
+            l.smart = after.clone();
+        }
+        self.ops.push(EditOp::SmartObjectSet {
+            layer,
+            before,
+            after,
+        });
+    }
+
     /// Record a change to a layer's effects.
     pub fn record_layer_style(
         &mut self,

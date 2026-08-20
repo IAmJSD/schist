@@ -4163,6 +4163,7 @@ dependencies = [
  "log",
  "photoslop-color",
  "photoslop-core",
+ "photoslop-psd-descriptor",
  "serde",
  "serde_json",
 ]
@@ -4212,9 +4213,11 @@ dependencies = [
  "anyhow",
  "byteorder",
  "log",
+ "miniz_oxide",
  "photoslop-color",
  "photoslop-compositor",
  "photoslop-core",
+ "photoslop-psd-descriptor",
  "thiserror 2.0.20",
 ]
 
@@ -4350,6 +4353,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "photoslop-psd-descriptor"
+version = "0.1.0"
 
 [[package]]
 name = "photoslop-text-engine"

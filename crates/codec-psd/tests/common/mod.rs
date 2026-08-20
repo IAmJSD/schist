@@ -55,8 +55,10 @@ pub struct L {
     pub clipping: u8,
     pub flags: u8,
     pub rle: bool,
-    /// Emit channel compression method 2 (zip) with a bogus payload.
+    /// Emit channel compression method 2 (zip) or, with `predict`, 3.
     pub zip: bool,
+    /// With `zip`, use method 3 (zip with prediction) instead of 2.
+    pub predict: bool,
     /// ('lsct' divider type, optional blend key inside the lsct block).
     pub lsct: Option<(u32, Option<[u8; 4]>)>,
     pub mask: Option<Mask>,
@@ -79,6 +81,7 @@ impl Default for L {
             flags: 0,
             rle: false,
             zip: false,
+            predict: false,
             lsct: None,
             mask: None,
             extra_blocks: Vec::new(),
@@ -290,7 +293,11 @@ impl Psd {
                 };
                 let mut data = Vec::new();
                 let comp: u16 = if l.zip {
-                    2
+                    if l.predict {
+                        3
+                    } else {
+                        2
+                    }
                 } else if l.rle {
                     1
                 } else {
@@ -313,7 +320,18 @@ impl Psd {
                             data.extend(enc);
                         }
                     }
-                    _ => data.extend(&plane), // raw, or bogus zip payload
+                    2 | 3 => data.extend(photoslop_codec_psd::zip::encode_channel(
+                        &plane,
+                        rows,
+                        row_bytes,
+                        match self.depth {
+                            16 => photoslop_color::Depth::Sixteen,
+                            32 => photoslop_color::Depth::ThirtyTwo,
+                            _ => photoslop_color::Depth::Eight,
+                        },
+                        comp == 3,
+                    )),
+                    _ => data.extend(&plane), // raw
                 }
                 (id, data)
             })

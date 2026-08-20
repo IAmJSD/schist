@@ -386,15 +386,35 @@ impl ToolPlugin for TransformTool {
             .doc
             .canvas_rect()
             .inflated(session.base.width().max(session.base.height()));
-        let tiles = photoslop_core::resample::transform_tiles(
-            &session.original,
-            &session.matrix(),
-            depth,
-            ctx.state.resample,
-            clip,
-        );
+        // A smart object composes the transform onto its own and
+        // re-renders from its untouched source, so transforming it twice
+        // costs no more quality than transforming it once.
+        let smart = ctx
+            .doc
+            .tree
+            .find(session.layer)
+            .and_then(|l| l.smart.as_deref())
+            .map(|so| {
+                let mut next = so.clone();
+                next.filter = ctx.state.resample;
+                next.apply(&session.matrix());
+                next
+            });
+        let tiles = match &smart {
+            Some(so) => so.render(depth, clip),
+            None => photoslop_core::resample::transform_tiles(
+                &session.original,
+                &session.matrix(),
+                depth,
+                ctx.state.resample,
+                clip,
+            ),
+        };
         let mut edit = ctx.doc.begin_edit("Free Transform");
         edit.replace_layer_tiles(session.layer, tiles);
+        if let Some(so) = smart {
+            edit.set_smart_object(session.layer, Some(Box::new(so)));
+        }
         edit.commit();
     }
 

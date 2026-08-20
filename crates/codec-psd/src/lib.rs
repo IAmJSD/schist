@@ -14,9 +14,11 @@
 //! Deliberately deferred: zip/zip-with-prediction channel compression,
 //! Bitmap/Indexed/CMYK/Lab/Duotone/Multichannel modes.
 
+pub mod effects;
 pub mod error;
 mod reader;
 mod writer;
+pub mod zip;
 
 pub use error::PsdError;
 pub use reader::read_psd;
