@@ -24,8 +24,12 @@ fn main() {
                 if std::env::var("AFTRIAGE_NAMES").is_ok() {
                     fn walk(layers: &[schist_core::Layer], depth: usize) {
                         for l in layers {
-                            println!("{}- {:?}{}", "  ".repeat(depth), l.name,
-                                if l.mask.is_some() { " [mask]" } else { "" });
+                            println!(
+                                "{}- {:?}{}",
+                                "  ".repeat(depth),
+                                l.name,
+                                if l.mask.is_some() { " [mask]" } else { "" }
+                            );
                             if let Some(children) = l.children() {
                                 walk(children, depth + 1);
                             }

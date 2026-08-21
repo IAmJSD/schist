@@ -73,9 +73,7 @@ impl CodecPlugin for AffinityCodec {
                         .map(|(name, kind)| format!("{name} [{kind}]"))
                         .collect::<Vec<_>>()
                 );
-                if let Some(mut reference) =
-                    self.preview_layer(bytes, doc.width, doc.height)
-                {
+                if let Some(mut reference) = self.preview_layer(bytes, doc.width, doc.height) {
                     reference.visible = false;
                     doc.tree.layers.insert(0, reference);
                     doc.damage_all();
@@ -414,7 +412,11 @@ mod tests {
                 continue; // the corpus README
             }
             let bytes = std::fs::read(entry.path()).unwrap();
-            assert!(AffinityCodec.probe(&bytes), "{:?} lacks magic", entry.path());
+            assert!(
+                AffinityCodec.probe(&bytes),
+                "{:?} lacks magic",
+                entry.path()
+            );
             let doc = AffinityCodec.import(&bytes).unwrap();
             assert!(doc.width > 0 && doc.height > 0);
         }

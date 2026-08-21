@@ -100,11 +100,7 @@ fn rasterize_into(
 /// Insert a live shape layer. Its pixels are left empty: the app's
 /// re-rasterization pass fills them in from the shape on the next frame,
 /// and again whenever the shape changes.
-pub(crate) fn commit_shape_layer(
-    doc: &mut Document,
-    shape: schist_core::VectorShape,
-    name: &str,
-) {
+pub(crate) fn commit_shape_layer(doc: &mut Document, shape: schist_core::VectorShape, name: &str) {
     let mut layer = Layer::new_raster(name);
     // Rasterize straight away rather than waiting for the next frame's
     // refresh, so the shape appears the moment it is drawn.

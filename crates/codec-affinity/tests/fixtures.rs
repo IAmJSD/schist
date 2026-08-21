@@ -15,7 +15,12 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
     // in addition.
     let mut dirs = vec![fixture_dir()];
     if let Ok(extra) = std::env::var("SCHIST_AFFINITY_CORPUS") {
-        dirs.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+        dirs.extend(
+            extra
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        );
     }
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     for dir in dirs {
@@ -46,8 +51,8 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn archives_parse_and_all_entries_extract() {
     for (name, bytes) in fixtures() {
-        let archive = schist_codec_affinity::Archive::parse(&bytes)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let archive =
+            schist_codec_affinity::Archive::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         let names: Vec<String> = archive.names().map(str::to_owned).collect();
         assert!(names.iter().any(|n| n == "doc.dat"), "{name}: no doc.dat");
         for entry_name in &names {
@@ -65,8 +70,8 @@ fn archives_parse_and_all_entries_extract() {
 #[test]
 fn graphs_parse() {
     for (name, bytes) in fixtures() {
-        let dump = schist_codec_affinity::import::dump(&bytes)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let dump =
+            schist_codec_affinity::import::dump(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(dump.contains("DocR"), "{name}: no document root in dump");
         println!("=== {name}: dump {} chars", dump.len());
     }
@@ -122,8 +127,8 @@ fn raster_pixels_land_where_the_file_says() {
 #[test]
 fn documents_import() {
     for (name, bytes) in fixtures() {
-        let (doc, report) = schist_codec_affinity::read_affinity(&bytes)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (doc, report) =
+            schist_codec_affinity::read_affinity(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(doc.width > 0 && doc.height > 0, "{name}: empty canvas");
         println!(
             "{name}: {}×{}, {} raster, {} groups, {} skipped {:?}",

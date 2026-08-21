@@ -124,7 +124,12 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
             (y1 - y0).round().max(0.0) as u32,
         ),
         _ => match f64s(doc_node, b"DfSz") {
-            Some([w, h]) => (0.0, 0.0, w.round().max(0.0) as u32, h.round().max(0.0) as u32),
+            Some([w, h]) => (
+                0.0,
+                0.0,
+                w.round().max(0.0) as u32,
+                h.round().max(0.0) as u32,
+            ),
             _ => return Err(malformed("no spread bounds or document size")),
         },
     };
@@ -153,9 +158,7 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
     // an evicted composite cache here (statuses all empty) — absence,
     // not content, so it must not spoil the report.
     if let Some(ras) = graph.child(spread, b"RasS") {
-        let has_content = graph
-            .child(ras, b"Bitm")
-            .is_some_and(bitmap_has_content);
+        let has_content = graph.child(ras, b"Bitm").is_some_and(bitmap_has_content);
         if has_content {
             if let Some(layer) = walker.raster_layer(ras, "Background") {
                 doc.push_layer(layer);
@@ -369,7 +372,8 @@ impl Walker<'_> {
             return None;
         }
 
-        let square = matches!(shpe.field(b"ShCR"), Some(Value::VecF(r)) if r.iter().all(|v| *v == 0.0));
+        let square =
+            matches!(shpe.field(b"ShCR"), Some(Value::VecF(r)) if r.iter().all(|v| *v == 0.0));
         let kind_name = match &shpe.type_tag().to_be_bytes() {
             b"ShNR" | b"ShRR" if square => "Rectangle",
             b"ShNR" | b"ShRR" => "Rounded Rectangle",
@@ -423,9 +427,7 @@ impl Walker<'_> {
         for (_, value) in &data.fields {
             match value {
                 Value::Bool(c) => closed = *c,
-                Value::Array(items)
-                    if items.iter().any(|v| matches!(v, Value::Curve(_))) =>
-                {
+                Value::Array(items) if items.iter().any(|v| matches!(v, Value::Curve(_))) => {
                     let mut records = Vec::new();
                     for item in items {
                         let Value::Curve(raw) = item else { continue };
@@ -469,7 +471,9 @@ impl Walker<'_> {
         let fill = fill_desc.first().and_then(|f| descriptor_color(graph, f));
         let mut gradient = match fill {
             Some(_) => None,
-            None => fill_desc.first().and_then(|f| descriptor_gradient(graph, f)),
+            None => fill_desc
+                .first()
+                .and_then(|f| descriptor_gradient(graph, f)),
         };
         // Gradient axis into document space.
         if let Some(g) = &mut gradient {
@@ -534,11 +538,7 @@ impl Walker<'_> {
                 .collect();
             (out.len() >= 8).then_some(out)
         };
-        for (src, dst) in [
-            (b"DSrA", b"DDsA"),
-            (b"DSrB", b"DDsB"),
-            (b"Src ", b"Dst "),
-        ] {
+        for (src, dst) in [(b"DSrA", b"DDsA"), (b"DSrB", b"DDsB"), (b"Src ", b"Dst ")] {
             match (corners(src), corners(dst)) {
                 (Some(a), Some(b)) => {
                     if a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-6) {
@@ -637,7 +637,12 @@ impl Walker<'_> {
                 return;
             }
         };
-        let rect = self.placement(mask_node, &format!("{} (mask)", layer.name), gray.width, gray.height);
+        let rect = self.placement(
+            mask_node,
+            &format!("{} (mask)", layer.name),
+            gray.width,
+            gray.height,
+        );
         let gray = resample_to(gray, rect.width() as u32, rect.height() as u32);
         if rect.is_empty()
             || gray.pixels.len() != rect.width() as usize * rect.height() as usize * 4
@@ -879,9 +884,17 @@ impl Walker<'_> {
             }
         }
         let c = self.node_ctm(node, name);
-        let (dw, dh) = ((w as f64 * c[0].abs()).round(), (h as f64 * c[1].abs()).round());
+        let (dw, dh) = (
+            (w as f64 * c[0].abs()).round(),
+            (h as f64 * c[1].abs()).round(),
+        );
         if dw >= 1.0 && dh >= 1.0 && dw < (1 << 24) as f64 && dh < (1 << 24) as f64 {
-            return IntRect::from_xywh(c[2].round() as i32, c[3].round() as i32, dw as u32, dh as u32);
+            return IntRect::from_xywh(
+                c[2].round() as i32,
+                c[3].round() as i32,
+                dw as u32,
+                dh as u32,
+            );
         }
         IntRect::from_size(w, h)
     }
@@ -956,7 +969,11 @@ fn bitmap_has_content(bitm: &Node) -> bool {
     all_statuses(bitm).iter().any(|&s| s > 1)
 }
 
-fn decode_bitmap(archive: &Archive, graph: &Graph, bitm: &Node) -> Result<RgbaImage, AffinityError> {
+fn decode_bitmap(
+    archive: &Archive,
+    graph: &Graph,
+    bitm: &Node,
+) -> Result<RgbaImage, AffinityError> {
     let frmt = enum_of(bitm, b"Frmt").ok_or_else(|| malformed("bitmap has no format"))?;
     let fmt = format(frmt).ok_or_else(|| malformed(format!("unknown pixel format {frmt}")))?;
     let width = i32_of(bitm, b"BmpW").unwrap_or(0);
@@ -1034,7 +1051,12 @@ fn decode_bitmap(archive: &Archive, graph: &Graph, bitm: &Node) -> Result<RgbaIm
                         sample(&planes[2], x, y),
                         sample(&planes[3], x, y),
                     );
-                    ((1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - yl) * (1.0 - k), sample(&planes[4], x, y))
+                    (
+                        (1.0 - c) * (1.0 - k),
+                        (1.0 - m) * (1.0 - k),
+                        (1.0 - yl) * (1.0 - k),
+                        sample(&planes[4], x, y),
+                    )
                 }
                 FormatKind::Lab => {
                     let l = sample(&planes[0], x, y) * 100.0;
@@ -1116,8 +1138,14 @@ fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
                     .ok_or_else(|| malformed(format!("missing tile entry {name:?}")))?;
                 let tile = tile_payload(job.archive.extract(entry)?)
                     .ok_or_else(|| malformed(format!("tile {name:?} has no 64 KiB payload")))?;
-                let (x0, y0) = (rect[0].clamp(0, 256) as usize, rect[1].clamp(0, 256) as usize);
-                let (x1, y1) = (rect[2].clamp(0, 256) as usize, rect[3].clamp(0, 256) as usize);
+                let (x0, y0) = (
+                    rect[0].clamp(0, 256) as usize,
+                    rect[1].clamp(0, 256) as usize,
+                );
+                let (x1, y1) = (
+                    rect[2].clamp(0, 256) as usize,
+                    rect[3].clamp(0, 256) as usize,
+                );
                 for ty in y0..y1 {
                     if y + ty >= job.rows {
                         break;
@@ -1506,7 +1534,11 @@ fn rasterize_shape(
     }
     let flat = builder.build(0.25);
 
-    let pad = shape.stroke.map(|(_, w)| w / 2.0 + 1.0).unwrap_or(1.0).ceil() as i32;
+    let pad = shape
+        .stroke
+        .map(|(_, w)| w / 2.0 + 1.0)
+        .unwrap_or(1.0)
+        .ceil() as i32;
     let mut rect = shape.path.bounds();
     rect.left -= pad;
     rect.top -= pad;
@@ -1562,15 +1594,15 @@ fn rasterize_shape(
                 } else {
                     (px * dx + py * dy) / len2
                 };
-                over(
-                    &mut rgba[(y * w + x) * 4..][..4],
-                    g.color_at(t as f32),
-                    a,
-                );
+                over(&mut rgba[(y * w + x) * 4..][..4], g.color_at(t as f32), a);
             }
         }
     } else if shape.fill.a > 0.0 {
-        layer_in(&mut rgba, schist_vector::rasterize(&flat, rect, rule), shape.fill);
+        layer_in(
+            &mut rgba,
+            schist_vector::rasterize(&flat, rect, rule),
+            shape.fill,
+        );
     }
     if let Some((color, width)) = shape.stroke {
         let stroked = schist_vector::stroke_path(
@@ -1760,13 +1792,23 @@ pub fn dump(bytes: &[u8]) -> Result<String, AffinityError> {
         archive.version,
         tag_name(archive.class_tag)
     );
-    let _ = writeln!(out, "entries: {}", archive.names().collect::<Vec<_>>().join(", "));
+    let _ = writeln!(
+        out,
+        "entries: {}",
+        archive.names().collect::<Vec<_>>().join(", ")
+    );
     let entry = archive
         .head("doc.dat")
         .ok_or_else(|| malformed("no doc.dat"))?;
     let doc = archive.extract(entry)?;
     let graph = graph::parse(&doc)?;
-    dump_node(&graph, graph::ROOT, 0, &mut out, &mut vec![false; graph.nodes.len()]);
+    dump_node(
+        &graph,
+        graph::ROOT,
+        0,
+        &mut out,
+        &mut vec![false; graph.nodes.len()],
+    );
     Ok(out)
 }
 

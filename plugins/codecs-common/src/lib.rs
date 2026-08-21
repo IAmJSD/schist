@@ -42,11 +42,7 @@ fn export_flat(
     // Reducing to 8 bits per channel bands smooth gradients; dither unless
     // the user turned it off.
     if options.dither && options.bit_depth <= 8 {
-        schist_colormgmt::dither_to_depth(
-            &mut pixels,
-            doc.width as usize,
-            1 << options.bit_depth,
-        );
+        schist_colormgmt::dither_to_depth(&mut pixels, doc.width as usize, 1 << options.bit_depth);
     }
     let rgba: Vec<u8> = pixels
         .iter()

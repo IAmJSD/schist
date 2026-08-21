@@ -5,6 +5,7 @@
 //! pre-stroke pixels at `coverage × tool opacity`. So scribbling over the
 //! same spot at 50% opacity stays 50%, but two separate strokes darken.
 
+use rustc_hash::FxHashMap;
 use schist_color::Rgba;
 use schist_core::{
     Document, IntRect, LayerId, LayerKind, StrokeEdit, TileCoord, TileMap, TILE_SIZE,
@@ -13,7 +14,6 @@ use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
 };
-use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaintMode {

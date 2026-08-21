@@ -23,7 +23,14 @@ fn main() {
     }
     println!();
     for b in &data[..n] {
-        print!("{} ", if b.is_ascii_graphic() { *b as char } else { '.' });
+        print!(
+            "{} ",
+            if b.is_ascii_graphic() {
+                *b as char
+            } else {
+                '.'
+            }
+        );
     }
     println!();
 }

@@ -36,10 +36,7 @@ fn extract_preview(bytes: &[u8]) -> Option<Vec<u8>> {
     let sig = [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     let mut best: Option<(u64, Vec<u8>)> = None;
     let mut search = 0;
-    while let Some(rel) = bytes[search..]
-        .windows(8)
-        .position(|w| w == sig)
-    {
+    while let Some(rel) = bytes[search..].windows(8).position(|w| w == sig) {
         let start = search + rel;
         search = start + 8;
         let Some(end_rel) = bytes[start..].windows(4).position(|w| w == b"IEND") else {

@@ -115,9 +115,9 @@ fn confirm_close_tab(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl In
     ui::modal_frame(
         "Unsaved Changes",
         380.0,
-        div()
-            .text_size(px(12.0))
-            .child(format!("Save changes to \u{201C}{title}\u{201D} before closing?")),
+        div().text_size(px(12.0)).child(format!(
+            "Save changes to \u{201C}{title}\u{201D} before closing?"
+        )),
         div()
             .flex()
             .flex_row()

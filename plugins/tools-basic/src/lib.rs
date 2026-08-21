@@ -70,10 +70,7 @@ impl MoveTool {
 
     /// The outermost group containing `id`, or `id` itself if it is not in
     /// one.
-    fn group_of(
-        doc: &schist_core::Document,
-        id: schist_core::LayerId,
-    ) -> schist_core::LayerId {
+    fn group_of(doc: &schist_core::Document, id: schist_core::LayerId) -> schist_core::LayerId {
         let Some(path) = doc.tree.path_of(id) else {
             return id;
         };

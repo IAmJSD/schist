@@ -16,6 +16,8 @@
 //! clipping layers are confined to their base layer's alpha, and adjustment
 //! layers re-colour the backdrop beneath them (mask- and clip-aware).
 
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use schist_adjustments::Params;
 use schist_color::Rgba;
 use schist_core::{
@@ -23,8 +25,6 @@ use schist_core::{
     TILE_SIZE,
 };
 use schist_pixel_ops::blend_pixel;
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 type TileF32 = Vec<f32>; // TILE_PIXELS * 4, straight-alpha RGBA

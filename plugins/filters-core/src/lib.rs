@@ -4,9 +4,7 @@
 //! premultiplied space (otherwise transparent pixels bleed their colour
 //! into the result) and convert back afterwards.
 
-use schist_plugin_api::{
-    FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry,
-};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry};
 
 pub mod camera_raw;
 pub mod distort;

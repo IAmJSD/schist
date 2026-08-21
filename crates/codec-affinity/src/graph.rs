@@ -53,8 +53,14 @@ pub enum Value {
     F64(f64),
     Bool(bool),
     Str(String),
-    Enum { id: u16, version: u16 },
-    Flags { version: u16, bits: u64 },
+    Enum {
+        id: u16,
+        version: u16,
+    },
+    Flags {
+        version: u16,
+        bits: u64,
+    },
     VecI(Vec<i32>),
     VecF(Vec<f32>),
     VecD(Vec<f64>),
@@ -64,7 +70,10 @@ pub enum Value {
     Blob(Vec<u8>),
     /// 0x33: a short string naming another entry in the container —
     /// this is how bitmaps reference their pixel tiles.
-    Embedded { tag: u32, name: String },
+    Embedded {
+        tag: u32,
+        name: String,
+    },
     /// 0x35–0x74 fixed-size struct (colors, mostly), kept raw.
     Struct(Vec<u8>),
     /// Nested class: index into [`Graph::nodes`], or None for null.
@@ -354,7 +363,9 @@ impl Parser<'_> {
     fn strings(&mut self, array: bool) -> Result<Value, AffinityError> {
         let read_one = |c: &mut Cursor| -> Result<Value, AffinityError> {
             let len = c.u32()? as usize;
-            Ok(Value::Str(String::from_utf8_lossy(c.take(len)?).into_owned()))
+            Ok(Value::Str(
+                String::from_utf8_lossy(c.take(len)?).into_owned(),
+            ))
         };
         if !array {
             return read_one(&mut self.c);

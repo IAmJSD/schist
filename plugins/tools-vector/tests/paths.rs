@@ -2,9 +2,7 @@
 
 use schist_color::Depth;
 use schist_core::{Anchor, Document, Layer, SubPath, VectorPath};
-use schist_plugin_api::{
-    EditorState, Modifiers, OptionValue, PointerInput, ToolCtx, ToolPlugin,
-};
+use schist_plugin_api::{EditorState, Modifiers, OptionValue, PointerInput, ToolCtx, ToolPlugin};
 use schist_tools_vector::paths::*;
 
 fn input(x: f32, y: f32) -> PointerInput {

@@ -25,10 +25,8 @@ fn composited_document_shows_a_layer_shadow() {
     assert!(layer.styled.is_some(), "fx renderer produced nothing");
     doc.push_layer(layer);
 
-    let out = schist_compositor::composite_region_rgba8(
-        &doc,
-        schist_core::IntRect::new(0, 0, 200, 200),
-    );
+    let out =
+        schist_compositor::composite_region_rgba8(&doc, schist_core::IntRect::new(0, 0, 200, 200));
     let at = |x: usize, y: usize| -> [u8; 4] {
         let i = (y * 200 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]

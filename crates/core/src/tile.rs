@@ -6,8 +6,8 @@
 //! (`Arc::make_mut`). A missing tile in the map means "fully transparent".
 
 use crate::geom::IntRect;
-use schist_color::{f32_to_u16, f32_to_u8, u16_to_f32, u8_to_f32, Depth, Rgba};
 use rustc_hash::FxHashMap;
+use schist_color::{f32_to_u16, f32_to_u8, u16_to_f32, u8_to_f32, Depth, Rgba};
 use std::sync::Arc;
 
 pub const TILE_SIZE: i32 = 256;

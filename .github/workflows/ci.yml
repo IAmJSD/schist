@@ -21,8 +21,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # clang and mold are required by the linker settings in .cargo/config.toml.
           sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev \
+            clang mold
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

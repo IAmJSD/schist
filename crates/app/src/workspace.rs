@@ -13,14 +13,14 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use schist_color::{Depth, Rgba};
 use schist_compositor::TileCache;
 use schist_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE};
 use schist_plugin_api::{
     CommandCtx, EditorState, Modifiers, Overlay, PluginRegistry, PointerInput, ToolCtx,
 };
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use smallvec::smallvec;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -709,8 +709,10 @@ impl Workspace {
         let mut out = Vec::with_capacity(self.tab_count());
         let mut parked = self.background_tabs.iter();
         for index in 0..self.tab_count() {
-            let (title, dirty) = if index == self.active_tab && self.doc.is_some() {
-                let doc = self.doc.as_ref().unwrap();
+            let active_doc = (index == self.active_tab)
+                .then_some(self.doc.as_ref())
+                .flatten();
+            let (title, dirty) = if let Some(doc) = active_doc {
                 (doc.title.clone(), doc.dirty)
             } else if let Some(tab) = parked.next() {
                 (tab.doc.title.clone(), tab.doc.dirty)
@@ -901,10 +903,7 @@ impl Workspace {
         }
     }
 
-    fn exporter_for(
-        &self,
-        path: &std::path::Path,
-    ) -> Option<&dyn schist_plugin_api::CodecPlugin> {
+    fn exporter_for(&self, path: &std::path::Path) -> Option<&dyn schist_plugin_api::CodecPlugin> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         self.registry
             .codecs()
@@ -1553,9 +1552,7 @@ impl Workspace {
         if doc.mode == mode {
             return;
         }
-        if mode == schist_color::ColorMode::Grayscale
-            || mode == schist_color::ColorMode::Indexed
-        {
+        if mode == schist_color::ColorMode::Grayscale || mode == schist_color::ColorMode::Indexed {
             // Flatten colour out of every layer, which is what the mode
             // change actually means for the pixels.
             let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
@@ -1636,8 +1633,7 @@ impl Workspace {
             }
             PathOp::Select => {
                 let rect = flat.bounds();
-                let mask =
-                    schist_vector::rasterize(&flat, rect, schist_vector::FillRule::NonZero);
+                let mask = schist_vector::rasterize(&flat, rect, schist_vector::FillRule::NonZero);
                 let w = rect.width().max(0) as usize;
                 let mut edit = doc.begin_edit("Make Selection");
                 edit.change_selection(|sel, _| {
@@ -2230,10 +2226,8 @@ impl Workspace {
                 Ok(doc) => {
                     let rect = doc.canvas_rect();
                     let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
-                    self.editor.clipboard = Some(Arc::new(schist_plugin_api::ClipboardImage {
-                        rect,
-                        rgba,
-                    }));
+                    self.editor.clipboard =
+                        Some(Arc::new(schist_plugin_api::ClipboardImage { rect, rgba }));
                     return true;
                 }
                 Err(e) => log::error!("clipboard import: {e}"),
@@ -2757,11 +2751,7 @@ impl Workspace {
     }
 
     /// Open Layer Properties for the given layer.
-    pub fn open_layer_properties(
-        &mut self,
-        layer: schist_core::LayerId,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_layer_properties(&mut self, layer: schist_core::LayerId, cx: &mut Context<Self>) {
         let Some(name) = self
             .doc
             .as_ref()
@@ -3603,11 +3593,7 @@ impl Workspace {
     }
 
     /// Assign a profile: same numbers, new interpretation.
-    pub fn assign_profile(
-        &mut self,
-        profile: schist_colormgmt::Profile,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn assign_profile(&mut self, profile: schist_colormgmt::Profile, cx: &mut Context<Self>) {
         if let Some(doc) = self.doc.as_mut() {
             doc.icc_profile = profile.icc_bytes().map(|b| b.to_vec());
             doc.dirty = true;
@@ -3977,11 +3963,9 @@ impl Workspace {
                 .await;
             this.update(cx, |ws, cx| {
                 ws.status = match status {
-                    crate::crash::UpdateStatus::UpToDate => format!(
-                        "Schist {} is up to date",
-                        crate::crash::current_version()
-                    )
-                    .into(),
+                    crate::crash::UpdateStatus::UpToDate => {
+                        format!("Schist {} is up to date", crate::crash::current_version()).into()
+                    }
                     crate::crash::UpdateStatus::Available { version, url } => {
                         log::info!("update {version} available at {url}");
                         format!(
@@ -4158,8 +4142,7 @@ impl Workspace {
     /// Open the parameter dialog for an existing adjustment layer.
     pub fn edit_adjustment(&mut self, layer: schist_core::LayerId, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_ref() else { return };
-        let Some(schist_core::LayerKind::Adjustment(data)) =
-            doc.tree.find(layer).map(|l| &l.kind)
+        let Some(schist_core::LayerKind::Adjustment(data)) = doc.tree.find(layer).map(|l| &l.kind)
         else {
             return;
         };

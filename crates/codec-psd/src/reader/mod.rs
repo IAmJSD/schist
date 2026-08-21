@@ -127,8 +127,7 @@ fn background_from_composite(
                 let at = |p: &Option<Vec<f32>>| {
                     1.0 - p.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(1.0)
                 };
-                let px =
-                    schist_color::convert::cmyk_to_rgb([at(&c), at(&m), at(&y), at(&k)], 1.0);
+                let px = schist_color::convert::cmyk_to_rgb([at(&c), at(&m), at(&y), at(&k)], 1.0);
                 r[i] = px.r;
                 g[i] = px.g;
                 b[i] = px.b;
