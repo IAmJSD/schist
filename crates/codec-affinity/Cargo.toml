@@ -24,5 +24,7 @@ log.workspace = true
 
 [dev-dependencies]
 # Geometry tests decode the embedded thumbnail — Affinity's own render
-# of each fixture — and compare the import against it.
+# of each fixture — and compare the import against it; the afdiff
+# example composites imported documents for the same comparison.
 image.workspace = true
+schist-compositor.workspace = true

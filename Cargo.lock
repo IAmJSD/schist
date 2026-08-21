@@ -5447,6 +5447,7 @@ dependencies = [
  "ruzstd",
  "schist-adjustments",
  "schist-color",
+ "schist-compositor",
  "schist-core",
  "schist-text-engine",
  "schist-vector",

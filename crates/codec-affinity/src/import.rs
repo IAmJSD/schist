@@ -192,7 +192,7 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
     }
 
     for child in graph.children(spread, b"Chld") {
-        if let Some(layer) = walker.layer(child) {
+        for layer in walker.layer_stack(child) {
             doc.push_layer(layer);
         }
     }
@@ -304,6 +304,54 @@ impl Walker<'_> {
         }
     }
 
+    /// A layer plus the clipped children Affinity nests inside it.
+    /// Any layer kind — pixels, shapes, adjustments, whole groups —
+    /// can sit in a non-group layer's `Chld` list; each is confined to
+    /// the parent's alpha, which is exactly a clipping run in our
+    /// model: the base layer followed by `clipping` layers above it.
+    fn layer_stack(&mut self, node: &Node) -> Vec<Layer> {
+        let mut out = Vec::new();
+        let Some(layer) = self.layer(node) else {
+            return out;
+        };
+        out.push(layer);
+        if matches!(&node.type_tag().to_be_bytes(), b"Grup" | b"Scop") {
+            return out; // group children were walked as real layers
+        }
+        let children = self.graph.children(node, b"Chld");
+        if children.is_empty() {
+            return out;
+        }
+        // Clipped children live in the parent's coordinate space, like
+        // group members.
+        let saved = self.ctm;
+        self.ctm = self.node_ctm(node);
+        for child in children {
+            let mut stack = self.layer_stack(child);
+            match stack.len() {
+                0 => {}
+                1 => {
+                    let mut clipped = stack.pop().unwrap();
+                    clipped.clipping = true;
+                    out.push(clipped);
+                }
+                // The child carries clips of its own; our flat clipping
+                // run can't nest, but a clipping group can.
+                _ => {
+                    let mut group = Layer::new_group(stack[0].name.clone());
+                    group.clipping = true;
+                    group.blend = stack[0].blend;
+                    if let schist_core::LayerKind::Group(g) = &mut group.kind {
+                        g.children = stack;
+                    }
+                    out.push(group);
+                }
+            }
+        }
+        self.ctm = saved;
+        out
+    }
+
     fn layer(&mut self, node: &Node) -> Option<Layer> {
         let kind = node.type_tag();
         let name = str_of(node, b"Desc").unwrap_or_default().to_string();
@@ -318,6 +366,7 @@ impl Walker<'_> {
                 b"PCrv" => "Curve".to_string(),
                 b"TxtA" | b"TxtF" => String::new(), // named from the text below
                 b"CrRA" => "Curves Adjustment".to_string(),
+                b"HsRA" => "HSL Adjustment".to_string(),
                 b"ShpN" => String::new(), // named from the shape kind below
                 _ => tag_name(kind),
             }
@@ -344,7 +393,7 @@ impl Walker<'_> {
                     .graph
                     .children(node, b"Chld")
                     .into_iter()
-                    .filter_map(|c| self.layer(c))
+                    .flat_map(|c| self.layer_stack(c))
                     .collect();
                 self.ctm = saved;
                 if let schist_core::LayerKind::Group(g) = &mut group.kind {
@@ -393,9 +442,16 @@ impl Walker<'_> {
                     return None;
                 }
             },
-            // Curves adjustment layers map onto our own curves
-            // adjustment; the compositor applies them non-destructively.
+            // Adjustment layers map onto our own adjustments; the
+            // compositor applies them non-destructively.
             b"CrRA" => match self.curves_adjustment(node, &display) {
+                Some(layer) => layer,
+                None => {
+                    self.report.skipped.push((skip_label, tag_name(kind)));
+                    return None;
+                }
+            },
+            b"HsRA" => match self.hsl_adjustment(node, &display) {
                 Some(layer) => layer,
                 None => {
                     self.report.skipped.push((skip_label, tag_name(kind)));
@@ -686,6 +742,50 @@ impl Walker<'_> {
         let mut layer = Layer::new_raster(if name.is_empty() { "Curves" } else { name });
         layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
             kind: schist_core::AdjustmentKind::Curves,
+            raw: Vec::new(),
+            params_json: serde_json::to_string(&params).ok(),
+        });
+        self.report.adjustments += 1;
+        Some(layer)
+    }
+
+    /// Rebuild an HSL adjustment layer ("HsRA").
+    ///
+    /// `AdjP` → "HSSP": master shifts `HueA` (a fraction of the full
+    /// turn), `SatA` and `LumA` (fractions of full range), an `HSV`
+    /// mode flag, and six per-hue-range tweak arrays (`HueC`/`SatC`/
+    /// `LumC` over the `RngC` boundaries) that our adjustment doesn't
+    /// model — kept master-only with a warning when they're in use.
+    fn hsl_adjustment(&mut self, node: &Node, name: &str) -> Option<Layer> {
+        let adj = self.graph.child(node, b"AdjP")?;
+        if &adj.type_tag().to_be_bytes() != b"HSSP" {
+            return None;
+        }
+        let f = |t: &[u8; 4]| f32_of(adj, t).unwrap_or(0.0);
+        let ranged = [b"HueC", b"SatC", b"LumC"].into_iter().any(|t| {
+            matches!(adj.field(t), Some(Value::Array(v)) if v.iter().any(|x| match x {
+                Value::F32(f) => *f != 0.0,
+                _ => false,
+            }))
+        });
+        if ranged {
+            log::warn!(
+                "affinity: HSL adjustment {name:?} has per-range tweaks; keeping master only"
+            );
+        }
+        if matches!(adj.field(b"HSV "), Some(Value::Bool(true))) {
+            log::warn!("affinity: HSL adjustment {name:?} uses HSV mode; applying as HSL");
+        }
+        let params = schist_adjustments::Params::HueSaturation {
+            hue: (f(b"HueA") * 360.0).clamp(-180.0, 180.0),
+            saturation: (f(b"SatA") * 100.0).clamp(-100.0, 100.0),
+            lightness: (f(b"LumA") * 100.0).clamp(-100.0, 100.0),
+            colorize: false,
+        };
+
+        let mut layer = Layer::new_raster(if name.is_empty() { "HSL" } else { name });
+        layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
+            kind: schist_core::AdjustmentKind::HueSaturation,
             raw: Vec::new(),
             params_json: serde_json::to_string(&params).ok(),
         });
@@ -988,29 +1088,14 @@ impl Walker<'_> {
         Some(layer)
     }
 
-    /// The map from a bitmap's pixel space onto the canvas.
-    ///
-    /// Preference order: the pixel rect `BitR` when set (Photo writes an
-    /// `i32::MIN+1` sentinel when it isn't), placed through the ancestor
-    /// transform; else the layer transform applied to the bitmap's
-    /// natural rect.
-    fn raster_map(&self, node: &Node, w: u32, h: u32) -> Mat {
-        if let Some(Value::VecI(r)) = node.field(b"BitR") {
-            if let [x0, y0, x1, y1] = r[..] {
-                let sane = |v: i32| v.abs() < 1 << 24;
-                if x1 > x0 && y1 > y0 && sane(x0) && sane(y0) && sane(x1) && sane(y1) {
-                    let to_rect = Mat([
-                        (x1 - x0) as f64 / w as f64,
-                        0.0,
-                        x0 as f64,
-                        0.0,
-                        (y1 - y0) as f64 / h as f64,
-                        y0 as f64,
-                    ]);
-                    return self.ctm.then(&to_rect);
-                }
-            }
-        }
+    /// The map from a bitmap's pixel space onto the canvas: the layer
+    /// transform chain, exactly as for vectors. `BitR` (the content's
+    /// bounding rect, usually in bitmap space) plays no part in
+    /// placement — treating it as a destination squashes any layer
+    /// whose transform isn't the identity, which real Photo documents
+    /// (scaled brush strokes, rotated placed images with pre-rotated
+    /// pixel caches) proved wrong against their own thumbnails.
+    fn raster_map(&self, node: &Node) -> Mat {
         self.node_ctm(node)
     }
 
@@ -1018,7 +1103,7 @@ impl Walker<'_> {
     /// scale bilinearly (identity is free); rotated or sheared ones go
     /// through a full affine resample.
     fn place_raster(&self, node: &Node, img: RgbaImage) -> Option<(IntRect, RgbaImage)> {
-        let map = self.raster_map(node, img.width, img.height);
+        let map = self.raster_map(node);
         if !map.axis_aligned() {
             return affine_resample(&img, &map);
         }
@@ -1225,8 +1310,14 @@ fn decode_bitmap(
     let rows = height.div_ceil(256) * 256;
 
     // Placed images don't duplicate their pixels: tiles with status 5
-    // pull from the original file, carried in the Bckg entry.
-    let source = if all_statuses(bitm).contains(&5) {
+    // pull from the original file, carried in the Bckg entry. A fully
+    // evicted bitmap (no status arrays at all) that still has its
+    // source *is* the source, wholesale.
+    let statuses = all_statuses(bitm);
+    if statuses.is_empty() && bitm.field(b"Bckg").is_some() {
+        return source_image(archive, bitm, width, height);
+    }
+    let source = if statuses.contains(&5) {
         Some(source_image(archive, bitm, width, height)?)
     } else {
         None

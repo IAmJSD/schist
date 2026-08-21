@@ -340,11 +340,15 @@ fn documents_import() {
             schist_codec_affinity::read_affinity(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(doc.width > 0 && doc.height > 0, "{name}: empty canvas");
         println!(
-            "{name}: {}×{}, {} raster, {} groups, {} skipped {:?}",
+            "{name}: {}×{}, {} raster, {} groups, {} text, {} shapes, {} adj, {} masks, {} skipped {:?}",
             doc.width,
             doc.height,
             report.raster_layers,
             report.groups,
+            report.text_layers,
+            report.shapes,
+            report.adjustments,
+            report.masks,
             report.skipped.len(),
             report.skipped
         );

@@ -130,10 +130,33 @@ a container; treat as group), `Grup` (group), `Rstr` (pixels), `ImgN`
 · `Visi` visible · `Opac` opacity (f32) · `Blnd` blend enum · `PasT`
 false = a group isolates (default passthrough) · `Xfrm` f64[6]
 **row-major** 2×3 transform `[sx kx tx ky sy ty]` · `BitR` i32[4]
-on-canvas pixel rect (Photo; `i32::MIN+1` sentinels when unset) ·
+content bounding rect (Photo; `i32::MIN+1` sentinels when unset) ·
 `FiEf` effects · `AdCh` mask/adjustment children. Transforms are full
 affine: import composes them exactly for vector layers and resamples
 rasters and masks through rotation/shear.
+
+**`BitR` does not place anything.** Rasters position exactly like
+vectors: the bitmap's `[0,0,w,h]` through the layer transform chain.
+`BitR` is only the content's bounding rect (usually in bitmap space —
+sometimes the full canvas or a transform-scaled rect; conventions
+vary). An earlier reading treated it as the destination rect, which
+coincides with the truth exactly when the layer transform is the
+identity — most Photo pixel layers — but squashes anything scaled, and
+mangles rotated placed images, whose *pixel caches are stored
+pre-rotated* so that the rotated `Xfrm` uprights them (their masks
+carry the counter-rotation explicitly). Corpus files' own thumbnails
+adjudicated this: transform-only placement wins or ties on every file.
+
+**Clipped children.** A *non-group* layer's `Chld` list nests clipped
+children — pixels, shapes, adjustments, even whole groups — each
+confined to the parent's alpha and living in the parent's coordinate
+space (A/B-scored against corpus thumbnails: composing the parent
+transform beats treating them as siblings). Import emits them as
+`clipping` layers directly above their base; a child that carries
+clips of its own becomes a clipping group. Beware that nested nodes
+are often written as bare tagged classes (`[CrRA]` with no
+`AdjR<EncR<…` base chain), so type-chain tests miss them — dispatch on
+the class tag.
 
 **Text** (`TxtA` artistic / `TxtF` frame): no pixels, but the full
 model. `StSt` (story) → `Blok` blocks → `Glyp` (`GStr`) holds the
@@ -150,8 +173,8 @@ width when a substituted font's metrics disagree), and stores the type
 tool's `PsTx` block so the layer stays editable.
 
 **Layer transforms nest**: a group's `Xfrm` defines the coordinate
-space its children's transforms (and `BitR` rects) live in; composing
-down the tree is what places deeply-nested tiles correctly.
+space its children's transforms live in; composing down the tree is
+what places deeply-nested tiles correctly.
 
 **Shapes** (`ShpN`): the layer's `ShpB` `f64[4]` local bounds plus a
 `Shpe` class giving the kind and parameters; geometry is built in the
@@ -216,6 +239,13 @@ channel (`Mast`, `C1Sp`–`C5Sp`): `Cnt` control points, `Vals` as xs
 then ys then tangents, in 0..1. Imported as a real curves adjustment
 layer (master + RGB channels).
 
+**HSL adjustments** (`HsRA`): `AdjP` → "HSSP": `HueA` master hue shift
+as a fraction of the full turn, `SatA`/`LumA` as fractions of full
+range, an `HSV` mode flag, and six per-hue-range tweak arrays
+(`HueC`/`SatC`/`LumC` over `RngC` boundary angles in degrees, 315–345
+= reds and so on). Imported as a real hue/saturation adjustment
+(master shifts only; per-range tweaks warn).
+
 **Live filter nodes** (`FlRN`): a `Filt` pipeline warping the content
 below between source and destination `Quad`s. Every corpus sighting
 maps each quad onto itself — configured but inert — and imports as
@@ -261,32 +291,53 @@ its pixels as tiles. The bitmap's `Bckg` entry (a graph document of
 type `Blck` with `Link` bool, `Size` u64, `Data` blob) holds the
 *original file bytes* (PNG, JPEG…) at exactly `BmpW`×`BmpH`; status-5
 tiles decode from it. Mip levels for such bitmaps do store real tiles.
+A **fully evicted** bitmap (no `Sta` arrays at all) that still has its
+`Bckg` *is* its source image wholesale — real Canva-era files park
+whole background photos this way.
 
 Live shapes, text and adjustments store **parameters only** — Affinity
 re-renders them — so no pixel recovery is possible for them without
 reimplementing Affinity's renderers. That's why the codec falls back to
 the file's embedded flattened preview whenever a document contains any.
 
-One field observation worth keeping: embedded flattened previews in
-real Photo 2 files can be **stale** (one corpus file's preview showed a
-half-rendered state while its layers were intact). The codec therefore
-prefers a partial layered import over the preview whenever any pixels
-were recovered, and adds the preview as a hidden reference layer.
+One field observation worth keeping: embedded flattened previews *and
+thumbnails* in real Photo 2 / Canva-era files can be **stale** — the
+container keeps savepoints, and the preview may show an older state
+(different video frame, since-hidden layers) than the head revision.
+The codec therefore prefers a partial layered import over the preview
+whenever any pixels were recovered, and adds the preview as a hidden
+reference layer. When using thumbnails as ground truth, treat
+disagreements about *visibility* with suspicion; geometry and colour
+remain reliable.
+
+The corpus sweep tooling: `--example afdiff` composites an import
+(through the real compositor) next to the file's thumbnail;
+`--example afscore` reduces that to an RMS number, which is how the
+`BitR` and clipped-children questions were settled; `--example aftree`
+prints the imported layer tree with bounds.
 
 ## What's still unknown / to do
 
-- Adjustments beyond curves (levels, HSL, recolour…): same `AdjP`
-  pattern, not yet mapped — no corpus file to read the field layouts
-  from.
-- Non-identity `FlRN` filter warps (none seen in the corpora).
+- Adjustments beyond curves and HSL (levels, recolour, white
+  balance…): same `AdjP` pattern, field layouts unread — no corpus
+  sighting yet.
+- The HSL `HueA`/`SatA`/`LumA` unit scaling (fraction of turn / full
+  range) is inferred from the UI's slider ranges, not yet verified
+  colorimetrically; per-range HSL tweaks are unmapped.
+- Non-identity `FlRN` filter warps (every corpus sighting is inert).
 - Shapes beyond the kinds above (polygons, cogs, callouts, curved-edge
   stars…) are parsed but not turned into geometry; a fixture drawn
   with each tool (plus its thumbnail) is all it takes to add one.
 - Text: single style per layer (first run wins), no per-run styling,
-  effects on text (drop shadows) not yet applied, `TxtF` frame text
-  gets artistic-text treatment.
-- Adjustment parameters, ICC profiles (`Prof` on DyBm holds the raw
-  ICC blob): parsed but not yet interpreted.
+  no line wrapping — a `TxtF` frame text whose story breaks into
+  several `Blok`s renders as one line (the corpus stream overlays
+  show this) — and effects on text are not applied.
+- Layer effects (`FiEf`): corpus files carry `Gaus` (blur), `OutG`
+  (outer glow), `Shad` (shadow), `ColO` (colour overlay), `Strk`
+  (stroke) and `BevE` (bevel) parameter classes; none are mapped onto
+  our layer-fx yet.
+- ICC profiles: `ICCP` nodes carry the profile name and blob; every
+  corpus sighting is sRGB, so no conversion has been needed yet.
 - Rotated/sheared *text* still imports axis-aligned (the text engine
   lays out horizontally); vectors and rasters carry full affine.
 - The `CTyp` corner-type enum: 0 is rounded; the other values

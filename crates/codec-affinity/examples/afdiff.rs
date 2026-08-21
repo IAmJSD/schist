@@ -1,5 +1,5 @@
-//! Dev tool: render an imported document's leaf rasters next to the
-//! file's embedded thumbnail, for eyeballing geometry mismatches.
+//! Dev tool: composite an imported document next to the file's
+//! embedded thumbnail, for eyeballing import mismatches.
 //!
 //! ```sh
 //! cargo run -p schist-codec-affinity --example afdiff -- file.afdesign out.png
@@ -17,38 +17,19 @@ fn main() {
     let (doc, report) = schist_codec_affinity::read_affinity(&bytes).expect("import");
     eprintln!("{report:?}");
 
+    // Match the thumbnail's proportions: composite at document size,
+    // then scale to the thumbnail's height for the side-by-side.
     let (w, h) = (doc.width, doc.height);
-    // Left: our import composited naively. Right: thumbnail downscaled.
-    let mut img = image::RgbaImage::from_pixel(w * 2, h, image::Rgba([255, 255, 255, 255]));
-    fn walk(layers: &[schist_core::Layer], img: &mut image::RgbaImage, w: u32, h: u32) {
-        for l in layers {
-            if let Some(children) = l.children() {
-                walk(children, img, w, h);
-            } else if let Some(r) = l.as_raster() {
-                for y in 0..h {
-                    for x in 0..w {
-                        let p = r.tiles.pixel(x as i32, y as i32).to_u8();
-                        if p[3] > 0 {
-                            let dst = img.get_pixel_mut(x, y);
-                            let a = p[3] as u32;
-                            for (d, s) in dst.0.iter_mut().zip(p).take(3) {
-                                *d = ((s as u32 * a + *d as u32 * (255 - a)) / 255) as u8;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    walk(&doc.tree.layers, &mut img, w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let tx = x * thumb.width() / w;
-            let ty = y * thumb.height() / h;
-            let p = *thumb.get_pixel(tx, ty);
-            img.put_pixel(w + x, y, p);
-        }
-    }
+    let region = schist_core::IntRect::from_size(w, h);
+    let pixels = schist_compositor::composite_region_rgba8(&doc, region);
+    let ours = image::RgbaImage::from_raw(w, h, pixels).expect("buffer");
+    let th = thumb.height();
+    let tw = (w as u64 * th as u64 / h as u64) as u32;
+    let ours = image::imageops::resize(&ours, tw, th, image::imageops::Triangle);
+
+    let mut img = image::RgbaImage::from_pixel(tw + thumb.width(), th, image::Rgba([255; 4]));
+    image::imageops::overlay(&mut img, &ours, 0, 0);
+    image::imageops::overlay(&mut img, &thumb, tw as i64, 0);
     img.save(&out_path).expect("save");
     eprintln!("wrote {out_path}");
 }
