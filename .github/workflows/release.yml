@@ -138,10 +138,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/schist.exe dist/
-          # NSIS ships with the runner image; skip the installer if absent.
-          if (Get-Command makensis -ErrorAction SilentlyContinue) {
-            makensis -DVERSION=$env:VERSION packaging/windows/installer.nsi
+          # NSIS is not on the runner image. This step used to assume it was
+          # and skip the installer in silence, so no release ever had one.
+          choco install nsis --no-progress -y
+          $makensis = 'C:\Program Files (x86)\NSIS\makensis.exe'
+          if (-not (Test-Path $makensis)) {
+            $found = Get-Command makensis -ErrorAction SilentlyContinue
+            if (-not $found) { throw 'makensis missing after installing NSIS' }
+            $makensis = $found.Source
           }
+          & $makensis -DVERSION=$env:VERSION packaging/windows/installer.nsi
 
       - uses: actions/upload-artifact@v4
         with:

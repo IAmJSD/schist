@@ -3,7 +3,9 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-appdir="$root/dist/Schist.AppDir"
+# Scratch, not a deliverable: dist/ is uploaded wholesale by CI, and an
+# AppDir in there collides with the real artifacts on the release.
+appdir="$root/target/Schist.AppDir"
 tool="${APPIMAGETOOL:-appimagetool}"
 
 cargo build --release -p schist-app
