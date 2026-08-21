@@ -77,10 +77,11 @@ schist-filters-core = { path = "plugins/filters-core" }
 schist-commands-core = { path = "plugins/commands-core" }
 
 # external
-# Fork of gpui 0.2.2 adding PinchEvent/on_pinch, which upstream has no
-# equivalent of; needed for trackpad pinch-to-zoom on the canvas.
+# Fork of gpui 0.2.2 adding PinchEvent/on_pinch and stylus pressure on the
+# mouse events, which upstream has no equivalent of; needed for trackpad
+# pinch-to-zoom and pressure-sensitive painting on the canvas.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "e82eb44da17ade861d9b55e4f9b594bf04f819ce" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "7fa666d3f19cd2372f9eaaa36674b8809f7de808" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
