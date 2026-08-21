@@ -113,6 +113,9 @@ pub struct Workspace {
     /// Path to the open submenu in the menu bar, e.g. [2, 4] for the fifth
     /// row of the third menu. Empty means none.
     pub open_submenu: Vec<usize>,
+    /// What the macOS menu bar was last built from, so it is only rebuilt
+    /// when a label or an entry has actually changed. `None` off macOS.
+    pub native_menu: Option<String>,
     /// Marching-ants animation step, advanced on a timer.
     /// View rotation in radians. Display only: the pixels are untouched,
     /// so this is a change of viewpoint rather than an edit.
@@ -635,6 +638,7 @@ impl Workspace {
             status: "Ready".into(),
             open_popup: None,
             open_submenu: Vec::new(),
+            native_menu: None,
             rotation: 0.0,
             model_downloads: Vec::new(),
             ant_phase: 0,
@@ -1107,7 +1111,7 @@ impl Workspace {
         self.center();
     }
 
-    fn center(&mut self) {
+    pub fn center(&mut self) {
         let Some(doc) = &self.doc else { return };
         let avail = self.canvas_bounds.size;
         self.offset = point(
@@ -2676,7 +2680,7 @@ impl Workspace {
 
     /// Collect the registry's tools into toolbar groups, preserving
     /// registration order both between and within groups.
-    fn rebuild_tool_groups(&mut self) {
+    pub fn rebuild_tool_groups(&mut self) {
         let mut groups: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
         for tool in self.registry.tools() {
             if !tool.in_toolbar() {
@@ -5520,6 +5524,9 @@ impl Render for Workspace {
         let captures_keys =
             self.tool_captures_keys() || self.modal.is_some() || self.layer_rename.is_some();
         let chrome = self.screen_mode == ScreenMode::Standard;
+        // On macOS the menus live in the system bar, not in the window.
+        crate::native_menu::sync(self, cx);
+        let in_window_menus = chrome && !cfg!(target_os = "macos");
         let modal = crate::dialogs::render(self, cx);
         let context_menu = panels::context_menu(self, window.viewport_size(), cx);
         let tool_flyout = panels::tool_flyout(self, cx);
@@ -5543,6 +5550,21 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, action: &ActivateTool, _w, cx| {
                 ws.activate_tool(&action.id.clone(), cx);
+            }))
+            .on_action(cx.listener(|ws, action: &RunAppItem, window, cx| {
+                panels::run_app_item(ws, action.item, window, cx);
+            }))
+            .on_action(cx.listener(|ws, action: &OpenFilter, _w, cx| {
+                // The dialog holds the filter's id for the life of the
+                // modal, so it needs the registry's 'static one.
+                let id = ws
+                    .registry
+                    .filters()
+                    .find(|f| f.id() == action.id)
+                    .map(|f| f.id());
+                if let Some(id) = id {
+                    ws.open_filter_dialog(id, cx);
+                }
             }))
             .on_action(cx.listener(|ws, action: &CycleToolGroup, _w, cx| {
                 // The group ids are 'static strings from the registry; find
@@ -5628,18 +5650,10 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|ws, action: &AddAdjustment, _w, cx| {
-                let kind = match action.kind.as_str() {
-                    "levels" => schist_core::AdjustmentKind::Levels,
-                    "curves" => schist_core::AdjustmentKind::Curves,
-                    "hue_saturation" => schist_core::AdjustmentKind::HueSaturation,
-                    "invert" => schist_core::AdjustmentKind::Invert,
-                    "brightness_contrast" => schist_core::AdjustmentKind::BrightnessContrast,
-                    other => {
-                        log::warn!("unknown adjustment {other}");
-                        return;
-                    }
-                };
-                ws.add_adjustment(kind, cx);
+                match adjustment_from_id(&action.kind) {
+                    Some(kind) => ws.add_adjustment(kind, cx),
+                    None => log::warn!("unknown adjustment {}", action.kind),
+                }
             }))
             .on_action(cx.listener(|ws, _: &ToggleRulers, _w, cx| ws.toggle_rulers(cx)))
             .on_action(cx.listener(|ws, _: &ToggleGrid, _w, cx| ws.toggle_grid(cx)))
@@ -5672,8 +5686,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &NextTab, _w, cx| ws.cycle_tab(1, cx)))
             .on_action(cx.listener(|ws, _: &PrevTab, _w, cx| ws.cycle_tab(-1, cx)))
-            .on_action(|_: &Quit, _w, cx| cx.quit())
-            .children(chrome.then(|| panels::menu_bar(self, cx)))
+            .children(in_window_menus.then(|| panels::menu_bar(self, cx)))
             .children(chrome.then(|| panels::tool_options_bar(self, cx)))
             .children(chrome.then(|| panels::tab_bar(self, cx)))
             .child(
