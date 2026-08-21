@@ -6,11 +6,11 @@
 //! into a selection -- which is the whole reason paths are stored rather
 //! than committed on the spot.
 
-use photoslop_core::{Anchor, Document, IntRect, SubPath, VectorPath};
-use photoslop_plugin_api::{
+use schist_core::{Anchor, Document, IntRect, SubPath, VectorPath};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PointerInput, ToolCtx, ToolOption, ToolPlugin,
 };
-use photoslop_vector::{Path, PathBuilder};
+use schist_vector::{Path, PathBuilder};
 
 /// Flatten a stored path for drawing or rasterizing.
 pub fn flatten(path: &VectorPath) -> Path {
@@ -644,7 +644,7 @@ impl ToolPlugin for CustomShapeTool {
             ctx.doc,
             &b.build(0.25),
             color,
-            photoslop_vector::FillRule::NonZero,
+            schist_vector::FillRule::NonZero,
             "Custom Shape",
         );
     }

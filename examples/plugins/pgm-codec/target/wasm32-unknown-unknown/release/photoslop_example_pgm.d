@@ -1,1 +1,0 @@
-/home/infrawrench-agent/projects/photoslop/examples/plugins/pgm-codec/target/wasm32-unknown-unknown/release/photoslop_example_pgm.wasm: /home/infrawrench-agent/projects/photoslop/crates/plugin-sdk/src/lib.rs /home/infrawrench-agent/projects/photoslop/examples/plugins/pgm-codec/src/lib.rs

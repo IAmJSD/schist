@@ -2,7 +2,7 @@
 //! <out>_layered.png (structured import, composited) and
 //! <out>_preview.png (the file's own embedded flattened preview).
 
-use photoslop_plugin_api::CodecPlugin;
+use schist_plugin_api::CodecPlugin;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -10,12 +10,12 @@ fn main() {
     let out = args.next().expect("usage: afrender <file> <out-prefix>");
     let bytes = std::fs::read(&path).expect("read");
 
-    let (doc, report) = photoslop_codec_affinity::read_affinity(&bytes).expect("structured read");
+    let (doc, report) = schist_codec_affinity::read_affinity(&bytes).expect("structured read");
     println!(
         "layered: {}x{} raster:{} groups:{} skipped:{:?}",
         doc.width, doc.height, report.raster_layers, report.groups, report.skipped
     );
-    let png = photoslop_codecs_common::PngCodec.export(&doc).expect("png");
+    let png = schist_codecs_common::PngCodec.export(&doc).expect("png");
     std::fs::write(format!("{out}_layered.png"), png).unwrap();
 
     // The embedded preview, via the public codec (which would fall back

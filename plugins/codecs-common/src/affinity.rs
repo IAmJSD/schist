@@ -2,7 +2,7 @@
 //!
 //! Two readers, best first:
 //!
-//! 1. **Structured** — `photoslop-codec-affinity` parses the actual
+//! 1. **Structured** — `schist-codec-affinity` parses the actual
 //!    (reverse-engineered) format: container, object graph, layer tree,
 //!    raster tiles. When it recovers every layer's pixels, the document
 //!    opens layered, with names, opacity, visibility and blend modes.
@@ -15,9 +15,9 @@
 //!
 //! Import-only: there is no way to write a file Affinity would accept.
 
-use photoslop_color::Depth;
-use photoslop_core::{blit_rgba8, Document, IntRect, Layer};
-use photoslop_plugin_api::CodecPlugin;
+use schist_color::Depth;
+use schist_core::{blit_rgba8, Document, IntRect, Layer};
+use schist_plugin_api::CodecPlugin;
 
 /// Every Affinity file starts with these bytes.
 const MAGIC: [u8; 4] = [0x00, 0xFF, 0x4B, 0x41];
@@ -53,7 +53,7 @@ impl CodecPlugin for AffinityCodec {
         bytes.starts_with(&MAGIC)
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
-        match photoslop_codec_affinity::read_affinity(bytes) {
+        match schist_codec_affinity::read_affinity(bytes) {
             Ok((doc, report)) if report.complete() && !doc.tree.layers.is_empty() => {
                 return Ok(doc);
             }
@@ -150,7 +150,7 @@ impl AffinityCodec {
         }
         anyhow::bail!(
             "no usable embedded preview. Affinity's layered format is \
-             proprietary; Photoslop imports the flattened preview the file \
+             proprietary; Schist imports the flattened preview the file \
              carries. This file has none — re-save it in Affinity, or export \
              it as PSD for a full layered import."
         )

@@ -1,10 +1,10 @@
 [package]
-name = "photoslop-layer-fx"
+name = "schist-layer-fx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-color.workspace = true
-photoslop-pixel-ops.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true
+schist-pixel-ops.workspace = true

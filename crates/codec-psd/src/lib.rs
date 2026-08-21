@@ -1,8 +1,8 @@
-//! PSD/PSB reader (and, from M6 on, writer) for Photoslop.
+//! PSD/PSB reader (and, from M6 on, writer) for Schist.
 //!
 //! Milestone M5 scope (see `PLAN.md` §4): read the five PSD sections —
 //! header, color mode data, image resources, layer & mask info, merged image
-//! data — into a [`photoslop_core::Document`]. Everything we do not
+//! data — into a [`schist_core::Document`]. Everything we do not
 //! interpret (unknown image resources, unknown additional-layer-info keys,
 //! text engine data, smart objects, effects) is preserved verbatim on the
 //! document / layers so the M6 writer can round-trip it byte-for-byte.

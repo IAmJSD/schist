@@ -1,8 +1,8 @@
 // Render a contact sheet of every filter for eyeballing.
 fn main() {
-    use photoslop_plugin_api::{FilterValues, PluginManifest, PluginRegistry};
+    use schist_plugin_api::{FilterValues, PluginManifest, PluginRegistry};
     let mut reg = PluginRegistry::default();
-    photoslop_filters_core::CoreFiltersPlugin.register(&mut reg);
+    schist_filters_core::CoreFiltersPlugin.register(&mut reg);
     let (w, h) = (96usize, 96usize);
     let base = {
         let mut px = vec![0.0f32; w * h * 4];

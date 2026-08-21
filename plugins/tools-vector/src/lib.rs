@@ -1,19 +1,19 @@
 //! Shape tools (U) and the pen tool (P).
 //!
 //! Shapes and pen paths are rasterized onto their own layer through
-//! `photoslop-vector`. They are *not* PSD vector shape layers: we render
+//! `schist-vector`. They are *not* PSD vector shape layers: we render
 //! pixels and keep no editable vector data, which is why re-opening a saved
 //! file gives raster layers (noted in PLAN.md §7 as an M7 scope cut).
 
 pub mod paths;
 
-use photoslop_color::Rgba;
-use photoslop_core::{Document, IntRect, Layer, LayerPath, TileCoord, TILE_SIZE};
-use photoslop_plugin_api::{
+use schist_color::Rgba;
+use schist_core::{Document, IntRect, Layer, LayerPath, TileCoord, TILE_SIZE};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
 };
-use photoslop_vector::{FillRule, Path, PathBuilder};
+use schist_vector::{FillRule, Path, PathBuilder};
 
 /// Paint a coverage mask onto a fresh layer above the active one, honouring
 /// the current selection, as a single undoable edit.
@@ -29,24 +29,24 @@ pub fn fill_path(doc: &mut Document, path: &Path, color: Rgba, rule: FillRule, n
 /// The single implementation, used both when a shape layer is created and
 /// whenever its path is edited afterwards, so the two can never drift.
 pub fn render_shape(
-    shape: &photoslop_core::VectorShape,
-    depth: photoslop_color::Depth,
+    shape: &schist_core::VectorShape,
+    depth: schist_color::Depth,
     canvas: IntRect,
-) -> photoslop_core::TileMap {
+) -> schist_core::TileMap {
     let flat = crate::paths::flatten(&shape.path);
     let rule = if shape.even_odd {
         FillRule::EvenOdd
     } else {
         FillRule::NonZero
     };
-    let mut tiles = photoslop_core::TileMap::new();
+    let mut tiles = schist_core::TileMap::new();
     rasterize_into(&mut tiles, &flat, rule, shape.fill, depth, canvas);
     if let Some((colour, width)) = shape.stroke {
-        let stroked = photoslop_vector::stroke_path(
+        let stroked = schist_vector::stroke_path(
             &flat,
-            photoslop_vector::StrokeStyle::new(width)
-                .with_cap(photoslop_vector::LineCap::Round)
-                .with_join(photoslop_vector::LineJoin::Round),
+            schist_vector::StrokeStyle::new(width)
+                .with_cap(schist_vector::LineCap::Round)
+                .with_join(schist_vector::LineJoin::Round),
         );
         rasterize_into(
             &mut tiles,
@@ -62,18 +62,18 @@ pub fn render_shape(
 
 /// Composite a filled path onto a tile map.
 fn rasterize_into(
-    tiles: &mut photoslop_core::TileMap,
+    tiles: &mut schist_core::TileMap,
     path: &Path,
     rule: FillRule,
     colour: Rgba,
-    depth: photoslop_color::Depth,
+    depth: schist_color::Depth,
     canvas: IntRect,
 ) {
     let bounds = path.bounds().intersect(&canvas);
     if bounds.is_empty() {
         return;
     }
-    let mask = photoslop_vector::rasterize(path, bounds, rule);
+    let mask = schist_vector::rasterize(path, bounds, rule);
     let w = bounds.width() as usize;
     for coord in TileCoord::covering(&bounds) {
         let trect = coord.rect();
@@ -102,7 +102,7 @@ fn rasterize_into(
 /// and again whenever the shape changes.
 pub(crate) fn commit_shape_layer(
     doc: &mut Document,
-    shape: photoslop_core::VectorShape,
+    shape: schist_core::VectorShape,
     name: &str,
 ) {
     let mut layer = Layer::new_raster(name);
@@ -115,7 +115,7 @@ pub(crate) fn commit_shape_layer(
     layer.shape_key = key;
     layer.shape = Some(Box::new(shape));
     let id = layer.id;
-    let path = photoslop_core::LayerPath(vec![doc.tree.layers.len()]);
+    let path = schist_core::LayerPath(vec![doc.tree.layers.len()]);
     let mut edit = doc.begin_edit(format!("{name} Layer"));
     edit.insert_layer(path, layer);
     edit.commit();
@@ -133,7 +133,7 @@ pub(crate) fn commit_shape(
     if bounds.is_empty() {
         return;
     }
-    let mask = photoslop_vector::rasterize(path, bounds, rule);
+    let mask = schist_vector::rasterize(path, bounds, rule);
     let w = bounds.width() as usize;
     let selection = doc.selection.clone();
     let depth = doc.depth;
@@ -294,19 +294,19 @@ impl ShapeTool {
         from: (f32, f32),
         to: (f32, f32),
         colour: Rgba,
-    ) -> Option<photoslop_core::VectorShape> {
+    ) -> Option<schist_core::VectorShape> {
         let to = self.constrained(from, to);
         let r = drag_rect(from.0, from.1, to.0, to.1, self.square);
         let (l, t, rr, b) = (r.left as f32, r.top as f32, r.right as f32, r.bottom as f32);
-        let mut path = photoslop_core::VectorPath::new(self.kind.label());
+        let mut path = schist_core::VectorPath::new(self.kind.label());
         match self.kind {
             ShapeKind::Rectangle => {
-                path.subpaths.push(photoslop_core::SubPath {
+                path.subpaths.push(schist_core::SubPath {
                     anchors: vec![
-                        photoslop_core::Anchor::corner(l, t),
-                        photoslop_core::Anchor::corner(rr, t),
-                        photoslop_core::Anchor::corner(rr, b),
-                        photoslop_core::Anchor::corner(l, b),
+                        schist_core::Anchor::corner(l, t),
+                        schist_core::Anchor::corner(rr, t),
+                        schist_core::Anchor::corner(rr, b),
+                        schist_core::Anchor::corner(l, b),
                     ],
                     closed: true,
                 });
@@ -317,12 +317,12 @@ impl ShapeTool {
                 let (cx, cy) = ((l + rr) / 2.0, (t + b) / 2.0);
                 let (rx, ry) = ((rr - l) / 2.0, (b - t) / 2.0);
                 let (ox, oy) = (rx * K, ry * K);
-                path.subpaths.push(photoslop_core::SubPath {
+                path.subpaths.push(schist_core::SubPath {
                     anchors: vec![
-                        photoslop_core::Anchor::smooth(cx, t, ox, 0.0),
-                        photoslop_core::Anchor::smooth(rr, cy, 0.0, oy),
-                        photoslop_core::Anchor::smooth(cx, b, -ox, 0.0),
-                        photoslop_core::Anchor::smooth(l, cy, 0.0, -oy),
+                        schist_core::Anchor::smooth(cx, t, ox, 0.0),
+                        schist_core::Anchor::smooth(rr, cy, 0.0, oy),
+                        schist_core::Anchor::smooth(cx, b, -ox, 0.0),
+                        schist_core::Anchor::smooth(l, cy, 0.0, -oy),
                     ],
                     closed: true,
                 });
@@ -331,13 +331,13 @@ impl ShapeTool {
                 let n = self.sides.max(3) as usize;
                 let (cx, cy) = ((l + rr) / 2.0, (t + b) / 2.0);
                 let (rx, ry) = ((rr - l) / 2.0, (b - t) / 2.0);
-                path.subpaths.push(photoslop_core::SubPath {
+                path.subpaths.push(schist_core::SubPath {
                     anchors: (0..n)
                         .map(|i| {
                             // Start at the top, as Photoshop's polygon does.
                             let a = -std::f32::consts::FRAC_PI_2
                                 + i as f32 * std::f32::consts::TAU / n as f32;
-                            photoslop_core::Anchor::corner(cx + rx * a.cos(), cy + ry * a.sin())
+                            schist_core::Anchor::corner(cx + rx * a.cos(), cy + ry * a.sin())
                         })
                         .collect(),
                     closed: true,
@@ -349,15 +349,15 @@ impl ShapeTool {
                 // everything to the stroke. Arrowheads are closed
                 // subpaths, so they are the other way round.
                 path.push_open_anchors(vec![
-                    photoslop_core::Anchor::corner(from.0, from.1),
-                    photoslop_core::Anchor::corner(to.0, to.1),
+                    schist_core::Anchor::corner(from.0, from.1),
+                    schist_core::Anchor::corner(to.0, to.1),
                 ]);
                 if self.arrow_start {
                     if let Some(head) = self.arrow_head(to, from) {
-                        path.subpaths.push(photoslop_core::SubPath {
+                        path.subpaths.push(schist_core::SubPath {
                             anchors: head
                                 .iter()
-                                .map(|(x, y)| photoslop_core::Anchor::corner(*x, *y))
+                                .map(|(x, y)| schist_core::Anchor::corner(*x, *y))
                                 .collect(),
                             closed: true,
                         });
@@ -365,16 +365,16 @@ impl ShapeTool {
                 }
                 if self.arrow_end {
                     if let Some(head) = self.arrow_head(from, to) {
-                        path.subpaths.push(photoslop_core::SubPath {
+                        path.subpaths.push(schist_core::SubPath {
                             anchors: head
                                 .iter()
-                                .map(|(x, y)| photoslop_core::Anchor::corner(*x, *y))
+                                .map(|(x, y)| schist_core::Anchor::corner(*x, *y))
                                 .collect(),
                             closed: true,
                         });
                     }
                 }
-                let mut shape = photoslop_core::VectorShape::new(path, colour);
+                let mut shape = schist_core::VectorShape::new(path, colour);
                 shape.stroke = Some((colour, self.weight));
                 return Some(shape);
             }
@@ -382,7 +382,7 @@ impl ShapeTool {
         if path.is_empty() {
             return None;
         }
-        Some(photoslop_core::VectorShape::new(path, colour))
+        Some(schist_core::VectorShape::new(path, colour))
     }
 
     fn path_for(&self, from: (f32, f32), to: (f32, f32)) -> Path {
@@ -404,10 +404,10 @@ impl ShapeTool {
             ShapeKind::Line => {
                 b.move_to(from.0, from.1).line_to(to.0, to.1);
                 // Butt caps: a line should end exactly where the drag did.
-                let mut path = photoslop_vector::stroke_path(
+                let mut path = schist_vector::stroke_path(
                     &b.build(0.25),
-                    photoslop_vector::StrokeStyle::new(self.weight)
-                        .with_cap(photoslop_vector::LineCap::Butt),
+                    schist_vector::StrokeStyle::new(self.weight)
+                        .with_cap(schist_vector::LineCap::Butt),
                 );
                 if self.arrow_start {
                     if let Some(head) = self.arrow_head(to, from) {
@@ -582,20 +582,20 @@ impl PenTool {
     /// The anchors as an editable path, for the shape-layer commit. The
     /// pen already stores a point and an outgoing handle per anchor, which
     /// is exactly what a smooth anchor is.
-    fn vector_shape(&self, colour: Rgba) -> Option<photoslop_core::VectorShape> {
+    fn vector_shape(&self, colour: Rgba) -> Option<schist_core::VectorShape> {
         if self.anchors.len() < 3 {
             return None;
         }
-        let mut path = photoslop_core::VectorPath::new("Path");
-        path.subpaths.push(photoslop_core::SubPath {
+        let mut path = schist_core::VectorPath::new("Path");
+        path.subpaths.push(schist_core::SubPath {
             anchors: self
                 .anchors
                 .iter()
-                .map(|((x, y), (hx, hy))| photoslop_core::Anchor::smooth(*x, *y, *hx, *hy))
+                .map(|((x, y), (hx, hy))| schist_core::Anchor::smooth(*x, *y, *hx, *hy))
                 .collect(),
             closed: true,
         });
-        Some(photoslop_core::VectorShape::new(path, colour))
+        Some(schist_core::VectorShape::new(path, colour))
     }
 
     fn build_path(&self, close: bool) -> Path {
@@ -767,7 +767,7 @@ pub struct VectorToolsPlugin;
 
 impl PluginManifest for VectorToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-vector"
+        "schist.tools-vector"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -789,9 +789,9 @@ impl PluginManifest for VectorToolsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::SelectOp;
-    use photoslop_plugin_api::Modifiers;
+    use schist_color::Depth;
+    use schist_core::SelectOp;
+    use schist_plugin_api::Modifiers;
 
     fn doc() -> Document {
         let mut d = Document::new("t", 100, 100, Depth::Eight);

@@ -3,12 +3,12 @@
 //! Interactive editing only recomposites *damaged, visible* tiles, so the
 //! number that matters is "one screenful of tiles through the layer stack",
 //! not the whole canvas. Run with `cargo run --release -p
-//! photoslop-compositor --example bench`.
+//! schist-compositor --example bench`.
 
-use photoslop_adjustments::{Curve, Curves, Params};
-use photoslop_color::Depth;
-use photoslop_compositor::{composite_region_rgba8, composite_tile, TileCache};
-use photoslop_core::{
+use schist_adjustments::{Curve, Curves, Params};
+use schist_color::Depth;
+use schist_compositor::{composite_region_rgba8, composite_tile, TileCache};
+use schist_core::{
     blit_rgba8, AdjustmentData, AdjustmentKind, BlendMode, Document, IntRect, Layer, LayerKind,
     TileCoord,
 };

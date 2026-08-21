@@ -1,10 +1,10 @@
 [package]
-name = "photoslop-tools-retouch"
+name = "schist-tools-retouch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-color.workspace = true
-photoslop-plugin-api.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true
+schist-plugin-api.workspace = true

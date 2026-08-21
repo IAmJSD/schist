@@ -9,8 +9,8 @@
 //! "Protect" channel, here the selection) adds enough energy that seams
 //! route around it.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{IntRect, Selection, TileCoord, TileMap, TILE_SIZE};
+use schist_color::{Depth, Rgba};
+use schist_core::{IntRect, Selection, TileCoord, TileMap, TILE_SIZE};
 
 /// A flat RGBA image, which is what the carving works on.
 pub struct Image {

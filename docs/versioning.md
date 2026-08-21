@@ -2,12 +2,12 @@
 
 ## Versions
 
-Photoslop uses semantic versioning (`MAJOR.MINOR.PATCH`) across the whole
+Schist uses semantic versioning (`MAJOR.MINOR.PATCH`) across the whole
 workspace — every crate shares one version, set in the root `Cargo.toml`.
 
 Two surfaces carry compatibility promises:
 
-* **The plugin ABI** (`photoslop-plugin-host-wasm::abi::ABI_VERSION`) is
+* **The plugin ABI** (`schist-plugin-host-wasm::abi::ABI_VERSION`) is
   versioned independently and changes rarely. Additive changes (new optional
   exports) keep the number; anything that would break an existing plugin
   bumps it, and the host then refuses older plugins with a clear message

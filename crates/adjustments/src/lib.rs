@@ -10,10 +10,10 @@
 
 /// PSD descriptor decoding, re-exported so callers that already reach for
 /// it through this crate keep working.
-pub use photoslop_psd_descriptor as descriptor;
+pub use schist_psd_descriptor as descriptor;
 
-use photoslop_color::Rgba;
-use photoslop_core::AdjustmentKind;
+use schist_color::Rgba;
+use schist_core::AdjustmentKind;
 
 /// A tone curve as up to 16 control points in 0..1, evaluated with
 /// monotone-ish Catmull-Rom interpolation and cached into a LUT.

@@ -4313,354 +4313,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "photoslop-adjustments"
-version = "0.1.0"
-dependencies = [
- "log",
- "photoslop-color",
- "photoslop-core",
- "photoslop-psd-descriptor",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "photoslop-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "gpui",
- "image",
- "log",
- "photoslop-adjustments",
- "photoslop-codec-psd",
- "photoslop-codecs-common",
- "photoslop-color",
- "photoslop-colormgmt",
- "photoslop-commands-core",
- "photoslop-compositor",
- "photoslop-core",
- "photoslop-filters-core",
- "photoslop-layer-fx",
- "photoslop-neural",
- "photoslop-plugin-api",
- "photoslop-plugin-host-wasm",
- "photoslop-text-engine",
- "photoslop-tools-basic",
- "photoslop-tools-doc",
- "photoslop-tools-paint",
- "photoslop-tools-retouch",
- "photoslop-tools-select",
- "photoslop-tools-transform",
- "photoslop-tools-type",
- "photoslop-tools-vector",
- "photoslop-tools-warp",
- "photoslop-vector",
- "rayon",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "smallvec",
- "ureq",
-]
-
-[[package]]
-name = "photoslop-codec-affinity"
-version = "0.1.0"
-dependencies = [
- "image",
- "log",
- "miniz_oxide",
- "photoslop-adjustments",
- "photoslop-color",
- "photoslop-core",
- "photoslop-text-engine",
- "photoslop-vector",
- "ruzstd",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "photoslop-codec-psd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "log",
- "miniz_oxide",
- "photoslop-color",
- "photoslop-compositor",
- "photoslop-core",
- "photoslop-psd-descriptor",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "photoslop-codecs-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "image",
- "log",
- "photoslop-codec-affinity",
- "photoslop-color",
- "photoslop-colormgmt",
- "photoslop-compositor",
- "photoslop-core",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-color"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "photoslop-colormgmt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "moxcms",
- "photoslop-color",
- "serde",
-]
-
-[[package]]
-name = "photoslop-commands-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "photoslop-color",
- "photoslop-compositor",
- "photoslop-core",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-compositor"
-version = "0.1.0"
-dependencies = [
- "log",
- "photoslop-adjustments",
- "photoslop-color",
- "photoslop-core",
- "photoslop-layer-fx",
- "photoslop-pixel-ops",
- "rayon",
- "rustc-hash 2.1.3",
- "serde_json",
-]
-
-[[package]]
-name = "photoslop-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "parking_lot",
- "photoslop-color",
- "rayon",
- "rustc-hash 2.1.3",
- "serde",
- "smallvec",
-]
-
-[[package]]
-name = "photoslop-filters-core"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-neural",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-layer-fx"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-pixel-ops",
-]
-
-[[package]]
-name = "photoslop-neural"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "rayon",
- "sha2 0.10.9",
- "tract-onnx",
-]
-
-[[package]]
-name = "photoslop-pixel-ops"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
-]
-
-[[package]]
-name = "photoslop-plugin-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "parking_lot",
- "photoslop-color",
- "photoslop-core",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "smallvec",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "photoslop-plugin-host-wasm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
- "serde",
- "serde_json",
- "wasmtime",
-]
-
-[[package]]
-name = "photoslop-plugin-sdk"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "photoslop-psd-descriptor"
-version = "0.1.0"
-
-[[package]]
-name = "photoslop-text-engine"
-version = "0.1.0"
-dependencies = [
- "fontdb 0.24.0",
- "fontdue",
- "log",
- "photoslop-color",
- "photoslop-core",
- "serde",
-]
-
-[[package]]
-name = "photoslop-tools-basic"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-compositor",
- "photoslop-core",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-tools-doc"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
- "photoslop-vector",
-]
-
-[[package]]
-name = "photoslop-tools-paint"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-compositor",
- "photoslop-core",
- "photoslop-pixel-ops",
- "photoslop-plugin-api",
- "rustc-hash 2.1.3",
-]
-
-[[package]]
-name = "photoslop-tools-retouch"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-tools-select"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-pixel-ops",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-tools-transform"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-tools-type"
-version = "0.1.0"
-dependencies = [
- "log",
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
- "photoslop-text-engine",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "photoslop-tools-vector"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
- "photoslop-vector",
-]
-
-[[package]]
-name = "photoslop-tools-warp"
-version = "0.1.0"
-dependencies = [
- "photoslop-color",
- "photoslop-core",
- "photoslop-plugin-api",
-]
-
-[[package]]
-name = "photoslop-vector"
-version = "0.1.0"
-dependencies = [
- "photoslop-core",
-]
-
-[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5730,6 +5382,354 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "schist-adjustments"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "schist-color",
+ "schist-core",
+ "schist-psd-descriptor",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schist-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "gpui",
+ "image",
+ "log",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "schist-adjustments",
+ "schist-codec-psd",
+ "schist-codecs-common",
+ "schist-color",
+ "schist-colormgmt",
+ "schist-commands-core",
+ "schist-compositor",
+ "schist-core",
+ "schist-filters-core",
+ "schist-layer-fx",
+ "schist-neural",
+ "schist-plugin-api",
+ "schist-plugin-host-wasm",
+ "schist-text-engine",
+ "schist-tools-basic",
+ "schist-tools-doc",
+ "schist-tools-paint",
+ "schist-tools-retouch",
+ "schist-tools-select",
+ "schist-tools-transform",
+ "schist-tools-type",
+ "schist-tools-vector",
+ "schist-tools-warp",
+ "schist-vector",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "ureq",
+]
+
+[[package]]
+name = "schist-codec-affinity"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "log",
+ "miniz_oxide",
+ "ruzstd",
+ "schist-adjustments",
+ "schist-color",
+ "schist-core",
+ "schist-text-engine",
+ "schist-vector",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "schist-codec-psd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "log",
+ "miniz_oxide",
+ "schist-color",
+ "schist-compositor",
+ "schist-core",
+ "schist-psd-descriptor",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "schist-codecs-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "schist-codec-affinity",
+ "schist-color",
+ "schist-colormgmt",
+ "schist-compositor",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-color"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "schist-colormgmt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "moxcms",
+ "schist-color",
+ "serde",
+]
+
+[[package]]
+name = "schist-commands-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "schist-color",
+ "schist-compositor",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-compositor"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "schist-adjustments",
+ "schist-color",
+ "schist-core",
+ "schist-layer-fx",
+ "schist-pixel-ops",
+ "serde_json",
+]
+
+[[package]]
+name = "schist-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "parking_lot",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "schist-color",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
+name = "schist-filters-core"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-neural",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-layer-fx"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-pixel-ops",
+]
+
+[[package]]
+name = "schist-neural"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "rayon",
+ "sha2 0.10.9",
+ "tract-onnx",
+]
+
+[[package]]
+name = "schist-pixel-ops"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+]
+
+[[package]]
+name = "schist-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "rustc-hash 2.1.3",
+ "schist-color",
+ "schist-core",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "schist-plugin-host-wasm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+ "serde",
+ "serde_json",
+ "wasmtime",
+]
+
+[[package]]
+name = "schist-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schist-psd-descriptor"
+version = "0.1.0"
+
+[[package]]
+name = "schist-text-engine"
+version = "0.1.0"
+dependencies = [
+ "fontdb 0.24.0",
+ "fontdue",
+ "log",
+ "schist-color",
+ "schist-core",
+ "serde",
+]
+
+[[package]]
+name = "schist-tools-basic"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-compositor",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-tools-doc"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+ "schist-vector",
+]
+
+[[package]]
+name = "schist-tools-paint"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "schist-color",
+ "schist-compositor",
+ "schist-core",
+ "schist-pixel-ops",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-tools-retouch"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-tools-select"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-pixel-ops",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-tools-transform"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-tools-type"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+ "schist-text-engine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schist-tools-vector"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+ "schist-vector",
+]
+
+[[package]]
+name = "schist-tools-warp"
+version = "0.1.0"
+dependencies = [
+ "schist-color",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
+name = "schist-vector"
+version = "0.1.0"
+dependencies = [
+ "schist-core",
 ]
 
 [[package]]

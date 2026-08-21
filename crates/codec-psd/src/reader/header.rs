@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use crate::error::PsdError;
-use photoslop_color::{ColorMode, Depth};
+use schist_color::{ColorMode, Depth};
 
 /// PSD colour mode numbers.
 pub const MODE_BITMAP: u16 = 0;

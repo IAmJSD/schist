@@ -6,8 +6,8 @@
 //! example crates rather than loading a checked-in binary. It skips (rather
 //! than fails) when the wasm target isn't installed.
 
-use photoslop_plugin_api::{CodecPlugin, FilterPlugin, FilterValues, PluginRegistry};
-use photoslop_plugin_host_wasm::{LoadedPlugin, PluginManager, WasmCodec, WasmFilter};
+use schist_plugin_api::{CodecPlugin, FilterPlugin, FilterValues, PluginRegistry};
+use schist_plugin_host_wasm::{LoadedPlugin, PluginManager, WasmCodec, WasmFilter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -42,7 +42,7 @@ fn build_example(dir: &str, artifact: &str) -> Option<PathBuf> {
 
 #[test]
 fn sepia_filter_plugin_loads_and_transforms_pixels() {
-    let Some(path) = build_example("sepia-filter", "photoslop_example_sepia.wasm") else {
+    let Some(path) = build_example("sepia-filter", "schist_example_sepia.wasm") else {
         return;
     };
     let plugin = LoadedPlugin::load(&path).expect("plugin loads");
@@ -71,7 +71,7 @@ fn sepia_filter_plugin_loads_and_transforms_pixels() {
 
 #[test]
 fn pgm_codec_plugin_decodes_an_image() {
-    let Some(path) = build_example("pgm-codec", "photoslop_example_pgm.wasm") else {
+    let Some(path) = build_example("pgm-codec", "schist_example_pgm.wasm") else {
         return;
     };
     let plugin = LoadedPlugin::load(&path).expect("plugin loads");
@@ -96,10 +96,10 @@ fn pgm_codec_plugin_decodes_an_image() {
 
 #[test]
 fn plugin_directory_scan_registers_and_honours_disabling() {
-    let Some(sepia) = build_example("sepia-filter", "photoslop_example_sepia.wasm") else {
+    let Some(sepia) = build_example("sepia-filter", "schist_example_sepia.wasm") else {
         return;
     };
-    let dir = std::env::temp_dir().join("photoslop-plugin-scan-test");
+    let dir = std::env::temp_dir().join("schist-plugin-scan-test");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -125,7 +125,7 @@ fn plugin_directory_scan_registers_and_honours_disabling() {
 #[test]
 fn junk_and_hostile_modules_are_refused_not_executed() {
     // Not wasm at all.
-    let dir = std::env::temp_dir().join("photoslop-plugin-junk-test");
+    let dir = std::env::temp_dir().join("schist-plugin-junk-test");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("garbage.wasm"), b"definitely not wasm").unwrap();
@@ -156,7 +156,7 @@ fn wat_minimal() -> Vec<u8> {
 
 #[test]
 fn missing_plugin_directory_is_not_an_error() {
-    let dir = std::env::temp_dir().join("photoslop-plugin-absent-dir");
+    let dir = std::env::temp_dir().join("schist-plugin-absent-dir");
     let _ = std::fs::remove_dir_all(&dir);
     let mut registry = PluginRegistry::new();
     let manager = PluginManager::load_dir(&dir, &mut registry);

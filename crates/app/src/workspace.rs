@@ -13,10 +13,10 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
-use photoslop_color::{Depth, Rgba};
-use photoslop_compositor::TileCache;
-use photoslop_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE};
-use photoslop_plugin_api::{
+use schist_color::{Depth, Rgba};
+use schist_compositor::TileCache;
+use schist_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE};
+use schist_plugin_api::{
     CommandCtx, EditorState, Modifiers, Overlay, PluginRegistry, PointerInput, ToolCtx,
 };
 use rayon::prelude::*;
@@ -39,7 +39,7 @@ fn prefs_path() -> Option<PathBuf> {
                 .ok()
                 .map(|h| PathBuf::from(h).join(".config"))
         })?;
-    Some(base.join("photoslop/preferences.json"))
+    Some(base.join("schist/preferences.json"))
 }
 
 fn load_view_options() -> ViewOptions {
@@ -114,7 +114,7 @@ pub struct Workspace {
     /// knows to keep repainting for tools that draw their own.
     pub tool_has_overlay: bool,
     /// Which curve the Curves editor is showing.
-    pub curve_channel: photoslop_adjustments::CurveChannel,
+    pub curve_channel: schist_adjustments::CurveChannel,
     /// Index of the control point being dragged in the curve editor.
     pub curve_drag: Option<usize>,
     /// Which colour control is being dragged, if any.
@@ -127,7 +127,7 @@ pub struct Workspace {
     active_slider: Option<(&'static str, f32)>,
     /// Layer thumbnails keyed by layer id, tagged with the doc revision
     /// they were rendered at.
-    thumbs: FxHashMap<photoslop_core::LayerId, (u64, Arc<RenderImage>)>,
+    thumbs: FxHashMap<schist_core::LayerId, (u64, Arc<RenderImage>)>,
     /// Toolbar groups: (group id, tool ids in registration order).
     pub tool_groups: Vec<(&'static str, Vec<&'static str>)>,
     /// The tool each group last used — what its toolbar slot shows.
@@ -144,7 +144,7 @@ pub struct Workspace {
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
     /// Third-party plugin registry state (M9).
-    pub plugins: photoslop_plugin_host_wasm::PluginManager,
+    pub plugins: schist_plugin_host_wasm::PluginManager,
     /// Plugin enable/disable requested from the manager UI, applied on the
     /// next render pass (the checkbox callback has no context to do it).
     pub pending_plugin_toggle: Option<(String, bool)>,
@@ -152,7 +152,7 @@ pub struct Workspace {
     pub view: ViewOptions,
     pub screen_mode: ScreenMode,
     /// A guide being dragged out of a ruler.
-    dragging_guide: Option<photoslop_core::Guide>,
+    dragging_guide: Option<schist_core::Guide>,
     /// The selection outline, tagged with the selection generation it was
     /// traced from.
     selection_outline: Option<(u64, SelectionOutline)>,
@@ -165,16 +165,16 @@ pub struct Workspace {
     /// the old transform are rebuilt.
     color_epoch: u64,
     /// Colour management settings and the compiled display transform.
-    pub color: photoslop_colormgmt::ColorSettings,
-    display_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
-    proof_transform: Option<Arc<photoslop_colormgmt::ColorTransform>>,
+    pub color: schist_colormgmt::ColorSettings,
+    display_transform: Option<Arc<schist_colormgmt::ColorTransform>>,
+    proof_transform: Option<Arc<schist_colormgmt::ColorTransform>>,
 }
 
 /// One filter in the Filter Gallery's stack.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GalleryEntry {
     pub id: &'static str,
-    pub values: photoslop_plugin_api::FilterValues,
+    pub values: schist_plugin_api::FilterValues,
     /// Unticking keeps the entry but skips it, which is how the gallery's
     /// eye toggles work.
     pub enabled: bool,
@@ -308,7 +308,7 @@ impl ModifyKind {
 /// re-run from the untouched original and Cancel can put it back.
 #[derive(Clone)]
 pub struct FilterPreview {
-    pub layer: photoslop_core::LayerId,
+    pub layer: schist_core::LayerId,
     pub region: IntRect,
     pub original: Vec<f32>,
 }
@@ -392,7 +392,7 @@ type SelectionOutline = Arc<Vec<Vec<(f32, f32)>>>;
 /// What a context menu was opened on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextTarget {
-    Layer(photoslop_core::LayerId),
+    Layer(schist_core::LayerId),
     History,
     Color,
     Navigator,
@@ -424,7 +424,7 @@ pub enum Modal {
     ImageSize {
         width: u32,
         height: u32,
-        filter: photoslop_core::Filter,
+        filter: schist_core::Filter,
         link: bool,
     },
     CanvasSize {
@@ -435,25 +435,25 @@ pub enum Modal {
     /// A destructive filter with live parameters.
     Filter {
         id: &'static str,
-        values: photoslop_plugin_api::FilterValues,
+        values: schist_plugin_api::FilterValues,
         /// Show the result on the canvas while the dialog is open.
         preview: bool,
     },
     /// Layer effects for one layer. Boxed because the style is by far the
     /// largest thing any dialog carries.
     LayerStyle {
-        layer: photoslop_core::LayerId,
-        style: Box<photoslop_core::LayerStyle>,
+        layer: schist_core::LayerId,
+        style: Box<schist_core::LayerStyle>,
         /// What to put back on Cancel, and the "before" for the history
         /// entry recorded on OK.
-        original: Box<photoslop_core::LayerStyle>,
+        original: Box<schist_core::LayerStyle>,
         /// Which effect's settings are showing.
         active: &'static str,
     },
     /// An adjustment applied straight to the pixels (Image ▸ Adjustments).
     DestructiveAdjustment {
-        kind: photoslop_core::AdjustmentKind,
-        params: Box<photoslop_adjustments::Params>,
+        kind: schist_core::AdjustmentKind,
+        params: Box<schist_adjustments::Params>,
         preview: bool,
     },
     /// Filter ▸ Filter Gallery: a stack of filters applied in order.
@@ -469,7 +469,7 @@ pub enum Modal {
     /// Edit ▸ Stroke.
     Stroke {
         width: f32,
-        position: photoslop_core::StrokePosition,
+        position: schist_core::StrokePosition,
     },
     /// Edit ▸ Fill.
     Fill { source: FillSource, opacity: f32 },
@@ -499,7 +499,7 @@ pub enum Modal {
     /// Export with format options.
     Export {
         codec: &'static str,
-        options: photoslop_plugin_api::ExportOptions,
+        options: schist_plugin_api::ExportOptions,
     },
     /// Assign or convert to a colour profile.
     Profile {
@@ -509,15 +509,15 @@ pub enum Modal {
     },
     /// Rename a layer (Layer Properties).
     LayerProperties {
-        layer: photoslop_core::LayerId,
+        layer: schist_core::LayerId,
         name: String,
     },
     /// Editing an existing adjustment layer's parameters. `original` is
     /// what the layer held before the dialog opened, so Cancel can put it
     /// back exactly.
     Adjustment {
-        layer: photoslop_core::LayerId,
-        params: photoslop_adjustments::Params,
+        layer: schist_core::LayerId,
+        params: schist_adjustments::Params,
         original: (Option<String>, Vec<u8>),
     },
 }
@@ -556,7 +556,7 @@ struct Preview {
 impl Workspace {
     pub fn new(
         registry: PluginRegistry,
-        plugins: photoslop_plugin_host_wasm::PluginManager,
+        plugins: schist_plugin_host_wasm::PluginManager,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut ws = Workspace {
@@ -611,7 +611,7 @@ impl Workspace {
             nav_thumb: None,
             focused_once: false,
             color_epoch: 0,
-            color: photoslop_colormgmt::ColorSettings::default(),
+            color: schist_colormgmt::ColorSettings::default(),
             display_transform: None,
             proof_transform: None,
         };
@@ -904,7 +904,7 @@ impl Workspace {
     fn exporter_for(
         &self,
         path: &std::path::Path,
-    ) -> Option<&dyn photoslop_plugin_api::CodecPlugin> {
+    ) -> Option<&dyn schist_plugin_api::CodecPlugin> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         self.registry
             .codecs()
@@ -929,7 +929,7 @@ impl Workspace {
         let bytes = codec.export(doc)?;
         // Write to a sibling temp file and rename, so an interrupted save
         // can't truncate the user's existing file.
-        let tmp = path.with_extension("photoslop-tmp");
+        let tmp = path.with_extension("schist-tmp");
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
@@ -947,12 +947,12 @@ impl Workspace {
                     .ok()
                     .map(|h| PathBuf::from(h).join(".local/state"))
             })?;
-        Some(base.join("photoslop/recovery"))
+        Some(base.join("schist/recovery"))
     }
 
     /// One snapshot file per open document, so every dirty tab survives a
     /// crash, not just the frontmost one.
-    fn recovery_path(&self, id: photoslop_core::DocumentId) -> Option<PathBuf> {
+    fn recovery_path(&self, id: schist_core::DocumentId) -> Option<PathBuf> {
         Some(Self::recovery_dir()?.join(format!("session-{}-{}.psd", std::process::id(), id.0)))
     }
 
@@ -997,7 +997,7 @@ impl Workspace {
         }
     }
 
-    fn remove_recovery_for(&self, id: photoslop_core::DocumentId) {
+    fn remove_recovery_for(&self, id: schist_core::DocumentId) {
         if let Some(path) = self.recovery_path(id) {
             let _ = std::fs::remove_file(path);
         }
@@ -1135,7 +1135,7 @@ impl Workspace {
     // ----- change propagation -----
 
     /// Open the Layer Style dialog for the active layer.
-    pub fn show_layer_style(&mut self, layer: photoslop_core::LayerId, cx: &mut Context<Self>) {
+    pub fn show_layer_style(&mut self, layer: schist_core::LayerId, cx: &mut Context<Self>) {
         let Some(style) = self
             .doc
             .as_ref()
@@ -1164,8 +1164,8 @@ impl Workspace {
     /// Push the dialog's style onto the layer so the canvas shows it.
     pub fn preview_layer_style(
         &mut self,
-        layer: photoslop_core::LayerId,
-        style: photoslop_core::LayerStyle,
+        layer: schist_core::LayerId,
+        style: schist_core::LayerStyle,
         cx: &mut Context<Self>,
     ) {
         if let Some(doc) = self.doc.as_mut() {
@@ -1304,7 +1304,7 @@ impl Workspace {
         edit.change_selection(|sel, canvas| {
             sel.deselect();
             sel.activate();
-            sel.apply_shape(canvas, photoslop_core::SelectOp::Replace, |x, y| {
+            sel.apply_shape(canvas, schist_core::SelectOp::Replace, |x, y| {
                 cov[(y - canvas.top) as usize * w + (x - canvas.left) as usize]
             });
         });
@@ -1320,10 +1320,10 @@ impl Workspace {
     /// writes pixels; that is what "destructive" means here.
     pub fn apply_adjustment_destructive(
         &mut self,
-        kind: photoslop_core::AdjustmentKind,
+        kind: schist_core::AdjustmentKind,
         cx: &mut Context<Self>,
     ) {
-        let params = photoslop_adjustments::Params::default_for(kind);
+        let params = schist_adjustments::Params::default_for(kind);
         if !self.begin_filter_preview() {
             cx.notify();
             return;
@@ -1341,7 +1341,7 @@ impl Workspace {
     /// Re-run a destructive adjustment's preview from the snapshot.
     pub fn preview_destructive_adjustment(
         &mut self,
-        params: Option<&photoslop_adjustments::Params>,
+        params: Option<&schist_adjustments::Params>,
         cx: &mut Context<Self>,
     ) {
         let Some(preview) = self.filter_preview.clone() else {
@@ -1365,8 +1365,8 @@ impl Workspace {
     /// Commit a destructive adjustment as one history entry.
     pub fn commit_destructive_adjustment(
         &mut self,
-        kind: photoslop_core::AdjustmentKind,
-        params: &photoslop_adjustments::Params,
+        kind: schist_core::AdjustmentKind,
+        params: &schist_adjustments::Params,
         cx: &mut Context<Self>,
     ) {
         // Put the previewed pixels back first so the edit records the
@@ -1468,8 +1468,8 @@ impl Workspace {
         let (nw, nh) = if swaps { (h, w) } else { (w, h) };
         // Read every layer's pixels first: the mapping reads from the old
         // geometry while writing the new one.
-        let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
-        let sources: Vec<(photoslop_core::LayerId, photoslop_core::TileMap)> = ids
+        let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+        let sources: Vec<(schist_core::LayerId, schist_core::TileMap)> = ids
             .iter()
             .filter_map(|id| {
                 doc.tree
@@ -1514,7 +1514,7 @@ impl Workspace {
         let canvas = doc.canvas_rect();
         // What counts as "border" is the colour of the top-left pixel of
         // the composited image, or transparency where there is none.
-        let flat = photoslop_compositor::composite_region_rgba8(doc, canvas);
+        let flat = schist_compositor::composite_region_rgba8(doc, canvas);
         let w = canvas.width() as usize;
         let at = |x: i32, y: i32| -> [u8; 4] {
             let i = (y as usize * w + x as usize) * 4;
@@ -1541,25 +1541,25 @@ impl Workspace {
     /// Crop the document to `rect`, moving every layer with it.
     pub fn resize_canvas_to(&mut self, rect: IntRect, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_mut() else { return };
-        photoslop_tools_transform::crop_to(doc, rect);
+        schist_tools_transform::crop_to(doc, rect);
         self.status = "Trimmed".into();
         self.fit_to_view();
         self.after_change(cx);
     }
 
     /// Image ▸ Mode: switch the document between RGB and Grayscale.
-    pub fn set_color_mode(&mut self, mode: photoslop_color::ColorMode, cx: &mut Context<Self>) {
+    pub fn set_color_mode(&mut self, mode: schist_color::ColorMode, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_mut() else { return };
         if doc.mode == mode {
             return;
         }
-        if mode == photoslop_color::ColorMode::Grayscale
-            || mode == photoslop_color::ColorMode::Indexed
+        if mode == schist_color::ColorMode::Grayscale
+            || mode == schist_color::ColorMode::Indexed
         {
             // Flatten colour out of every layer, which is what the mode
             // change actually means for the pixels.
-            let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
-            let coords_by_layer: Vec<(photoslop_core::LayerId, Vec<TileCoord>)> = ids
+            let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+            let coords_by_layer: Vec<(schist_core::LayerId, Vec<TileCoord>)> = ids
                 .iter()
                 .filter_map(|id| {
                     doc.tree
@@ -1574,10 +1574,10 @@ impl Workspace {
                     let Some(tile) = edit.writable_tile(id, coord) else {
                         break;
                     };
-                    for ix in 0..photoslop_core::TILE_PIXELS {
+                    for ix in 0..schist_core::TILE_PIXELS {
                         let p = tile.get(ix);
                         let l = 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
-                        tile.set(ix, photoslop_color::Rgba::new(l, l, l, p.a));
+                        tile.set(ix, schist_color::Rgba::new(l, l, l, p.a));
                     }
                 }
             }
@@ -1605,45 +1605,45 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let flat = photoslop_tools_vector::paths::flatten(&path);
+        let flat = schist_tools_vector::paths::flatten(&path);
         let colour = self.editor.foreground;
         let width = self.editor.brush_size.max(1.0);
         let Some(doc) = self.doc.as_mut() else { return };
         match op {
             PathOp::Fill => {
-                photoslop_tools_vector::fill_path(
+                schist_tools_vector::fill_path(
                     doc,
                     &flat,
                     colour,
-                    photoslop_vector::FillRule::NonZero,
+                    schist_vector::FillRule::NonZero,
                     "Fill Path",
                 );
             }
             PathOp::Stroke => {
-                let stroked = photoslop_vector::stroke_path(
+                let stroked = schist_vector::stroke_path(
                     &flat,
-                    photoslop_vector::StrokeStyle::new(width)
-                        .with_cap(photoslop_vector::LineCap::Round)
-                        .with_join(photoslop_vector::LineJoin::Round),
+                    schist_vector::StrokeStyle::new(width)
+                        .with_cap(schist_vector::LineCap::Round)
+                        .with_join(schist_vector::LineJoin::Round),
                 );
-                photoslop_tools_vector::fill_path(
+                schist_tools_vector::fill_path(
                     doc,
                     &stroked,
                     colour,
-                    photoslop_vector::FillRule::NonZero,
+                    schist_vector::FillRule::NonZero,
                     "Stroke Path",
                 );
             }
             PathOp::Select => {
                 let rect = flat.bounds();
                 let mask =
-                    photoslop_vector::rasterize(&flat, rect, photoslop_vector::FillRule::NonZero);
+                    schist_vector::rasterize(&flat, rect, schist_vector::FillRule::NonZero);
                 let w = rect.width().max(0) as usize;
                 let mut edit = doc.begin_edit("Make Selection");
                 edit.change_selection(|sel, _| {
                     sel.deselect();
                     sel.activate();
-                    sel.apply_shape(rect, photoslop_core::SelectOp::Replace, |x, y| {
+                    sel.apply_shape(rect, schist_core::SelectOp::Replace, |x, y| {
                         mask[(y - rect.top) as usize * w + (x - rect.left) as usize]
                     });
                 });
@@ -1669,7 +1669,7 @@ impl Workspace {
     pub fn stroke_selection(
         &mut self,
         width: f32,
-        position: photoslop_core::StrokePosition,
+        position: schist_core::StrokePosition,
         cx: &mut Context<Self>,
     ) {
         let colour = self.editor.foreground;
@@ -1688,19 +1688,19 @@ impl Workspace {
         let mut band = doc.selection.clone();
         let w = width.round().max(1.0) as i32;
         match position {
-            photoslop_core::StrokePosition::Inside => {
+            schist_core::StrokePosition::Inside => {
                 let mut inner = band.clone();
                 inner.contract(w, canvas);
                 subtract_into(&mut band, &inner, canvas);
             }
-            photoslop_core::StrokePosition::Outside => {
+            schist_core::StrokePosition::Outside => {
                 let mut outer = band.clone();
                 outer.expand(w, canvas);
                 let inner = band.clone();
                 subtract_into(&mut outer, &inner, canvas);
                 band = outer;
             }
-            photoslop_core::StrokePosition::Center => band.border(w, canvas),
+            schist_core::StrokePosition::Center => band.border(w, canvas),
         }
         let rect = band.bounds().intersect(&canvas);
         if rect.is_empty() {
@@ -1843,7 +1843,7 @@ impl Workspace {
                     selection.coverage(rect.left + x as i32, rect.top + y as i32) >= 128;
             }
         }
-        let filled = photoslop_tools_retouch::inpaint(&tiles, rect, &hole);
+        let filled = schist_tools_retouch::inpaint(&tiles, rect, &hole);
         let mut edit = doc.begin_edit("Content-Aware Fill");
         for coord in TileCoord::covering(&rect) {
             let trect = coord.rect();
@@ -1892,13 +1892,13 @@ impl Workspace {
         // channel does.
         let protect = (!doc.selection.is_empty()).then(|| doc.selection.clone());
         let depth = doc.depth;
-        let ids: Vec<photoslop_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
-        let mut carved: Vec<(photoslop_core::LayerId, photoslop_core::TileMap)> = Vec::new();
+        let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+        let mut carved: Vec<(schist_core::LayerId, schist_core::TileMap)> = Vec::new();
         for id in &ids {
             let Some(raster) = doc.tree.find(*id).and_then(|l| l.as_raster()) else {
                 continue;
             };
-            let mut img = photoslop_tools_warp::scale::Image::from_tiles(
+            let mut img = schist_tools_warp::scale::Image::from_tiles(
                 &raster.tiles,
                 canvas,
                 protect.as_ref(),
@@ -1937,7 +1937,7 @@ impl Workspace {
             .map(|f| {
                 vec![GalleryEntry {
                     id: f.id(),
-                    values: photoslop_plugin_api::FilterValues::defaults(&f.params()),
+                    values: schist_plugin_api::FilterValues::defaults(&f.params()),
                     enabled: true,
                 }]
             })
@@ -2015,10 +2015,10 @@ impl Workspace {
     /// Capture every layer's visibility and appearance as a named comp.
     pub fn new_layer_comp(&mut self, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_mut() else { return };
-        let states: Vec<photoslop_core::LayerCompState> = doc
+        let states: Vec<schist_core::LayerCompState> = doc
             .tree
             .iter()
-            .map(|l| photoslop_core::LayerCompState {
+            .map(|l| schist_core::LayerCompState {
                 layer: l.id,
                 visible: l.visible,
                 opacity: l.opacity,
@@ -2028,7 +2028,7 @@ impl Workspace {
             })
             .collect();
         let n = doc.layer_comps.len() + 1;
-        let mut comp = photoslop_core::LayerComp::new(format!("Layer Comp {n}"));
+        let mut comp = schist_core::LayerComp::new(format!("Layer Comp {n}"));
         comp.states = states;
         doc.layer_comps.push(comp);
         self.status = "Layer comp captured".into();
@@ -2136,7 +2136,7 @@ impl Workspace {
             }
             // Codecs export a whole document, so each region becomes a
             // one-layer document of its flattened pixels.
-            let rgba = photoslop_compositor::composite_region_rgba8(doc, rect);
+            let rgba = schist_compositor::composite_region_rgba8(doc, rect);
             let mut region_doc = Document::new(
                 name.clone(),
                 rect.width() as u32,
@@ -2144,7 +2144,7 @@ impl Workspace {
                 doc.depth,
             );
             let mut layer = Layer::new_raster(name.clone());
-            photoslop_core::blit_rgba8(
+            schist_core::blit_rgba8(
                 &mut layer.as_raster_mut().unwrap().tiles,
                 doc.depth,
                 IntRect::from_size(rect.width() as u32, rect.height() as u32),
@@ -2174,7 +2174,7 @@ impl Workspace {
 
     /// Push the internal clipboard out to the system clipboard as a PNG.
     ///
-    /// Photoslop's own copy/paste has always worked between its documents;
+    /// Schist's own copy/paste has always worked between its documents;
     /// this is what makes it work with everything else.
     pub fn sync_clipboard_out(&mut self, cx: &mut Context<Self>) {
         let Some(clip) = self.editor.clipboard.clone() else {
@@ -2190,7 +2190,7 @@ impl Workspace {
         // Codecs export documents, so the clipboard becomes a one-layer one.
         let mut doc = Document::new("clipboard", w, h, Depth::Eight);
         let mut layer = Layer::new_raster("clipboard");
-        photoslop_core::blit_rgba8(
+        schist_core::blit_rgba8(
             &mut layer.as_raster_mut().unwrap().tiles,
             Depth::Eight,
             IntRect::from_size(w, h),
@@ -2221,7 +2221,7 @@ impl Workspace {
             if image.bytes.is_empty() {
                 continue;
             }
-            // Route it through the codecs, so anything Photoslop can open
+            // Route it through the codecs, so anything Schist can open
             // it can also paste.
             let Some(codec) = self.registry.codecs().find(|c| c.probe(&image.bytes)) else {
                 continue;
@@ -2229,8 +2229,8 @@ impl Workspace {
             match codec.import(&image.bytes) {
                 Ok(doc) => {
                     let rect = doc.canvas_rect();
-                    let rgba = photoslop_compositor::composite_region_rgba8(&doc, rect);
-                    self.editor.clipboard = Some(Arc::new(photoslop_plugin_api::ClipboardImage {
+                    let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
+                    self.editor.clipboard = Some(Arc::new(schist_plugin_api::ClipboardImage {
                         rect,
                         rgba,
                     }));
@@ -2247,7 +2247,7 @@ impl Workspace {
     /// Runs off the UI thread: these are megabytes over the network, and
     /// the window should stay usable while one arrives.
     pub fn download_model(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        let Some(spec) = photoslop_neural::spec(id) else {
+        let Some(spec) = schist_neural::spec(id) else {
             return;
         };
         let Some(url) = spec.url else { return };
@@ -2264,11 +2264,11 @@ impl Workspace {
                 .await;
             this.update(cx, |ws, cx| {
                 ws.model_downloads.retain(|d| *d != id);
-                let Some(spec) = photoslop_neural::spec(id) else {
+                let Some(spec) = schist_neural::spec(id) else {
                     return;
                 };
                 ws.status = match fetched.and_then(|bytes| {
-                    photoslop_neural::install(spec, &bytes).map_err(|e| e.to_string())
+                    schist_neural::install(spec, &bytes).map_err(|e| e.to_string())
                 }) {
                     Ok(path) => format!("Installed {} to {}", spec.name, path.display()).into(),
                     Err(e) => format!("{}: {e}", spec.name).into(),
@@ -2281,10 +2281,10 @@ impl Workspace {
     }
 
     pub fn remove_model(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        let Some(spec) = photoslop_neural::spec(id) else {
+        let Some(spec) = schist_neural::spec(id) else {
             return;
         };
-        self.status = match photoslop_neural::uninstall(spec) {
+        self.status = match schist_neural::uninstall(spec) {
             Ok(()) => format!("Removed {}", spec.name).into(),
             Err(e) => format!("{e}").into(),
         };
@@ -2401,7 +2401,7 @@ impl Workspace {
     pub fn set_tool_option(
         &mut self,
         key: &'static str,
-        value: photoslop_plugin_api::OptionValue,
+        value: schist_plugin_api::OptionValue,
         cx: &mut Context<Self>,
     ) {
         let tool_id = self.editor.active_tool;
@@ -2759,7 +2759,7 @@ impl Workspace {
     /// Open Layer Properties for the given layer.
     pub fn open_layer_properties(
         &mut self,
-        layer: photoslop_core::LayerId,
+        layer: schist_core::LayerId,
         cx: &mut Context<Self>,
     ) {
         let Some(name) = self
@@ -2776,7 +2776,7 @@ impl Workspace {
     /// Commit a rename from the Layer Properties dialog.
     pub fn rename_layer(
         &mut self,
-        layer: photoslop_core::LayerId,
+        layer: schist_core::LayerId,
         name: String,
         cx: &mut Context<Self>,
     ) {
@@ -3176,7 +3176,7 @@ impl Workspace {
 
     /// Live (history-free) layer opacity update during a slider drag; the
     /// drag commits one undo step on release via `commit_layer_opacity`.
-    pub fn set_layer_opacity_live(&mut self, id: photoslop_core::LayerId, value: f32) {
+    pub fn set_layer_opacity_live(&mut self, id: schist_core::LayerId, value: f32) {
         if let Some(doc) = &mut self.doc {
             let mut bounds = IntRect::EMPTY;
             if let Some(layer) = doc.tree.find_mut(id) {
@@ -3189,7 +3189,7 @@ impl Workspace {
 
     pub fn commit_layer_opacity(
         &mut self,
-        id: photoslop_core::LayerId,
+        id: schist_core::LayerId,
         before: f32,
         cx: &mut Context<Self>,
     ) {
@@ -3211,8 +3211,8 @@ impl Workspace {
 
     pub fn set_blend_mode(
         &mut self,
-        id: photoslop_core::LayerId,
-        mode: photoslop_core::BlendMode,
+        id: schist_core::LayerId,
+        mode: schist_core::BlendMode,
         cx: &mut Context<Self>,
     ) {
         if let Some(doc) = &mut self.doc {
@@ -3245,7 +3245,7 @@ impl Workspace {
 
     /// 36x28 thumbnail of a raster layer over a checkerboard, cached per
     /// document revision.
-    pub fn layer_thumbnail(&mut self, id: photoslop_core::LayerId) -> Option<Arc<RenderImage>> {
+    pub fn layer_thumbnail(&mut self, id: schist_core::LayerId) -> Option<Arc<RenderImage>> {
         const TW: usize = 36;
         const TH: usize = 28;
         let doc = self.doc.as_ref()?;
@@ -3327,7 +3327,7 @@ impl Workspace {
             ((doc.width as f32 / scale) as u32).clamp(1, MAX),
             ((doc.height as f32 / scale) as u32).clamp(1, 84),
         );
-        let rgba = photoslop_compositor::composite_region_rgba8(doc, doc.canvas_rect());
+        let rgba = schist_compositor::composite_region_rgba8(doc, doc.canvas_rect());
         let mut bgra = vec![0u8; (w * h * 4) as usize];
         for ty in 0..h {
             for tx in 0..w {
@@ -3360,10 +3360,10 @@ impl Workspace {
     }
 
     /// Toggle a group's expanded state (pure UI state, not undoable).
-    pub fn toggle_group_open(&mut self, id: photoslop_core::LayerId, cx: &mut Context<Self>) {
+    pub fn toggle_group_open(&mut self, id: schist_core::LayerId, cx: &mut Context<Self>) {
         if let Some(doc) = &mut self.doc {
             if let Some(layer) = doc.tree.find_mut(id) {
-                if let photoslop_core::LayerKind::Group(g) = &mut layer.kind {
+                if let schist_core::LayerKind::Group(g) = &mut layer.kind {
                     g.open = !g.open;
                 }
             }
@@ -3466,7 +3466,7 @@ impl Workspace {
 
     /// Start dragging a new guide out of a ruler.
     pub fn begin_guide(&mut self, horizontal: bool, position: f32) {
-        self.dragging_guide = Some(photoslop_core::Guide {
+        self.dragging_guide = Some(schist_core::Guide {
             horizontal,
             position,
         });
@@ -3605,7 +3605,7 @@ impl Workspace {
     /// Assign a profile: same numbers, new interpretation.
     pub fn assign_profile(
         &mut self,
-        profile: photoslop_colormgmt::Profile,
+        profile: schist_colormgmt::Profile,
         cx: &mut Context<Self>,
     ) {
         if let Some(doc) = self.doc.as_mut() {
@@ -3621,17 +3621,17 @@ impl Workspace {
     /// Convert to a profile: rewrite pixels so the appearance is preserved.
     pub fn convert_to_profile(
         &mut self,
-        profile: photoslop_colormgmt::Profile,
+        profile: schist_colormgmt::Profile,
         cx: &mut Context<Self>,
     ) {
         let intent = self.color.intent;
         let Some(doc) = self.doc.as_mut() else { return };
         let source = match &doc.icc_profile {
-            Some(bytes) => photoslop_colormgmt::Profile::from_bytes(bytes)
+            Some(bytes) => schist_colormgmt::Profile::from_bytes(bytes)
                 .unwrap_or_else(|_| self.color.working.clone()),
             None => self.color.working.clone(),
         };
-        let transform = match photoslop_colormgmt::ColorTransform::new(&source, &profile, intent) {
+        let transform = match schist_colormgmt::ColorTransform::new(&source, &profile, intent) {
             Ok(t) => t,
             Err(err) => {
                 self.status = format!("Convert failed: {err}").into();
@@ -3644,12 +3644,12 @@ impl Workspace {
             let Some(raster) = edit.doc().tree.find(id).and_then(|l| l.as_raster()) else {
                 continue;
             };
-            let coords: Vec<photoslop_core::TileCoord> = raster.tiles.coords().collect();
+            let coords: Vec<schist_core::TileCoord> = raster.tiles.coords().collect();
             for coord in coords {
                 let Some(tile) = edit.writable_tile(id, coord) else {
                     break;
                 };
-                let mut buf = vec![0.0f32; photoslop_core::TILE_PIXELS * 4];
+                let mut buf = vec![0.0f32; schist_core::TILE_PIXELS * 4];
                 tile.decode_f32(&mut buf);
                 transform.apply(&mut buf);
                 tile.encode_f32(&buf);
@@ -3663,7 +3663,7 @@ impl Workspace {
     }
 
     /// Toggle soft proofing against a device profile.
-    pub fn toggle_proof(&mut self, profile: photoslop_colormgmt::Profile, cx: &mut Context<Self>) {
+    pub fn toggle_proof(&mut self, profile: schist_colormgmt::Profile, cx: &mut Context<Self>) {
         self.color.proof = match &self.color.proof {
             Some(_) => None,
             None => Some(profile),
@@ -3683,7 +3683,7 @@ impl Workspace {
     /// selection, as one undoable edit.
     /// The pixels a filter would touch: the layer's content clipped to the
     /// canvas, or to the selection when there is one.
-    fn filter_region(&self, layer_id: photoslop_core::LayerId) -> IntRect {
+    fn filter_region(&self, layer_id: schist_core::LayerId) -> IntRect {
         let Some(doc) = self.doc.as_ref() else {
             return IntRect::EMPTY;
         };
@@ -3701,7 +3701,7 @@ impl Workspace {
 
     /// Pull `region` out of a raster layer into a flat straight-alpha
     /// f32 RGBA buffer, the shape every filter works on.
-    fn read_region(&self, layer_id: photoslop_core::LayerId, region: IntRect) -> Option<Vec<f32>> {
+    fn read_region(&self, layer_id: schist_core::LayerId, region: IntRect) -> Option<Vec<f32>> {
         let raster = self
             .doc
             .as_ref()?
@@ -3733,7 +3733,7 @@ impl Workspace {
     /// preview needs.
     fn write_region(
         &mut self,
-        layer_id: photoslop_core::LayerId,
+        layer_id: schist_core::LayerId,
         region: IntRect,
         original: &[f32],
         filtered: &[f32],
@@ -3814,7 +3814,7 @@ impl Workspace {
     pub fn preview_filter(
         &mut self,
         id: &str,
-        values: Option<&photoslop_plugin_api::FilterValues>,
+        values: Option<&schist_plugin_api::FilterValues>,
         cx: &mut Context<Self>,
     ) {
         let Some(preview) = self.filter_preview.clone() else {
@@ -3854,7 +3854,7 @@ impl Workspace {
     pub fn apply_filter(
         &mut self,
         id: &str,
-        values: &photoslop_plugin_api::FilterValues,
+        values: &schist_plugin_api::FilterValues,
         cx: &mut Context<Self>,
     ) {
         // A live preview has already changed these pixels; put them back so
@@ -3911,7 +3911,7 @@ impl Workspace {
     pub fn export_with(
         &mut self,
         codec_id: &str,
-        options: photoslop_plugin_api::ExportOptions,
+        options: schist_plugin_api::ExportOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3978,7 +3978,7 @@ impl Workspace {
             this.update(cx, |ws, cx| {
                 ws.status = match status {
                     crate::crash::UpdateStatus::UpToDate => format!(
-                        "Photoslop {} is up to date",
+                        "Schist {} is up to date",
                         crate::crash::current_version()
                     )
                     .into(),
@@ -4003,7 +4003,7 @@ impl Workspace {
 
     /// Enable or disable a third-party plugin.
     pub fn set_plugin_enabled(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
-        let Some(dir) = photoslop_plugin_host_wasm::PluginManager::plugin_dir() else {
+        let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
             return;
         };
         self.plugins.set_enabled(&id, enabled, &dir);
@@ -4018,10 +4018,10 @@ impl Workspace {
 
     /// Install a plugin file into the plugin directory.
     pub fn install_plugin(&mut self, source: PathBuf, cx: &mut Context<Self>) {
-        let Some(dir) = photoslop_plugin_host_wasm::PluginManager::plugin_dir() else {
+        let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
             return;
         };
-        self.status = match photoslop_plugin_host_wasm::PluginManager::install(&source, &dir) {
+        self.status = match schist_plugin_host_wasm::PluginManager::install(&source, &dir) {
             Ok(path) => format!("Installed {} — restart to load", path.display()).into(),
             Err(err) => format!("Plugin rejected: {err}").into(),
         };
@@ -4033,7 +4033,7 @@ impl Workspace {
         let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
             return;
         };
-        let values = photoslop_plugin_api::FilterValues::defaults(&filter.params());
+        let values = schist_plugin_api::FilterValues::defaults(&filter.params());
         // Filters with no parameters just run.
         if values.0.is_empty() {
             self.apply_filter(id, &values, cx);
@@ -4055,11 +4055,11 @@ impl Workspace {
     }
 
     /// Insert an adjustment layer above the active layer.
-    pub fn add_adjustment(&mut self, kind: photoslop_core::AdjustmentKind, cx: &mut Context<Self>) {
-        let params = photoslop_adjustments::Params::default_for(kind);
+    pub fn add_adjustment(&mut self, kind: schist_core::AdjustmentKind, cx: &mut Context<Self>) {
+        let params = schist_adjustments::Params::default_for(kind);
         let Some(doc) = self.doc.as_mut() else { return };
         let mut layer = Layer::new_raster(kind.display_name());
-        layer.kind = photoslop_core::LayerKind::Adjustment(photoslop_core::AdjustmentData {
+        layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
             kind,
             raw: Vec::new(),
             params_json: serde_json::to_string(&params).ok(),
@@ -4070,7 +4070,7 @@ impl Workspace {
                 *p.0.last_mut().unwrap() += 1;
                 p
             }
-            None => photoslop_core::LayerPath(vec![doc.tree.layers.len()]),
+            None => schist_core::LayerPath(vec![doc.tree.layers.len()]),
         };
         let mut edit = doc.begin_edit(format!("New {} Layer", kind.display_name()));
         edit.insert_layer(path, layer);
@@ -4096,11 +4096,11 @@ impl Workspace {
     /// a history entry per slider tick).
     pub fn preview_adjustment(
         &mut self,
-        layer: photoslop_core::LayerId,
-        params: &photoslop_adjustments::Params,
+        layer: schist_core::LayerId,
+        params: &schist_adjustments::Params,
     ) {
         let Some(doc) = self.doc.as_mut() else { return };
-        if let Some(photoslop_core::LayerKind::Adjustment(data)) =
+        if let Some(schist_core::LayerKind::Adjustment(data)) =
             doc.tree.find_mut(layer).map(|l| &mut l.kind)
         {
             data.params_json = serde_json::to_string(params).ok();
@@ -4111,8 +4111,8 @@ impl Workspace {
     /// Commit edited adjustment parameters as one history entry.
     pub fn commit_adjustment(
         &mut self,
-        layer: photoslop_core::LayerId,
-        params: &photoslop_adjustments::Params,
+        layer: schist_core::LayerId,
+        params: &schist_adjustments::Params,
         original: (Option<String>, Vec<u8>),
         cx: &mut Context<Self>,
     ) {
@@ -4120,7 +4120,7 @@ impl Workspace {
         if let Some(doc) = self.doc.as_mut() {
             // Put the pre-dialog state back first so the recorded edit has
             // the right "before"; the live preview already moved the layer.
-            if let Some(photoslop_core::LayerKind::Adjustment(data)) =
+            if let Some(schist_core::LayerKind::Adjustment(data)) =
                 doc.tree.find_mut(layer).map(|l| &mut l.kind)
             {
                 data.params_json = original.0.clone();
@@ -4139,12 +4139,12 @@ impl Workspace {
     /// Discard a live adjustment preview (dialog cancelled).
     pub fn revert_adjustment(
         &mut self,
-        layer: photoslop_core::LayerId,
+        layer: schist_core::LayerId,
         original: (Option<String>, Vec<u8>),
         cx: &mut Context<Self>,
     ) {
         if let Some(doc) = self.doc.as_mut() {
-            if let Some(photoslop_core::LayerKind::Adjustment(data)) =
+            if let Some(schist_core::LayerKind::Adjustment(data)) =
                 doc.tree.find_mut(layer).map(|l| &mut l.kind)
             {
                 data.params_json = original.0;
@@ -4156,9 +4156,9 @@ impl Workspace {
     }
 
     /// Open the parameter dialog for an existing adjustment layer.
-    pub fn edit_adjustment(&mut self, layer: photoslop_core::LayerId, cx: &mut Context<Self>) {
+    pub fn edit_adjustment(&mut self, layer: schist_core::LayerId, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_ref() else { return };
-        let Some(photoslop_core::LayerKind::Adjustment(data)) =
+        let Some(schist_core::LayerKind::Adjustment(data)) =
             doc.tree.find(layer).map(|l| &l.kind)
         else {
             return;
@@ -4167,7 +4167,7 @@ impl Workspace {
             .params_json
             .as_deref()
             .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_else(|| photoslop_adjustments::parse_psd(data.kind, &data.raw));
+            .unwrap_or_else(|| schist_adjustments::parse_psd(data.kind, &data.raw));
         if params.param_specs().is_empty() {
             self.status = format!("{} has no editable settings", params.display_name()).into();
             return;
@@ -4453,7 +4453,7 @@ impl Workspace {
             if rect.is_empty() {
                 continue;
             }
-            let rgba = photoslop_compositor::composite_region_rgba8(doc, rect);
+            let rgba = schist_compositor::composite_region_rgba8(doc, rect);
             let rw = rect.width() as usize;
             // Point-sample the full-res composite into the preview buffer.
             let px0 = rect.left.div_euclid(step).max(0);
@@ -4521,9 +4521,9 @@ impl Workspace {
         // moment you switched to something else.
         if !PATH_TOOLS.contains(&tool_id) {
             if let Some(path) = doc.active_path.and_then(|i| doc.paths.get(i)) {
-                for sub in &photoslop_tools_vector::paths::flatten(path).subpaths {
+                for sub in &schist_tools_vector::paths::flatten(path).subpaths {
                     if sub.len() >= 2 {
-                        overlays.push(photoslop_plugin_api::Overlay::AntsPolygon(sub.clone()));
+                        overlays.push(schist_plugin_api::Overlay::AntsPolygon(sub.clone()));
                     }
                 }
             }
@@ -5023,8 +5023,8 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &DefaultColors, _w, cx| {
-                ws.editor.foreground = photoslop_color::Rgba::BLACK;
-                ws.editor.background = photoslop_color::Rgba::WHITE;
+                ws.editor.foreground = schist_color::Rgba::BLACK;
+                ws.editor.background = schist_color::Rgba::WHITE;
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &CancelGesture, _w, cx| {
@@ -5046,11 +5046,11 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, action: &AddAdjustment, _w, cx| {
                 let kind = match action.kind.as_str() {
-                    "levels" => photoslop_core::AdjustmentKind::Levels,
-                    "curves" => photoslop_core::AdjustmentKind::Curves,
-                    "hue_saturation" => photoslop_core::AdjustmentKind::HueSaturation,
-                    "invert" => photoslop_core::AdjustmentKind::Invert,
-                    "brightness_contrast" => photoslop_core::AdjustmentKind::BrightnessContrast,
+                    "levels" => schist_core::AdjustmentKind::Levels,
+                    "curves" => schist_core::AdjustmentKind::Curves,
+                    "hue_saturation" => schist_core::AdjustmentKind::HueSaturation,
+                    "invert" => schist_core::AdjustmentKind::Invert,
+                    "brightness_contrast" => schist_core::AdjustmentKind::BrightnessContrast,
                     other => {
                         log::warn!("unknown adjustment {other}");
                         return;
@@ -5124,13 +5124,13 @@ impl Render for Workspace {
 /// weighted by selection coverage.
 #[allow(clippy::too_many_arguments)]
 fn blend_region_tile(
-    tile: &mut photoslop_core::TileBuf,
+    tile: &mut schist_core::TileBuf,
     coord: TileCoord,
     clip: IntRect,
     region: IntRect,
     original: &[f32],
     filtered: &[f32],
-    selection: &photoslop_core::Selection,
+    selection: &schist_core::Selection,
 ) {
     let trect = coord.rect();
     let w = region.width() as usize;
@@ -5145,7 +5145,7 @@ fn blend_region_tile(
             let mix = |a: f32, b: f32| a + (b - a) * cov;
             tile.set(
                 ix,
-                photoslop_color::Rgba::new(
+                schist_color::Rgba::new(
                     mix(original[src], filtered[src]),
                     mix(original[src + 1], filtered[src + 1]),
                     mix(original[src + 2], filtered[src + 2]),
@@ -5160,7 +5160,7 @@ fn blend_region_tile(
 /// areas that changed so they can be repainted.
 fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
     for layer in layers.iter_mut() {
-        if let photoslop_core::LayerKind::Group(g) = &mut layer.kind {
+        if let schist_core::LayerKind::Group(g) = &mut layer.kind {
             restyle_layers(&mut g.children, damage);
         }
         let wanted = !layer.style.is_empty();
@@ -5176,7 +5176,7 @@ fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
             continue;
         }
         let before = layer.styled.as_ref().map(|s| s.bounds);
-        layer.styled = photoslop_layer_fx::render(layer).map(|mut r| {
+        layer.styled = schist_layer_fx::render(layer).map(|mut r| {
             r.key = key;
             Arc::new(r)
         });
@@ -5204,7 +5204,7 @@ fn fx_key(layer: &Layer) -> u64 {
 }
 
 /// Whether one named effect is switched on, for the dialog's initial tab.
-fn style_enabled(style: &photoslop_core::LayerStyle, key: &str) -> bool {
+fn style_enabled(style: &schist_core::LayerStyle, key: &str) -> bool {
     match key {
         "bevel" => style.bevel.enabled,
         "stroke" => style.stroke.enabled,
@@ -5231,15 +5231,15 @@ const PATH_TOOLS: &[&str] = &[
 
 /// Remove `other`'s coverage from `sel`, in place.
 fn subtract_into(
-    sel: &mut photoslop_core::Selection,
-    other: &photoslop_core::Selection,
+    sel: &mut schist_core::Selection,
+    other: &schist_core::Selection,
     canvas: IntRect,
 ) {
     let rect = sel.bounds().intersect(&canvas);
     let keep = sel.clone();
     sel.deselect();
     sel.activate();
-    sel.apply_shape(rect, photoslop_core::SelectOp::Replace, |x, y| {
+    sel.apply_shape(rect, schist_core::SelectOp::Replace, |x, y| {
         keep.coverage(x, y).saturating_sub(other.coverage(x, y))
     });
 }
@@ -5250,7 +5250,7 @@ fn subtract_into(
 /// path, thrown away and rebuilt rather than resampled.
 fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &mut Vec<IntRect>) {
     for layer in layers.iter_mut() {
-        if let photoslop_core::LayerKind::Group(g) = &mut layer.kind {
+        if let schist_core::LayerKind::Group(g) = &mut layer.kind {
             reshape_layers(&mut g.children, depth, canvas, damage);
         }
         let Some(shape) = layer.shape.as_deref() else {
@@ -5261,7 +5261,7 @@ fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &
             continue;
         }
         let before = layer.content_bounds();
-        let tiles = photoslop_tools_vector::render_shape(shape, depth, canvas);
+        let tiles = schist_tools_vector::render_shape(shape, depth, canvas);
         if let Some(raster) = layer.as_raster_mut() {
             raster.tiles = tiles;
         }
@@ -5280,7 +5280,7 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
     // redirect to something enormous, not a real limit.
     const MAX: u64 = 256 << 20;
     let mut response = ureq::get(url)
-        .header("User-Agent", "photoslop-model-fetch")
+        .header("User-Agent", "schist-model-fetch")
         .call()
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();

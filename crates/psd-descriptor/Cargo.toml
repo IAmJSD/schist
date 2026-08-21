@@ -1,5 +1,5 @@
 [package]
-name = "photoslop-psd-descriptor"
+name = "schist-psd-descriptor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

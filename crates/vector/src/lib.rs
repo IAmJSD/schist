@@ -6,7 +6,7 @@
 //! in both axes without pulling in a tessellation dependency, and it feeds
 //! the same 8-bit coverage masks the selection system already uses.
 
-use photoslop_core::IntRect;
+use schist_core::IntRect;
 
 /// Winding rule used when filling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

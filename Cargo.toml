@@ -37,44 +37,44 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
-repository = "https://github.com/infrawrench/photoslop"
+license = "MIT"
+repository = "https://github.com/infrawrench/schist"
 
 [workspace.dependencies]
 # internal
-photoslop-core = { path = "crates/core" }
-photoslop-plugin-api = { path = "crates/plugin-api" }
-photoslop-pixel-ops = { path = "crates/pixel-ops" }
-photoslop-compositor = { path = "crates/compositor" }
-photoslop-color = { path = "crates/color" }
-photoslop-codec-psd = { path = "crates/codec-psd" }
-photoslop-codec-affinity = { path = "crates/codec-affinity" }
-photoslop-vector = { path = "crates/vector" }
-photoslop-layer-fx = { path = "crates/layer-fx" }
-photoslop-neural = { path = "crates/neural" }
-photoslop-psd-descriptor = { path = "crates/psd-descriptor" }
+schist-core = { path = "crates/core" }
+schist-plugin-api = { path = "crates/plugin-api" }
+schist-pixel-ops = { path = "crates/pixel-ops" }
+schist-compositor = { path = "crates/compositor" }
+schist-color = { path = "crates/color" }
+schist-codec-psd = { path = "crates/codec-psd" }
+schist-codec-affinity = { path = "crates/codec-affinity" }
+schist-vector = { path = "crates/vector" }
+schist-layer-fx = { path = "crates/layer-fx" }
+schist-neural = { path = "crates/neural" }
+schist-psd-descriptor = { path = "crates/psd-descriptor" }
 
 # zlib for PSD's zip-compressed channels; pure Rust, no C toolchain.
 miniz_oxide = "0.8"
 # zstd for Affinity 2 files; also pure Rust.
 ruzstd = "0.9"
-photoslop-text-engine = { path = "crates/text-engine" }
-photoslop-adjustments = { path = "crates/adjustments" }
-photoslop-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
-photoslop-plugin-sdk = { path = "crates/plugin-sdk" }
-photoslop-colormgmt = { path = "crates/colormgmt" }
-photoslop-codecs-common = { path = "plugins/codecs-common" }
-photoslop-tools-basic = { path = "plugins/tools-basic" }
-photoslop-tools-paint = { path = "plugins/tools-paint" }
-photoslop-tools-retouch = { path = "plugins/tools-retouch" }
-photoslop-tools-warp = { path = "plugins/tools-warp" }
-photoslop-tools-doc = { path = "plugins/tools-doc" }
-photoslop-tools-select = { path = "plugins/tools-select" }
-photoslop-tools-transform = { path = "plugins/tools-transform" }
-photoslop-tools-vector = { path = "plugins/tools-vector" }
-photoslop-tools-type = { path = "plugins/tools-type" }
-photoslop-filters-core = { path = "plugins/filters-core" }
-photoslop-commands-core = { path = "plugins/commands-core" }
+schist-text-engine = { path = "crates/text-engine" }
+schist-adjustments = { path = "crates/adjustments" }
+schist-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
+schist-plugin-sdk = { path = "crates/plugin-sdk" }
+schist-colormgmt = { path = "crates/colormgmt" }
+schist-codecs-common = { path = "plugins/codecs-common" }
+schist-tools-basic = { path = "plugins/tools-basic" }
+schist-tools-paint = { path = "plugins/tools-paint" }
+schist-tools-retouch = { path = "plugins/tools-retouch" }
+schist-tools-warp = { path = "plugins/tools-warp" }
+schist-tools-doc = { path = "plugins/tools-doc" }
+schist-tools-select = { path = "plugins/tools-select" }
+schist-tools-transform = { path = "plugins/tools-transform" }
+schist-tools-vector = { path = "plugins/tools-vector" }
+schist-tools-type = { path = "plugins/tools-type" }
+schist-filters-core = { path = "plugins/filters-core" }
+schist-commands-core = { path = "plugins/commands-core" }
 
 # external
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch, which upstream has no

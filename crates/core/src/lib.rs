@@ -1,7 +1,7 @@
-//! Photoslop kernel: document model, tiles, layers, selection, history.
+//! Schist kernel: document model, tiles, layers, selection, history.
 //!
 //! This crate deliberately contains **no user-facing features** — those live
-//! in plugins (see `photoslop-plugin-api`). If every plugin were removed the
+//! in plugins (see `schist-plugin-api`). If every plugin were removed the
 //! app would boot to an empty workspace that can do nothing.
 
 pub mod annotate;
@@ -38,4 +38,4 @@ pub use style::{
 };
 pub use tile::{MaskTileMap, TileBuf, TileCoord, TileMap, TILE_PIXELS, TILE_SIZE};
 
-pub use photoslop_color as color;
+pub use schist_color as color;

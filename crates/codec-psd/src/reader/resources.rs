@@ -7,7 +7,7 @@
 
 use super::cursor::Cursor;
 use crate::error::PsdError;
-use photoslop_core::PreservedResource;
+use schist_core::PreservedResource;
 
 pub const RES_RESOLUTION_INFO: u16 = 0x03ED;
 pub const RES_ICC_PROFILE: u16 = 0x040F;

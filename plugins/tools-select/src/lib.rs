@@ -4,8 +4,8 @@
 //! Modifier convention (Photoshop): Shift = add to selection, Alt =
 //! subtract, Shift+Alt = intersect, no modifier = replace.
 
-use photoslop_core::{Document, IntRect, LayerKind, SelectOp, Selection, TileCoord, TILE_SIZE};
-use photoslop_plugin_api::{
+use schist_core::{Document, IntRect, LayerKind, SelectOp, Selection, TileCoord, TILE_SIZE};
+use schist_plugin_api::{
     EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
     ToolCtx, ToolOption, ToolPlugin,
 };
@@ -64,7 +64,7 @@ fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &
 }
 
 /// The active layer's pixels, if it has any.
-fn active_raster(doc: &Document) -> Option<&photoslop_core::RasterLayer> {
+fn active_raster(doc: &Document) -> Option<&schist_core::RasterLayer> {
     let layer = doc.active_layer.and_then(|id| doc.tree.find(id))?;
     match &layer.kind {
         LayerKind::Raster(r) => Some(r),
@@ -399,7 +399,7 @@ impl LassoTool {
 }
 
 /// Sobel-ish edge strength at a pixel, 0..=255-ish.
-fn gradient_at(raster: &photoslop_core::RasterLayer, x: i32, y: i32) -> f32 {
+fn gradient_at(raster: &schist_core::RasterLayer, x: i32, y: i32) -> f32 {
     let lum = |x: i32, y: i32| {
         let p = raster.tiles.pixel(x, y);
         (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * p.a * 255.0
@@ -1044,7 +1044,7 @@ pub struct SelectToolsPlugin;
 
 impl PluginManifest for SelectToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-select"
+        "schist.tools-select"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -1060,13 +1060,13 @@ impl PluginManifest for SelectToolsPlugin {
 }
 
 #[allow(unused_imports)]
-use photoslop_pixel_ops as _;
+use schist_pixel_ops as _;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, Layer};
+    use schist_color::Depth;
+    use schist_core::{blit_rgba8, Layer};
 
     fn input(x: f32, y: f32, m: Modifiers) -> PointerInput {
         PointerInput {
@@ -1320,8 +1320,8 @@ mod tests {
 #[cfg(test)]
 mod new_tool_tests {
     use super::*;
-    use photoslop_color::{Depth, Rgba};
-    use photoslop_core::{Layer, TileCoord};
+    use schist_color::{Depth, Rgba};
+    use schist_core::{Layer, TileCoord};
 
     fn input(x: f32, y: f32, m: Modifiers) -> PointerInput {
         PointerInput {

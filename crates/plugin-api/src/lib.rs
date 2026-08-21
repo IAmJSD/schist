@@ -7,8 +7,8 @@
 //! arrives as our own event types and overlays are returned as primitive
 //! shapes the canvas draws — which also makes tools unit-testable headless.
 
-use photoslop_color::Rgba;
-use photoslop_core::{Document, IntRect};
+use schist_color::Rgba;
+use schist_core::{Document, IntRect};
 
 pub use registry::{PluginManifest, PluginRegistry};
 
@@ -60,7 +60,7 @@ pub struct EditorState {
     /// hit targets and handles in *screen* pixels.
     pub zoom: f32,
     /// Resampling filter used when committing transforms.
-    pub resample: photoslop_core::Filter,
+    pub resample: schist_core::Filter,
     /// Colour tolerance, 0..=255. Mirrored from the magic wand, which is
     /// where Photoshop's Grow, Similar and Color Range take theirs from.
     pub tolerance: u8,
@@ -77,7 +77,7 @@ impl Default for EditorState {
             active_tool: "move",
             clipboard: None,
             zoom: 1.0,
-            resample: photoslop_core::Filter::Bicubic,
+            resample: schist_core::Filter::Bicubic,
             tolerance: 32,
         }
     }

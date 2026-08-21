@@ -6,8 +6,8 @@
 //! grid and interpolated, because storing it per pixel would cost
 //! 96 MB on a 12-megapixel layer for no visible gain.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{IntRect, TileCoord, TileMap, TILE_SIZE};
+use schist_color::{Depth, Rgba};
+use schist_core::{IntRect, TileCoord, TileMap, TILE_SIZE};
 
 /// Grid spacing in pixels. Small enough that a brush of any usable size
 /// covers several cells, large enough to keep the mesh cheap.

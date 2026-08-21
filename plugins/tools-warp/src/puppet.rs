@@ -10,8 +10,8 @@
 //! between them stretches smoothly, and nothing shears -- and it needs no
 //! triangulation.
 
-use photoslop_core::{Document, IntRect, LayerId, TileMap};
-use photoslop_plugin_api::{
+use schist_core::{Document, IntRect, LayerId, TileMap};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PointerInput, ToolCtx, ToolOption, ToolPlugin,
 };
 

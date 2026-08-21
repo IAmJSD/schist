@@ -2,7 +2,7 @@
 
 use crate::util::{at, convolve3, gaussian_rgba, luma, put, value_noise};
 use crate::{param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// Sobel gradient magnitude of the luminance at every pixel, 0..~1.
 fn edges(px: &[f32], w: usize, h: usize) -> Vec<f32> {
@@ -395,7 +395,7 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(FindEdges));
     registry.register_filter(Box::new(GlowingEdges));
     registry.register_filter(Box::new(Emboss));

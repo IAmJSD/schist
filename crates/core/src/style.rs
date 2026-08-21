@@ -1,13 +1,13 @@
 //! Layer styles ("effects" in the PSD format, `lfx2`).
 //!
 //! These are pure description: how the effects are rasterized lives in
-//! `photoslop-layer-fx`, which turns a layer's pixels plus its style into
+//! `schist-layer-fx`, which turns a layer's pixels plus its style into
 //! a single styled raster that the compositor then blends normally. That
 //! split keeps the kernel free of rendering policy (PLAN.md §3.1) and
 //! matches Photoshop's own model, where Fill opacity scales the layer's
 //! own pixels and Opacity scales the layer *and* its effects.
 
-use photoslop_color::Rgba;
+use schist_color::Rgba;
 use serde::{Deserialize, Serialize};
 
 use crate::blend::BlendMode;

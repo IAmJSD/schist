@@ -1,11 +1,11 @@
 [package]
-name = "photoslop-colormgmt"
+name = "schist-colormgmt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-color.workspace = true
+schist-color.workspace = true
 moxcms = "0.8"
 anyhow.workspace = true
 serde.workspace = true

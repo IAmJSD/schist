@@ -1,18 +1,18 @@
 [package]
-name = "photoslop-compositor"
+name = "schist-compositor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-adjustments.workspace = true
+schist-core.workspace = true
+schist-adjustments.workspace = true
 serde_json.workspace = true
 log.workspace = true
-photoslop-pixel-ops.workspace = true
-photoslop-color.workspace = true
+schist-pixel-ops.workspace = true
+schist-color.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
-photoslop-layer-fx.workspace = true
+schist-layer-fx.workspace = true

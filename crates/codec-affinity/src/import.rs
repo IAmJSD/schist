@@ -1,4 +1,4 @@
-//! Interpret a parsed Affinity graph as a Photoslop document.
+//! Interpret a parsed Affinity graph as a Schist document.
 //!
 //! The document graph is `Pers` (persona) → `DocR` (document node) →
 //! `Chld` (spreads) → recursive layer tree. Layers carry `Desc` (name),
@@ -18,8 +18,8 @@
 use crate::archive::Archive;
 use crate::error::{malformed, AffinityError};
 use crate::graph::{self, tag_name, Graph, Node, Value};
-use photoslop_color::Depth;
-use photoslop_core::{blit_rgba8, Document, IntRect, Layer};
+use schist_color::Depth;
+use schist_core::{blit_rgba8, Document, IntRect, Layer};
 
 /// What a structural import managed to recover.
 #[derive(Debug, Default, Clone)]
@@ -251,7 +251,7 @@ impl Walker<'_> {
                     .filter_map(|c| self.layer(c))
                     .collect();
                 self.ctm = saved;
-                if let photoslop_core::LayerKind::Group(g) = &mut group.kind {
+                if let schist_core::LayerKind::Group(g) = &mut group.kind {
                     g.children = children;
                 }
                 group
@@ -328,7 +328,7 @@ impl Walker<'_> {
         // Groups pass through by default; PasT=false switches a group to
         // isolated (Normal) compositing. An explicit Blnd overrides both.
         if layer.is_group() && bool_of(node, b"PasT") == Some(false) {
-            layer.blend = photoslop_core::BlendMode::Normal;
+            layer.blend = schist_core::BlendMode::Normal;
         }
         if let Some((id, version)) = match node.field(b"Blnd") {
             Some(Value::Enum { id, version }) => Some((*id, *version)),
@@ -394,8 +394,8 @@ impl Walker<'_> {
             _ => return None,
         };
 
-        let mut path = photoslop_core::VectorPath::new(name);
-        path.subpaths.push(photoslop_core::SubPath {
+        let mut path = schist_core::VectorPath::new(name);
+        path.subpaths.push(schist_core::SubPath {
             anchors,
             closed: true,
         });
@@ -418,7 +418,7 @@ impl Walker<'_> {
         let c = self.node_ctm(node, name);
         let to_doc = |x: f64, y: f64| ((x * c[0] + c[2]) as f32, (y * c[1] + c[3]) as f32);
 
-        let mut path = photoslop_core::VectorPath::new(name);
+        let mut path = schist_core::VectorPath::new(name);
         let mut closed = true;
         for (_, value) in &data.fields {
             match value {
@@ -459,10 +459,10 @@ impl Walker<'_> {
         &mut self,
         node: &Node,
         name: &str,
-        path: photoslop_core::VectorPath,
+        path: schist_core::VectorPath,
         even_odd: bool,
     ) -> Option<Layer> {
-        use photoslop_color::Rgba;
+        use schist_color::Rgba;
         let graph = self.graph;
         let c = self.node_ctm(node, name);
         let fill_desc = graph.children(node, b"BFFl");
@@ -496,7 +496,7 @@ impl Walker<'_> {
         }
 
         let to_rgba = |c: [u8; 4]| Rgba::from_u8(c[0], c[1], c[2], c[3]);
-        let shape = photoslop_core::VectorShape {
+        let shape = schist_core::VectorShape {
             path,
             fill: fill.map(to_rgba).unwrap_or(Rgba::TRANSPARENT),
             stroke: stroke.map(|c| (to_rgba(c), stroke_width)),
@@ -563,8 +563,8 @@ impl Walker<'_> {
         if &adj.type_tag().to_be_bytes() != b"CrvP" {
             return None;
         }
-        let curve_of = |tag: &[u8; 4]| -> photoslop_adjustments::Curve {
-            let mut curve = photoslop_adjustments::Curve::default();
+        let curve_of = |tag: &[u8; 4]| -> schist_adjustments::Curve {
+            let mut curve = schist_adjustments::Curve::default();
             let Some(spline) = self.graph.child(adj, tag) else {
                 return curve;
             };
@@ -587,7 +587,7 @@ impl Walker<'_> {
                 .collect();
             curve
         };
-        let params = photoslop_adjustments::Params::Curves(photoslop_adjustments::Curves {
+        let params = schist_adjustments::Params::Curves(schist_adjustments::Curves {
             rgb: curve_of(b"Mast"),
             red: curve_of(b"C1Sp"),
             green: curve_of(b"C2Sp"),
@@ -595,8 +595,8 @@ impl Walker<'_> {
         });
 
         let mut layer = Layer::new_raster(if name.is_empty() { "Curves" } else { name });
-        layer.kind = photoslop_core::LayerKind::Adjustment(photoslop_core::AdjustmentData {
-            kind: photoslop_core::AdjustmentKind::Curves,
+        layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
+            kind: schist_core::AdjustmentKind::Curves,
             raw: Vec::new(),
             params_json: serde_json::to_string(&params).ok(),
         });
@@ -645,7 +645,7 @@ impl Walker<'_> {
             return;
         }
 
-        let mut mask = photoslop_core::LayerMask::new_revealing();
+        let mut mask = schist_core::LayerMask::new_revealing();
         mask.bounds = rect;
         mask.enabled = bool_of(mask_node, b"Visi").unwrap_or(true);
         blit_mask(&mut mask.tiles, rect, &gray);
@@ -717,27 +717,27 @@ impl Walker<'_> {
             return None;
         }
 
-        let mut spec = photoslop_text_engine::TextSpec {
+        let mut spec = schist_text_engine::TextSpec {
             text,
             family,
             bold: post.contains("Bold"),
             italic: post.contains("Italic") || post.contains("Oblique"),
             size: eff_size,
-            align: photoslop_text_engine::Align::Left,
+            align: schist_text_engine::Align::Left,
             line_height: 1.0,
             tracking: 0.0,
             wrap_width: None,
         };
-        let mut raster = match photoslop_text_engine::rasterize(&spec) {
+        let mut raster = match schist_text_engine::rasterize(&spec) {
             Some(r) => r,
             None => {
-                let fallback = photoslop_text_engine::default_family();
+                let fallback = schist_text_engine::default_family();
                 log::warn!(
                     "affinity: font {:?} not installed; setting {name:?} in {fallback:?}",
                     spec.family
                 );
                 spec.family = fallback;
-                photoslop_text_engine::rasterize(&spec)?
+                schist_text_engine::rasterize(&spec)?
             }
         };
         if raster.is_empty() {
@@ -750,7 +750,7 @@ impl Walker<'_> {
             let ratio = frame_width as f32 / raster.bounds.width() as f32;
             if (ratio - 1.0).abs() > 0.02 {
                 spec.size *= ratio;
-                raster = photoslop_text_engine::rasterize(&spec)?;
+                raster = schist_text_engine::rasterize(&spec)?;
                 if raster.is_empty() {
                     return None;
                 }
@@ -797,7 +797,7 @@ impl Walker<'_> {
         // reopens this text for editing.
         #[derive(serde::Serialize)]
         struct StoredText<'a> {
-            spec: &'a photoslop_text_engine::TextSpec,
+            spec: &'a schist_text_engine::TextSpec,
             origin: (i32, i32),
             color: [u8; 4],
         }
@@ -806,7 +806,7 @@ impl Walker<'_> {
             origin,
             color,
         }) {
-            layer.extras.push(photoslop_core::RawBlock {
+            layer.extras.push(schist_core::RawBlock {
                 key: *b"PsTx",
                 data,
             });
@@ -1374,8 +1374,8 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
 fn subpath_from_records(
     records: &[(f32, f32, u8, u8)],
     closed: bool,
-) -> Option<photoslop_core::SubPath> {
-    use photoslop_core::Anchor;
+) -> Option<schist_core::SubPath> {
+    use schist_core::Anchor;
     // Split into (endpoint, incoming c1, incoming c2) per segment.
     let mut points: Vec<(f32, f32)> = Vec::new();
     let mut c1s: Vec<Option<(f32, f32)>> = Vec::new();
@@ -1423,15 +1423,15 @@ fn subpath_from_records(
             }
         })
         .collect();
-    Some(photoslop_core::SubPath { anchors, closed })
+    Some(schist_core::SubPath { anchors, closed })
 }
 
 /// Circle-to-Bezier handle length as a fraction of the radius.
 const KAPPA: f32 = 0.552_284_8;
 
 /// Anchors for a clockwise rounded rectangle (plain corners at r = 0).
-fn rounded_rect_anchors(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> Vec<photoslop_core::Anchor> {
-    use photoslop_core::Anchor;
+fn rounded_rect_anchors(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> Vec<schist_core::Anchor> {
+    use schist_core::Anchor;
     if r < 0.25 {
         return vec![
             Anchor::corner(x0, y0),
@@ -1459,8 +1459,8 @@ fn rounded_rect_anchors(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> Vec<photo
 }
 
 /// Anchors for a clockwise ellipse filling the box.
-fn ellipse_anchors(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<photoslop_core::Anchor> {
-    use photoslop_core::Anchor;
+fn ellipse_anchors(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<schist_core::Anchor> {
+    use schist_core::Anchor;
     let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
     let (kx, ky) = (KAPPA * (x1 - x0) / 2.0, KAPPA * (y1 - y0) / 2.0);
     vec![
@@ -1475,10 +1475,10 @@ fn ellipse_anchors(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<photoslop_core::An
 /// gradient-shaded), then stroke composited over it, blitted once.
 fn rasterize_shape(
     layer: &mut Layer,
-    shape: &photoslop_core::VectorShape,
+    shape: &schist_core::VectorShape,
     gradient: Option<&GradientFill>,
 ) {
-    let mut builder = photoslop_vector::PathBuilder::new();
+    let mut builder = schist_vector::PathBuilder::new();
     for sub in &shape.path.subpaths {
         let Some(first) = sub.anchors.first() else {
             continue;
@@ -1532,7 +1532,7 @@ fn rasterize_shape(
     }
 
     let mut rgba = vec![0u8; w * h * 4];
-    fn layer_in(rgba: &mut [u8], cov: Vec<u8>, color: photoslop_color::Rgba) {
+    fn layer_in(rgba: &mut [u8], cov: Vec<u8>, color: schist_color::Rgba) {
         let c = color.to_u8();
         for (px, &a) in rgba.chunks_exact_mut(4).zip(&cov) {
             if a > 0 {
@@ -1541,12 +1541,12 @@ fn rasterize_shape(
         }
     }
     let rule = if shape.even_odd {
-        photoslop_vector::FillRule::EvenOdd
+        schist_vector::FillRule::EvenOdd
     } else {
-        photoslop_vector::FillRule::NonZero
+        schist_vector::FillRule::NonZero
     };
     if let Some(g) = gradient {
-        let cov = photoslop_vector::rasterize(&flat, rect, rule);
+        let cov = schist_vector::rasterize(&flat, rect, rule);
         let (dx, dy) = (g.end.0 - g.start.0, g.end.1 - g.start.1);
         let len2 = (dx * dx + dy * dy).max(1e-9);
         for y in 0..h {
@@ -1570,18 +1570,18 @@ fn rasterize_shape(
             }
         }
     } else if shape.fill.a > 0.0 {
-        layer_in(&mut rgba, photoslop_vector::rasterize(&flat, rect, rule), shape.fill);
+        layer_in(&mut rgba, schist_vector::rasterize(&flat, rect, rule), shape.fill);
     }
     if let Some((color, width)) = shape.stroke {
-        let stroked = photoslop_vector::stroke_path(
+        let stroked = schist_vector::stroke_path(
             &flat,
-            photoslop_vector::StrokeStyle::new(width)
-                .with_cap(photoslop_vector::LineCap::Round)
-                .with_join(photoslop_vector::LineJoin::Round),
+            schist_vector::StrokeStyle::new(width)
+                .with_cap(schist_vector::LineCap::Round)
+                .with_join(schist_vector::LineJoin::Round),
         );
         layer_in(
             &mut rgba,
-            photoslop_vector::rasterize(&stroked, rect, photoslop_vector::FillRule::NonZero),
+            schist_vector::rasterize(&stroked, rect, schist_vector::FillRule::NonZero),
             color,
         );
     }
@@ -1594,8 +1594,8 @@ fn rasterize_shape(
 }
 
 /// Write a decoded mask image (channel 0) into mask tiles at `rect`.
-fn blit_mask(tiles: &mut photoslop_core::MaskTileMap, rect: IntRect, gray: &RgbaImage) {
-    use photoslop_core::{TileCoord, TILE_SIZE};
+fn blit_mask(tiles: &mut schist_core::MaskTileMap, rect: IntRect, gray: &RgbaImage) {
+    use schist_core::{TileCoord, TILE_SIZE};
     let w = gray.width as usize;
     for coord in TileCoord::covering(&rect) {
         let trect = coord.rect();
@@ -1717,8 +1717,8 @@ fn lab_to_srgb(l: f32, a: f32, b: f32) -> (f32, f32, f32) {
 /// ids under version 1 (2.1 vs Multiply 2.0, 15.1 vs Exclusion 15.0).
 /// Average, Negation, Reflect, Glow and Erase have no Photoshop-model
 /// equivalent and map to None.
-fn blend_mode(id: u16, version: u16) -> Option<photoslop_core::BlendMode> {
-    use photoslop_core::BlendMode::*;
+fn blend_mode(id: u16, version: u16) -> Option<schist_core::BlendMode> {
+    use schist_core::BlendMode::*;
     Some(match (id, version) {
         (0, _) => Normal,
         (1, _) => Darken,

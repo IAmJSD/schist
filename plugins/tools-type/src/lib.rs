@@ -6,15 +6,15 @@
 //! blocks verbatim), so text stays re-editable across sessions while
 //! Photoshop still sees ordinary pixels.
 
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_color::Rgba;
+use schist_core::{
     Document, IntRect, Layer, LayerId, LayerPath, RawBlock, TileCoord, TileMap, TILE_SIZE,
 };
-use photoslop_plugin_api::{
+use schist_plugin_api::{
     EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
     ToolCtx, ToolOption, ToolPlugin,
 };
-use photoslop_text_engine::{rasterize, Align, TextSpec};
+use schist_text_engine::{rasterize, Align, TextSpec};
 
 /// Additional-layer-info key under which the text spec is preserved.
 pub const TEXT_BLOCK_KEY: [u8; 4] = *b"PsTx";
@@ -306,7 +306,7 @@ impl ToolPlugin for TypeTool {
     }
 
     fn options(&self) -> Vec<ToolOption> {
-        let families = photoslop_text_engine::family_names();
+        let families = schist_text_engine::family_names();
         let family = families
             .iter()
             .position(|f| *f == self.spec.family)
@@ -352,7 +352,7 @@ impl ToolPlugin for TypeTool {
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
             "type-family" => {
-                if let Some(name) = photoslop_text_engine::family_names().get(value.index()) {
+                if let Some(name) = schist_text_engine::family_names().get(value.index()) {
                     self.spec.family = (*name).to_string();
                 }
             }
@@ -535,7 +535,7 @@ pub struct TypeToolsPlugin;
 
 impl PluginManifest for TypeToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-type"
+        "schist.tools-type"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -546,7 +546,7 @@ impl PluginManifest for TypeToolsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
+    use schist_color::Depth;
 
     fn doc() -> Document {
         let mut d = Document::new("t", 300, 200, Depth::Eight);
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn the_options_bar_settings_reach_the_text() {
         let mut d = doc();
-        let mut state = photoslop_plugin_api::EditorState::default();
+        let mut state = schist_plugin_api::EditorState::default();
         let mut tool = TypeTool::default();
         let mut ctx = ToolCtx {
             doc: &mut d,
@@ -600,7 +600,7 @@ mod tests {
     fn a_bigger_size_renders_bigger_text() {
         let render = |size: f32| {
             let mut d = doc();
-            let mut state = photoslop_plugin_api::EditorState::default();
+            let mut state = schist_plugin_api::EditorState::default();
             let mut tool = TypeTool::default();
             tool.set_option("type-size", OptionValue::Num(size));
             let mut ctx = ToolCtx {
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn editing_an_existing_layer_adopts_its_settings() {
         let mut d = doc();
-        let mut state = photoslop_plugin_api::EditorState::default();
+        let mut state = schist_plugin_api::EditorState::default();
         let mut tool = TypeTool::default();
         {
             let mut ctx = ToolCtx {
@@ -667,7 +667,7 @@ mod tests {
             .tiles
             .iter()
             .map(|(_, buf)| {
-                (0..photoslop_core::TILE_PIXELS)
+                (0..schist_core::TILE_PIXELS)
                     .filter(|&i| buf.get(i).a > 0.0)
                     .count()
             })

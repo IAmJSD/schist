@@ -1,4 +1,4 @@
-//! The Photoslop plugin ABI (version 1).
+//! The Schist plugin ABI (version 1).
 //!
 //! Plugins are plain `wasm32-unknown-unknown` modules — no WASI, no
 //! component model — so the surface is small enough to keep stable and to
@@ -8,21 +8,21 @@
 //!
 //! | export | signature | purpose |
 //! |---|---|---|
-//! | `photoslop_abi_version` | `() -> i32` | must return [`ABI_VERSION`] |
-//! | `photoslop_manifest` | `() -> i64` | packed pointer/length of a JSON [`Manifest`] |
-//! | `photoslop_alloc` | `(i32) -> i32` | allocate guest memory for the host to fill |
-//! | `photoslop_free` | `(i32, i32)` | release memory the host allocated |
+//! | `schist_abi_version` | `() -> i32` | must return [`ABI_VERSION`] |
+//! | `schist_manifest` | `() -> i64` | packed pointer/length of a JSON [`Manifest`] |
+//! | `schist_alloc` | `(i32) -> i32` | allocate guest memory for the host to fill |
+//! | `schist_free` | `(i32, i32)` | release memory the host allocated |
 //!
-//! Filters additionally export `photoslop_filter_apply(ptr, width, height,
+//! Filters additionally export `schist_filter_apply(ptr, width, height,
 //! params_ptr, params_len)`, operating in place on straight-alpha f32 RGBA.
-//! Codecs export `photoslop_codec_probe(ptr, len) -> i32` and
-//! `photoslop_codec_decode(ptr, len) -> i64`, the latter returning a packed
+//! Codecs export `schist_codec_probe(ptr, len) -> i32` and
+//! `schist_codec_decode(ptr, len) -> i64`, the latter returning a packed
 //! pointer/length to a decoded [`DecodedImage`] JSON header followed by
 //! RGBA8 pixels.
 //!
 //! ## Imports the host provides
 //!
-//! Only `photoslop::log(ptr, len)`. There is deliberately no filesystem,
+//! Only `schist::log(ptr, len)`. There is deliberately no filesystem,
 //! clock, network or random source: a plugin can compute and nothing else,
 //! so "capabilities" start empty and are granted per manifest request.
 
@@ -32,13 +32,13 @@ use serde::{Deserialize, Serialize};
 /// different version are refused rather than mis-executed.
 pub const ABI_VERSION: i32 = 1;
 
-pub const EXPORT_ABI_VERSION: &str = "photoslop_abi_version";
-pub const EXPORT_MANIFEST: &str = "photoslop_manifest";
-pub const EXPORT_ALLOC: &str = "photoslop_alloc";
-pub const EXPORT_FREE: &str = "photoslop_free";
-pub const EXPORT_FILTER_APPLY: &str = "photoslop_filter_apply";
-pub const EXPORT_CODEC_PROBE: &str = "photoslop_codec_probe";
-pub const EXPORT_CODEC_DECODE: &str = "photoslop_codec_decode";
+pub const EXPORT_ABI_VERSION: &str = "schist_abi_version";
+pub const EXPORT_MANIFEST: &str = "schist_manifest";
+pub const EXPORT_ALLOC: &str = "schist_alloc";
+pub const EXPORT_FREE: &str = "schist_free";
+pub const EXPORT_FILTER_APPLY: &str = "schist_filter_apply";
+pub const EXPORT_CODEC_PROBE: &str = "schist_codec_probe";
+pub const EXPORT_CODEC_DECODE: &str = "schist_codec_decode";
 
 /// What a plugin provides.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,7 +69,7 @@ pub struct ParamSchema {
     pub suffix: String,
 }
 
-/// The JSON blob a plugin returns from `photoslop_manifest`.
+/// The JSON blob a plugin returns from `schist_manifest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     /// Stable identifier, e.g. "com.example.sepia".

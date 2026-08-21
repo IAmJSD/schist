@@ -1,4 +1,4 @@
-//! Photoslop — a plugin-first image editor on GPUI. See PLAN.md.
+//! Schist — a plugin-first image editor on GPUI. See PLAN.md.
 
 mod actions;
 mod assets;
@@ -14,10 +14,10 @@ mod ui;
 mod workspace;
 
 use gpui::{px, size, App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions};
-use photoslop_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
+use schist_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
 use workspace::Workspace;
 
-/// PSD/PSB import and export via `photoslop-codec-psd`.
+/// PSD/PSB import and export via `schist-codec-psd`.
 struct PsdCodec;
 
 impl CodecPlugin for PsdCodec {
@@ -31,16 +31,16 @@ impl CodecPlugin for PsdCodec {
         &["psd", "psb"]
     }
     fn probe(&self, bytes: &[u8]) -> bool {
-        photoslop_codec_psd::is_psd(bytes)
+        schist_codec_psd::is_psd(bytes)
     }
-    fn import(&self, bytes: &[u8]) -> anyhow::Result<photoslop_core::Document> {
-        Ok(photoslop_codec_psd::read_psd(bytes)?)
+    fn import(&self, bytes: &[u8]) -> anyhow::Result<schist_core::Document> {
+        Ok(schist_codec_psd::read_psd(bytes)?)
     }
     fn can_export(&self) -> bool {
         true
     }
-    fn export(&self, doc: &photoslop_core::Document) -> anyhow::Result<Vec<u8>> {
-        Ok(photoslop_codec_psd::write_psd(doc)?)
+    fn export(&self, doc: &schist_core::Document) -> anyhow::Result<Vec<u8>> {
+        Ok(schist_codec_psd::write_psd(doc)?)
     }
 }
 
@@ -48,7 +48,7 @@ struct PsdPlugin;
 
 impl PluginManifest for PsdPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.codec-psd"
+        "schist.codec-psd"
     }
     fn register(&self, registry: &mut PluginRegistry) {
         registry.register_codec(Box::new(PsdCodec));
@@ -57,7 +57,7 @@ impl PluginManifest for PsdPlugin {
 
 /// Crash reporting stays off unless the user opts in.
 fn crash_reports_enabled() -> bool {
-    if std::env::var("PHOTOSLOP_CRASH_REPORTS").is_ok_and(|v| v == "1") {
+    if std::env::var("SCHIST_CRASH_REPORTS").is_ok_and(|v| v == "1") {
         return true;
     }
     std::env::var("XDG_CONFIG_HOME")
@@ -68,7 +68,7 @@ fn crash_reports_enabled() -> bool {
                 .ok()
                 .map(|h| std::path::PathBuf::from(h).join(".config"))
         })
-        .map(|d| d.join("photoslop/preferences.json"))
+        .map(|d| d.join("schist/preferences.json"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|v| v.get("crash_reports").and_then(|b| b.as_bool()))
@@ -77,21 +77,21 @@ fn crash_reports_enabled() -> bool {
 
 /// Assemble the first-party plugin set. Every entry here is optional — the
 /// app boots (to an empty shell) with any or all of them removed.
-fn build_registry() -> (PluginRegistry, photoslop_plugin_host_wasm::PluginManager) {
+fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
-        Box::new(photoslop_tools_basic::BasicToolsPlugin),
-        Box::new(photoslop_tools_paint::PaintToolsPlugin),
-        Box::new(photoslop_tools_retouch::RetouchToolsPlugin),
-        Box::new(photoslop_tools_warp::WarpToolsPlugin),
-        Box::new(photoslop_tools_doc::DocToolsPlugin),
-        Box::new(photoslop_tools_select::SelectToolsPlugin),
-        Box::new(photoslop_tools_transform::TransformToolsPlugin),
-        Box::new(photoslop_tools_vector::VectorToolsPlugin),
-        Box::new(photoslop_tools_type::TypeToolsPlugin),
-        Box::new(photoslop_commands_core::CoreCommandsPlugin),
-        Box::new(photoslop_filters_core::CoreFiltersPlugin),
-        Box::new(photoslop_codecs_common::CommonCodecsPlugin),
+        Box::new(schist_tools_basic::BasicToolsPlugin),
+        Box::new(schist_tools_paint::PaintToolsPlugin),
+        Box::new(schist_tools_retouch::RetouchToolsPlugin),
+        Box::new(schist_tools_warp::WarpToolsPlugin),
+        Box::new(schist_tools_doc::DocToolsPlugin),
+        Box::new(schist_tools_select::SelectToolsPlugin),
+        Box::new(schist_tools_transform::TransformToolsPlugin),
+        Box::new(schist_tools_vector::VectorToolsPlugin),
+        Box::new(schist_tools_type::TypeToolsPlugin),
+        Box::new(schist_commands_core::CoreCommandsPlugin),
+        Box::new(schist_filters_core::CoreFiltersPlugin),
+        Box::new(schist_codecs_common::CommonCodecsPlugin),
         Box::new(PsdPlugin),
     ];
     for manifest in manifests {
@@ -99,16 +99,16 @@ fn build_registry() -> (PluginRegistry, photoslop_plugin_host_wasm::PluginManage
         manifest.register(&mut registry);
     }
     // Third-party WebAssembly plugins, sandboxed (M9).
-    let manager = match photoslop_plugin_host_wasm::PluginManager::plugin_dir() {
-        Some(dir) => photoslop_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
-        None => photoslop_plugin_host_wasm::PluginManager::default(),
+    let manager = match schist_plugin_host_wasm::PluginManager::plugin_dir() {
+        Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
+        None => schist_plugin_host_wasm::PluginManager::default(),
     };
     (registry, manager)
 }
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    // Opt-in: PHOTOSLOP_CRASH_REPORTS=1, or the preference file's
+    // Opt-in: SCHIST_CRASH_REPORTS=1, or the preference file's
     // crash_reports flag once the user enables it in Preferences.
     crash::install_handler(crash_reports_enabled());
     let (registry, plugin_manager) = build_registry();

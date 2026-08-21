@@ -1,20 +1,20 @@
 //! Layer effects (`lfx2`), read and written as PSD descriptors.
 //!
 //! Before this the block was preserved byte-for-byte but never
-//! interpreted, so a file's drop shadows were invisible in Photoslop and
+//! interpreted, so a file's drop shadows were invisible in Schist and
 //! editing a layer's effects meant throwing the block away on save. Both
-//! directions now go through `photoslop-psd-descriptor`.
+//! directions now go through `schist-psd-descriptor`.
 //!
 //! Photoshop's key names are terse and mostly undocumented; the mapping
 //! below is the one the format actually uses, with the meaning spelled out
 //! in comments rather than guessed at from the name.
 
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_color::Rgba;
+use schist_core::{
     BevelStyle, BevelStyle_, BlendMode, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
     GradientShape, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, Technique,
 };
-use photoslop_psd_descriptor::{parse, Builder, Descriptor, Value};
+use schist_psd_descriptor::{parse, Builder, Descriptor, Value};
 
 /// `lfx2` prefixes its descriptor with two u32s: an object-effects version
 /// (0) and the descriptor version (16). That is not the u16+u32 shape the

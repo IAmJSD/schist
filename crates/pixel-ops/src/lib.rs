@@ -8,8 +8,8 @@
 //! All math is straight-alpha f32; the general compositing equation is
 //!   co·αo = Cs·αs·(1−αb) + B(Cb,Cs)·αs·αb + Cb·αb·(1−αs)
 
-use photoslop_color::Rgba;
-use photoslop_core::BlendMode;
+use schist_color::Rgba;
+use schist_core::BlendMode;
 
 #[inline]
 fn mul(b: f32, s: f32) -> f32 {

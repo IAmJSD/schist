@@ -1,12 +1,12 @@
 [package]
-name = "photoslop-commands-core"
+name = "schist-commands-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-plugin-api.workspace = true
+schist-core.workspace = true
+schist-plugin-api.workspace = true
 anyhow.workspace = true
-photoslop-compositor.workspace = true
-photoslop-color.workspace = true
+schist-compositor.workspace = true
+schist-color.workspace = true

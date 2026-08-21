@@ -11,13 +11,13 @@ pub mod perspective;
 pub mod puppet;
 pub mod scale;
 
-use photoslop_plugin_api::{PluginManifest, PluginRegistry};
+use schist_plugin_api::{PluginManifest, PluginRegistry};
 
 pub struct WarpToolsPlugin;
 
 impl PluginManifest for WarpToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-warp"
+        "schist.tools-warp"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {

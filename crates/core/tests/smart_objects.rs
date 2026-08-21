@@ -1,8 +1,8 @@
 //! The property that makes a smart object worth having: transforming it
 //! repeatedly costs no more quality than transforming it once.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{Affine, IntRect, SmartObject, TileCoord, TileMap, TILE_SIZE};
+use schist_color::{Depth, Rgba};
+use schist_core::{Affine, IntRect, SmartObject, TileCoord, TileMap, TILE_SIZE};
 
 /// 128x128 of fine detail — a one-pixel checkerboard, which is the first
 /// thing to disappear when an image is scaled down and back up.
@@ -99,18 +99,18 @@ fn the_same_abuse_destroys_an_ordinary_layer() {
     let source = detailed_source();
     let mut tiles = source.clone();
     for _ in 0..10 {
-        tiles = photoslop_core::resample::transform_tiles(
+        tiles = schist_core::resample::transform_tiles(
             &tiles,
             &Affine::scale(0.1, 0.1),
             Depth::Eight,
-            photoslop_core::Filter::Bicubic,
+            schist_core::Filter::Bicubic,
             CLIP,
         );
-        tiles = photoslop_core::resample::transform_tiles(
+        tiles = schist_core::resample::transform_tiles(
             &tiles,
             &Affine::scale(10.0, 10.0),
             Depth::Eight,
-            photoslop_core::Filter::Bicubic,
+            schist_core::Filter::Bicubic,
             CLIP,
         );
     }

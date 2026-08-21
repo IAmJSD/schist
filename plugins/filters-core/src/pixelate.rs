@@ -2,7 +2,7 @@
 
 use crate::util::{at, luma, premultiply, put, unpremultiply, value_noise};
 use crate::{param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// Average `px` over each cell of a grid and paint the cell flat.
 fn cellular(px: &mut [f32], w: usize, h: usize, cell: usize, jitter: bool, seed: u32) {
@@ -252,7 +252,7 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(Mosaic));
     registry.register_filter(Box::new(Crystallize));
     registry.register_filter(Box::new(Pointillize));

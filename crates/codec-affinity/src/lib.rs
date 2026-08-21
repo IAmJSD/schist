@@ -10,7 +10,7 @@
 //! 2. [`graph`] — the object graph: "doc.dat" deserialized into a tree
 //!    of tagged classes and fields.
 //! 3. [`import`] — interpretation: walk the graph's document → spread →
-//!    layer hierarchy into a [`photoslop_core::Document`], loading
+//!    layer hierarchy into a [`schist_core::Document`], loading
 //!    raster layers' pixel tiles from the container.
 //!
 //! Verified against Affinity 1 files. Affinity 2 files (zstd entries)

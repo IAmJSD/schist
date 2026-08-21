@@ -1,10 +1,10 @@
 //! Each retouch tool should change what it claims to change and leave the
 //! rest alone.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{Document, IntRect, Layer, SelectOp, TileCoord, TILE_SIZE};
-use photoslop_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
-use photoslop_tools_retouch::*;
+use schist_color::{Depth, Rgba};
+use schist_core::{Document, IntRect, Layer, SelectOp, TileCoord, TILE_SIZE};
+use schist_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
+use schist_tools_retouch::*;
 
 fn input(x: f32, y: f32) -> PointerInput {
     PointerInput {
@@ -15,7 +15,7 @@ fn input(x: f32, y: f32) -> PointerInput {
     }
 }
 
-fn set(doc: &mut Document, layer: photoslop_core::LayerId, x: i32, y: i32, c: Rgba) {
+fn set(doc: &mut Document, layer: schist_core::LayerId, x: i32, y: i32, c: Rgba) {
     let raster = doc.tree.find_mut(layer).unwrap().as_raster_mut().unwrap();
     let coord = TileCoord::containing(x, y);
     let trect = coord.rect();
@@ -35,7 +35,7 @@ fn get(doc: &Document, x: i32, y: i32) -> Rgba {
 }
 
 /// 120x120 flat grey, with whatever `paint` puts on top.
-fn doc_with(paint: impl Fn(&mut Document, photoslop_core::LayerId)) -> Document {
+fn doc_with(paint: impl Fn(&mut Document, schist_core::LayerId)) -> Document {
     let mut doc = Document::new("t", 120, 120, Depth::Eight);
     let layer = Layer::new_raster("bg");
     let id = layer.id;
@@ -133,7 +133,7 @@ fn inpaint_fills_a_hole_from_its_surroundings() {
             hole[y * 40 + x] = true;
         }
     }
-    let filled = photoslop_tools_retouch::inpaint(&tiles, rect, &hole);
+    let filled = schist_tools_retouch::inpaint(&tiles, rect, &hole);
     let mid = filled[20 * 40 + 20];
     assert!(
         (mid.r - 0.2).abs() < 0.05 && (mid.b - 0.9).abs() < 0.05,

@@ -6,7 +6,7 @@
 //! from a built-in one.
 //!
 //! Isolation comes from what the sandbox *lacks*: the host supplies exactly
-//! one import (`photoslop::log`), so a plugin has no filesystem, network,
+//! one import (`schist::log`), so a plugin has no filesystem, network,
 //! clock or randomness. Execution is additionally bounded by fuel, so a
 //! plugin that loops forever is unwound instead of hanging the editor.
 
@@ -14,9 +14,9 @@ pub mod abi;
 
 use abi::{Capability, DecodedImage, Manifest, PluginKind};
 use anyhow::{anyhow, Context as _, Result};
-use photoslop_color::Depth;
-use photoslop_core::{blit_rgba8, Document, IntRect, Layer};
-use photoslop_plugin_api::{CodecPlugin, FilterParam, FilterPlugin, FilterValues, PluginRegistry};
+use schist_color::Depth;
+use schist_core::{blit_rgba8, Document, IntRect, Layer};
+use schist_plugin_api::{CodecPlugin, FilterParam, FilterPlugin, FilterValues, PluginRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -69,7 +69,7 @@ impl Instance {
             .instance
             .get_typed_func::<i32, i32>(&mut self.store, abi::EXPORT_ALLOC)
             .map_err(wasm_err)
-            .context("plugin does not export photoslop_alloc")?;
+            .context("plugin does not export schist_alloc")?;
         let ptr = f.call(&mut self.store, len as i32).map_err(wasm_err)?;
         if ptr <= 0 {
             return Err(anyhow!("plugin allocation of {len} bytes failed"));
@@ -140,7 +140,7 @@ impl LoadedPlugin {
             .instance
             .get_typed_func::<(), i32>(&mut instance.store, abi::EXPORT_ABI_VERSION)
             .map_err(wasm_err)
-            .context("plugin does not export photoslop_abi_version")?
+            .context("plugin does not export schist_abi_version")?
             .call(&mut instance.store, ())
             .map_err(wasm_err)?;
         if version != abi::ABI_VERSION {
@@ -153,7 +153,7 @@ impl LoadedPlugin {
             .instance
             .get_typed_func::<(), i64>(&mut instance.store, abi::EXPORT_MANIFEST)
             .map_err(wasm_err)
-            .context("plugin does not export photoslop_manifest")?
+            .context("plugin does not export schist_manifest")?
             .call(&mut instance.store, ())
             .map_err(wasm_err)?;
         let (ptr, len) = abi::unpack(packed);
@@ -192,7 +192,7 @@ impl LoadedPlugin {
         // The entire host surface: one logging call.
         linker
             .func_wrap(
-                "photoslop",
+                "schist",
                 "log",
                 |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
                     let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
@@ -258,7 +258,7 @@ impl LoadedPlugin {
                 abi::EXPORT_FILTER_APPLY,
             )
             .map_err(wasm_err)
-            .context("filter plugin does not export photoslop_filter_apply")?
+            .context("filter plugin does not export schist_filter_apply")?
             .call(
                 &mut inst.store,
                 (
@@ -294,7 +294,7 @@ impl LoadedPlugin {
             .instance
             .get_typed_func::<(i32, i32), i32>(&mut inst.store, abi::EXPORT_CODEC_PROBE)
             .map_err(wasm_err)
-            .context("codec plugin does not export photoslop_codec_probe")?
+            .context("codec plugin does not export schist_codec_probe")?
             .call(&mut inst.store, (ptr, bytes.len() as i32))
             .map_err(wasm_err)?;
         Ok(verdict != 0)
@@ -309,7 +309,7 @@ impl LoadedPlugin {
             .instance
             .get_typed_func::<(i32, i32), i64>(&mut inst.store, abi::EXPORT_CODEC_DECODE)
             .map_err(wasm_err)
-            .context("codec plugin does not export photoslop_codec_decode")?
+            .context("codec plugin does not export schist_codec_decode")?
             .call(&mut inst.store, (ptr, bytes.len() as i32))
             .map_err(wasm_err)
             .context("plugin trapped or ran out of fuel")?;
@@ -502,7 +502,7 @@ impl PluginManager {
                     .ok()
                     .map(|h| PathBuf::from(h).join(".config"))
             })?;
-        Some(base.join("photoslop/plugins"))
+        Some(base.join("schist/plugins"))
     }
 
     /// Load every `.wasm` in `dir`, registering the ones that pass

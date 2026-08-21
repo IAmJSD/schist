@@ -16,7 +16,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Point,
     SharedString, Styled,
 };
-use photoslop_adjustments::{CurveChannel, Curves};
+use schist_adjustments::{CurveChannel, Curves};
 
 /// Side of the square graph, in pixels.
 const SIZE: f32 = 256.0;
@@ -36,11 +36,11 @@ pub enum CurveTarget {
 fn current(ws: &Workspace) -> Option<(CurveTarget, Curves, CurveChannel)> {
     match ws.modal.as_ref()? {
         Modal::Adjustment {
-            params: photoslop_adjustments::Params::Curves(c),
+            params: schist_adjustments::Params::Curves(c),
             ..
         } => Some((CurveTarget::Layer, c.clone(), ws.curve_channel)),
         Modal::DestructiveAdjustment { params, .. } => match &**params {
-            photoslop_adjustments::Params::Curves(c) => {
+            schist_adjustments::Params::Curves(c) => {
                 Some((CurveTarget::Destructive, c.clone(), ws.curve_channel))
             }
             _ => None,
@@ -55,13 +55,13 @@ fn commit(ws: &mut Workspace, curves: Curves, cx: &mut Context<Workspace>) {
     let mut destructive_preview = None;
     ws.update_modal(|m| match m {
         Modal::Adjustment { params, layer, .. } => {
-            *params = photoslop_adjustments::Params::Curves(curves.clone());
+            *params = schist_adjustments::Params::Curves(curves.clone());
             layer_preview = Some((*layer, params.clone()));
         }
         Modal::DestructiveAdjustment {
             params, preview, ..
         } => {
-            **params = photoslop_adjustments::Params::Curves(curves.clone());
+            **params = schist_adjustments::Params::Curves(curves.clone());
             if *preview {
                 destructive_preview = Some((**params).clone());
             }

@@ -1,16 +1,16 @@
 [package]
-name = "photoslop-codecs-common"
+name = "schist-codecs-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-plugin-api.workspace = true
-photoslop-codec-affinity.workspace = true
+schist-core.workspace = true
+schist-plugin-api.workspace = true
+schist-codec-affinity.workspace = true
 anyhow.workspace = true
 log.workspace = true
 image.workspace = true
-photoslop-color.workspace = true
-photoslop-colormgmt.workspace = true
-photoslop-compositor.workspace = true
+schist-color.workspace = true
+schist-colormgmt.workspace = true
+schist-compositor.workspace = true

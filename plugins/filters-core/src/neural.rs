@@ -4,7 +4,7 @@
 //! residual CNN trained for this application (`tools/train/detail.py`)
 //! and shipped inside the binary; Style Transfer uses the fast
 //! neural-style networks from the ONNX Model Zoo, downloaded on demand.
-//! Both run through `photoslop-neural`, which is `tract` -- pure Rust, so
+//! Both run through `schist-neural`, which is `tract` -- pure Rust, so
 //! there is no runtime to install.
 //!
 //! The rest are signal processing, and the distinction is worth stating
@@ -35,8 +35,8 @@ fn through_rgb(px: &mut [f32], f: impl FnOnce(&mut Vec<f32>)) {
 
 /// The note a model-backed filter shows in its dialog.
 fn model_note(id: &str, fallback: &str) -> Option<String> {
-    match photoslop_neural::spec(id) {
-        Some(spec) if photoslop_neural::installed(id) => {
+    match schist_neural::spec(id) {
+        Some(spec) if schist_neural::installed(id) => {
             // The dot rather than nested brackets: the names already have
             // brackets in them.
             Some(format!("Using {} \u{b7} {}.", spec.name, spec.license))
@@ -52,7 +52,7 @@ fn model_note(id: &str, fallback: &str) -> Option<String> {
 
 use crate::util::{at, gaussian_rgba, luma, put, sample};
 use crate::{choice, param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// How much a colour looks like skin, 0..=1.
 ///
@@ -240,9 +240,9 @@ impl FilterPlugin for SuperZoom {
         if detail <= 0.0 {
             return;
         }
-        if let Some(model) = photoslop_neural::get("detail") {
+        if let Some(model) = schist_neural::get("detail") {
             through_rgb(px, |rgb| {
-                photoslop_neural::run_tiled(&model, rgb, width, height, detail);
+                schist_neural::run_tiled(&model, rgb, width, height, detail);
             });
             return;
         }
@@ -310,7 +310,7 @@ impl FilterPlugin for StyleTransfer {
         let ready: Vec<&str> = STYLE_IDS
             .iter()
             .enumerate()
-            .filter(|(_, id)| photoslop_neural::installed(id))
+            .filter(|(_, id)| schist_neural::installed(id))
             .map(|(i, _)| STYLES[i])
             .collect();
         Some(if ready.is_empty() {
@@ -334,9 +334,9 @@ impl FilterPlugin for StyleTransfer {
             return;
         }
         let pick = (values.get("style").round().max(0.0) as usize).min(STYLE_IDS.len() - 1);
-        if let Some(model) = photoslop_neural::get(STYLE_IDS[pick]) {
+        if let Some(model) = schist_neural::get(STYLE_IDS[pick]) {
             through_rgb(px, |rgb| {
-                photoslop_neural::run_tiled(&model, rgb, width, height, strength);
+                schist_neural::run_tiled(&model, rgb, width, height, strength);
             });
             return;
         }
@@ -481,7 +481,7 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(SkinSmoothing));
     registry.register_filter(Box::new(JpegArtifactRemoval));
     registry.register_filter(Box::new(Colorize));

@@ -1,5 +1,5 @@
 [package]
-name = "photoslop-example-sepia"
+name = "schist-example-sepia"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -9,5 +9,5 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-photoslop-plugin-sdk = { path = "../../../crates/plugin-sdk" }
+schist-plugin-sdk = { path = "../../../crates/plugin-sdk" }
 serde_json = "1"

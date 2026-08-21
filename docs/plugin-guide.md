@@ -1,9 +1,9 @@
-# Writing Photoslop plugins
+# Writing Schist plugins
 
-Photoslop loads third-party plugins as sandboxed WebAssembly modules. A
+Schist loads third-party plugins as sandboxed WebAssembly modules. A
 plugin can add a **filter** (a function over pixels) or a **format** (an
 image decoder). It runs with no filesystem, network, clock or randomness —
-the host exposes exactly one import, `photoslop::log` — and is bounded by an
+the host exposes exactly one import, `schist::log` — and is bounded by an
 execution-fuel budget, so a runaway plugin is unwound instead of freezing
 the editor.
 
@@ -15,14 +15,14 @@ the editor.
 crate-type = ["cdylib"]
 
 [dependencies]
-photoslop-plugin-sdk = { git = "https://github.com/IAmJSD/photoslop" }
+schist-plugin-sdk = { git = "https://github.com/IAmJSD/schist" }
 serde_json = "1"
 ```
 
 ```rust
-use photoslop_plugin_sdk::*;
+use schist_plugin_sdk::*;
 
-photoslop_filter! {
+schist_filter! {
     id: "com.example.sepia",
     name: "Sepia",
     category: "Plugins",
@@ -39,10 +39,10 @@ photoslop_filter! {
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/*.wasm ~/.config/photoslop/plugins/
+cp target/wasm32-unknown-unknown/release/*.wasm ~/.config/schist/plugins/
 ```
 
-Restart Photoslop; the filter appears in the **Filter** menu with a slider
+Restart Schist; the filter appears in the **Filter** menu with a slider
 per declared parameter. **File → Plugins…** lists what loaded, shows why
 anything was refused, and can enable/disable or install plugins.
 
@@ -52,7 +52,7 @@ Two complete examples live in [`examples/plugins`](../examples/plugins):
 ## Formats
 
 ```rust
-photoslop_codec! {
+schist_codec! {
     id: "com.example.pgm",
     name: "Netpbm PGM",
     extensions: ["pgm"],
@@ -71,13 +71,13 @@ The SDK is a convenience, not a requirement — any language that emits
 
 | export | signature | purpose |
 |---|---|---|
-| `photoslop_abi_version` | `() -> i32` | must return `1` |
-| `photoslop_manifest` | `() -> i64` | packed `(ptr << 32) \| len` of manifest JSON |
-| `photoslop_alloc` | `(i32) -> i32` | allocate guest memory |
-| `photoslop_free` | `(i32, i32)` | release it |
-| `photoslop_filter_apply` | `(ptr, w, h, params_ptr, params_len)` | filters: edit f32 RGBA in place |
-| `photoslop_codec_probe` | `(ptr, len) -> i32` | formats: 1 if recognised |
-| `photoslop_codec_decode` | `(ptr, len) -> i64` | formats: packed pointer to header + RGBA8 |
+| `schist_abi_version` | `() -> i32` | must return `1` |
+| `schist_manifest` | `() -> i64` | packed `(ptr << 32) \| len` of manifest JSON |
+| `schist_alloc` | `(i32) -> i32` | allocate guest memory |
+| `schist_free` | `(i32, i32)` | release it |
+| `schist_filter_apply` | `(ptr, w, h, params_ptr, params_len)` | filters: edit f32 RGBA in place |
+| `schist_codec_probe` | `(ptr, len) -> i32` | formats: 1 if recognised |
+| `schist_codec_decode` | `(ptr, len) -> i64` | formats: packed pointer to header + RGBA8 |
 
 The module must export its `memory`. Manifest fields: `id`, `name`, `kind`
 (`"filter"` or `"codec"`), `api_version`, and optionally `description`,

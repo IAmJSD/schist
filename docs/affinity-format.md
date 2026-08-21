@@ -1,13 +1,13 @@
 # The Affinity file format, reverse engineered
 
-What Photoslop knows about Serif's `.afphoto` / `.afdesign` / `.afpub`
+What Schist knows about Serif's `.afphoto` / `.afdesign` / `.afpub`
 format, as implemented by `crates/codec-affinity`. Serif publishes no
 spec. This knowledge comes from prior art — [afread] by Vladimir Mamonov
 (MIT) and [AFDesignLoad] by Nick Beeuwsaert (MIT) — plus our own
 inspection of real files: `fixtures/affinity/` (Affinity Designer 1.x)
 plus private corpora of Affinity Photo 2.6 documents and Canva-era
 Affinity `.af` documents (not vendored — point
-`PHOTOSLOP_AFFINITY_CORPUS` at colon-separated directories of real
+`SCHIST_AFFINITY_CORPUS` at colon-separated directories of real
 files to sweep them in the codec tests). Every generation uses the
 same container and object graph: Affinity 2 swaps zlib for zstd, adds
 a few fields, and stores placed-image pixels by reference; the unified
@@ -248,7 +248,7 @@ were recovered, and adds the preview as a hidden reference layer.
 - `Xfrm` rotation/shear on rasters is dropped (axis-aligned scale and
   translation only) — full affine resampling on import would fix it.
 
-`cargo run -p photoslop-codec-affinity --example afdump -- file.afphoto`
+`cargo run -p schist-codec-affinity --example afdump -- file.afphoto`
 prints any file's container listing and full object graph.
 
 [afread]: https://github.com/VMDevCpp/afread

@@ -1,7 +1,7 @@
 //! Each effect should put pixels where Photoshop puts them.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{IntRect, Layer, LayerStyle, StrokePosition};
+use schist_color::{Depth, Rgba};
+use schist_core::{IntRect, Layer, LayerStyle, StrokePosition};
 
 /// A 20x20 opaque red square at (40,40) on an otherwise empty layer.
 fn square_layer() -> Layer {
@@ -9,24 +9,24 @@ fn square_layer() -> Layer {
     let raster = layer.as_raster_mut().unwrap();
     for y in 40..60 {
         for x in 40..60 {
-            let coord = photoslop_core::TileCoord::containing(x, y);
+            let coord = schist_core::TileCoord::containing(x, y);
             let trect = coord.rect();
             let buf = raster.tiles.get_mut_or_insert(coord, Depth::Eight);
-            let ix = ((y - trect.top) * photoslop_core::TILE_SIZE + (x - trect.left)) as usize;
+            let ix = ((y - trect.top) * schist_core::TILE_SIZE + (x - trect.left)) as usize;
             buf.set(ix, Rgba::new(1.0, 0.0, 0.0, 1.0));
         }
     }
     layer
 }
 
-fn alpha_at(styled: &photoslop_core::StyledRaster, x: i32, y: i32) -> f32 {
+fn alpha_at(styled: &schist_core::StyledRaster, x: i32, y: i32) -> f32 {
     styled.tiles.pixel(x, y).a
 }
 
 #[test]
 fn no_style_renders_nothing() {
     let layer = square_layer();
-    assert!(photoslop_layer_fx::render(&layer).is_none());
+    assert!(schist_layer_fx::render(&layer).is_none());
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn drop_shadow_falls_outside_the_layer() {
     layer.style.drop_shadow.settings.size = 2.0;
     // 135 degrees: light from the upper left, so the shadow goes down-right.
     layer.style.drop_shadow.settings.angle = 135.0;
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     // The raster must have grown past the square to hold the shadow.
     assert!(
@@ -71,7 +71,7 @@ fn outside_stroke_draws_a_band_around_the_edge() {
     layer.style.stroke.settings.size = 4.0;
     layer.style.stroke.settings.position = StrokePosition::Outside;
     layer.style.stroke.settings.color = Rgba::new(0.0, 0.0, 1.0, 1.0);
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     // Two pixels outside the left edge: inside a 4px outside stroke.
     let px = styled.tiles.pixel(38, 50);
@@ -96,7 +96,7 @@ fn inside_stroke_stays_within_the_layer() {
     layer.style.stroke.settings.size = 4.0;
     layer.style.stroke.settings.position = StrokePosition::Inside;
     layer.style.stroke.settings.color = Rgba::new(0.0, 0.0, 1.0, 1.0);
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     assert!(
         styled.tiles.pixel(38, 50).a < 0.1,
@@ -117,7 +117,7 @@ fn color_overlay_recolours_only_the_layer() {
     let mut layer = square_layer();
     layer.style.color_overlay.enabled = true;
     layer.style.color_overlay.settings.color = Rgba::new(0.0, 1.0, 0.0, 1.0);
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     let px = styled.tiles.pixel(50, 50);
     assert!(px.g > 0.9 && px.r < 0.1, "overlay did not recolour: {px:?}");
@@ -133,7 +133,7 @@ fn outer_glow_surrounds_the_layer_evenly() {
     let mut layer = square_layer();
     layer.style.outer_glow.enabled = true;
     layer.style.outer_glow.settings.size = 6.0;
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     // A glow has no direction, so all four sides should light up.
     for (x, y, side) in [
@@ -154,7 +154,7 @@ fn fill_opacity_fades_the_layer_but_not_its_shadow() {
     layer.style.drop_shadow.settings.distance = 10.0;
     layer.style.drop_shadow.settings.size = 1.0;
     layer.style.drop_shadow.settings.knockout = false;
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     // Photoshop's Fill hides the content and leaves the effects.
     assert!(
@@ -183,7 +183,7 @@ fn styled_bounds_cover_every_painted_pixel() {
     layer.style.drop_shadow.settings.size = 8.0;
     layer.style.outer_glow.enabled = true;
     layer.style.outer_glow.settings.size = 12.0;
-    let styled = photoslop_layer_fx::render(&layer).expect("styled");
+    let styled = schist_layer_fx::render(&layer).expect("styled");
 
     let painted: IntRect = styled.tiles.content_bounds();
     assert!(

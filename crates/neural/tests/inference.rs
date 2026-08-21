@@ -1,6 +1,6 @@
 //! The built-in model has to load, run, and actually help.
 
-use photoslop_neural as neural;
+use schist_neural as neural;
 
 /// A test image with photograph-like statistics: a multi-octave noise
 /// field with roughly a 1/f spectrum, plus hard-edged shapes over it.
@@ -269,9 +269,9 @@ fn a_corrupt_model_is_rejected() {
 
 #[test]
 fn install_checks_the_hash() {
-    let dir = std::env::temp_dir().join(format!("photoslop-model-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("schist-model-test-{}", std::process::id()));
     // SAFETY: single-threaded test setup, before any model is loaded.
-    unsafe { std::env::set_var("PHOTOSLOP_MODEL_DIR", &dir) };
+    unsafe { std::env::set_var("SCHIST_MODEL_DIR", &dir) };
     let mut spec = neural::spec("style-mosaic").expect("catalogued").clone();
     spec.sha256 = Some("0000000000000000000000000000000000000000000000000000000000000000");
     let err = neural::install(&spec, b"whatever").unwrap_err().to_string();

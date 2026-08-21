@@ -10,11 +10,11 @@ fn fixture_dir() -> PathBuf {
 }
 
 fn fixtures() -> Vec<(String, Vec<u8>)> {
-    // The vendored corpus, plus (when set) PHOTOSLOP_AFFINITY_CORPUS —
+    // The vendored corpus, plus (when set) SCHIST_AFFINITY_CORPUS —
     // colon-separated directories of private real-world files to sweep
     // in addition.
     let mut dirs = vec![fixture_dir()];
-    if let Ok(extra) = std::env::var("PHOTOSLOP_AFFINITY_CORPUS") {
+    if let Ok(extra) = std::env::var("SCHIST_AFFINITY_CORPUS") {
         dirs.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
@@ -46,7 +46,7 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn archives_parse_and_all_entries_extract() {
     for (name, bytes) in fixtures() {
-        let archive = photoslop_codec_affinity::Archive::parse(&bytes)
+        let archive = schist_codec_affinity::Archive::parse(&bytes)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         let names: Vec<String> = archive.names().map(str::to_owned).collect();
         assert!(names.iter().any(|n| n == "doc.dat"), "{name}: no doc.dat");
@@ -65,7 +65,7 @@ fn archives_parse_and_all_entries_extract() {
 #[test]
 fn graphs_parse() {
     for (name, bytes) in fixtures() {
-        let dump = photoslop_codec_affinity::import::dump(&bytes)
+        let dump = schist_codec_affinity::import::dump(&bytes)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(dump.contains("DocR"), "{name}: no document root in dump");
         println!("=== {name}: dump {} chars", dump.len());
@@ -82,11 +82,11 @@ fn raster_pixels_land_where_the_file_says() {
         eprintln!("skipping: no {}", path.display());
         return;
     };
-    let (doc, report) = photoslop_codec_affinity::read_affinity(&bytes).unwrap();
+    let (doc, report) = schist_codec_affinity::read_affinity(&bytes).unwrap();
     assert!(report.complete());
     assert_eq!(report.raster_layers, 1);
 
-    fn find_raster(layers: &[photoslop_core::Layer]) -> Option<&photoslop_core::Layer> {
+    fn find_raster(layers: &[schist_core::Layer]) -> Option<&schist_core::Layer> {
         layers.iter().find_map(|l| match l.children() {
             Some(children) => find_raster(children),
             None => l.as_raster().is_some().then_some(l),
@@ -122,7 +122,7 @@ fn raster_pixels_land_where_the_file_says() {
 #[test]
 fn documents_import() {
     for (name, bytes) in fixtures() {
-        let (doc, report) = photoslop_codec_affinity::read_affinity(&bytes)
+        let (doc, report) = schist_codec_affinity::read_affinity(&bytes)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(doc.width > 0 && doc.height > 0, "{name}: empty canvas");
         println!(

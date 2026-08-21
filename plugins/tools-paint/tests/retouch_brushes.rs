@@ -1,9 +1,9 @@
 //! The brush-based retouch tools: healing, spot healing, blur, sharpen,
 //! smudge, background eraser and the history brush.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{Document, Layer, LayerId, TileCoord, TILE_SIZE};
-use photoslop_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
+use schist_color::{Depth, Rgba};
+use schist_core::{Document, Layer, LayerId, TileCoord, TILE_SIZE};
+use schist_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
 
 fn input(x: f32, y: f32) -> PointerInput {
     PointerInput {
@@ -60,7 +60,7 @@ fn doc_with(paint: impl Fn(&mut Document, LayerId)) -> Document {
 }
 
 fn tool(id: &str) -> Box<dyn ToolPlugin> {
-    photoslop_tools_paint::tool_for_test(id).expect("unknown tool")
+    schist_tools_paint::tool_for_test(id).expect("unknown tool")
 }
 
 /// A blemish on flat skin should come out the colour of the skin.

@@ -1,10 +1,10 @@
 [package]
-name = "photoslop-tools-transform"
+name = "schist-tools-transform"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-plugin-api.workspace = true
-photoslop-color.workspace = true
+schist-core.workspace = true
+schist-plugin-api.workspace = true
+schist-color.workspace = true

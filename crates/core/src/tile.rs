@@ -1,12 +1,12 @@
 //! Sparse, copy-on-write tile storage.
 //!
-//! All raster content in Photoslop — layer pixels, masks, selections — lives
+//! All raster content in Schist — layer pixels, masks, selections — lives
 //! in fixed-size square tiles. Tiles are reference-counted (`Arc`); cloning a
 //! layer or snapshotting for undo shares tiles until a write actually happens
 //! (`Arc::make_mut`). A missing tile in the map means "fully transparent".
 
 use crate::geom::IntRect;
-use photoslop_color::{f32_to_u16, f32_to_u8, u16_to_f32, u8_to_f32, Depth, Rgba};
+use schist_color::{f32_to_u16, f32_to_u8, u16_to_f32, u8_to_f32, Depth, Rgba};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -303,7 +303,7 @@ impl TileMap {
 
     /// Lossless integer translation of the whole map. Tile-aligned moves
     /// re-key tiles; unaligned moves re-slice pixels across tiles.
-    pub fn translated(&self, dx: i32, dy: i32, depth: photoslop_color::Depth) -> TileMap {
+    pub fn translated(&self, dx: i32, dy: i32, depth: schist_color::Depth) -> TileMap {
         if dx == 0 && dy == 0 {
             return self.clone();
         }

@@ -3,7 +3,7 @@
 
 use crate::util::{fbm, warp};
 use crate::{param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
     Twirl,
@@ -214,7 +214,7 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(Twirl));
     registry.register_filter(Box::new(Ripple));
     registry.register_filter(Box::new(Wave));

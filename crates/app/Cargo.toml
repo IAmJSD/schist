@@ -1,11 +1,11 @@
 [package]
-name = "photoslop-app"
+name = "schist-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "photoslop"
+name = "schist"
 path = "src/main.rs"
 
 [dependencies]
@@ -22,27 +22,27 @@ smallvec.workspace = true
 rustc-hash.workspace = true
 rayon.workspace = true
 
-photoslop-core.workspace = true
-photoslop-color.workspace = true
-photoslop-plugin-api.workspace = true
-photoslop-compositor.workspace = true
-photoslop-layer-fx.workspace = true
-photoslop-neural.workspace = true
-photoslop-codec-psd.workspace = true
-photoslop-codecs-common.workspace = true
-photoslop-tools-basic.workspace = true
-photoslop-tools-paint.workspace = true
-photoslop-tools-retouch.workspace = true
-photoslop-tools-select.workspace = true
-photoslop-tools-transform.workspace = true
-photoslop-tools-vector.workspace = true
-photoslop-tools-warp.workspace = true
-photoslop-tools-doc.workspace = true
-photoslop-tools-type.workspace = true
-photoslop-text-engine.workspace = true
-photoslop-vector.workspace = true
-photoslop-commands-core.workspace = true
-photoslop-filters-core.workspace = true
-photoslop-adjustments.workspace = true
-photoslop-plugin-host-wasm.workspace = true
-photoslop-colormgmt.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true
+schist-plugin-api.workspace = true
+schist-compositor.workspace = true
+schist-layer-fx.workspace = true
+schist-neural.workspace = true
+schist-codec-psd.workspace = true
+schist-codecs-common.workspace = true
+schist-tools-basic.workspace = true
+schist-tools-paint.workspace = true
+schist-tools-retouch.workspace = true
+schist-tools-select.workspace = true
+schist-tools-transform.workspace = true
+schist-tools-vector.workspace = true
+schist-tools-warp.workspace = true
+schist-tools-doc.workspace = true
+schist-tools-type.workspace = true
+schist-text-engine.workspace = true
+schist-vector.workspace = true
+schist-commands-core.workspace = true
+schist-filters-core.workspace = true
+schist-adjustments.workspace = true
+schist-plugin-host-wasm.workspace = true
+schist-colormgmt.workspace = true

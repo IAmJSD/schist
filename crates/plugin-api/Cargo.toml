@@ -1,12 +1,12 @@
 [package]
-name = "photoslop-plugin-api"
+name = "schist-plugin-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-color.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

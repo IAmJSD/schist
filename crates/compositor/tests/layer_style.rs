@@ -1,5 +1,5 @@
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{Document, Layer, TileCoord};
+use schist_color::{Depth, Rgba};
+use schist_core::{Document, Layer, TileCoord};
 
 #[test]
 fn composited_document_shows_a_layer_shadow() {
@@ -12,7 +12,7 @@ fn composited_document_shows_a_layer_shadow() {
                 let coord = TileCoord::containing(x, y);
                 let trect = coord.rect();
                 let buf = raster.tiles.get_mut_or_insert(coord, Depth::Eight);
-                let ix = ((y - trect.top) * photoslop_core::TILE_SIZE + (x - trect.left)) as usize;
+                let ix = ((y - trect.top) * schist_core::TILE_SIZE + (x - trect.left)) as usize;
                 buf.set(ix, Rgba::new(1.0, 0.0, 0.0, 1.0));
             }
         }
@@ -21,13 +21,13 @@ fn composited_document_shows_a_layer_shadow() {
     layer.style.drop_shadow.settings.distance = 10.0;
     layer.style.drop_shadow.settings.size = 4.0;
     layer.style.drop_shadow.settings.angle = 135.0;
-    layer.styled = photoslop_layer_fx::render(&layer).map(std::sync::Arc::new);
+    layer.styled = schist_layer_fx::render(&layer).map(std::sync::Arc::new);
     assert!(layer.styled.is_some(), "fx renderer produced nothing");
     doc.push_layer(layer);
 
-    let out = photoslop_compositor::composite_region_rgba8(
+    let out = schist_compositor::composite_region_rgba8(
         &doc,
-        photoslop_core::IntRect::new(0, 0, 200, 200),
+        schist_core::IntRect::new(0, 0, 200, 200),
     );
     let at = |x: usize, y: usize| -> [u8; 4] {
         let i = (y * 200 + x) * 4;

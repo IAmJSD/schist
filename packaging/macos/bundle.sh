@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Photoslop.app, and sign + notarize it when credentials are present.
+# Build Schist.app, and sign + notarize it when credentials are present.
 #
 # Signing needs (all optional; the bundle still builds without them):
 #   MACOS_CERT_NAME      "Developer ID Application: … (TEAMID)"
@@ -8,16 +8,16 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 target="${1:-release}"
-app="$root/dist/Photoslop.app"
+app="$root/dist/Schist.app"
 
-cargo build --"$target" -p photoslop-app
+cargo build --"$target" -p schist-app
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/packaging/macos/Info.plist" "$app/Contents/Info.plist"
-cp "$root/target/$target/photoslop" "$app/Contents/MacOS/photoslop"
-if [ -f "$root/packaging/macos/photoslop.icns" ]; then
-    cp "$root/packaging/macos/photoslop.icns" "$app/Contents/Resources/"
+cp "$root/target/$target/schist" "$app/Contents/MacOS/schist"
+if [ -f "$root/packaging/macos/schist.icns" ]; then
+    cp "$root/packaging/macos/schist.icns" "$app/Contents/Resources/"
 fi
 
 if [ -n "${MACOS_CERT_NAME:-}" ]; then
@@ -31,8 +31,8 @@ fi
 
 if [ -n "${MACOS_NOTARY_PROFILE:-}" ]; then
     echo "notarizing"
-    ditto -c -k --keepParent "$app" "$root/dist/Photoslop.zip"
-    xcrun notarytool submit "$root/dist/Photoslop.zip" \
+    ditto -c -k --keepParent "$app" "$root/dist/Schist.zip"
+    xcrun notarytool submit "$root/dist/Schist.zip" \
         --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
     xcrun stapler staple "$app"
 else

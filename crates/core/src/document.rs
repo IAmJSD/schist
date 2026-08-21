@@ -5,7 +5,7 @@ use crate::history::{Edit, EditOp, History, LayerProps};
 use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree};
 use crate::selection::Selection;
 use crate::tile::{TileBuf, TileCoord, TileMap, TILE_PIXELS};
-use photoslop_color::{ColorMode, Depth};
+use schist_color::{ColorMode, Depth};
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1006,7 +1006,7 @@ pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8])
                 let lx = (x - trect.left) as usize;
                 let s = (sy * w + sx) * 4;
                 let px =
-                    photoslop_color::Rgba::from_u8(rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]);
+                    schist_color::Rgba::from_u8(rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]);
                 buf.set(ly * TILE_SIZE as usize + lx, px);
             }
         }
@@ -1017,7 +1017,7 @@ pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Rgba;
+    use schist_color::Rgba;
 
     fn doc_with_layer() -> (Document, LayerId) {
         let mut doc = Document::new("test", 512, 512, Depth::Eight);

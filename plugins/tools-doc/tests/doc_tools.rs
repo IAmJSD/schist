@@ -1,9 +1,9 @@
 //! Artboards, slices, frames, notes and counts.
 
-use photoslop_color::Depth;
-use photoslop_core::{Document, IntRect, Layer};
-use photoslop_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
-use photoslop_tools_doc::*;
+use schist_color::Depth;
+use schist_core::{Document, IntRect, Layer};
+use schist_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
+use schist_tools_doc::*;
 
 fn input(x: f32, y: f32) -> PointerInput {
     PointerInput {
@@ -117,7 +117,7 @@ fn an_elliptical_frame_masks_out_its_corners() {
     let mut doc = doc();
     let mut state = EditorState::default();
     let mut tool = RectTool::new(RectKind::Frame);
-    tool.set_option("frame-shape", photoslop_plugin_api::OptionValue::Choice(1));
+    tool.set_option("frame-shape", schist_plugin_api::OptionValue::Choice(1));
     {
         let mut ctx = ToolCtx {
             doc: &mut doc,

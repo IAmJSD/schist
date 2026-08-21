@@ -1,4 +1,4 @@
-//! Blend mode identifiers (the math lives in `photoslop-pixel-ops`).
+//! Blend mode identifiers (the math lives in `schist-pixel-ops`).
 //!
 //! The set and the PSD 4-byte keys come from the PSD specification's blend
 //! mode keys ('norm', 'mul ', …). `PassThrough` is only valid on groups.

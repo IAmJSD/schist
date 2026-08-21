@@ -10,8 +10,8 @@ pub(crate) mod rle;
 
 use crate::error::PsdError;
 use cursor::Cursor;
-use photoslop_color::ColorMode;
-use photoslop_core::{Document, IntRect, Layer, PreservedResource, RasterLayer};
+use schist_color::ColorMode;
+use schist_core::{Document, IntRect, Layer, PreservedResource, RasterLayer};
 
 /// Sentinel `PreservedResource::id` under which the Color Mode Data section
 /// is stashed (with name `b"colormodedata"`). Real Adobe image resource ids
@@ -128,7 +128,7 @@ fn background_from_composite(
                     1.0 - p.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(1.0)
                 };
                 let px =
-                    photoslop_color::convert::cmyk_to_rgb([at(&c), at(&m), at(&y), at(&k)], 1.0);
+                    schist_color::convert::cmyk_to_rgb([at(&c), at(&m), at(&y), at(&k)], 1.0);
                 r[i] = px.r;
                 g[i] = px.g;
                 b[i] = px.b;
@@ -149,7 +149,7 @@ fn background_from_composite(
                 };
                 // Channels arrive 0..=1: L maps to 0..=100, a and b to
                 // -128..=127 with 128 as the neutral point.
-                let px = photoslop_color::convert::lab_to_rgb(
+                let px = schist_color::convert::lab_to_rgb(
                     [
                         get(&l) * 100.0,
                         get(&a) * 255.0 - 128.0,
@@ -172,7 +172,7 @@ fn background_from_composite(
 
     let mut layer = Layer::new_raster("Background");
     let rect = IntRect::from_size(header.width, header.height);
-    if let photoslop_core::LayerKind::Raster(RasterLayer { tiles }) = &mut layer.kind {
+    if let schist_core::LayerKind::Raster(RasterLayer { tiles }) = &mut layer.kind {
         pixels::fill_tiles(tiles, header.depth, rect, &planes);
     }
     layer

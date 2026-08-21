@@ -5,8 +5,8 @@
 //! against the real document. Enter bakes the mesh into the layer, Escape
 //! throws it away.
 
-use photoslop_core::{Document, IntRect, TileMap};
-use photoslop_plugin_api::{
+use schist_core::{Document, IntRect, TileMap};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PointerInput, ToolCtx, ToolOption, ToolPlugin,
 };
 
@@ -61,7 +61,7 @@ impl Mode {
 }
 
 struct Session {
-    layer: photoslop_core::LayerId,
+    layer: schist_core::LayerId,
     /// The layer as it was before any warping. Every render goes from
     /// here, so the mesh is applied once rather than compounding.
     original: TileMap,
@@ -353,7 +353,7 @@ pub fn liquify_region(
     src: &TileMap,
     rect: IntRect,
     mesh: &Mesh,
-    depth: photoslop_color::Depth,
+    depth: schist_color::Depth,
 ) -> TileMap {
     warp_tiles(src, mesh, depth, rect)
 }

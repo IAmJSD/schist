@@ -1,7 +1,7 @@
 //! Puppet Warp's deformation and Vanishing Point's perspective maths.
 
-use photoslop_tools_warp::perspective::{unit_square_to_quad, Homography};
-use photoslop_tools_warp::puppet::{mls_inverse, Pin};
+use schist_tools_warp::perspective::{unit_square_to_quad, Homography};
+use schist_tools_warp::puppet::{mls_inverse, Pin};
 
 fn close(a: (f32, f32), b: (f32, f32), tol: f32, what: &str) {
     assert!(

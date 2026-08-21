@@ -1,6 +1,6 @@
 //! Select ▸ Transform Selection moves the mask and nothing else.
 
-use photoslop_core::{Affine, IntRect, SelectOp, Selection};
+use schist_core::{Affine, IntRect, SelectOp, Selection};
 
 const CANVAS: IntRect = IntRect {
     left: 0,

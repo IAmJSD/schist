@@ -12,7 +12,7 @@
 //! deltas those, because the exponent bytes of adjacent floats are far more
 //! alike than the floats are.
 
-use photoslop_color::Depth;
+use schist_color::Depth;
 
 use crate::PsdError;
 

@@ -1,11 +1,11 @@
 [package]
-name = "photoslop-core"
+name = "schist-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-color.workspace = true
+schist-color.workspace = true
 anyhow.workspace = true
 parking_lot.workspace = true
 rustc-hash.workspace = true

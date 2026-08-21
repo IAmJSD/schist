@@ -192,7 +192,7 @@ mod tests {
 /// Conversions between the working RGB space and the other document
 /// modes.
 ///
-/// Photoslop edits in RGBA f32 whatever the document's mode says, and
+/// Schist edits in RGBA f32 whatever the document's mode says, and
 /// converts at the boundaries: on open, on Image ▸ Mode, and on save. That
 /// keeps one pipeline rather than four, at the cost of not editing CMYK
 /// channels individually -- which is stated in the docs rather than

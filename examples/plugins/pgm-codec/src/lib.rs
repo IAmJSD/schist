@@ -1,11 +1,11 @@
 //! Example third-party codec: binary PGM (Netpbm P5), a grayscale format
-//! Photoslop has no built-in support for.
+//! Schist has no built-in support for.
 //!
-//! Build: `cargo build --release --target wasm32-unknown-unknown -p photoslop-example-pgm`
+//! Build: `cargo build --release --target wasm32-unknown-unknown -p schist-example-pgm`
 
-use photoslop_plugin_sdk::*;
+use schist_plugin_sdk::*;
 
-photoslop_codec! {
+schist_codec! {
     id: "com.example.pgm",
     name: "Netpbm PGM",
     extensions: ["pgm"],

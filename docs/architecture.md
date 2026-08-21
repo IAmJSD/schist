@@ -1,6 +1,6 @@
 # Architecture
 
-Photoslop is a microkernel plus plugins. The kernel owns *state and
+Schist is a microkernel plus plugins. The kernel owns *state and
 contracts*; everything a user can see or click lives in a plugin.
 
 ```
@@ -73,7 +73,7 @@ Interactivity comes from doing less, not from a GPU: only damaged, visible
 tiles recomposite. On a 100 MP document with three full-canvas blend layers
 plus a curves adjustment, a 1920×1080 viewport recomposites in ~16 ms and a
 single dirty tile — what a brush stroke actually costs — in ~3 ms
-(`cargo run --release -p photoslop-compositor --example bench`). A `Compositor`
+(`cargo run --release -p schist-compositor --example bench`). A `Compositor`
 trait marks where a GPU backend would slot in; see PLAN.md §2 for why it
 isn't there yet.
 
@@ -99,6 +99,6 @@ before every feature exists.
 ## Third-party plugins
 
 Plugins are WebAssembly modules loaded by `wasmtime` with exactly one host
-import (`photoslop::log`) and a fuel budget. No filesystem, no network, no
+import (`schist::log`) and a fuel budget. No filesystem, no network, no
 clock, no randomness: isolation comes from what the sandbox lacks. See
 [plugin-guide.md](plugin-guide.md).

@@ -6,8 +6,8 @@ use super::header::Header;
 use super::pixels::{fill_mask_tiles, fill_tiles, plane_to_f32, ColorPlanes};
 use super::rle::unpack_channel;
 use crate::error::PsdError;
-use photoslop_color::ColorMode;
-use photoslop_core::{
+use schist_color::ColorMode;
+use schist_core::{
     AdjustmentData, AdjustmentKind, BlendMode, GroupLayer, IntRect, Layer, LayerId, LayerKind,
     LayerMask, MaskTileMap, RasterLayer, RawBlock, TileMap,
 };
@@ -612,7 +612,7 @@ fn convert_cmyk_planes(planes: &mut ColorPlanes, key: Option<&[f32]>) {
     let mut b = vec![0.0f32; n];
     for i in 0..n {
         let k = 1.0 - key.and_then(|v| v.get(i)).copied().unwrap_or(1.0);
-        let px = photoslop_color::convert::cmyk_to_rgb(
+        let px = schist_color::convert::cmyk_to_rgb(
             [
                 take(&planes.r, i),
                 take(&planes.g, i),
@@ -643,7 +643,7 @@ fn convert_lab_planes(planes: &mut ColorPlanes) {
     let mut g = vec![0.0f32; n];
     let mut b = vec![0.0f32; n];
     for i in 0..n {
-        let px = photoslop_color::convert::lab_to_rgb(
+        let px = schist_color::convert::lab_to_rgb(
             [
                 take(&planes.r, i) * 100.0,
                 take(&planes.g, i) * 255.0 - 128.0,
@@ -664,7 +664,7 @@ fn convert_lab_planes(planes: &mut ColorPlanes) {
 fn shape_from_blocks(
     extras: &[RawBlock],
     header: &Header,
-) -> Option<Box<photoslop_core::VectorShape>> {
+) -> Option<Box<schist_core::VectorShape>> {
     let mask = extras
         .iter()
         .find(|b| &b.key == b"vmsk" || &b.key == b"vsms")?;
@@ -677,18 +677,18 @@ fn shape_from_blocks(
             // 'SoCo' carries a u32 descriptor version and then the
             // descriptor; some blocks put a u16 block version in front of
             // that, which is what `parse_versioned` expects. Try both.
-            photoslop_psd_descriptor::parse(b.data.get(4..)?)
-                .or_else(|| photoslop_psd_descriptor::parse_versioned(&b.data))
+            schist_psd_descriptor::parse(b.data.get(4..)?)
+                .or_else(|| schist_psd_descriptor::parse_versioned(&b.data))
         })
         .and_then(|d| {
             let c = d.get("Clr ")?.as_object()?;
-            Some(photoslop_color::Rgba::new(
+            Some(schist_color::Rgba::new(
                 (c.number("Rd  ")? / 255.0) as f32,
                 (c.number("Grn ")? / 255.0) as f32,
                 (c.number("Bl  ")? / 255.0) as f32,
                 1.0,
             ))
         })
-        .unwrap_or(photoslop_color::Rgba::new(0.0, 0.0, 0.0, 1.0));
-    Some(Box::new(photoslop_core::VectorShape::new(path, fill)))
+        .unwrap_or(schist_color::Rgba::new(0.0, 0.0, 0.0, 1.0));
+    Some(Box::new(schist_core::VectorShape::new(path, fill)))
 }

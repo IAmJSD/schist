@@ -7,7 +7,7 @@
 
 use crate::geom::IntRect;
 use crate::tile::{TileBuf, TileCoord, TileMap, TILE_SIZE};
-use photoslop_color::{Depth, Rgba};
+use schist_color::{Depth, Rgba};
 use rayon::prelude::*;
 
 /// Reconstruction filter used when sampling between pixels.

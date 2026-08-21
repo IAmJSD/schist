@@ -2,7 +2,7 @@
 
 use crate::util::{at, fbm, put};
 use crate::{param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
     Clouds,
@@ -142,7 +142,7 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(Clouds));
     registry.register_filter(Box::new(DifferenceClouds));
     registry.register_filter(Box::new(Fibers));

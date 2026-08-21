@@ -82,7 +82,7 @@ pub const CATALOG: &[ModelSpec] = &[
         tile: 128,
         overlap: 8,
         range: Range::Unit,
-        license: "Trained for Photoslop; same licence as the app",
+        license: "Trained for Schist; same licence as the app",
         note: "Restores the high frequencies an enlargement loses. Trained \
                on the Kodak image suite; see tools/train/detail.py.",
     },
@@ -133,7 +133,7 @@ pub fn spec(id: &str) -> Option<&'static ModelSpec> {
 
 /// Where downloaded models live.
 pub fn model_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PHOTOSLOP_MODEL_DIR") {
+    if let Ok(dir) = std::env::var("SCHIST_MODEL_DIR") {
         return PathBuf::from(dir);
     }
     let base = std::env::var("XDG_DATA_HOME")
@@ -141,7 +141,7 @@ pub fn model_dir() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share")
         });
-    base.join("photoslop/models")
+    base.join("schist/models")
 }
 
 /// Whether a model is ready to run.

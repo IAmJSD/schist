@@ -1,12 +1,12 @@
 [package]
-name = "photoslop-codec-affinity"
+name = "schist-codec-affinity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-color.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true
 miniz_oxide.workspace = true
 ruzstd.workspace = true
 # Placed images keep their original file (PNG/JPEG…) in the container;
@@ -14,9 +14,9 @@ ruzstd.workspace = true
 image.workspace = true
 # Text layers re-render through our text engine; the spec is stored the
 # same way the type tool stores it, so imported text stays editable.
-photoslop-text-engine.workspace = true
-photoslop-vector.workspace = true
-photoslop-adjustments.workspace = true
+schist-text-engine.workspace = true
+schist-vector.workspace = true
+schist-adjustments.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

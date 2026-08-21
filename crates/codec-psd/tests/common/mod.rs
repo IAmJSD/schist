@@ -320,14 +320,14 @@ impl Psd {
                             data.extend(enc);
                         }
                     }
-                    2 | 3 => data.extend(photoslop_codec_psd::zip::encode_channel(
+                    2 | 3 => data.extend(schist_codec_psd::zip::encode_channel(
                         &plane,
                         rows,
                         row_bytes,
                         match self.depth {
-                            16 => photoslop_color::Depth::Sixteen,
-                            32 => photoslop_color::Depth::ThirtyTwo,
-                            _ => photoslop_color::Depth::Eight,
+                            16 => schist_color::Depth::Sixteen,
+                            32 => schist_color::Depth::ThirtyTwo,
+                            _ => schist_color::Depth::Eight,
                         },
                         comp == 3,
                     )),

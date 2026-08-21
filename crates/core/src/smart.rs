@@ -14,7 +14,7 @@
 use crate::geom::IntRect;
 use crate::resample::{Affine, Filter};
 use crate::tile::TileMap;
-use photoslop_color::Depth;
+use schist_color::Depth;
 
 /// The source artwork of a smart object, plus where it sits.
 #[derive(Debug, Clone)]

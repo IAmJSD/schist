@@ -1,13 +1,13 @@
-; NSIS installer for Photoslop. Build with:
+; NSIS installer for Schist. Build with:
 ;   makensis -DVERSION=0.1.0 packaging/windows/installer.nsi
 !ifndef VERSION
   !define VERSION "0.1.0"
 !endif
 
-Name "Photoslop ${VERSION}"
-OutFile "..\..\dist\Photoslop-${VERSION}-setup.exe"
-InstallDir "$PROGRAMFILES64\Photoslop"
-InstallDirRegKey HKLM "Software\Photoslop" "InstallDir"
+Name "Schist ${VERSION}"
+OutFile "..\..\dist\Schist-${VERSION}-setup.exe"
+InstallDir "$PROGRAMFILES64\Schist"
+InstallDirRegKey HKLM "Software\Schist" "InstallDir"
 RequestExecutionLevel admin
 Unicode true
 
@@ -16,33 +16,33 @@ Page instfiles
 UninstPage uninstConfirm
 UninstPage instfiles
 
-Section "Photoslop"
+Section "Schist"
   SetOutPath "$INSTDIR"
-  File "..\..\target\release\photoslop.exe"
+  File "..\..\target\release\schist.exe"
 
-  WriteRegStr HKLM "Software\Photoslop" "InstallDir" "$INSTDIR"
+  WriteRegStr HKLM "Software\Schist" "InstallDir" "$INSTDIR"
   ; Add/Remove Programs entry.
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Photoslop" \
-    "DisplayName" "Photoslop"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Photoslop" \
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Schist" \
+    "DisplayName" "Schist"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Schist" \
     "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Photoslop" \
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Schist" \
     "UninstallString" "$INSTDIR\uninstall.exe"
 
-  ; Open .psd files with Photoslop.
-  WriteRegStr HKCR ".psd\OpenWithProgids" "Photoslop.psd" ""
-  WriteRegStr HKCR "Photoslop.psd\shell\open\command" "" '"$INSTDIR\photoslop.exe" "%1"'
+  ; Open .psd files with Schist.
+  WriteRegStr HKCR ".psd\OpenWithProgids" "Schist.psd" ""
+  WriteRegStr HKCR "Schist.psd\shell\open\command" "" '"$INSTDIR\schist.exe" "%1"'
 
-  CreateShortcut "$SMPROGRAMS\Photoslop.lnk" "$INSTDIR\photoslop.exe"
+  CreateShortcut "$SMPROGRAMS\Schist.lnk" "$INSTDIR\schist.exe"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 
 Section "Uninstall"
-  Delete "$INSTDIR\photoslop.exe"
+  Delete "$INSTDIR\schist.exe"
   Delete "$INSTDIR\uninstall.exe"
-  Delete "$SMPROGRAMS\Photoslop.lnk"
+  Delete "$SMPROGRAMS\Schist.lnk"
   RMDir "$INSTDIR"
-  DeleteRegKey HKLM "Software\Photoslop"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Photoslop"
-  DeleteRegKey HKCR "Photoslop.psd"
+  DeleteRegKey HKLM "Software\Schist"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Schist"
+  DeleteRegKey HKCR "Schist.psd"
 SectionEnd

@@ -18,7 +18,7 @@ pub fn crash_dir() -> Option<PathBuf> {
                 .ok()
                 .map(|h| PathBuf::from(h).join(".local/state"))
         })?;
-    Some(base.join("photoslop/crashes"))
+    Some(base.join("schist/crashes"))
 }
 
 /// Install a panic hook that records a report next to the recovery
@@ -53,7 +53,7 @@ fn write_report(info: &std::panic::PanicHookInfo<'_>) {
         .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
         .unwrap_or_else(|| "unknown location".into());
     let report = format!(
-        "photoslop {}\n\
+        "schist {}\n\
          platform: {} {}\n\
          location: {}\n\
          message: {}\n\
@@ -70,7 +70,7 @@ fn write_report(info: &std::panic::PanicHookInfo<'_>) {
     // it lines up with the recovery snapshot from the same run.
     let path = dir.join(format!("crash-{}.txt", std::process::id()));
     let _ = std::fs::write(&path, report);
-    eprintln!("photoslop: crash report written to {}", path.display());
+    eprintln!("schist: crash report written to {}", path.display());
 }
 
 /// A release published upstream.
@@ -112,8 +112,8 @@ pub fn current_version() -> &'static str {
 }
 
 /// Where releases are published.
-const RELEASES_API: &str = "https://api.github.com/repos/IAmJSD/photoslop/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/IAmJSD/photoslop/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/IAmJSD/schist/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/IAmJSD/schist/releases";
 
 /// The outcome of an update check.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,11 +125,11 @@ pub enum UpdateStatus {
 
 /// Ask GitHub for the latest release. Blocking — call it off the UI thread.
 ///
-/// This is the only network request Photoslop ever makes, and only when the
+/// This is the only network request Schist ever makes, and only when the
 /// user explicitly asks for it.
 pub fn check_for_update() -> UpdateStatus {
     let response = ureq::get(RELEASES_API)
-        .header("User-Agent", "photoslop-update-check")
+        .header("User-Agent", "schist-update-check")
         .header("Accept", "application/vnd.github+json")
         .call();
     let release: Release = match response {
@@ -186,6 +186,6 @@ mod tests {
     #[test]
     fn crash_dir_is_under_the_state_directory() {
         let dir = crash_dir().expect("HOME is set in tests");
-        assert!(dir.ends_with("photoslop/crashes"), "{dir:?}");
+        assert!(dir.ends_with("schist/crashes"), "{dir:?}");
     }
 }

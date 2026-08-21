@@ -13,8 +13,8 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled,
 };
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_color::Rgba;
+use schist_core::{
     BevelStyle_, BlendMode, GradientShape, LayerId, LayerStyle, StrokePosition, Technique,
 };
 
@@ -170,7 +170,7 @@ fn get(style: &LayerStyle, effect: &str, field: &str) -> f32 {
     }
 }
 
-fn shadow_get(s: &photoslop_core::ShadowStyle, field: &str) -> f32 {
+fn shadow_get(s: &schist_core::ShadowStyle, field: &str) -> f32 {
     match field {
         "opacity" => s.opacity,
         "angle" => s.angle,
@@ -181,7 +181,7 @@ fn shadow_get(s: &photoslop_core::ShadowStyle, field: &str) -> f32 {
     }
 }
 
-fn glow_get(g: &photoslop_core::GlowStyle, field: &str) -> f32 {
+fn glow_get(g: &schist_core::GlowStyle, field: &str) -> f32 {
     match field {
         "opacity" => g.opacity,
         "spread" => g.spread,
@@ -233,7 +233,7 @@ fn set(style: &mut LayerStyle, effect: &str, field: &str, v: f32) {
     }
 }
 
-fn shadow_set(s: &mut photoslop_core::ShadowStyle, field: &str, v: f32) {
+fn shadow_set(s: &mut schist_core::ShadowStyle, field: &str, v: f32) {
     match field {
         "opacity" => s.opacity = v,
         "angle" => s.angle = v,
@@ -244,7 +244,7 @@ fn shadow_set(s: &mut photoslop_core::ShadowStyle, field: &str, v: f32) {
     }
 }
 
-fn glow_set(g: &mut photoslop_core::GlowStyle, field: &str, v: f32) {
+fn glow_set(g: &mut schist_core::GlowStyle, field: &str, v: f32) {
     match field {
         "opacity" => g.opacity = v,
         "spread" => g.spread = v,

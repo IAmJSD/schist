@@ -11,8 +11,8 @@
 //! would blend the layer's own pixels, which is what makes layer opacity
 //! apply to the effects while fill opacity applies only to the content.
 
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_color::Rgba;
+use schist_core::{
     blend::BlendMode, BevelStyle, BevelStyle_, GlowStyle, GradientOverlayStyle, GradientShape,
     IntRect, Layer, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, StyledRaster,
     Technique, TileCoord, TileMap,
@@ -73,7 +73,7 @@ impl Plane {
                 self.rect.left + (i % w.max(1)) as i32,
                 self.rect.top + (i / w.max(1)) as i32,
             );
-            let out = photoslop_pixel_ops::blend_pixel(mode, top, bottom, x, y);
+            let out = schist_pixel_ops::blend_pixel(mode, top, bottom, x, y);
             self.px[i * 4] = out.r;
             self.px[i * 4 + 1] = out.g;
             self.px[i * 4 + 2] = out.b;
@@ -521,11 +521,11 @@ fn plane_to_tiles(p: &Plane) -> TileMap {
         if !any {
             continue;
         }
-        let buf = tiles.get_mut_or_insert(coord, photoslop_color::Depth::ThirtyTwo);
+        let buf = tiles.get_mut_or_insert(coord, schist_color::Depth::ThirtyTwo);
         for y in clip.top..clip.bottom {
             for x in clip.left..clip.right {
                 let i = ((y - p.rect.top) as usize * w + (x - p.rect.left) as usize) * 4;
-                let ix = ((y - trect.top) * photoslop_core::TILE_SIZE + (x - trect.left)) as usize;
+                let ix = ((y - trect.top) * schist_core::TILE_SIZE + (x - trect.left)) as usize;
                 buf.set(
                     ix,
                     Rgba::new(p.px[i], p.px[i + 1], p.px[i + 2], p.px[i + 3]),
@@ -543,4 +543,4 @@ pub fn outset(style: &LayerStyle) -> i32 {
 
 /// Re-exported so callers can name the settings types without also
 /// depending on core's module layout.
-pub use photoslop_core::style;
+pub use schist_core::style;

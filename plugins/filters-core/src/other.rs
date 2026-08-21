@@ -3,7 +3,7 @@
 
 use crate::util::{at, gaussian_rgba, luma, premultiply, put, unpremultiply, value_noise};
 use crate::{param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
     HighPass,
@@ -454,7 +454,7 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(HighPass));
     registry.register_filter(Box::new(Offset));
     registry.register_filter(Box::new(Maximum));

@@ -5,9 +5,9 @@
 //! so the reader acts as the writer's oracle. Where ImageMagick is present
 //! it double-checks the merged composite with a third-party decoder.
 
-use photoslop_codec_psd::{read_psd, write_psd, write_psd_with};
-use photoslop_color::{ColorMode, Depth, Rgba};
-use photoslop_core::{
+use schist_codec_psd::{read_psd, write_psd, write_psd_with};
+use schist_color::{ColorMode, Depth, Rgba};
+use schist_core::{
     blit_rgba8, BlendMode, Document, IntRect, Layer, LayerKind, LayerMask, PreservedResource,
     RawBlock, TileCoord, TILE_SIZE,
 };
@@ -393,7 +393,7 @@ fn merged_composite_reads_in_imagemagick() {
         Depth::Eight,
     ));
 
-    let dir = std::env::temp_dir().join("photoslop-psd-writer-test");
+    let dir = std::env::temp_dir().join("schist-psd-writer-test");
     std::fs::create_dir_all(&dir).unwrap();
     let psd = dir.join("merged.psd");
     std::fs::write(&psd, write_psd(&doc).unwrap()).unwrap();
@@ -416,7 +416,7 @@ fn merged_composite_reads_in_imagemagick() {
 
 #[test]
 fn round_trips_layer_effects_through_a_file() {
-    use photoslop_core::{StrokePosition, Technique};
+    use schist_core::{StrokePosition, Technique};
 
     let mut doc = base_doc();
     let mut layer = solid_layer(
@@ -559,7 +559,7 @@ fn cmyk_files_carry_four_colour_channels() {
 fn shape_layers_round_trip_as_vectors() {
     // The point of a shape layer is that it stays a shape. If it came back
     // as a picture of itself, resizing it would be lossy.
-    use photoslop_core::{Anchor, SubPath, VectorPath, VectorShape};
+    use schist_core::{Anchor, SubPath, VectorPath, VectorShape};
 
     let mut doc = Document::new("t", 200, 100, Depth::Eight);
     let mut path = VectorPath::new("Rect");

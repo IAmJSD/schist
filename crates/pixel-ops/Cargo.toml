@@ -1,9 +1,9 @@
 [package]
-name = "photoslop-pixel-ops"
+name = "schist-pixel-ops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-color.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true

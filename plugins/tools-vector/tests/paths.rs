@@ -1,11 +1,11 @@
 //! Stored paths: drawing them, editing them, and using them.
 
-use photoslop_color::Depth;
-use photoslop_core::{Anchor, Document, Layer, SubPath, VectorPath};
-use photoslop_plugin_api::{
+use schist_color::Depth;
+use schist_core::{Anchor, Document, Layer, SubPath, VectorPath};
+use schist_plugin_api::{
     EditorState, Modifiers, OptionValue, PointerInput, ToolCtx, ToolPlugin,
 };
-use photoslop_tools_vector::paths::*;
+use schist_tools_vector::paths::*;
 
 fn input(x: f32, y: f32) -> PointerInput {
     PointerInput {
@@ -222,8 +222,8 @@ fn smoothing_gives_every_anchor_mirrored_handles() {
 fn flattening_a_closed_square_covers_its_area() {
     let path = square_path();
     let flat = flatten(&path);
-    let rect = photoslop_core::IntRect::new(0, 0, 200, 200);
-    let mask = photoslop_vector::rasterize(&flat, rect, photoslop_vector::FillRule::NonZero);
+    let rect = schist_core::IntRect::new(0, 0, 200, 200);
+    let mask = schist_vector::rasterize(&flat, rect, schist_vector::FillRule::NonZero);
     let at = |x: usize, y: usize| mask[y * 200 + x];
     assert_eq!(at(100, 100), 255, "middle of the square is not filled");
     assert_eq!(at(20, 20), 0, "outside the square is filled");
@@ -233,7 +233,7 @@ fn flattening_a_closed_square_covers_its_area() {
 fn custom_shape_draws_the_chosen_preset() {
     let mut doc = doc();
     let mut state = EditorState {
-        foreground: photoslop_color::Rgba::new(1.0, 0.0, 0.0, 1.0),
+        foreground: schist_color::Rgba::new(1.0, 0.0, 0.0, 1.0),
         ..Default::default()
     };
     let mut tool = CustomShapeTool::new();

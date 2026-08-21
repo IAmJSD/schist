@@ -6,9 +6,9 @@
 pub use affinity::AffinityCodec;
 use anyhow::Context as _;
 use image::ImageFormat;
-use photoslop_color::Depth;
-use photoslop_core::{blit_rgba8, Document, IntRect, Layer};
-use photoslop_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
+use schist_color::Depth;
+use schist_core::{blit_rgba8, Document, IntRect, Layer};
+use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
 
 mod affinity;
 
@@ -38,11 +38,11 @@ fn export_flat(
     options: &ExportOptions,
 ) -> anyhow::Result<Vec<u8>> {
     let region = doc.canvas_rect();
-    let mut pixels = photoslop_compositor::composite_region_f32(doc, region);
+    let mut pixels = schist_compositor::composite_region_f32(doc, region);
     // Reducing to 8 bits per channel bands smooth gradients; dither unless
     // the user turned it off.
     if options.dither && options.bit_depth <= 8 {
-        photoslop_colormgmt::dither_to_depth(
+        schist_colormgmt::dither_to_depth(
             &mut pixels,
             doc.width as usize,
             1 << options.bit_depth,
@@ -148,7 +148,7 @@ pub struct CommonCodecsPlugin;
 
 impl PluginManifest for CommonCodecsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.codecs-common"
+        "schist.codecs-common"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {

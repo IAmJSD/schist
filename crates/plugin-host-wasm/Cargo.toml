@@ -1,13 +1,13 @@
 [package]
-name = "photoslop-plugin-host-wasm"
+name = "schist-plugin-host-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-plugin-api.workspace = true
-photoslop-color.workspace = true
+schist-core.workspace = true
+schist-plugin-api.workspace = true
+schist-color.workspace = true
 wasmtime = { version = "47", default-features = false, features = ["cranelift", "runtime", "std"] }
 anyhow.workspace = true
 serde.workspace = true

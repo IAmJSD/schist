@@ -5,9 +5,9 @@
 //! handles their pointer input itself; the tool objects exist so the
 //! toolbar and keymap treat them uniformly.
 
-use photoslop_color::Rgba;
-use photoslop_core::IntRect;
-use photoslop_plugin_api::{
+use schist_color::Rgba;
+use schist_core::IntRect;
+use schist_plugin_api::{
     OptionValue, PluginManifest, PluginRegistry, PointerInput, ToolCtx, ToolOption, ToolPlugin,
 };
 
@@ -30,7 +30,7 @@ pub struct MoveTool {
 const AUTO_TARGETS: &[&str] = &["Layer", "Group"];
 
 struct Drag {
-    layer: photoslop_core::LayerId,
+    layer: schist_core::LayerId,
     start: (f32, f32),
     /// The offset currently applied to the layer.
     offset: (i32, i32),
@@ -50,7 +50,7 @@ impl MoveTool {
     /// `tree.iter()` runs bottom to top, so the last hit is the topmost
     /// one. Bounds alone are not enough -- a layer's box usually contains
     /// a lot of transparency, and Photoshop picks what you can see.
-    fn layer_at(doc: &photoslop_core::Document, x: f32, y: f32) -> Option<photoslop_core::LayerId> {
+    fn layer_at(doc: &schist_core::Document, x: f32, y: f32) -> Option<schist_core::LayerId> {
         let (px, py) = (x.floor() as i32, y.floor() as i32);
         let mut hit = None;
         for layer in doc.tree.iter() {
@@ -71,9 +71,9 @@ impl MoveTool {
     /// The outermost group containing `id`, or `id` itself if it is not in
     /// one.
     fn group_of(
-        doc: &photoslop_core::Document,
-        id: photoslop_core::LayerId,
-    ) -> photoslop_core::LayerId {
+        doc: &schist_core::Document,
+        id: schist_core::LayerId,
+    ) -> schist_core::LayerId {
         let Some(path) = doc.tree.path_of(id) else {
             return id;
         };
@@ -269,7 +269,7 @@ impl EyedropperTool {
                 1.0,
             ));
         }
-        let px = photoslop_compositor::composite_region_rgba8(ctx.doc, area);
+        let px = schist_compositor::composite_region_rgba8(ctx.doc, area);
         let mut acc = [0u32; 3];
         let count = (area.width() * area.height()) as u32;
         for p in px.chunks_exact(4) {
@@ -376,7 +376,7 @@ pub struct BasicToolsPlugin;
 
 impl PluginManifest for BasicToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-basic"
+        "schist.tools-basic"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -390,9 +390,9 @@ impl PluginManifest for BasicToolsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, Document, Layer};
-    use photoslop_plugin_api::{EditorState, Modifiers, OptionValue};
+    use schist_color::Depth;
+    use schist_core::{blit_rgba8, Document, Layer};
+    use schist_plugin_api::{EditorState, Modifiers, OptionValue};
 
     fn input(x: f32, y: f32) -> PointerInput {
         PointerInput {

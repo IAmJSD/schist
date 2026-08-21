@@ -1,7 +1,7 @@
 //! Extract one entry from an Affinity container and describe it.
 //!
 //! ```sh
-//! cargo run -p photoslop-codec-affinity --example afentry -- file.afphoto d/1
+//! cargo run -p schist-codec-affinity --example afentry -- file.afphoto d/1
 //! ```
 
 fn main() {
@@ -9,7 +9,7 @@ fn main() {
     let path = args.next().expect("usage: afentry <file> <entry>");
     let name = args.next().expect("usage: afentry <file> <entry>");
     let bytes = std::fs::read(&path).expect("read file");
-    let archive = photoslop_codec_affinity::Archive::parse(&bytes).expect("parse");
+    let archive = schist_codec_affinity::Archive::parse(&bytes).expect("parse");
     let entry = archive.head(&name).expect("no such entry");
     println!(
         "compressed {} → {} bytes, compression {:#04x}",

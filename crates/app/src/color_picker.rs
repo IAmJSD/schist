@@ -23,7 +23,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderImage,
     SharedString, Styled as _,
 };
-use photoslop_color::Rgba;
+use schist_color::Rgba;
 use smallvec::smallvec;
 use std::sync::Arc;
 

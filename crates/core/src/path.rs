@@ -5,7 +5,7 @@
 //! stroked or turned into a selection. Before this the pen tool built a
 //! path and immediately rasterized it, so there was nothing to edit.
 //!
-//! Rasterizing lives in `photoslop-vector`; this is only the model.
+//! Rasterizing lives in `schist-vector`; this is only the model.
 
 use serde::{Deserialize, Serialize};
 
@@ -174,15 +174,15 @@ impl VectorPath {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorShape {
     pub path: VectorPath,
-    pub fill: photoslop_color::Rgba,
+    pub fill: schist_color::Rgba,
     /// Stroke colour and width, when the shape has one.
-    pub stroke: Option<(photoslop_color::Rgba, f32)>,
+    pub stroke: Option<(schist_color::Rgba, f32)>,
     /// Even-odd rather than nonzero, for shapes with holes.
     pub even_odd: bool,
 }
 
 impl VectorShape {
-    pub fn new(path: VectorPath, fill: photoslop_color::Rgba) -> VectorShape {
+    pub fn new(path: VectorPath, fill: schist_color::Rgba) -> VectorShape {
         VectorShape {
             path,
             fill,

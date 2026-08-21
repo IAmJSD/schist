@@ -1,5 +1,5 @@
 [package]
-name = "photoslop-neural"
+name = "schist-neural"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

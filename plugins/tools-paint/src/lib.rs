@@ -5,11 +5,11 @@
 //! pre-stroke pixels at `coverage × tool opacity`. So scribbling over the
 //! same spot at 50% opacity stays 50%, but two separate strokes darken.
 
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_color::Rgba;
+use schist_core::{
     Document, IntRect, LayerId, LayerKind, StrokeEdit, TileCoord, TileMap, TILE_SIZE,
 };
-use photoslop_plugin_api::{
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
 };
@@ -1199,7 +1199,7 @@ impl ToolPlugin for BucketTool {
         // the paint still goes onto the active layer either way.
         let composite = self
             .all_layers
-            .then(|| photoslop_compositor::composite_region_rgba8(ctx.doc, canvas));
+            .then(|| schist_compositor::composite_region_rgba8(ctx.doc, canvas));
         let sample = |px: i32, py: i32| -> [u8; 4] {
             match &composite {
                 Some(buf) => {
@@ -1339,7 +1339,7 @@ pub struct PaintToolsPlugin;
 
 impl PluginManifest for PaintToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-paint"
+        "schist.tools-paint"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -1366,14 +1366,14 @@ impl PluginManifest for PaintToolsPlugin {
 // Silence unused-dep warning: pixel-ops is used by future paint modes
 // (brush blend modes); keep the wiring alive.
 #[allow(unused_imports)]
-use photoslop_pixel_ops as _;
+use schist_pixel_ops as _;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::Layer;
-    use photoslop_plugin_api::{EditorState, Modifiers, OptionValue};
+    use schist_color::Depth;
+    use schist_core::Layer;
+    use schist_plugin_api::{EditorState, Modifiers, OptionValue};
 
     fn doc_with_layer() -> Document {
         let mut doc = Document::new("t", 128, 128, Depth::Eight);
@@ -1406,7 +1406,7 @@ mod tests {
         let mut layer = Layer::new_raster("sq");
         let red = [255u8, 0, 0, 255].repeat(16 * 16);
         for origin in [(8, 8), (80, 80)] {
-            photoslop_core::blit_rgba8(
+            schist_core::blit_rgba8(
                 &mut layer.as_raster_mut().unwrap().tiles,
                 Depth::Eight,
                 IntRect::from_xywh(origin.0, origin.1, 16, 16),
@@ -1422,7 +1422,7 @@ mod tests {
         for contiguous in [true, false] {
             let mut doc = two_squares_doc();
             let mut state = EditorState {
-                foreground: photoslop_color::Rgba::from_u8(0, 0, 255, 255),
+                foreground: schist_color::Rgba::from_u8(0, 0, 255, 255),
                 ..EditorState::default()
             };
             let mut tool = BucketTool::new();
@@ -1451,7 +1451,7 @@ mod tests {
         let mut doc = two_squares_doc();
         doc.push_layer(Layer::new_raster("empty"));
         let mut state = EditorState {
-            foreground: photoslop_color::Rgba::from_u8(0, 0, 255, 255),
+            foreground: schist_color::Rgba::from_u8(0, 0, 255, 255),
             ..EditorState::default()
         };
         let mut tool = BucketTool::new();
@@ -1476,8 +1476,8 @@ mod tests {
         let sample = |style: usize, reverse: bool| {
             let mut doc = doc_with_layer();
             let mut state = EditorState {
-                foreground: photoslop_color::Rgba::from_u8(255, 255, 255, 255),
-                background: photoslop_color::Rgba::from_u8(0, 0, 0, 255),
+                foreground: schist_color::Rgba::from_u8(255, 255, 255, 255),
+                background: schist_color::Rgba::from_u8(0, 0, 0, 255),
                 ..EditorState::default()
             };
             let mut tool = GradientTool::new(GradientKind::Linear);
@@ -1513,8 +1513,8 @@ mod tests {
         let mirrored = |style: usize| {
             let mut doc = doc_with_layer();
             let mut state = EditorState {
-                foreground: photoslop_color::Rgba::from_u8(255, 255, 255, 255),
-                background: photoslop_color::Rgba::from_u8(0, 0, 0, 255),
+                foreground: schist_color::Rgba::from_u8(255, 255, 255, 255),
+                background: schist_color::Rgba::from_u8(0, 0, 0, 255),
                 ..EditorState::default()
             };
             let mut tool = GradientTool::new(GradientKind::Linear);
@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn selection_confines_painting() {
-        use photoslop_core::SelectOp;
+        use schist_core::SelectOp;
         let mut doc = doc_with_layer();
         doc.selection
             .select_rect(IntRect::from_xywh(0, 0, 45, 128), SelectOp::Replace);
@@ -1683,9 +1683,9 @@ mod tests {
 #[cfg(test)]
 mod m7_tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, Layer, SelectOp};
-    use photoslop_plugin_api::Modifiers;
+    use schist_color::Depth;
+    use schist_core::{blit_rgba8, Layer, SelectOp};
+    use schist_plugin_api::Modifiers;
 
     fn filled_doc(rgba: [u8; 4]) -> Document {
         let mut doc = Document::new("t", 64, 64, Depth::Eight);

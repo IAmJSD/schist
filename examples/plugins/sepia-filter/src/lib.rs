@@ -1,12 +1,12 @@
 //! Example third-party filter: sepia tone.
 //!
-//! Build: `cargo build --release --target wasm32-unknown-unknown -p photoslop-example-sepia`
-//! Install: copy `target/wasm32-unknown-unknown/release/photoslop_example_sepia.wasm`
-//! into `~/.config/photoslop/plugins/`.
+//! Build: `cargo build --release --target wasm32-unknown-unknown -p schist-example-sepia`
+//! Install: copy `target/wasm32-unknown-unknown/release/schist_example_sepia.wasm`
+//! into `~/.config/schist/plugins/`.
 
-use photoslop_plugin_sdk::*;
+use schist_plugin_sdk::*;
 
-photoslop_filter! {
+schist_filter! {
     id: "com.example.sepia",
     name: "Sepia",
     category: "Plugins",

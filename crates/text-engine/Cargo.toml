@@ -1,12 +1,12 @@
 [package]
-name = "photoslop-text-engine"
+name = "schist-text-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-photoslop-core.workspace = true
-photoslop-color.workspace = true
+schist-core.workspace = true
+schist-color.workspace = true
 fontdue = "0.9"
 fontdb = "0.24"
 log.workspace = true

@@ -1,4 +1,4 @@
-# Photoslop — Development Plan
+# Schist — Development Plan
 
 > **Status (2026-08-20): M0–M12 complete — v1 feature-complete.** Workspace + kernel + plugin
 > registry (M0); tiled canvas with pan/zoom and codecs (M1); full layer
@@ -295,7 +295,7 @@ below is a default, not a hardcode. Single-letter tool binds are context-gated t
 ## 6. Workspace layout
 
 ```
-photoslop/
+schist/
 ├── Cargo.toml                # workspace
 ├── crates/
 │   ├── app/                  # binary: GPUI bootstrap, workspace/docking, menus
@@ -382,7 +382,7 @@ adjustment layer previews live at 60fps on a 100MP doc.*
 
 **M9 — Third-party plugins (3–4 wks).** WASM host: manifest + capability grants, filter
 and codec plugin ABI, params-schema-driven dialogs, plugin manager panel (install from
-file/dir, enable/disable), versioned API docs + `photoslop-plugin` template crate +
+file/dir, enable/disable), versioned API docs + `schist-plugin` template crate +
 two example plugins (a filter, a format). *Exit: an external dev builds a working filter
 against the template without touching our repo.*
 

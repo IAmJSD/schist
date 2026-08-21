@@ -13,8 +13,8 @@
 //! them, which is the inverse of what the reader folds up.
 
 use crate::error::PsdError;
-use photoslop_color::{ColorMode, Depth};
-use photoslop_core::{
+use schist_color::{ColorMode, Depth};
+use schist_core::{
     Document, IntRect, Layer, LayerKind, LayerMask, MaskTileMap, TileCoord, TileMap, TILE_SIZE,
 };
 
@@ -426,7 +426,7 @@ fn shape_blocks(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
         crate::vector::write_vector_mask(&shape.path, doc.width, doc.height),
     )];
     // The fill, as the solid-colour payload Photoshop expects.
-    let mut b = photoslop_psd_descriptor::Builder::new("null");
+    let mut b = schist_psd_descriptor::Builder::new("null");
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as f64;
     b.color("Clr ", q(shape.fill.r), q(shape.fill.g), q(shape.fill.b));
     out.push((*b"SoCo", b.finish_versioned()));
@@ -509,13 +509,13 @@ fn colour_planes(tiles: &TileMap, rect: IntRect, doc: &Document) -> Vec<Vec<u8>>
                 let values: Vec<f32> = match doc.mode {
                     ColorMode::Cmyk => {
                         // PSD stores CMYK inverted: 0 means full ink.
-                        photoslop_color::convert::rgb_to_cmyk(px)
+                        schist_color::convert::rgb_to_cmyk(px)
                             .iter()
                             .map(|v| 1.0 - v)
                             .collect()
                     }
                     ColorMode::Lab => {
-                        let lab = photoslop_color::convert::rgb_to_lab(px);
+                        let lab = schist_color::convert::rgb_to_lab(px);
                         vec![
                             lab[0] / 100.0,
                             (lab[1] + 128.0) / 255.0,
@@ -573,8 +573,8 @@ fn extract_planes(tiles: &TileMap, rect: IntRect, depth: Depth) -> [Vec<u8>; 4] 
 
 fn write_sample(out: &mut [u8], v: f32, depth: Depth) {
     match depth {
-        Depth::Eight => out[0] = photoslop_color::f32_to_u8(v),
-        Depth::Sixteen => out.copy_from_slice(&photoslop_color::f32_to_u16(v).to_be_bytes()),
+        Depth::Eight => out[0] = schist_color::f32_to_u8(v),
+        Depth::Sixteen => out.copy_from_slice(&schist_color::f32_to_u16(v).to_be_bytes()),
         Depth::ThirtyTwo => out.copy_from_slice(&v.to_be_bytes()),
     }
 }
@@ -670,7 +670,7 @@ fn encode_channel(plane: &[u8], row_bytes: usize, rows: usize, depth: Depth, psb
 /// layers.
 fn write_merged_image(b: &mut Buf, doc: &Document, channels: u16, psb: bool) {
     let rect = doc.canvas_rect();
-    let composite = photoslop_compositor::composite_region_f32(doc, rect);
+    let composite = schist_compositor::composite_region_f32(doc, rect);
     let w = rect.width() as usize;
     let h = rect.height() as usize;
     let bpc = doc.depth.bytes_per_channel();
@@ -681,7 +681,7 @@ fn write_merged_image(b: &mut Buf, doc: &Document, channels: u16, psb: bool) {
     let n = doc.mode.channels();
     let mut planes: Vec<Vec<u8>> = (0..n + 1).map(|_| vec![0u8; w * h * bpc]).collect();
     for i in 0..w * h {
-        let px = photoslop_color::Rgba::new(
+        let px = schist_color::Rgba::new(
             composite[i * 4],
             composite[i * 4 + 1],
             composite[i * 4 + 2],
@@ -692,12 +692,12 @@ fn write_merged_image(b: &mut Buf, doc: &Document, channels: u16, psb: bool) {
             ColorMode::Grayscale | ColorMode::Indexed => {
                 vec![0.299 * px.r + 0.587 * px.g + 0.114 * px.b]
             }
-            ColorMode::Cmyk => photoslop_color::convert::rgb_to_cmyk(px)
+            ColorMode::Cmyk => schist_color::convert::rgb_to_cmyk(px)
                 .iter()
                 .map(|v| 1.0 - v)
                 .collect(),
             ColorMode::Lab => {
-                let lab = photoslop_color::convert::rgb_to_lab(px);
+                let lab = schist_color::convert::rgb_to_lab(px);
                 vec![
                     lab[0] / 100.0,
                     (lab[1] + 128.0) / 255.0,

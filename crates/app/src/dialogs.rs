@@ -7,7 +7,7 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _,
 };
-use photoslop_core::Filter;
+use schist_core::Filter;
 
 /// Workspace state the dialog widgets read while rendering.
 #[derive(Clone)]
@@ -302,7 +302,7 @@ fn image_size(
             true,
             move |ws, _w, cx| {
                 if let Some(doc) = ws.doc.as_mut() {
-                    photoslop_tools_transform::resize_image(doc, width, height, filter);
+                    schist_tools_transform::resize_image(doc, width, height, filter);
                 }
                 ws.status = format!("Image size: {width} × {height}").into();
                 ws.close_modal(cx);
@@ -430,7 +430,7 @@ fn canvas_size(
             true,
             move |ws, _w, cx| {
                 if let Some(doc) = ws.doc.as_mut() {
-                    photoslop_tools_transform::resize_canvas(doc, width, height, anchor);
+                    schist_tools_transform::resize_canvas(doc, width, height, anchor);
                 }
                 ws.status = format!("Canvas size: {width} × {height}").into();
                 ws.close_modal(cx);
@@ -514,7 +514,7 @@ fn filter_dialog(
     ws: &mut Workspace,
     _state: &DialogState,
     id: &'static str,
-    values: photoslop_plugin_api::FilterValues,
+    values: schist_plugin_api::FilterValues,
     preview: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -632,14 +632,14 @@ fn filter_dialog(
 fn destructive_adjustment_dialog(
     ws: &mut Workspace,
     _state: &DialogState,
-    kind: photoslop_core::AdjustmentKind,
-    params: photoslop_adjustments::Params,
+    kind: schist_core::AdjustmentKind,
+    params: schist_adjustments::Params,
     preview: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let specs = params.param_specs();
     // Curves has no sliders: it needs a graph.
-    let curves = matches!(params, photoslop_adjustments::Params::Curves(_));
+    let curves = matches!(params, schist_adjustments::Params::Curves(_));
     let mut body = div()
         .id("destructive-adjust-body")
         .flex()
@@ -748,13 +748,13 @@ fn destructive_adjustment_dialog(
 /// trained for this application is built in and cannot be removed.
 fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let downloading = ws.model_downloads.clone();
-    let rows: Vec<gpui::AnyElement> = photoslop_neural::CATALOG
+    let rows: Vec<gpui::AnyElement> = schist_neural::CATALOG
         .iter()
         .map(|spec| {
             let id = spec.id;
-            let installed = photoslop_neural::installed(id);
+            let installed = schist_neural::installed(id);
             let busy = downloading.contains(&id);
-            let size = photoslop_neural::installed_size(spec)
+            let size = schist_neural::installed_size(spec)
                 .map(|b| format!("{:.1} MB", b as f64 / (1 << 20) as f64))
                 .unwrap_or_else(|| format!("{:.1} MB", spec.bytes as f64 / (1 << 20) as f64));
             let state = if spec.built_in() {
@@ -849,7 +849,7 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
                 .child(SharedString::from(format!(
                     "Models are kept in {}. Filters that have no model fall \
                      back to signal processing and say so.",
-                    photoslop_neural::model_dir().display()
+                    schist_neural::model_dir().display()
                 ))),
         );
     let actions = div().flex().flex_row().gap_2().child(ui::button(
@@ -955,10 +955,10 @@ fn stroke_dialog(
     ws: &Workspace,
     _state: &DialogState,
     width: f32,
-    position: photoslop_core::StrokePosition,
+    position: schist_core::StrokePosition,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    use photoslop_core::StrokePosition;
+    use schist_core::StrokePosition;
     let body = div()
         .flex()
         .flex_col()
@@ -1204,7 +1204,7 @@ fn modify_dialog(
 fn color_range_dialog(
     _state: &DialogState,
     tolerance: f32,
-    target: photoslop_color::Rgba,
+    target: schist_color::Rgba,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let swatch = {
@@ -1302,14 +1302,14 @@ fn color_range_dialog(
 
 fn adjustment_dialog(
     ws: &mut Workspace,
-    layer: photoslop_core::LayerId,
-    params: photoslop_adjustments::Params,
+    layer: schist_core::LayerId,
+    params: schist_adjustments::Params,
     original: (Option<String>, Vec<u8>),
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let specs = params.param_specs();
     let title = params.display_name().to_string();
-    let curves = matches!(params, photoslop_adjustments::Params::Curves(_));
+    let curves = matches!(params, schist_adjustments::Params::Curves(_));
     let mut body = div().flex().flex_col().gap_1();
     if curves {
         body = body.child(crate::curve_editor::render(ws, cx));
@@ -1374,7 +1374,7 @@ fn adjustment_dialog(
 /// The third-party plugin manager: what loaded, what didn't and why, and
 /// per-plugin enable/disable.
 fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let dir = photoslop_plugin_host_wasm::PluginManager::plugin_dir()
+    let dir = schist_plugin_host_wasm::PluginManager::plugin_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "(no config directory)".into());
     let rows: Vec<gpui::AnyElement> = ws
@@ -1385,8 +1385,8 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             let id = entry.id.clone();
             let enabled = entry.enabled;
             let kind = match &entry.kind {
-                Some(photoslop_plugin_host_wasm::abi::PluginKind::Filter) => "filter",
-                Some(photoslop_plugin_host_wasm::abi::PluginKind::Codec) => "format",
+                Some(schist_plugin_host_wasm::abi::PluginKind::Filter) => "filter",
+                Some(schist_plugin_host_wasm::abi::PluginKind::Codec) => "format",
                 None => "unavailable",
             };
             let detail = match &entry.error {
@@ -1476,7 +1476,7 @@ fn export_dialog(
     ws: &mut Workspace,
     state: &DialogState,
     codec_id: &'static str,
-    options: photoslop_plugin_api::ExportOptions,
+    options: schist_plugin_api::ExportOptions,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let codecs: Vec<(SharedString, &'static str)> = ws
@@ -1583,7 +1583,7 @@ fn profile_dialog(
     selected: usize,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let builtins = photoslop_colormgmt::Profile::builtins();
+    let builtins = schist_colormgmt::Profile::builtins();
     let options: Vec<(SharedString, usize)> = builtins
         .iter()
         .enumerate()
@@ -1645,10 +1645,10 @@ fn profile_dialog(
             if convert { "Convert" } else { "Assign" },
             true,
             move |ws, _w, cx| {
-                let profile = photoslop_colormgmt::Profile::builtins()
+                let profile = schist_colormgmt::Profile::builtins()
                     .get(selected)
                     .map(|(_, make)| make())
-                    .unwrap_or_else(photoslop_colormgmt::Profile::srgb);
+                    .unwrap_or_else(schist_colormgmt::Profile::srgb);
                 if convert {
                     ws.convert_to_profile(profile, cx);
                 } else {
@@ -1743,7 +1743,7 @@ fn preferences(
                     current: intent,
                     label: (intent.display_name()).into(),
                     width: 180.0,
-                    options: photoslop_colormgmt::Intent::all()
+                    options: schist_colormgmt::Intent::all()
                         .iter()
                         .map(|i| (SharedString::from(i.display_name()), *i))
                         .collect(),
@@ -1807,7 +1807,7 @@ fn preferences(
 /// Layer Properties: rename a layer.
 fn layer_properties(
     state: &DialogState,
-    layer: photoslop_core::LayerId,
+    layer: schist_core::LayerId,
     name: String,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {

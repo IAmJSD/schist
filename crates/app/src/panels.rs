@@ -13,8 +13,8 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, RenderImage,
     SharedString, StatefulInteractiveElement as _, Styled, Window,
 };
-use photoslop_color::Rgba;
-use photoslop_core::{BlendMode, Layer, LayerId, LayerKind};
+use schist_color::Rgba;
+use schist_core::{BlendMode, Layer, LayerId, LayerKind};
 use std::sync::Arc;
 
 const PANEL_BG: u32 = 0x1A1A1A;
@@ -56,7 +56,7 @@ enum MenuEntry {
     /// An app-level item handled by the shell.
     App(&'static str, AppItem, Option<&'static str>),
     /// Create an adjustment layer of this kind.
-    Adjustment(photoslop_core::AdjustmentKind),
+    Adjustment(schist_core::AdjustmentKind),
     /// Open a registered filter's dialog.
     Filter(&'static str),
     /// A nested menu, opened by hovering its row.
@@ -119,7 +119,7 @@ enum AppItem {
     FlipCanvasV,
     Trim,
     /// Apply an adjustment to the pixels rather than adding a layer.
-    ApplyAdjustment(photoslop_core::AdjustmentKind),
+    ApplyAdjustment(schist_core::AdjustmentKind),
     StrokeItem,
     FillItem,
     ContentAwareFill,
@@ -309,7 +309,7 @@ fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
         ),
         (
             "Adjust",
-            photoslop_adjustments::Params::creatable()
+            schist_adjustments::Params::creatable()
                 .iter()
                 .map(|&k| Adjustment(k))
                 .collect(),
@@ -412,9 +412,9 @@ fn layer_comp_entries(ws: &Workspace) -> Vec<MenuEntry> {
 /// Image ▸ Adjustments: the same list as the Adjust menu, but applied to
 /// the pixels rather than as a layer.
 fn destructive_adjustment_entries() -> Vec<MenuEntry> {
-    photoslop_adjustments::Params::creatable()
+    schist_adjustments::Params::creatable()
         .iter()
-        .filter(|k| !matches!(k, photoslop_core::AdjustmentKind::SolidColor))
+        .filter(|k| !matches!(k, schist_core::AdjustmentKind::SolidColor))
         .map(|&k| MenuEntry::App(k.display_name(), AppItem::ApplyAdjustment(k), None))
         .collect()
 }
@@ -617,7 +617,7 @@ fn run_app_item(
                 ws.open_modal(
                     Modal::Export {
                         codec,
-                        options: photoslop_plugin_api::ExportOptions::default(),
+                        options: schist_plugin_api::ExportOptions::default(),
                     },
                     cx,
                 );
@@ -638,7 +638,7 @@ fn run_app_item(
             cx,
         ),
         AppItem::ProofColors => {
-            let profile = photoslop_colormgmt::Profile::srgb();
+            let profile = schist_colormgmt::Profile::srgb();
             ws.toggle_proof(profile, cx);
         }
         AppItem::ToggleRulers => ws.toggle_rulers(cx),
@@ -649,11 +649,11 @@ fn run_app_item(
         AppItem::ClearGuides => ws.clear_guides(cx),
         AppItem::ScreenModeItem => ws.cycle_screen_mode(cx),
         AppItem::Preferences => ws.open_modal(Modal::Preferences, cx),
-        AppItem::ModeRgb => ws.set_color_mode(photoslop_color::ColorMode::Rgb, cx),
-        AppItem::ModeGrayscale => ws.set_color_mode(photoslop_color::ColorMode::Grayscale, cx),
-        AppItem::ModeCmyk => ws.set_color_mode(photoslop_color::ColorMode::Cmyk, cx),
-        AppItem::ModeLab => ws.set_color_mode(photoslop_color::ColorMode::Lab, cx),
-        AppItem::ModeIndexed => ws.set_color_mode(photoslop_color::ColorMode::Indexed, cx),
+        AppItem::ModeRgb => ws.set_color_mode(schist_color::ColorMode::Rgb, cx),
+        AppItem::ModeGrayscale => ws.set_color_mode(schist_color::ColorMode::Grayscale, cx),
+        AppItem::ModeCmyk => ws.set_color_mode(schist_color::ColorMode::Cmyk, cx),
+        AppItem::ModeLab => ws.set_color_mode(schist_color::ColorMode::Lab, cx),
+        AppItem::ModeIndexed => ws.set_color_mode(schist_color::ColorMode::Indexed, cx),
         AppItem::AutoTone => ws.auto_adjust(crate::workspace::AutoMode::Tone, cx),
         AppItem::AutoContrast => ws.auto_adjust(crate::workspace::AutoMode::Contrast, cx),
         AppItem::AutoColor => ws.auto_adjust(crate::workspace::AutoMode::Color, cx),
@@ -667,7 +667,7 @@ fn run_app_item(
         AppItem::StrokeItem => ws.open_modal(
             Modal::Stroke {
                 width: 3.0,
-                position: photoslop_core::StrokePosition::Center,
+                position: schist_core::StrokePosition::Center,
             },
             cx,
         ),
@@ -793,7 +793,7 @@ fn run_app_item(
             match rect {
                 Some(rect) if !rect.is_empty() => {
                     if let Some(doc) = ws.doc.as_mut() {
-                        photoslop_tools_transform::crop_to(doc, rect);
+                        schist_tools_transform::crop_to(doc, rect);
                     }
                     ws.after_change(cx);
                     ws.fit_to_view();
@@ -1114,7 +1114,7 @@ fn slider_set(ws: &mut Workspace, target: SliderTarget, ratio: f32, cx: &mut Con
     match target {
         SliderTarget::ToolOption { key, min, max } => ws.set_tool_option(
             key,
-            photoslop_plugin_api::OptionValue::Num(min + ratio * (max - min)),
+            schist_plugin_api::OptionValue::Num(min + ratio * (max - min)),
             cx,
         ),
         SliderTarget::BrushSize => ws.editor.brush_size = 1.0 + ratio * 299.0,
@@ -1373,10 +1373,10 @@ pub fn tool_options_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl
 /// the tools.
 fn tool_option_control(
     ws: &Workspace,
-    opt: photoslop_plugin_api::ToolOption,
+    opt: schist_plugin_api::ToolOption,
     cx: &mut Context<Workspace>,
 ) -> gpui::AnyElement {
-    use photoslop_plugin_api::OptionKind;
+    use schist_plugin_api::OptionKind;
     let key = opt.key;
     match opt.kind {
         OptionKind::Slider { min, max, suffix } => {
@@ -1403,7 +1403,7 @@ fn tool_option_control(
                 opt.label,
                 on,
                 move |ws, cx| {
-                    ws.set_tool_option(key, photoslop_plugin_api::OptionValue::Bool(!on), cx)
+                    ws.set_tool_option(key, schist_plugin_api::OptionValue::Bool(!on), cx)
                 },
                 cx,
             )
@@ -1429,7 +1429,7 @@ fn tool_option_control(
                         .collect(),
                 },
                 move |ws, i, cx| {
-                    ws.set_tool_option(key, photoslop_plugin_api::OptionValue::Choice(i), cx)
+                    ws.set_tool_option(key, schist_plugin_api::OptionValue::Choice(i), cx)
                 },
                 cx,
             );

@@ -1,4 +1,4 @@
-//! CPU tile compositor — the reference implementation of Photoslop's
+//! CPU tile compositor — the reference implementation of Schist's
 //! rendering semantics (a future GPU compositor must match it, PLAN.md §2).
 //!
 //! Measured on a 16-core desktop (see `examples/bench.rs`): a
@@ -16,13 +16,13 @@
 //! clipping layers are confined to their base layer's alpha, and adjustment
 //! layers re-colour the backdrop beneath them (mask- and clip-aware).
 
-use photoslop_adjustments::Params;
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_adjustments::Params;
+use schist_color::Rgba;
+use schist_core::{
     AdjustmentData, BlendMode, Document, IntRect, Layer, LayerKind, TileCoord, TILE_PIXELS,
     TILE_SIZE,
 };
-use photoslop_pixel_ops::blend_pixel;
+use schist_pixel_ops::blend_pixel;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -290,7 +290,7 @@ fn resolve_params(data: &AdjustmentData) -> Params {
             Err(err) => log::warn!("adjustment params unreadable: {err}"),
         }
     }
-    photoslop_adjustments::parse_psd(data.kind, &data.raw)
+    schist_adjustments::parse_psd(data.kind, &data.raw)
 }
 
 /// Apply an adjustment layer to the backdrop already accumulated in `dst`.
@@ -471,7 +471,7 @@ fn blend_buf_onto(
     // dispatches the mode once instead of per pixel.
     if group_mask.is_none()
         && mode != BlendMode::Normal
-        && photoslop_pixel_ops::blend_span(mode, src, dst, opacity)
+        && schist_pixel_ops::blend_span(mode, src, dst, opacity)
     {
         return;
     }
@@ -585,8 +585,8 @@ impl TileCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, Layer, LayerMask, SelectOp};
+    use schist_color::Depth;
+    use schist_core::{blit_rgba8, Layer, LayerMask, SelectOp};
 
     fn solid_layer(name: &str, rect: IntRect, rgba: [u8; 4]) -> Layer {
         let mut layer = Layer::new_raster(name);
@@ -780,9 +780,9 @@ mod tests {
 #[cfg(test)]
 mod adjustment_tests {
     use super::*;
-    use photoslop_adjustments::Params;
-    use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, AdjustmentData, AdjustmentKind, Layer, LayerMask};
+    use schist_adjustments::Params;
+    use schist_color::Depth;
+    use schist_core::{blit_rgba8, AdjustmentData, AdjustmentKind, Layer, LayerMask};
 
     fn solid(name: &str, rect: IntRect, rgba: [u8; 4]) -> Layer {
         let mut layer = Layer::new_raster(name);

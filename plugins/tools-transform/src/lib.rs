@@ -6,8 +6,8 @@
 //! with the user's chosen filter and commits a single history entry. Escape
 //! restores the snapshot.
 
-use photoslop_core::{Affine, Document, Filter, IntRect, LayerId, LayerKind, TileMap};
-use photoslop_plugin_api::{
+use schist_core::{Affine, Document, Filter, IntRect, LayerId, LayerKind, TileMap};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
 };
@@ -96,7 +96,7 @@ struct Session {
     /// Untransformed pixels (cheap: tiles are reference-counted).
     original: TileMap,
     /// Untransformed selection, for `TransformMode::Selection`.
-    original_selection: photoslop_core::Selection,
+    original_selection: schist_core::Selection,
     /// Bounds of `original`, the box the handles frame.
     base: IntRect,
     /// Scale / rotation / skew accumulated so far.
@@ -195,7 +195,7 @@ impl Session {
                 * self.scale.0.abs().max(self.scale.1.abs())) as i32,
         );
         let depth = doc.depth;
-        let tiles = photoslop_core::resample::transform_tiles(
+        let tiles = schist_core::resample::transform_tiles(
             &self.original,
             &self.matrix(),
             depth,
@@ -508,7 +508,7 @@ impl ToolPlugin for TransformTool {
             });
         let tiles = match &smart {
             Some(so) => so.render(depth, clip),
-            None => photoslop_core::resample::transform_tiles(
+            None => schist_core::resample::transform_tiles(
                 &session.original,
                 &session.matrix(),
                 depth,
@@ -601,7 +601,7 @@ fn discard_outside(doc: &mut Document, keep: IntRect) {
         else {
             continue;
         };
-        let mut kept = photoslop_core::TileMap::new();
+        let mut kept = schist_core::TileMap::new();
         for (coord, buf) in tiles.iter() {
             let trect = coord.rect();
             if keep.intersect(&trect).is_empty() {
@@ -615,12 +615,12 @@ fn discard_outside(doc: &mut Document, keep: IntRect) {
             }
             // Straddles the edge: keep the inside, blank the rest.
             let mut trimmed = (**buf).clone();
-            for ly in 0..photoslop_core::TILE_SIZE {
-                for lx in 0..photoslop_core::TILE_SIZE {
+            for ly in 0..schist_core::TILE_SIZE {
+                for lx in 0..schist_core::TILE_SIZE {
                     let (x, y) = (trect.left + lx, trect.top + ly);
                     if !keep.contains(x, y) {
-                        let ix = (ly * photoslop_core::TILE_SIZE + lx) as usize;
-                        trimmed.set(ix, photoslop_color::Rgba::TRANSPARENT);
+                        let ix = (ly * schist_core::TILE_SIZE + lx) as usize;
+                        trimmed.set(ix, schist_color::Rgba::TRANSPARENT);
                     }
                 }
             }
@@ -744,7 +744,7 @@ pub fn resize_image(doc: &mut Document, width: u32, height: u32, filter: Filter)
         let Some(raster) = edit.doc().tree.find(id).and_then(|l| l.as_raster()) else {
             continue;
         };
-        let tiles = photoslop_core::resample::resize_tiles(
+        let tiles = schist_core::resample::resize_tiles(
             &raster.tiles,
             from,
             (width, height),
@@ -778,7 +778,7 @@ pub struct TransformToolsPlugin;
 
 impl PluginManifest for TransformToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-transform"
+        "schist.tools-transform"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -791,9 +791,9 @@ impl PluginManifest for TransformToolsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_core::{blit_rgba8, Layer};
-    use photoslop_plugin_api::Modifiers;
+    use schist_color::Depth;
+    use schist_core::{blit_rgba8, Layer};
+    use schist_plugin_api::Modifiers;
 
     fn doc_with_square() -> Document {
         let mut doc = Document::new("t", 200, 200, Depth::Eight);

@@ -8,7 +8,7 @@
 use crate::actions::*;
 use crate::workspace::Workspace;
 use gpui::{Context, KeyBinding, PathPromptOptions, Window};
-use photoslop_plugin_api::PluginRegistry;
+use schist_plugin_api::PluginRegistry;
 use std::path::PathBuf;
 
 const CONTEXT: Option<&str> = Some("Workspace");
@@ -143,7 +143,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         ));
     }
 
-    // User overrides: ~/.config/photoslop/keymap.json
+    // User overrides: ~/.config/schist/keymap.json
     // Format: { "<keystroke>": "command:<id>" | "tool:<id>" }
     if let Some(user) = load_user_keymap() {
         for (keystroke, target) in user {
@@ -169,7 +169,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
 
 /// Where user keybinding overrides live.
 pub fn user_keymap_path() -> Option<PathBuf> {
-    Some(dirs_config()?.join("photoslop/keymap.json"))
+    Some(dirs_config()?.join("schist/keymap.json"))
 }
 
 fn load_user_keymap() -> Option<Vec<(String, String)>> {

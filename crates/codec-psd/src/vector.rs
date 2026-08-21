@@ -11,7 +11,7 @@
 //! the document* rather than in pixels -- and stored vertically first.
 //! Both are easy to get subtly wrong, so both are pinned by tests.
 
-use photoslop_core::{Anchor, SubPath, VectorPath};
+use schist_core::{Anchor, SubPath, VectorPath};
 
 const REC: usize = 26;
 

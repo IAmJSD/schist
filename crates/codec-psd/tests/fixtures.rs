@@ -3,8 +3,8 @@
 //! The test SKIPS (does not fail) when the directory is missing or empty so
 //! fresh checkouts without fixtures still pass.
 
-use photoslop_codec_psd::{is_psd, read_psd};
-use photoslop_core::Layer;
+use schist_codec_psd::{is_psd, read_psd};
+use schist_core::Layer;
 use std::path::PathBuf;
 
 fn fixtures_dir() -> PathBuf {
@@ -98,7 +98,7 @@ fn imagemagick_grayscale_gradient() {
         return;
     }
     let doc = read_psd(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(doc.mode, photoslop_color::ColorMode::Grayscale);
+    assert_eq!(doc.mode, schist_color::ColorMode::Grayscale);
     let l = &doc.tree.layers[0];
     let px = pixel(l, 10, 0);
     // Gray replicated into RGB.

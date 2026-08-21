@@ -6,9 +6,9 @@
 //! Cloning then happens in *plane* space, which is what makes a patch
 //! copied along a receding wall get smaller as it recedes.
 
-use photoslop_color::Rgba;
-use photoslop_core::{Document, IntRect, LayerId, TileCoord, TileMap, TILE_SIZE};
-use photoslop_plugin_api::{
+use schist_color::Rgba;
+use schist_core::{Document, IntRect, LayerId, TileCoord, TileMap, TILE_SIZE};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PointerInput, ToolCtx, ToolOption, ToolPlugin,
 };
 
@@ -142,7 +142,7 @@ pub fn perspective_clone(
     region: IntRect,
     radius: f32,
     centre: (f32, f32),
-    depth: photoslop_color::Depth,
+    depth: schist_color::Depth,
 ) {
     let Some(inv) = plane.invert() else { return };
     for coord in TileCoord::covering(&region) {

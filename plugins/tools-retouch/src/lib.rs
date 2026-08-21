@@ -9,9 +9,9 @@
 //! right for smooth surroundings and visibly blurry over texture, which is
 //! at least a predictable failure.
 
-use photoslop_color::Rgba;
-use photoslop_core::{Document, IntRect, LayerId, Selection, TileCoord, TileMap, TILE_SIZE};
-use photoslop_plugin_api::{
+use schist_color::Rgba;
+use schist_core::{Document, IntRect, LayerId, Selection, TileCoord, TileMap, TILE_SIZE};
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
 };
@@ -798,7 +798,7 @@ pub struct RetouchToolsPlugin;
 
 impl PluginManifest for RetouchToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-retouch"
+        "schist.tools-retouch"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {

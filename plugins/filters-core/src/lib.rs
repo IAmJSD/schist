@@ -4,7 +4,7 @@
 //! premultiplied space (otherwise transparent pixels bleed their colour
 //! into the result) and convert back afterwards.
 
-use photoslop_plugin_api::{
+use schist_plugin_api::{
     FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry,
 };
 
@@ -555,7 +555,7 @@ pub struct CoreFiltersPlugin;
 
 impl PluginManifest for CoreFiltersPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.filters-core"
+        "schist.filters-core"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {

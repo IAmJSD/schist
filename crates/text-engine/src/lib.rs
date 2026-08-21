@@ -7,7 +7,7 @@
 //! need a full shaper, which is why `PLAN.md` §2 named parley/swash as the
 //! eventual home for this crate.
 
-use photoslop_core::IntRect;
+use schist_core::IntRect;
 use std::sync::{Arc, OnceLock};
 
 /// Horizontal alignment of wrapped lines.

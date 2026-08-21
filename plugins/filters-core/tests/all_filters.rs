@@ -1,11 +1,11 @@
 //! Properties every filter in the set has to hold, checked against all of
 //! them at once so a new filter cannot quietly skip them.
 
-use photoslop_plugin_api::{FilterValues, PluginManifest, PluginRegistry};
+use schist_plugin_api::{FilterValues, PluginManifest, PluginRegistry};
 
 fn registry() -> PluginRegistry {
     let mut reg = PluginRegistry::default();
-    photoslop_filters_core::CoreFiltersPlugin.register(&mut reg);
+    schist_filters_core::CoreFiltersPlugin.register(&mut reg);
     reg
 }
 

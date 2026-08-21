@@ -1,7 +1,7 @@
 //! Batch-import a directory of Affinity files and report per-file results.
 //!
 //! ```sh
-//! cargo run -p photoslop-codec-affinity --example aftriage -- /path/to/dir
+//! cargo run -p schist-codec-affinity --example aftriage -- /path/to/dir
 //! ```
 
 fn main() {
@@ -19,10 +19,10 @@ fn main() {
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let bytes = std::fs::read(&path).expect("read file");
-        match photoslop_codec_affinity::read_affinity(&bytes) {
+        match schist_codec_affinity::read_affinity(&bytes) {
             Ok((doc, report)) => {
                 if std::env::var("AFTRIAGE_NAMES").is_ok() {
-                    fn walk(layers: &[photoslop_core::Layer], depth: usize) {
+                    fn walk(layers: &[schist_core::Layer], depth: usize) {
                         for l in layers {
                             println!("{}- {:?}{}", "  ".repeat(depth), l.name,
                                 if l.mask.is_some() { " [mask]" } else { "" });

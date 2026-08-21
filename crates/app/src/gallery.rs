@@ -96,7 +96,7 @@ pub fn render(
                                     .filters()
                                     .find(|f| f.id() == id)
                                     .map(|f| {
-                                        photoslop_plugin_api::FilterValues::defaults(&f.params())
+                                        schist_plugin_api::FilterValues::defaults(&f.params())
                                     })
                                     .unwrap_or_default();
                                 edit(ws, cx, |stack, selected| {

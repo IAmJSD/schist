@@ -1,8 +1,8 @@
 //! A stroked open line must be solid along its whole length, including both
 //! end caps.
 
-use photoslop_core::IntRect;
-use photoslop_vector::{rasterize, stroke_to_path, FillRule, Path};
+use schist_core::IntRect;
+use schist_vector::{rasterize, stroke_to_path, FillRule, Path};
 
 fn cov(mask: &[u8], rect: IntRect, x: i32, y: i32) -> u8 {
     let w = rect.width() as usize;

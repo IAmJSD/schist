@@ -3,9 +3,9 @@
 mod common;
 
 use common::{resolution_res, Mask, Psd, Res, L};
-use photoslop_codec_psd::{is_psd, read_psd, PsdError};
-use photoslop_color::{ColorMode, Depth};
-use photoslop_core::{BlendMode, Layer, LayerKind};
+use schist_codec_psd::{is_psd, read_psd, PsdError};
+use schist_color::{ColorMode, Depth};
+use schist_core::{BlendMode, Layer, LayerKind};
 
 fn raster_pixel(layer: &Layer, x: i32, y: i32) -> [u8; 4] {
     layer.as_raster().unwrap().tiles.pixel(x, y).to_u8()
@@ -221,7 +221,7 @@ fn adjustment_layer_from_key_with_raw_payload() {
     let LayerKind::Adjustment(adj) = &layer.kind else {
         panic!("expected adjustment")
     };
-    assert_eq!(adj.kind, photoslop_core::AdjustmentKind::BrightnessContrast);
+    assert_eq!(adj.kind, schist_core::AdjustmentKind::BrightnessContrast);
     assert_eq!(adj.raw, vec![0, 10, 0, 20, 0, 0, 0, 1]);
     // The raw block is ALSO preserved in extras for round-trip.
     assert_eq!(layer.extras.len(), 1);

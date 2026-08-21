@@ -1,4 +1,4 @@
-# Photoslop
+# Schist
 
 A layered image editor written in Rust on [GPUI], with first-class PSD
 support and a plugin-first architecture — every tool, filter, format and
@@ -20,7 +20,7 @@ sudo apt-get install build-essential pkg-config libfontconfig-dev \
   libwayland-dev libxkbcommon-x11-dev libxcb1-dev libxcb-render0-dev \
   libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev clang
 
-cargo run --release -p photoslop-app -- [file.psd|file.png|…]
+cargo run --release -p schist-app -- [file.psd|file.png|…]
 ```
 
 `cargo test --workspace` runs everything. Packaging scripts for macOS,
@@ -32,7 +32,7 @@ them all in CI.
 **Documents.** PSD and PSB read *and* write — layers, nested groups, masks,
 all 27 blend modes, adjustment layers, layer effects, vector shapes,
 8/16/32-bit, RGB, greyscale, CMYK, Lab and Indexed, RLE and zip-compressed
-channels. Every block Photoslop doesn't understand is preserved
+channels. Every block Schist doesn't understand is preserved
 byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
 than transforming it once. Also PNG, JPEG, WebP and TIFF. Affinity files
@@ -144,7 +144,7 @@ pinches are never forwarded to X11 clients, and Windows is not yet
 implemented in the fork. Ctrl+scroll, the zoom-with-scroll preference,
 ⌘+/⌘-, and the navigator's zoom slider work everywhere.
 
-Remap anything in `~/.config/photoslop/keymap.json`:
+Remap anything in `~/.config/schist/keymap.json`:
 
 ```json
 { "ctrl-shift-x": "command:edit.fill_foreground", "f1": "tool:brush" }
@@ -189,7 +189,7 @@ clock, and a fuel budget so a runaway plugin can't hang the editor. A filter
 is one function:
 
 ```rust
-photoslop_filter! {
+schist_filter! {
     id: "com.example.sepia",
     name: "Sepia",
     category: "Plugins",
@@ -198,7 +198,7 @@ photoslop_filter! {
 }
 ```
 
-Drop the `.wasm` in `~/.config/photoslop/plugins/` — or use **File ▸
+Drop the `.wasm` in `~/.config/schist/plugins/` — or use **File ▸
 Plugins…**, which also shows why anything failed to load. Full instructions
 and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 

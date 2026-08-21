@@ -1,4 +1,4 @@
-//! Write Photoslop plugins in Rust.
+//! Write Schist plugins in Rust.
 //!
 //! A plugin is a `wasm32-unknown-unknown` cdylib that exports a handful of
 //! functions. This crate supplies the boilerplate — memory management, the
@@ -6,9 +6,9 @@
 //! pixels:
 //!
 //! ```ignore
-//! use photoslop_plugin_sdk::*;
+//! use schist_plugin_sdk::*;
 //!
-//! photoslop_filter! {
+//! schist_filter! {
 //!     id: "com.example.invert",
 //!     name: "Invert (plugin)",
 //!     category: "Plugins",
@@ -26,7 +26,7 @@
 //!
 //! Build with:
 //! `cargo build --release --target wasm32-unknown-unknown`
-//! and drop the resulting `.wasm` into `~/.config/photoslop/plugins/`.
+//! and drop the resulting `.wasm` into `~/.config/schist/plugins/`.
 
 use std::collections::HashMap;
 
@@ -94,8 +94,8 @@ pub fn log(message: &str) {
 
 pub mod host {
     // Without this the import lands in the default "env" module and the
-    // host's `photoslop::log` never matches it.
-    #[link(wasm_import_module = "photoslop")]
+    // host's `schist::log` never matches it.
+    #[link(wasm_import_module = "schist")]
     unsafe extern "C" {
         /// The host's only import: append a line to the application log.
         pub fn log(ptr: i32, len: i32);
@@ -104,10 +104,10 @@ pub mod host {
 
 /// Memory exports every plugin needs. Invoked by the entry-point macros.
 #[macro_export]
-macro_rules! photoslop_memory_exports {
+macro_rules! schist_memory_exports {
     () => {
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_alloc(len: i32) -> i32 {
+        pub extern "C" fn schist_alloc(len: i32) -> i32 {
             let mut buf = vec![0u8; len.max(0) as usize];
             let ptr = buf.as_mut_ptr();
             std::mem::forget(buf);
@@ -115,7 +115,7 @@ macro_rules! photoslop_memory_exports {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_free(ptr: i32, len: i32) {
+        pub extern "C" fn schist_free(ptr: i32, len: i32) {
             if ptr == 0 || len <= 0 {
                 return;
             }
@@ -129,7 +129,7 @@ macro_rules! photoslop_memory_exports {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_abi_version() -> i32 {
+        pub extern "C" fn schist_abi_version() -> i32 {
             $crate::ABI_VERSION
         }
     };
@@ -137,7 +137,7 @@ macro_rules! photoslop_memory_exports {
 
 /// Define a filter plugin.
 #[macro_export]
-macro_rules! photoslop_filter {
+macro_rules! schist_filter {
     (
         id: $id:expr,
         name: $name:expr,
@@ -145,10 +145,10 @@ macro_rules! photoslop_filter {
         params: [$($param:expr),* $(,)?],
         apply: $apply:expr $(,)?
     ) => {
-        $crate::photoslop_memory_exports!();
+        $crate::schist_memory_exports!();
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_manifest() -> i64 {
+        pub extern "C" fn schist_manifest() -> i64 {
             let manifest = serde_json::json!({
                 "id": $id,
                 "name": $name,
@@ -162,7 +162,7 @@ macro_rules! photoslop_filter {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_filter_apply(
+        pub extern "C" fn schist_filter_apply(
             ptr: i32,
             width: i32,
             height: i32,
@@ -191,7 +191,7 @@ macro_rules! photoslop_filter {
 
 /// Define an image-format plugin.
 #[macro_export]
-macro_rules! photoslop_codec {
+macro_rules! schist_codec {
     (
         id: $id:expr,
         name: $name:expr,
@@ -199,10 +199,10 @@ macro_rules! photoslop_codec {
         probe: $probe:expr,
         decode: $decode:expr $(,)?
     ) => {
-        $crate::photoslop_memory_exports!();
+        $crate::schist_memory_exports!();
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_manifest() -> i64 {
+        pub extern "C" fn schist_manifest() -> i64 {
             let manifest = serde_json::json!({
                 "id": $id,
                 "name": $name,
@@ -215,7 +215,7 @@ macro_rules! photoslop_codec {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_codec_probe(ptr: i32, len: i32) -> i32 {
+        pub extern "C" fn schist_codec_probe(ptr: i32, len: i32) -> i32 {
             if ptr == 0 || len <= 0 {
                 return 0;
             }
@@ -229,7 +229,7 @@ macro_rules! photoslop_codec {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn photoslop_codec_decode(ptr: i32, len: i32) -> i64 {
+        pub extern "C" fn schist_codec_decode(ptr: i32, len: i32) -> i64 {
             if ptr == 0 || len <= 0 {
                 return 0;
             }

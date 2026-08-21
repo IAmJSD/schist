@@ -148,7 +148,7 @@ pub struct AdjustmentData {
     /// Our canonical parameters as JSON, set when the user edits the layer.
     /// When present it wins over `raw`; when absent the renderer parses
     /// `raw`. The kernel deliberately doesn't know the schema — that lives
-    /// in `photoslop-adjustments`.
+    /// in `schist-adjustments`.
     pub params_json: Option<String>,
 }
 
@@ -224,7 +224,7 @@ pub struct Layer {
     /// from the source whenever the transform changes.
     pub smart: Option<Box<crate::smart::SmartObject>>,
     /// The layer's pixels with `style` rasterized around them, rebuilt by
-    /// `photoslop-layer-fx` whenever the pixels or the style change. This
+    /// `schist-layer-fx` whenever the pixels or the style change. This
     /// is a derived cache: never saved, never compared, and dropped as
     /// soon as it goes stale.
     pub styled: Option<std::sync::Arc<StyledRaster>>,

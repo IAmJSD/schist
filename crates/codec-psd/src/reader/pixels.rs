@@ -1,7 +1,7 @@
 //! Converting decompressed planar channel bytes into tile maps.
 
-use photoslop_color::{Depth, Rgba};
-use photoslop_core::{IntRect, MaskTileMap, TileCoord, TileMap, TILE_SIZE};
+use schist_color::{Depth, Rgba};
+use schist_core::{IntRect, MaskTileMap, TileCoord, TileMap, TILE_SIZE};
 
 /// Convert one decompressed big-endian channel plane to normalized f32.
 ///

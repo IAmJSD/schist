@@ -11,7 +11,7 @@
 
 use crate::util::{at, gaussian_rgba, luma, put};
 use crate::{param, simple_filter};
-use photoslop_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// Smooth weighting of a value's membership of a tonal band.
 ///
@@ -207,6 +207,6 @@ simple_filter!(
     }
 );
 
-pub fn register(registry: &mut photoslop_plugin_api::PluginRegistry) {
+pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(CameraRaw));
 }

@@ -2,10 +2,10 @@
 //! (all/deselect/inverse), and layer operations — with their default
 //! Photoshop keybindings.
 
-use photoslop_core::{
+use schist_core::{
     blit_rgba8, Document, IntRect, Layer, LayerId, LayerKind, LayerPath, TileCoord, TILE_SIZE,
 };
-use photoslop_plugin_api::{
+use schist_plugin_api::{
     ClipboardImage, Command, CommandCtx, CommandPlugin, PluginManifest, PluginRegistry,
 };
 use std::sync::Arc;
@@ -168,7 +168,7 @@ fn copy_pixels(doc: &Document, merged: bool) -> Option<ClipboardImage> {
     let w = bounds.width() as usize;
     let h = bounds.height() as usize;
     let mut rgba = if merged {
-        photoslop_compositor::composite_region_rgba8(doc, bounds)
+        schist_compositor::composite_region_rgba8(doc, bounds)
     } else {
         let layer = doc.active_layer.and_then(|id| doc.tree.find(id))?;
         let LayerKind::Raster(raster) = &layer.kind else {
@@ -279,7 +279,7 @@ fn merge_down(ctx: &mut CommandCtx) {
     if bounds.is_empty() {
         return;
     }
-    let rgba = photoslop_compositor::composite_region_rgba8(&scratch, bounds);
+    let rgba = schist_compositor::composite_region_rgba8(&scratch, bounds);
 
     let mut merged = Layer::new_raster(ctx.doc.tree.find(id).unwrap().name.clone());
     blit_rgba8(
@@ -307,7 +307,7 @@ fn merge_down(ctx: &mut CommandCtx) {
 
 fn merge_visible(ctx: &mut CommandCtx) {
     let canvas = ctx.doc.canvas_rect();
-    let rgba = photoslop_compositor::composite_region_rgba8(ctx.doc, canvas);
+    let rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
     let mut merged = Layer::new_raster("Merged");
     blit_rgba8(
         &mut merged.as_raster_mut().unwrap().tiles,
@@ -533,7 +533,7 @@ impl CommandPlugin for CoreCommandsPlugin {
                     // The layer's current pixels become the untouched
                     // source; what is on the canvas does not change.
                     let so =
-                        photoslop_core::SmartObject::wrap(raster.tiles.clone(), layer.name.clone());
+                        schist_core::SmartObject::wrap(raster.tiles.clone(), layer.name.clone());
                     let mut edit = ctx.doc.begin_edit("Convert to Smart Object");
                     edit.set_smart_object(id, Some(Box::new(so)));
                     edit.commit();
@@ -703,7 +703,7 @@ impl CommandPlugin for CoreCommandsPlugin {
                 // A mask made from a selection reveals only the selection.
                 let selection = ctx.doc.selection.clone();
                 let canvas = ctx.doc.canvas_rect();
-                let mut mask = photoslop_core::LayerMask::new_revealing();
+                let mut mask = schist_core::LayerMask::new_revealing();
                 if !selection.is_empty() {
                     mask.default_value = 0;
                     mask.bounds = canvas;
@@ -800,7 +800,7 @@ fn move_layer_to_end(ctx: &mut CommandCtx, to_front: bool) {
 /// Remove a layer through the builder but get the removed value back
 /// (EditBuilder::remove_layer records the op; we reconstruct the layer from
 /// the document *before* removal).
-fn ctx_remove(edit: &mut photoslop_core::EditBuilder<'_>, id: LayerId) -> Option<Layer> {
+fn ctx_remove(edit: &mut schist_core::EditBuilder<'_>, id: LayerId) -> Option<Layer> {
     let layer = edit.doc().tree.find(id)?.clone();
     if edit.remove_layer(id) {
         let mut l = layer;
@@ -815,7 +815,7 @@ fn ctx_remove(edit: &mut photoslop_core::EditBuilder<'_>, id: LayerId) -> Option
 
 impl PluginManifest for CoreCommandsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.commands-core"
+        "schist.commands-core"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
@@ -826,14 +826,14 @@ impl PluginManifest for CoreCommandsPlugin {
 #[allow(unused_imports)]
 use anyhow as _;
 #[allow(unused_imports)]
-use photoslop_color as _;
+use schist_color as _;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photoslop_color::{Depth, Rgba};
-    use photoslop_core::SelectOp;
-    use photoslop_plugin_api::EditorState;
+    use schist_color::{Depth, Rgba};
+    use schist_core::SelectOp;
+    use schist_plugin_api::EditorState;
 
     fn registry() -> PluginRegistry {
         let mut reg = PluginRegistry::new();
@@ -1001,8 +1001,8 @@ mod tests {
 #[cfg(test)]
 mod m11_tests {
     use super::*;
-    use photoslop_color::Depth;
-    use photoslop_plugin_api::EditorState;
+    use schist_color::Depth;
+    use schist_plugin_api::EditorState;
 
     fn registry() -> PluginRegistry {
         let mut reg = PluginRegistry::new();
@@ -1106,7 +1106,7 @@ mod m11_tests {
         let mut state = EditorState::default();
         doc.selection.select_rect(
             IntRect::from_xywh(0, 0, 8, 8),
-            photoslop_core::SelectOp::Replace,
+            schist_core::SelectOp::Replace,
         );
         run(&reg, "layer.cut_to_new", &mut doc, &mut state);
 
@@ -1131,7 +1131,7 @@ mod m11_tests {
         let mut state = EditorState::default();
         doc.selection.select_rect(
             IntRect::from_xywh(0, 0, 8, 64),
-            photoslop_core::SelectOp::Replace,
+            schist_core::SelectOp::Replace,
         );
         run(&reg, "layer.add_mask", &mut doc, &mut state);
 

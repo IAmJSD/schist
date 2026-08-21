@@ -5,12 +5,12 @@
 //! result goes into a list on the `Document` -- so they share this crate
 //! and the small amount of hit-testing and drawing that goes with it.
 
-use photoslop_color::Rgba;
-use photoslop_core::{
+use schist_color::Rgba;
+use schist_core::{
     Artboard, CountGroup, Document, IntRect, Layer, LayerMask, MaskTileMap, Note, Slice, TileCoord,
     TILE_SIZE,
 };
-use photoslop_plugin_api::{
+use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
 };
@@ -74,14 +74,14 @@ impl RectTool {
             return;
         }
         let mut mask_tiles = MaskTileMap::new();
-        let mut b = photoslop_vector::PathBuilder::new();
+        let mut b = schist_vector::PathBuilder::new();
         if self.ellipse {
             b.ellipse(rect);
         } else {
             b.rect(rect);
         }
         let path = b.build(0.25);
-        let cov = photoslop_vector::rasterize(&path, rect, photoslop_vector::FillRule::NonZero);
+        let cov = schist_vector::rasterize(&path, rect, schist_vector::FillRule::NonZero);
         let w = rect.width() as usize;
         for coord in TileCoord::covering(&rect) {
             let trect = coord.rect();
@@ -129,7 +129,7 @@ impl RectTool {
             }
         }
         let id = layer.id;
-        let path = photoslop_core::LayerPath(vec![doc.tree.layers.len()]);
+        let path = schist_core::LayerPath(vec![doc.tree.layers.len()]);
         let mut edit = doc.begin_edit("Frame");
         edit.insert_layer(path, layer);
         edit.commit();
@@ -432,7 +432,7 @@ pub struct DocToolsPlugin;
 
 impl PluginManifest for DocToolsPlugin {
     fn id(&self) -> &'static str {
-        "photoslop.tools-doc"
+        "schist.tools-doc"
     }
 
     fn register(&self, registry: &mut PluginRegistry) {
