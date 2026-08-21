@@ -8,11 +8,13 @@ mod curve_editor;
 mod dialogs;
 mod gallery;
 mod keymap;
+mod native_menu;
 mod panels;
 mod style_dialog;
 mod ui;
 mod workspace;
 
+use actions::{HideApp, HideOthers, Quit, ShowAll};
 use gpui::{px, size, App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions};
 use schist_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
 use workspace::Workspace;
@@ -117,6 +119,12 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             cx.bind_keys(keymap::build_bindings(&registry));
+            // The macOS application menu, which is reachable with no window
+            // open, so these are global rather than on the workspace.
+            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
+            cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+            cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
             cx.open_window(
                 WindowOptions {

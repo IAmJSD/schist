@@ -6,6 +6,7 @@
 //! are monochrome SVGs from the embedded asset source, tinted by text
 //! color — no emoji.
 
+use crate::actions::AppItem;
 use crate::ui;
 use crate::ui::palette;
 use crate::workspace::{ColorTarget, ContextTarget, LayerDrop, Modal, Popup, Workspace};
@@ -44,7 +45,7 @@ impl<T: Styled> ActiveExt for T {}
 
 // ===== menu bar =====
 
-enum MenuEntry {
+pub(crate) enum MenuEntry {
     /// A registered plugin command (label + keybind resolved from registry).
     Cmd(&'static str),
     /// An app-level item handled by the shell.
@@ -61,86 +62,7 @@ enum MenuEntry {
     Sep,
 }
 
-#[derive(Clone, Copy)]
-enum AppItem {
-    New,
-    Open,
-    Close,
-    Save,
-    SaveAs,
-    Quit,
-    ZoomIn,
-    ZoomOut,
-    ZoomFit,
-    ZoomActual,
-    ImageSize,
-    CanvasSize,
-    FreeTransform,
-    Crop,
-    Plugins,
-    Export,
-    AssignProfile,
-    ConvertProfile,
-    ProofColors,
-    ToggleRulers,
-    ToggleGrid,
-    ToggleGuides,
-    ToggleExtras,
-    ToggleSnap,
-    ClearGuides,
-    ScreenModeItem,
-    Preferences,
-    CheckForUpdates,
-    LayerStyleItem,
-    SelectExpand,
-    SelectContract,
-    SelectBorder,
-    SelectSmooth,
-    SelectFeatherItem,
-    ColorRangeItem,
-    ModeRgb,
-    ModeGrayscale,
-    ModeCmyk,
-    ModeLab,
-    ModeIndexed,
-    AutoTone,
-    AutoContrast,
-    AutoColor,
-    RotateCw,
-    RotateCcw,
-    Rotate180,
-    FlipCanvasH,
-    FlipCanvasV,
-    Trim,
-    /// Apply an adjustment to the pixels rather than adding a layer.
-    ApplyAdjustment(schist_core::AdjustmentKind),
-    StrokeItem,
-    FillItem,
-    ContentAwareFill,
-    TransformSelection,
-    ContentAwareScaleItem,
-    FilterGalleryItem,
-    ManageModels,
-    NewLayerComp,
-    ExportArtboards,
-    ExportSlices,
-    RotateViewCw,
-    RotateViewCcw,
-    ResetView,
-    ClearNotes,
-    ClearCounts,
-    ApplyLayerComp(usize),
-    DeleteLayerComp(usize),
-    LiquifyItem,
-    PuppetWarpItem,
-    VanishingPointItem,
-    PathFill,
-    PathStroke,
-    PathToSelection,
-    PathDelete,
-}
-
-fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
+pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;
     vec![
@@ -558,14 +480,17 @@ fn app_item_checked(ws: &Workspace, item: AppItem) -> Option<bool> {
     })
 }
 
-fn run_app_item(
+pub(crate) fn run_app_item(
     ws: &mut Workspace,
     item: AppItem,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     match item {
-        AppItem::New => ws.new_document(),
+        AppItem::New => {
+            ws.rebuild_tool_groups();
+            ws.new_document();
+        }
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),
         AppItem::Save => ws.save_current(window, cx),
@@ -577,6 +502,7 @@ fn run_app_item(
         AppItem::ZoomActual => {
             ws.zoom = 1.0;
             ws.editor.zoom = 1.0;
+            ws.center();
         }
         AppItem::ImageSize => {
             if let Some(doc) = ws.doc.as_ref() {
