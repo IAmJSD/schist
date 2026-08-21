@@ -6,7 +6,7 @@
 /// Premultiply alpha, so blurs and resamples do not pull colour out of
 /// transparent pixels.
 pub fn premultiply(px: &mut [f32]) {
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0.iter_mut() {
         p[0] *= p[3];
         p[1] *= p[3];
         p[2] *= p[3];
@@ -14,7 +14,7 @@ pub fn premultiply(px: &mut [f32]) {
 }
 
 pub fn unpremultiply(px: &mut [f32]) {
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0.iter_mut() {
         if p[3] > 1e-6 {
             p[0] /= p[3];
             p[1] /= p[3];

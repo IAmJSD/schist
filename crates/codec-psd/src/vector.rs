@@ -46,7 +46,7 @@ pub fn read_vector_mask(raw: &[u8], width: u32, height: u32) -> Option<VectorPat
     let mut current: Option<SubPath> = None;
     let mut remaining = 0usize;
 
-    for chunk in body.chunks_exact(REC) {
+    for chunk in body.as_chunks::<REC>().0 {
         let selector = u16::from_be_bytes([chunk[0], chunk[1]]);
         match selector {
             CLOSED_LENGTH | OPEN_LENGTH => {

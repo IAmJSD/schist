@@ -269,7 +269,7 @@ impl EyedropperTool {
         let px = schist_compositor::composite_region_rgba8(ctx.doc, area);
         let mut acc = [0u32; 3];
         let count = (area.width() * area.height()) as u32;
-        for p in px.chunks_exact(4) {
+        for p in px.as_chunks::<4>().0 {
             acc[0] += p[0] as u32;
             acc[1] += p[1] as u32;
             acc[2] += p[2] as u32;

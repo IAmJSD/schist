@@ -198,7 +198,7 @@ fn maximum_and_minimum_are_opposites() {
     let max = reg.filters().find(|f| f.id() == "filter.maximum").unwrap();
     let min = reg.filters().find(|f| f.id() == "filter.minimum").unwrap();
     let before = image(w, h);
-    let mean = |px: &[f32]| px.chunks_exact(4).map(|p| p[0]).sum::<f32>();
+    let mean = |px: &[f32]| px.as_chunks::<4>().0.iter().map(|p| p[0]).sum::<f32>();
 
     let mut grown = before.clone();
     max.apply(&mut grown, w, h, &FilterValues::defaults(&max.params()));

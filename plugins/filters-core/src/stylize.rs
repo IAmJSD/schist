@@ -131,7 +131,7 @@ simple_filter!(
         // Invert everything above mid grey, which is what over-exposing a
         // negative to light does.
         let _ = (w, h);
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             for c in p.iter_mut().take(3) {
                 if *c > 0.5 {
                     *c = 1.0 - *c;
@@ -236,7 +236,7 @@ simple_filter!(
         let tw = w.div_ceil(count);
         let th = h.div_ceil(count);
         let src = px.to_vec();
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             p[3] = 0.0;
         }
         for ty in 0..h.div_ceil(th) {
@@ -365,7 +365,7 @@ simple_filter!(
         let size = v.get("size").max(2.0) as usize;
         let depth = v.get("depth");
         let src = px.to_vec();
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             p[0] = 0.0;
             p[1] = 0.0;
             p[2] = 0.0;

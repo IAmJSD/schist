@@ -1411,7 +1411,9 @@ impl Workspace {
         let mut hi = [0.0f32; 3];
         for ch in 0..3 {
             let mut vals: Vec<f32> = buf
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| p[3] > 0.0)
                 .map(|p| p[ch])
                 .collect();
@@ -1432,7 +1434,7 @@ impl Workspace {
             lo = [l; 3];
             hi = [h; 3];
         }
-        for p in buf.chunks_exact_mut(4) {
+        for p in buf.as_chunks_mut::<4>().0 {
             if p[3] <= 0.0 {
                 continue;
             }

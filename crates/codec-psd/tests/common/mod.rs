@@ -427,7 +427,7 @@ impl Psd {
             Some(rgba) => {
                 assert_eq!(rgba.len(), (self.width * self.height) as usize * 4);
                 for c in 0..self.channels as usize {
-                    out.extend(rgba.chunks_exact(4).map(|px| px[c.min(3)]));
+                    out.extend(rgba.as_chunks::<4>().0.iter().map(|px| px[c.min(3)]));
                 }
             }
             None => out.extend(vec![0u8; plane_bytes * self.channels as usize]),

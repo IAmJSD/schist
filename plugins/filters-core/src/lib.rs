@@ -94,7 +94,7 @@ macro_rules! simple_filter {
 }
 
 fn premultiply(pixels: &mut [f32]) {
-    for px in pixels.chunks_exact_mut(4) {
+    for px in pixels.as_chunks_mut::<4>().0.iter_mut() {
         px[0] *= px[3];
         px[1] *= px[3];
         px[2] *= px[3];
@@ -102,7 +102,7 @@ fn premultiply(pixels: &mut [f32]) {
 }
 
 fn unpremultiply(pixels: &mut [f32]) {
-    for px in pixels.chunks_exact_mut(4) {
+    for px in pixels.as_chunks_mut::<4>().0.iter_mut() {
         if px[3] > 1e-6 {
             px[0] /= px[3];
             px[1] /= px[3];
@@ -418,7 +418,12 @@ fn unsharp_mask(
         box_pass(&tmp, &mut blurred, width, height, 1, true);
         unpremultiply(&mut blurred);
     }
-    for (px, bl) in pixels.chunks_exact_mut(4).zip(blurred.chunks_exact(4)) {
+    for (px, bl) in pixels
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(blurred.as_chunks::<4>().0.iter())
+    {
         for c in 0..3 {
             let diff = px[c] - bl[c];
             if diff.abs() >= threshold {
@@ -588,7 +593,7 @@ mod tests {
 
     fn flat(w: usize, h: usize, v: f32) -> Vec<f32> {
         let mut buf = vec![0.0f32; w * h * 4];
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0.iter_mut() {
             px.copy_from_slice(&[v, v, v, 1.0]);
         }
         buf
@@ -725,7 +730,7 @@ mod tests {
         AddNoise.apply(&mut b, w, h, &v);
         assert_eq!(a, b, "same input gives the same noise");
         assert_ne!(a, flat(w, h, 0.5), "something changed");
-        for px in a.chunks_exact(4) {
+        for px in a.as_chunks::<4>().0.iter() {
             assert!(px[0] >= 0.0 && px[0] <= 1.0);
             assert!((px[0] - 0.5).abs() <= 0.21, "within amount: {}", px[0]);
         }
@@ -741,7 +746,7 @@ mod tests {
             h,
             &values(&[("amount", 30.0), ("monochrome", 1.0)]),
         );
-        for px in buf.chunks_exact(4) {
+        for px in buf.as_chunks::<4>().0.iter() {
             assert!((px[0] - px[1]).abs() < 1e-6 && (px[1] - px[2]).abs() < 1e-6);
         }
     }

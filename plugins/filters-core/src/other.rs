@@ -16,7 +16,12 @@ simple_filter!(
         // on mid grey. The classic sharpening pre-pass.
         let mut low = px.to_vec();
         gaussian_rgba(&mut low, w, h, v.get("radius"));
-        for (p, l) in px.chunks_exact_mut(4).zip(low.chunks_exact(4)) {
+        for (p, l) in px
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(low.as_chunks::<4>().0.iter())
+        {
             for c in 0..3 {
                 p[c] = (p[c] - l[c] + 0.5).clamp(0.0, 1.0);
             }
@@ -209,7 +214,7 @@ simple_filter!(
         let _ = (w, h);
         let mut acc = [0.0f64; 4];
         let n = (px.len() / 4) as f64;
-        for p in px.chunks_exact(4) {
+        for p in px.as_chunks::<4>().0.iter() {
             for c in 0..4 {
                 acc[c] += p[c] as f64;
             }
@@ -223,7 +228,7 @@ simple_filter!(
             (acc[2] / n) as f32,
             (acc[3] / n) as f32,
         ];
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             p[0] = mean[0];
             p[1] = mean[1];
             p[2] = mean[2];
@@ -295,7 +300,12 @@ simple_filter!(
         let floor = v.get("noise") / 100.0 * 0.25;
         let mut low = px.to_vec();
         gaussian_rgba(&mut low, w, h, v.get("radius"));
-        for (p, l) in px.chunks_exact_mut(4).zip(low.chunks_exact(4)) {
+        for (p, l) in px
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(low.as_chunks::<4>().0.iter())
+        {
             for c in 0..3 {
                 let d = p[c] - l[c];
                 if d.abs() <= floor {
@@ -317,7 +327,12 @@ simple_filter!(
         // Sharpen only where there is already an edge.
         let mut low = px.to_vec();
         gaussian_rgba(&mut low, w, h, 1.5);
-        for (p, l) in px.chunks_exact_mut(4).zip(low.chunks_exact(4)) {
+        for (p, l) in px
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(low.as_chunks::<4>().0.iter())
+        {
             let contrast = (p[0] - l[0])
                 .abs()
                 .max((p[1] - l[1]).abs())

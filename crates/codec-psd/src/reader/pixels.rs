@@ -14,11 +14,15 @@ pub fn plane_to_f32(bytes: &[u8], depth: Depth) -> Vec<f32> {
     match depth {
         Depth::Eight => bytes.iter().map(|&v| v as f32 / 255.0).collect(),
         Depth::Sixteen => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]]) as f32 / 65535.0)
             .collect(),
         Depth::ThirtyTwo => bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
             .collect(),
     }

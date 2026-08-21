@@ -785,7 +785,7 @@ impl Walker<'_> {
         let mut layer = Layer::new_raster(display_name);
         let bounds = raster.bounds.translated(origin.0, origin.1);
         let mut rgba = vec![0u8; raster.coverage.len() * 4];
-        for (px, &cov) in rgba.chunks_exact_mut(4).zip(&raster.coverage) {
+        for (px, &cov) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(&raster.coverage) {
             px[0] = color[0];
             px[1] = color[1];
             px[2] = color[2];
@@ -1566,7 +1566,7 @@ fn rasterize_shape(
     let mut rgba = vec![0u8; w * h * 4];
     fn layer_in(rgba: &mut [u8], cov: Vec<u8>, color: schist_color::Rgba) {
         let c = color.to_u8();
-        for (px, &a) in rgba.chunks_exact_mut(4).zip(&cov) {
+        for (px, &a) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(&cov) {
             if a > 0 {
                 over(px, c, a);
             }

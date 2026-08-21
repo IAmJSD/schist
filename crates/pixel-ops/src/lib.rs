@@ -256,7 +256,12 @@ pub fn blend_span(mode: BlendMode, top: &[f32], bottom: &mut [f32], opacity: f32
 
     #[inline(always)]
     fn run<F: Fn(f32, f32) -> f32>(top: &[f32], bottom: &mut [f32], opacity: f32, blend: F) {
-        for (s, d) in top.chunks_exact(4).zip(bottom.chunks_exact_mut(4)) {
+        for (s, d) in top
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(bottom.as_chunks_mut::<4>().0.iter_mut())
+        {
             let a_s = s[3] * opacity;
             if a_s <= 0.0 {
                 continue;
@@ -342,8 +347,10 @@ pub fn blend_buffer(
 ) {
     debug_assert_eq!(top.len(), bottom.len());
     for (i, (t, b)) in top
-        .chunks_exact(4)
-        .zip(bottom.chunks_exact_mut(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(bottom.as_chunks_mut::<4>().0.iter_mut())
         .enumerate()
     {
         let x = origin.0 + (i % width) as i32;

@@ -273,7 +273,7 @@ impl LoadedPlugin {
             .context("plugin trapped or ran out of fuel")?;
 
         let out = inst.read(pixel_ptr, bytes.len() as i32)?;
-        for (dst, chunk) in pixels.iter_mut().zip(out.chunks_exact(4)) {
+        for (dst, chunk) in pixels.iter_mut().zip(out.as_chunks::<4>().0.iter()) {
             let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             // A plugin returning NaN would poison the document.
             *dst = if v.is_finite() {

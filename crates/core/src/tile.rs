@@ -166,9 +166,9 @@ impl TileBuf {
     /// True if every pixel is fully transparent.
     pub fn is_blank(&self) -> bool {
         match self {
-            TileBuf::U8(d) => d.chunks_exact(4).all(|p| p[3] == 0),
-            TileBuf::U16(d) => d.chunks_exact(4).all(|p| p[3] == 0),
-            TileBuf::F32(d) => d.chunks_exact(4).all(|p| p[3] == 0.0),
+            TileBuf::U8(d) => d.as_chunks::<4>().0.iter().all(|p| p[3] == 0),
+            TileBuf::U16(d) => d.as_chunks::<4>().0.iter().all(|p| p[3] == 0),
+            TileBuf::F32(d) => d.as_chunks::<4>().0.iter().all(|p| p[3] == 0.0),
         }
     }
 }

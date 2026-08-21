@@ -50,7 +50,7 @@ simple_filter!(
         let temp = v.get("temperature") / 100.0;
         let tint = v.get("tint") / 100.0;
         if temp != 0.0 || tint != 0.0 {
-            for p in px.chunks_exact_mut(4) {
+            for p in px.as_chunks_mut::<4>().0.iter_mut() {
                 // Warmer lifts red and drops blue; tint trades green
                 // against magenta, which is the other axis of the
                 // correction.
@@ -69,7 +69,7 @@ simple_filter!(
         let shadows = v.get("shadows") / 100.0;
         let whites = v.get("whites") / 100.0;
         let blacks = v.get("blacks") / 100.0;
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             for c in p.iter_mut().take(3) {
                 *c = (*c * exposure).clamp(0.0, 1.0);
             }
@@ -112,7 +112,12 @@ simple_filter!(
             }
             let mut low = px.to_vec();
             gaussian_rgba(&mut low, w, h, radius);
-            for (p, l) in px.chunks_exact_mut(4).zip(low.chunks_exact(4)) {
+            for (p, l) in px
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(low.as_chunks::<4>().0.iter())
+            {
                 for c in 0..3 {
                     // Midtone-weighted so clarity does not blow the
                     // highlights or crush the shadows.
@@ -126,7 +131,7 @@ simple_filter!(
         let vibrance = v.get("vibrance") / 100.0;
         let saturation = v.get("saturation") / 100.0;
         if vibrance != 0.0 || saturation != 0.0 {
-            for p in px.chunks_exact_mut(4) {
+            for p in px.as_chunks_mut::<4>().0.iter_mut() {
                 let l = luma(p);
                 let max = p[0].max(p[1]).max(p[2]);
                 let min = p[0].min(p[1]).min(p[2]);
@@ -179,7 +184,12 @@ simple_filter!(
         if sharpening > 0.0 {
             let mut low = px.to_vec();
             gaussian_rgba(&mut low, w, h, 1.0);
-            for (p, l) in px.chunks_exact_mut(4).zip(low.chunks_exact(4)) {
+            for (p, l) in px
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(low.as_chunks::<4>().0.iter())
+            {
                 for c in 0..3 {
                     p[c] = (p[c] + (p[c] - l[c]) * sharpening).clamp(0.0, 1.0);
                 }

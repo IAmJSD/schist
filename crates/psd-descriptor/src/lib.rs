@@ -123,8 +123,10 @@ impl<'a> Cur<'a> {
         let count = self.u32()? as usize;
         let bytes = self.take(count.checked_mul(2)?)?;
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         let s = String::from_utf16_lossy(&units);
         Some(s.trim_end_matches('\0').to_string())

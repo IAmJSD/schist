@@ -378,7 +378,7 @@ fn undo_delta_u8(data: &mut [u8]) {
 /// Same, over little-endian u16s.
 fn undo_delta_u16(data: &mut [u8]) {
     let mut acc = 0u16;
-    for pair in data.chunks_exact_mut(2) {
+    for pair in data.as_chunks_mut::<2>().0.iter_mut() {
         acc = acc.wrapping_add(u16::from_le_bytes([pair[0], pair[1]]));
         pair.copy_from_slice(&acc.to_le_bytes());
     }

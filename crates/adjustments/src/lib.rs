@@ -734,7 +734,7 @@ impl Params {
         if matches!(self, Params::Unsupported) {
             return;
         }
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let out = self.apply(Rgba::new(px[0], px[1], px[2], px[3]));
             px[0] = out.r;
             px[1] = out.g;

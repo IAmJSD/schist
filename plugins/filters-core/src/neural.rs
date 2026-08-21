@@ -24,11 +24,11 @@
 fn through_rgb(px: &mut [f32], f: impl FnOnce(&mut Vec<f32>)) {
     let n = px.len() / 4;
     let mut rgb = Vec::with_capacity(n * 3);
-    for p in px.chunks_exact(4) {
+    for p in px.as_chunks::<4>().0.iter() {
         rgb.extend_from_slice(&p[..3]);
     }
     f(&mut rgb);
-    for (i, p) in px.chunks_exact_mut(4).enumerate() {
+    for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         p[..3].copy_from_slice(&rgb[i * 3..i * 3 + 3]);
     }
 }
@@ -164,7 +164,12 @@ simple_filter!(
         // A gentle ringing clean-up inside the blocks.
         let mut low = px.to_vec();
         gaussian_rgba(&mut low, w, h, 0.8);
-        for (p, l) in px.chunks_exact_mut(4).zip(low.chunks_exact(4)) {
+        for (p, l) in px
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(low.as_chunks::<4>().0.iter())
+        {
             for c in 0..3 {
                 if (p[c] - l[c]).abs() < 0.05 {
                     p[c] += (l[c] - p[c]) * strength * 0.5;
@@ -190,7 +195,7 @@ simple_filter!(
         let _ = (w, h);
         let warmth = v.get("warmth") / 100.0;
         let strength = v.get("strength") / 100.0;
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             let l = luma(p);
             // Shadows towards blue, highlights towards amber.
             let t = l * 2.0 - 1.0;
@@ -352,7 +357,7 @@ impl FilterPlugin for StyleTransfer {
 fn colour_shift(px: &mut [f32], hue: f32, strength: f32) {
     let n = (px.len() / 4).max(1) as f32;
     let (mut ma, mut mb) = (0.0f32, 0.0f32);
-    for p in px.chunks_exact(4) {
+    for p in px.as_chunks::<4>().0.iter() {
         let l = luma(p);
         ma += p[0] - l;
         mb += p[2] - l;
@@ -360,7 +365,7 @@ fn colour_shift(px: &mut [f32], hue: f32, strength: f32) {
     ma /= n;
     mb /= n;
     let (ta, tb) = (hue.cos() * 0.18, hue.sin() * 0.18);
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0.iter_mut() {
         let l = luma(p);
         let (ca, cb) = (p[0] - l, p[2] - l);
         let target = [
@@ -399,7 +404,7 @@ simple_filter!(
         // Mean and spread of luminance, and mean chroma.
         let n = (px.len() / 4).max(1) as f32;
         let (mut mean_l, mut mean_a, mut mean_b) = (0.0f32, 0.0f32, 0.0f32);
-        for p in px.chunks_exact(4) {
+        for p in px.as_chunks::<4>().0.iter() {
             let l = luma(p);
             mean_l += l;
             mean_a += p[0] - l;
@@ -409,14 +414,14 @@ simple_filter!(
         mean_a /= n;
         mean_b /= n;
         let mut var_l = 0.0f32;
-        for p in px.chunks_exact(4) {
+        for p in px.as_chunks::<4>().0.iter() {
             var_l += (luma(p) - mean_l).powi(2);
         }
         let sd_l = (var_l / n).sqrt().max(1e-4);
         // The target chroma direction.
         let (ta, tb) = (hue.cos() * 0.18, hue.sin() * 0.18);
         let gain = 1.0 + match_contrast * (0.25 / sd_l - 1.0).clamp(-0.5, 0.5);
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             let l = luma(p);
             let (ca, cb) = (p[0] - l, p[2] - l);
             let l2 = mean_l + (l - mean_l) * gain;

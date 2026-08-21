@@ -193,7 +193,12 @@ impl ColorTransform {
         }
         // Extended-range output can exceed 0..1; clamp for display and
         // restore alpha, which a matrix transform may have touched.
-        for (out, inp) in pixels.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        for (out, inp) in pixels
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src.as_chunks::<4>().0)
+        {
             out[0] = out[0].clamp(0.0, 1.0);
             out[1] = out[1].clamp(0.0, 1.0);
             out[2] = out[2].clamp(0.0, 1.0);
@@ -291,7 +296,7 @@ pub fn dither_to_depth(pixels: &mut [f32], width: usize, levels: u32) {
         [15.0, 7.0, 13.0, 5.0],
     ];
     let steps = (levels - 1) as f32;
-    for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+    for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let x = i % width;
         let y = i / width;
         // Centre the threshold on zero so dithering doesn't shift levels.
@@ -437,7 +442,7 @@ mod tests {
         let width = 4;
         let mut pixels: Vec<f32> = (0..16).flat_map(|_| [0.5f32, 0.5, 0.5, 1.0]).collect();
         dither_to_depth(&mut pixels, width, 4);
-        let values: Vec<f32> = pixels.chunks_exact(4).map(|p| p[0]).collect();
+        let values: Vec<f32> = pixels.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
         let distinct: Vec<f32> = {
             let mut v = values.clone();
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());

@@ -347,7 +347,9 @@ fn parse_unicode_name(data: &[u8]) -> Option<String> {
     let count = c.u32().ok()? as usize;
     let bytes = c.take(count.checked_mul(2)?).ok()?;
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u16::from_be_bytes([p[0], p[1]]))
         .collect();
     Some(String::from_utf16_lossy(&units))

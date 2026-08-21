@@ -186,7 +186,7 @@ fn composite_layers(
             // layers to base alpha, then blend the lot with base's mode.
             let mut group_buf = scratch.take();
             render_single_layer(doc, layer, coord, &mut group_buf, 1.0, scratch);
-            let base_alpha: Vec<f32> = group_buf.chunks_exact(4).map(|p| p[3]).collect();
+            let base_alpha: Vec<f32> = group_buf.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
             for clip_layer in &layers[i + 1..clip_end] {
                 if !clip_layer.visible {
                     continue;
