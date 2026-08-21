@@ -30,10 +30,17 @@ u32  class tag         "Prsn" (persona/document); other values exist
                        for presets, brushes, macros…
 "#Inf"                 info block:
   u64 fat_offset       → first FAT block
-  u64 thumb_offset     → "\xFF\xFF\xFF\xFF Thmb" when a thumbnail exists
+  u64 thumb_offset     → thumbnail block when nonzero
   u64 length, u64 ?, u64 creation_date, u32 revision, u32 ?
 version > 7: "Prot" + u32 protocol revision
 ```
+
+**Thumbnail.** At `thumb_offset`: `FF FF FF FF` `"Thmb"` · u32 count ·
+u32 block size, then a 13-byte header (`u32 ?, u32 0, u32 png_size,
+u8 ?`) and a PNG — the writing app's own 512×512 render of the
+document. `Archive::thumbnail()` carves it; the codec tests use it as
+ground truth for shape geometry, comparing what we rebuild against what
+Affinity actually drew.
 
 **FAT chain.** At `fat_offset`, blocks tagged `#FAT`, `#FT2`, `#FT3` or
 `#FT4` (successive revisions of the same structure), linked by a
@@ -124,7 +131,9 @@ a container; treat as group), `Grup` (group), `Rstr` (pixels), `ImgN`
 false = a group isolates (default passthrough) · `Xfrm` f64[6]
 **row-major** 2×3 transform `[sx kx tx ky sy ty]` · `BitR` i32[4]
 on-canvas pixel rect (Photo; `i32::MIN+1` sentinels when unset) ·
-`FiEf` effects · `AdCh` mask/adjustment children.
+`FiEf` effects · `AdCh` mask/adjustment children. Transforms are full
+affine: import composes them exactly for vector layers and resamples
+rasters and masks through rotation/shear.
 
 **Text** (`TxtA` artistic / `TxtF` frame): no pixels, but the full
 model. `StSt` (story) → `Blok` blocks → `Glyp` (`GStr`) holds the
@@ -144,30 +153,63 @@ tool's `PsTx` block so the layer stays editable.
 space its children's transforms (and `BitR` rects) live in; composing
 down the tree is what places deeply-nested tiles correctly.
 
-**Shapes** (`ShpN`): the layer's `ShpB` `f64[4]` bounds (through the
-composed transform) plus a `Shpe` class giving the kind —
-"ShNR"/"ShRR" rounded rectangles carry `ShCR` per-corner radii
-(fractions of half the shorter side unless `AbSz`), "ShpE" is an
-ellipse; stars, hearts, polygons and friends have their own tags and
-parameters. Fill comes from `BFFl` (a fill descriptor: `FilS` solid
-with a colour, `FilN` none, `FilG` gradient), stroke colour from
-`LIFl` and width from `LILn` → `LDeL.Wght`. A gradient holds stop
-positions (`Grad.Posn`), stop colours (`Cols`), a linear/radial `Type`
-enum, and `FDeX` — a 2×3 transform mapping the unit gradient axis into
-path space — which hangs off the *descriptor* in newer files and the
-fill itself in older ones. Import rebuilds rectangles/rounded
-rectangles/ellipses as live vector layers (editable, re-rasterized by
-the app); gradient-filled ones keep rasterized pixels only.
+**Shapes** (`ShpN`): the layer's `ShpB` `f64[4]` local bounds plus a
+`Shpe` class giving the kind and parameters; geometry is built in the
+local box and pushed through the composed transform. Shape classes
+repeat a tag across their base-class sections (a base default followed
+by the derived value — `ShSt` carries `IRad` 0.5 then 0.382); the
+*last* occurrence is the one that renders. Kinds with rebuilt geometry,
+all verified against the files' own thumbnails:
+
+- "ShNR"/"ShRR" rectangles: `ShCR` per-corner radii (fractions of half
+  the shorter side unless `AbSz`), but a radius only applies where the
+  `CTyp` corner-type array says rounded (enum 0) — Designer's plain
+  rectangle keeps default radii in `ShCR` with no `CTyp` and renders
+  sharp.
+- "ShpE"/"ShCE" ellipse.
+- "ShSt" star: `Pnts` points alternating between the inscribed ellipse
+  and `IRad` of it, first point up; `CrvL`/`CrvR` bend the edges (only
+  straight-edged stars are rebuilt).
+- "ShSS" square star: `Side` rectangular arms, the first pointing
+  down. Arms are the middle `COut` of each edge of the regular
+  `Side`-gon inscribed in the ellipse — flat tips at the polygon's
+  apothem `cos(π/N)`, half-width `COut·sin(π/N)`, adjacent arms
+  meeting in a V notch at `COut` of the radius.
+- "ShCl" cloud: `Bubl` circular arcs bulging out around the inscribed
+  ellipse, meeting at `IRad` of the radius.
+- "ShHt" heart: two lobes over a point; `Sprd` deepens the notch
+  (proportions traced from the thumbnail at the default 0.2).
+
+Anything else (polygons, cogs, callouts…) is reported, not guessed.
+
+Two paint conventions coexist. Photo 2 hangs *descriptors* off the
+layer — `BFFl` fill, `LIFl` line fill, `LILn` line style, the class
+behind `FDeF` — while Designer 1.x stores the classes directly: `BFil`
+fill, `PFil` pen/line fill, `LSty` line style. The fill class is
+`FilS` solid (a `Colr` colour), `FilN` none, or `FilG` gradient;
+stroke width is `LDeL.Wght`, and `LDeL`'s 12-byte `Data` record is
+`f64 miter · u8 cap · u8 join · u8 style · u8 0` where style 0 means
+no line is drawn (1 solid, 2 dashed, 3 textured/brush — imported as
+solid). A gradient holds stop positions (`Grad.Posn`), stop colours
+(`Cols`), a linear/radial `Type` enum, and `FDeX` — a 2×3 transform
+mapping the unit gradient axis into path space — which hangs off the
+*descriptor* in newer files and the fill itself in older ones. Import
+rebuilds shapes as live vector layers (editable, re-rasterized by the
+app); gradient-filled ones keep rasterized pixels only.
 
 **Free paths** (`PCrv`): `Crvs` → "PCvD" → `Data`, an untagged record
 holding a subpath count then per subpath a closed flag and an array of
-18-byte records — f64 x, f64 y, and a marker pair: (1,0) control₁,
-(0,1) control₂, (0,2) on-curve endpoint. Each cubic segment starts at
-the previous endpoint; a closed path's stream begins mid-cycle, its
-first point being the final endpoint. Coordinates are in a local
-design space (`CvsB` bounds) mapped by the layer transform. Imported
-as live vector layers, even-odd filled so traced outlines keep their
-holes.
+18-byte records — f64 x, f64 y, and a marker pair classifying the
+record: **(1,0) and (2,0) are on-curve points** (terminal and interior
+respectively), **(0,1) is the previous point's outgoing control** and
+**(0,2) the next point's incoming control**. A closed path's trailing
+controls belong to the segment joining back to the first point. (An
+earlier reading — (1,0) control₁ · (0,1) control₂ · (0,2) endpoint —
+looked plausible on dense pen strokes because every point lands near
+its own controls, but it drops single-segment paths, whose stream is
+just `(1,0) (0,1) (0,2) (1,0)`.) Coordinates are in a local design
+space (`CvsB` bounds) mapped by the layer transform. Imported as live
+vector layers, even-odd filled so traced outlines keep their holes.
 
 **Curves adjustments** (`CrRA`): `AdjP` → "CrvP" with one `Spln` per
 channel (`Mast`, `C1Sp`–`C5Sp`): `Cnt` control points, `Vals` as xs
@@ -181,10 +223,10 @@ nothing; a genuine warp would be reported.
 
 **Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
 a full layer node with its own `Xfrm` and a single-channel bitmap
-(format 6) where white reveals. A layer can carry several (they
-multiply); adjustment layers (`CrRA` curves, etc.) nest their own
-masks the same way. Import attaches the first as a real, editable
-layer mask.
+(format 6) where white reveals. A layer can carry several; the visible
+ones multiply, and import multiplies them into one real, editable
+layer mask. Adjustment layers (`CrRA` curves, etc.) nest their own
+masks the same way.
 
 **Blend enum**, read from `layer_mode.afdesign` (a file with one layer
 per mode). The *(id, version)* pair is the key — later modes reuse ids
@@ -233,20 +275,23 @@ were recovered, and adds the preview as a hidden reference layer.
 
 ## What's still unknown / to do
 
-- Multiple masks on one layer are combined by taking only the first;
-  they should multiply. Mask (and raster) rotation/shear is dropped.
 - Adjustments beyond curves (levels, HSL, recolour…): same `AdjP`
-  pattern, not yet mapped.
+  pattern, not yet mapped — no corpus file to read the field layouts
+  from.
 - Non-identity `FlRN` filter warps (none seen in the corpora).
-- Shapes beyond rectangles/rounded rectangles/ellipses (stars, hearts,
-  polygons…) are parsed but not yet turned into geometry.
+- Shapes beyond the kinds above (polygons, cogs, callouts, curved-edge
+  stars…) are parsed but not turned into geometry; a fixture drawn
+  with each tool (plus its thumbnail) is all it takes to add one.
 - Text: single style per layer (first run wins), no per-run styling,
   effects on text (drop shadows) not yet applied, `TxtF` frame text
   gets artistic-text treatment.
 - Adjustment parameters, ICC profiles (`Prof` on DyBm holds the raw
   ICC blob): parsed but not yet interpreted.
-- `Xfrm` rotation/shear on rasters is dropped (axis-aligned scale and
-  translation only) — full affine resampling on import would fix it.
+- Rotated/sheared *text* still imports axis-aligned (the text engine
+  lays out horizontally); vectors and rasters carry full affine.
+- The `CTyp` corner-type enum: 0 is rounded; the other values
+  (straight/concave/cutout in the UI) haven't been observed and
+  import as sharp.
 
 `cargo run -p schist-codec-affinity --example afdump -- file.afphoto`
 prints any file's container listing and full object graph.

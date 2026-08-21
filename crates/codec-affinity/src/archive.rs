@@ -36,6 +36,7 @@ const fn tag(name: &[u8; 4]) -> u32 {
 
 const TAG_INF: u32 = tag(b"#Inf");
 const TAG_PROT: u32 = tag(b"Prot");
+const TAG_THMB: u32 = tag(b"Thmb");
 const TAG_FIL: u32 = tag(b"#Fil");
 const TAG_FAT: u32 = tag(b"#FAT");
 const TAG_FT2: u32 = tag(b"#FT2");
@@ -123,6 +124,7 @@ pub struct Archive<'a> {
     pub version: u16,
     pub class_tag: u32,
     pub creation_date: u64,
+    thumb_offset: u64,
     /// Name → id, as introduced by flag-0 entries.
     names: Vec<(String, u32)>,
     entries: Vec<Entry>,
@@ -152,7 +154,7 @@ impl<'a> Archive<'a> {
             return Err(malformed("missing #Inf block"));
         }
         let fat_offset = c.u64()?;
-        let _thumb_offset = c.u64()?;
+        let thumb_offset = c.u64()?;
         let _length = c.u64()?;
         let _unknown = c.u64()?;
         let creation_date = c.u64()?;
@@ -170,6 +172,7 @@ impl<'a> Archive<'a> {
             version,
             class_tag,
             creation_date,
+            thumb_offset,
             names: Vec::new(),
             entries: Vec::new(),
         };
@@ -270,6 +273,32 @@ impl<'a> Archive<'a> {
             offset = next_offset;
         }
         Ok(())
+    }
+
+    /// The embedded document thumbnail: a PNG the writing app rendered,
+    /// so it doubles as ground truth for what the document looks like.
+    ///
+    /// Layout at the #Inf block's thumbnail offset:
+    /// `FF FF FF FF "Thmb" · u32 count · u32 block_size`, then per
+    /// thumbnail a small header (`u32 ?, u32 ?, u32 png_size, u8 ?`)
+    /// and the PNG bytes.
+    pub fn thumbnail(&self) -> Option<&'a [u8]> {
+        if self.thumb_offset == 0 {
+            return None;
+        }
+        let mut c = Cursor::new(self.bytes);
+        c.seek(self.thumb_offset).ok()?;
+        if c.u32().ok()? != 0xFFFF_FFFF || c.tag().ok()? != TAG_THMB {
+            return None;
+        }
+        let _count = c.u32().ok()?;
+        let block_size = c.u32().ok()? as usize;
+        let block = c.take(block_size).ok()?;
+        // Header sizes have not been stable across writers; the PNG
+        // signature inside the (size-bounded) block is.
+        let sig = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let start = block.windows(sig.len()).position(|w| w == sig)?;
+        Some(&block[start..])
     }
 
     /// Names of every entry ever stored, in first-appearance order.

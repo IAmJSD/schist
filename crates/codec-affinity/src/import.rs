@@ -97,6 +97,31 @@ fn enum_of(node: &Node, name: &[u8; 4]) -> Option<u16> {
     }
 }
 
+fn u16_of(node: &Node, name: &[u8; 4]) -> Option<u16> {
+    match node.field(name)? {
+        Value::U16(v) => Some(*v),
+        Value::U32(v) => u16::try_from(*v).ok(),
+        Value::I32(v) => u16::try_from(*v).ok(),
+        _ => None,
+    }
+}
+
+/// The *last* occurrence of a float field. Shape classes repeat a tag
+/// across their base-class sections (a base default, then the derived
+/// value); the last one is the one that renders.
+fn f32_last(node: &Node, name: &[u8; 4]) -> Option<f32> {
+    let t = graph::tag(name);
+    node.fields
+        .iter()
+        .rev()
+        .find(|(ft, _)| *ft == t)
+        .and_then(|(_, v)| match v {
+            Value::F32(f) => Some(*f),
+            Value::F64(f) => Some(*f as f32),
+            _ => None,
+        })
+}
+
 fn str_of<'g>(node: &'g Node, name: &[u8; 4]) -> Option<&'g str> {
     match node.field(name)? {
         Value::Str(s) => Some(s),
@@ -143,7 +168,7 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
         archive,
         graph,
         report: &mut report,
-        ctm: [1.0, 1.0, -org_x, -org_y],
+        ctm: Mat::translation(-org_x, -org_y),
     };
 
     if spreads.len() > 1 {
@@ -181,32 +206,100 @@ struct Walker<'a> {
     archive: &'a Archive<'a>,
     graph: &'a Graph,
     report: &'a mut ImportReport,
-    /// Current transform: (sx, sy, tx, ty), the composition of every
-    /// ancestor group's transform plus the canvas origin. Rotation and
-    /// shear are dropped (with a warning) — axis-aligned import.
-    ctm: [f64; 4],
+    /// Current transform: the composition of every ancestor group's
+    /// transform plus the canvas origin. Full affine — vector layers
+    /// carry rotation/shear exactly, rasters resample through it.
+    ctm: Mat,
 }
 
-/// Compose an axis-aligned CTM with a node's 2×3 row-major transform.
-fn compose(ctm: [f64; 4], xf: [f64; 6]) -> [f64; 4] {
-    [
-        ctm[0] * xf[0],
-        ctm[1] * xf[4],
-        ctm[0] * xf[2] + ctm[2],
-        ctm[1] * xf[5] + ctm[3],
-    ]
+/// Row-major 2×3 affine transform — exactly the layout of an Affinity
+/// `Xfrm`: `[m00 m01 m02 m10 m11 m12]` maps (x, y) to
+/// (m00·x + m01·y + m02, m10·x + m11·y + m12).
+#[derive(Debug, Clone, Copy)]
+struct Mat([f64; 6]);
+
+impl Mat {
+    fn translation(tx: f64, ty: f64) -> Mat {
+        Mat([1.0, 0.0, tx, 0.0, 1.0, ty])
+    }
+
+    /// `self` applied after `other` (the matrix product self · other).
+    fn then(&self, o: &Mat) -> Mat {
+        let (a, b) = (&self.0, &o.0);
+        Mat([
+            a[0] * b[0] + a[1] * b[3],
+            a[0] * b[1] + a[1] * b[4],
+            a[0] * b[2] + a[1] * b[5] + a[2],
+            a[3] * b[0] + a[4] * b[3],
+            a[3] * b[1] + a[4] * b[4],
+            a[3] * b[2] + a[4] * b[5] + a[5],
+        ])
+    }
+
+    fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        let m = &self.0;
+        (m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5])
+    }
+
+    /// The linear part only — how direction vectors (Bezier handles)
+    /// transform.
+    fn apply_vec(&self, x: f64, y: f64) -> (f64, f64) {
+        let m = &self.0;
+        (m[0] * x + m[1] * y, m[3] * x + m[4] * y)
+    }
+
+    /// Length of the image of a unit x / y vector.
+    fn scale_x(&self) -> f64 {
+        self.0[0].hypot(self.0[3])
+    }
+    fn scale_y(&self) -> f64 {
+        self.0[1].hypot(self.0[4])
+    }
+
+    /// No rotation or shear: axis-aligned scale and translation only.
+    fn axis_aligned(&self) -> bool {
+        let m = &self.0;
+        let scale = m[0].abs().max(m[1].abs()).max(m[3].abs()).max(m[4].abs());
+        m[1].abs() <= scale * 1e-9 && m[3].abs() <= scale * 1e-9
+    }
+
+    fn invert(&self) -> Option<Mat> {
+        let m = &self.0;
+        let det = m[0] * m[4] - m[1] * m[3];
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let (a, b, c, d) = (m[4] / det, -m[1] / det, -m[3] / det, m[0] / det);
+        Some(Mat([
+            a,
+            b,
+            -(a * m[2] + b * m[5]),
+            c,
+            d,
+            -(c * m[2] + d * m[5]),
+        ]))
+    }
+}
+
+/// Push every anchor — points and handles — through an affine transform.
+fn transform_path(path: &mut schist_core::VectorPath, m: &Mat) {
+    for sub in &mut path.subpaths {
+        for a in &mut sub.anchors {
+            let p = m.apply(a.point.0 as f64, a.point.1 as f64);
+            let hi = m.apply_vec(a.handle_in.0 as f64, a.handle_in.1 as f64);
+            let ho = m.apply_vec(a.handle_out.0 as f64, a.handle_out.1 as f64);
+            a.point = (p.0 as f32, p.1 as f32);
+            a.handle_in = (hi.0 as f32, hi.1 as f32);
+            a.handle_out = (ho.0 as f32, ho.1 as f32);
+        }
+    }
 }
 
 impl Walker<'_> {
     /// This node's transform composed onto the current transform.
-    fn node_ctm(&self, node: &Node, what: &str) -> [f64; 4] {
+    fn node_ctm(&self, node: &Node) -> Mat {
         match f64s(node, b"Xfrm").and_then(|v| v.first_chunk::<6>().copied()) {
-            Some(xf) => {
-                if xf[1] != 0.0 || xf[3] != 0.0 {
-                    log::warn!("affinity: {what} is rotated/sheared; importing axis-aligned");
-                }
-                compose(self.ctm, xf)
-            }
+            Some(xf) => self.ctm.then(&Mat(xf)),
             None => self.ctm,
         }
     }
@@ -246,7 +339,7 @@ impl Walker<'_> {
                 let mut group = Layer::new_group(display);
                 // Children live in the group's coordinate space.
                 let saved = self.ctm;
-                self.ctm = self.node_ctm(node, "group");
+                self.ctm = self.node_ctm(node);
                 let children: Vec<Layer> = self
                     .graph
                     .children(node, b"Chld")
@@ -349,61 +442,34 @@ impl Walker<'_> {
 
     /// Rebuild a shape layer as a live vector layer.
     ///
-    /// Supported geometry: rectangles with per-corner rounding ("ShNR" /
-    /// "ShRR", radii in `ShCR` as fractions of half the shorter side
-    /// unless `AbSz`) and ellipses ("ShCE"), over the layer's `ShpB`
-    /// bounds through its transform. Fill from `BFFl`, stroke from
-    /// `LIFl`/`LILn`. Anything fancier (stars, hearts, polygons) is
-    /// reported instead of guessed.
+    /// Geometry comes from the `Shpe` class over the layer's `ShpB`
+    /// local bounds, built in local space and pushed through the full
+    /// layer transform — so rotated and sheared shapes import exactly.
+    /// Kinds whose geometry we can't rebuild are reported, not guessed.
     fn shape_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
         let graph = self.graph;
         let shpe = graph.child(node, b"Shpe")?;
         let b = f64s(node, b"ShpB").filter(|b| b.len() == 4)?;
-        let c = self.node_ctm(node, name);
-        let (sx, sy) = (c[0].abs(), c[1].abs());
-        let x0 = (b[0] * c[0] + c[2]) as f32;
-        let y0 = (b[1] * c[1] + c[3]) as f32;
-        let x1 = (b[2] * c[0] + c[2]) as f32;
-        let y1 = (b[3] * c[1] + c[3]) as f32;
-        let (x0, x1) = (x0.min(x1), x0.max(x1));
-        let (y0, y1) = (y0.min(y1), y0.max(y1));
-        let (w, h) = (x1 - x0, y1 - y0);
-        if w < 0.5 || h < 0.5 || w > 1e6 || h > 1e6 {
+        let ctm = self.node_ctm(node);
+        let (x0, y0) = (b[0].min(b[2]) as f32, b[1].min(b[3]) as f32);
+        let (x1, y1) = (b[0].max(b[2]) as f32, b[1].max(b[3]) as f32);
+        let (dw, dh) = (
+            (x1 - x0) as f64 * ctm.scale_x(),
+            (y1 - y0) as f64 * ctm.scale_y(),
+        );
+        if dw < 0.5 || dh < 0.5 || dw > 1e6 || dh > 1e6 {
             return None;
         }
 
-        let square =
-            matches!(shpe.field(b"ShCR"), Some(Value::VecF(r)) if r.iter().all(|v| *v == 0.0));
-        let kind_name = match &shpe.type_tag().to_be_bytes() {
-            b"ShNR" | b"ShRR" if square => "Rectangle",
-            b"ShNR" | b"ShRR" => "Rounded Rectangle",
-            b"ShCE" | b"ShpE" => "Ellipse",
-            _ => "Shape",
-        };
+        let (kind_name, anchors) = shape_geometry(shpe, x0, y0, x1, y1)?;
         let name = if name.is_empty() { kind_name } else { name };
-        let anchors = match &shpe.type_tag().to_be_bytes() {
-            b"ShNR" | b"ShRR" => {
-                let mut radius = match shpe.field(b"ShCR") {
-                    Some(Value::VecF(r)) if !r.is_empty() => r[0],
-                    _ => 0.0,
-                };
-                if !matches!(shpe.field(b"AbSz"), Some(Value::Bool(true))) {
-                    radius *= w.min(h) * 0.5;
-                } else {
-                    radius *= ((sx + sy) / 2.0) as f32;
-                }
-                rounded_rect_anchors(x0, y0, x1, y1, radius.clamp(0.0, w.min(h) * 0.5))
-            }
-            b"ShCE" | b"ShpE" => ellipse_anchors(x0, y0, x1, y1),
-            _ => return None,
-        };
-
         let mut path = schist_core::VectorPath::new(name);
         path.subpaths.push(schist_core::SubPath {
             anchors,
             closed: true,
         });
-        self.vector_layer(node, name, path, false)
+        transform_path(&mut path, &ctm);
+        self.vector_layer(node, name, path, false, &ctm)
     }
 
     /// Rebuild a free path layer ("PCrv") from its curve data.
@@ -419,8 +485,11 @@ impl Walker<'_> {
             .child(graph.child(node, b"Crvs")?, b"Data")
             .filter(|d| !d.fields.is_empty())?;
 
-        let c = self.node_ctm(node, name);
-        let to_doc = |x: f64, y: f64| ((x * c[0] + c[2]) as f32, (y * c[1] + c[3]) as f32);
+        let ctm = self.node_ctm(node);
+        let to_doc = |x: f64, y: f64| {
+            let (px, py) = ctm.apply(x, y);
+            (px as f32, py as f32)
+        };
 
         let mut path = schist_core::VectorPath::new(name);
         let mut closed = true;
@@ -452,45 +521,65 @@ impl Walker<'_> {
         }
         // Traced outlines carry holes as counter-subpaths; even-odd
         // renders them correctly regardless of winding.
-        self.vector_layer(node, name, path, true)
+        self.vector_layer(node, name, path, true, &ctm)
     }
 
     /// Shared tail for vector layers: fill/stroke lookup, live shape,
     /// rasterization.
+    ///
+    /// Two paint conventions coexist. Photo 2 hangs *descriptors* off
+    /// the layer (`BFFl` fill, `LIFl` line fill, `LILn` line style),
+    /// each wrapping the actual class behind `FDeF`. Designer 1.x
+    /// stores the classes directly: `BFil` (fill), `PFil` (pen/line
+    /// fill) and `LSty` (line style). A line style's 12-byte `Data`
+    /// record ends `… cap join style 0`; style 0 means no line is
+    /// drawn (1 solid, 2 dashed, 3 textured — both render as solid).
     fn vector_layer(
         &mut self,
         node: &Node,
         name: &str,
         path: schist_core::VectorPath,
         even_odd: bool,
+        ctm: &Mat,
     ) -> Option<Layer> {
         use schist_color::Rgba;
         let graph = self.graph;
-        let c = self.node_ctm(node, name);
-        let fill_desc = graph.children(node, b"BFFl");
-        let fill = fill_desc.first().and_then(|f| descriptor_color(graph, f));
+        let fill_node = graph
+            .children(node, b"BFFl")
+            .first()
+            .and_then(|f| graph.child(f, b"FDeF"))
+            .or_else(|| graph.child(node, b"BFil"));
+        let fill = fill_node.and_then(|f| fill_color(graph, f));
         let mut gradient = match fill {
             Some(_) => None,
-            None => fill_desc
-                .first()
-                .and_then(|f| descriptor_gradient(graph, f)),
+            None => {
+                let host = graph.children(node, b"BFFl").first().copied();
+                fill_node.and_then(|f| gradient_fill(graph, f, host))
+            }
         };
         // Gradient axis into document space.
         if let Some(g) = &mut gradient {
-            let map = |p: (f64, f64)| (p.0 * c[0] + c[2], p.1 * c[1] + c[3]);
-            g.start = map(g.start);
-            g.end = map(g.end);
+            g.start = ctm.apply(g.start.0, g.start.1);
+            g.end = ctm.apply(g.end.0, g.end.1);
         }
         let stroke_color = graph
             .children(node, b"LIFl")
             .first()
-            .and_then(|f| descriptor_color(graph, f));
+            .and_then(|f| graph.child(f, b"FDeF"))
+            .or_else(|| graph.child(node, b"PFil"))
+            .and_then(|f| fill_color(graph, f));
         let stroke_width = graph
             .children(node, b"LILn")
             .first()
+            .copied()
+            .or_else(|| graph.child(node, b"LSty"))
             .and_then(|l| graph.child(l, b"LDeL"))
+            .filter(|s| match s.field(b"Data") {
+                Some(Value::Curve(d)) => d.get(10).is_none_or(|style| *style != 0),
+                _ => true,
+            })
             .and_then(|s| match s.field(b"Wght") {
-                Some(Value::F64(v)) => Some((*v * (c[0].abs() + c[1].abs()) / 2.0) as f32),
+                Some(Value::F64(v)) => Some((*v * (ctm.scale_x() + ctm.scale_y()) / 2.0) as f32),
                 _ => None,
             })
             .unwrap_or(0.0);
@@ -604,9 +693,11 @@ impl Walker<'_> {
         Some(layer)
     }
 
-    /// Attach the layer's mask, if it carries one: a "MRst" (mask
-    /// raster) node in the `AdCh` list, holding a single-channel bitmap
-    /// where white reveals. It becomes a real, editable [`LayerMask`].
+    /// Attach the layer's masks: "MRst" (mask raster) nodes in the
+    /// `AdCh` list, each a full layer node with its own transform and a
+    /// single-channel bitmap where white reveals. Several masks
+    /// multiply, exactly as Affinity stacks them; the product becomes
+    /// one real, editable [`LayerMask`].
     fn apply_mask(&mut self, node: &Node, layer: &mut Layer) {
         let masks: Vec<&Node> = self
             .graph
@@ -614,48 +705,79 @@ impl Walker<'_> {
             .into_iter()
             .filter(|n| n.types.iter().any(|(t, _)| *t == graph::tag(b"MRst")))
             .collect();
-        let Some(&mask_node) = masks.first() else {
+        if masks.is_empty() {
             return;
-        };
-        if masks.len() > 1 {
-            log::warn!(
-                "affinity: layer {:?} has {} masks; applying the first",
-                layer.name,
-                masks.len()
-            );
         }
-        let Some(bitm) = self.graph.child(mask_node, b"Bitm") else {
-            return;
+        // A lone mask imports whole, keeping its enabled toggle; of
+        // several, only the visible ones join the product.
+        let visible: Vec<&Node> = masks
+            .iter()
+            .copied()
+            .filter(|m| bool_of(m, b"Visi").unwrap_or(true))
+            .collect();
+        let solo = masks.len() == 1;
+        let used: Vec<&Node> = if solo || visible.is_empty() {
+            vec![masks[0]]
+        } else {
+            visible
         };
-        let gray = match self.decode_bitmap(bitm) {
-            Ok(g) => g,
-            Err(e) => {
-                log::warn!("affinity: mask of {:?}: {e}", layer.name);
-                self.report
-                    .skipped
-                    .push((format!("{} (mask)", layer.name), "MRst".to_string()));
-                return;
+
+        let mut placed: Vec<(IntRect, RgbaImage)> = Vec::new();
+        for mask_node in &used {
+            let Some(bitm) = self.graph.child(mask_node, b"Bitm") else {
+                continue;
+            };
+            let gray = match self.decode_bitmap(bitm) {
+                Ok(g) => g,
+                Err(e) => {
+                    log::warn!("affinity: mask of {:?}: {e}", layer.name);
+                    self.report
+                        .skipped
+                        .push((format!("{} (mask)", layer.name), "MRst".to_string()));
+                    continue;
+                }
+            };
+            if let Some((rect, gray)) = self.place_raster(mask_node, gray) {
+                placed.push((rect, gray));
             }
-        };
-        let rect = self.placement(
-            mask_node,
-            &format!("{} (mask)", layer.name),
-            gray.width,
-            gray.height,
-        );
-        let gray = resample_to(gray, rect.width() as u32, rect.height() as u32);
-        if rect.is_empty()
-            || gray.pixels.len() != rect.width() as usize * rect.height() as usize * 4
-        {
+        }
+        if placed.is_empty() {
             return;
         }
 
+        // Union extent; outside its own rect a mask contributes the
+        // revealing default (255), so only stored pixels multiply.
+        let mut bounds = IntRect::EMPTY;
+        for (r, _) in &placed {
+            bounds = bounds.union(r);
+        }
+        let (w, h) = (bounds.width() as usize, bounds.height() as usize);
+        if bounds.is_empty() || w * h > (1 << 28) {
+            return;
+        }
+        let mut buf = vec![255u8; w * h];
+        for (r, img) in &placed {
+            let rw = r.width() as usize;
+            for y in r.top..r.bottom {
+                for x in r.left..r.right {
+                    let v =
+                        img.pixels[((y - r.top) as usize * rw + (x - r.left) as usize) * 4] as u16;
+                    let px = &mut buf[(y - bounds.top) as usize * w + (x - bounds.left) as usize];
+                    *px = (*px as u16 * v / 255) as u8;
+                }
+            }
+        }
+
         let mut mask = schist_core::LayerMask::new_revealing();
-        mask.bounds = rect;
-        mask.enabled = bool_of(mask_node, b"Visi").unwrap_or(true);
-        blit_mask(&mut mask.tiles, rect, &gray);
+        mask.bounds = bounds;
+        mask.enabled = if solo {
+            bool_of(used[0], b"Visi").unwrap_or(true)
+        } else {
+            true
+        };
+        blit_mask(&mut mask.tiles, bounds, &buf);
         layer.mask = Some(mask);
-        self.report.masks += 1;
+        self.report.masks += used.len();
     }
 
     /// Rebuild a text layer by re-setting its type.
@@ -713,11 +835,25 @@ impl Walker<'_> {
         // origin means.
         let frame = graph.child(node, b"TxtH")?;
         let frmb = f64s(frame, b"FrmB").filter(|b| b.len() == 4)?;
-        let c = self.node_ctm(node, name);
-        let frame_left = (frmb[0] * c[0] + c[2]).round() as i32;
-        let frame_top = (frmb[1] * c[1] + c[3]).round() as i32;
-        let frame_width = ((frmb[2] - frmb[0]) * c[0].abs()).round() as i32;
-        let eff_size = (size * c[1].abs()) as f32;
+        let ctm = self.node_ctm(node);
+        if !ctm.axis_aligned() {
+            log::warn!("affinity: text {name:?} is rotated/sheared; importing axis-aligned");
+        }
+        // The frame box's bounding box through the transform; under the
+        // usual axis-aligned case this is the box itself.
+        let corners = [
+            ctm.apply(frmb[0], frmb[1]),
+            ctm.apply(frmb[2], frmb[1]),
+            ctm.apply(frmb[0], frmb[3]),
+            ctm.apply(frmb[2], frmb[3]),
+        ];
+        let min = |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::INFINITY, f64::min);
+        let max =
+            |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
+        let frame_left = min(|c| c.0).round() as i32;
+        let frame_top = min(|c| c.1).round() as i32;
+        let frame_width = (max(|c| c.0) - min(|c| c.0)).round() as i32;
+        let eff_size = (size * ctm.scale_y()) as f32;
         if !(0.5..=10_000.0).contains(&eff_size) {
             return None;
         }
@@ -840,15 +976,7 @@ impl Walker<'_> {
             }
         };
 
-        let mut rect = self.placement(node, name, rgba.width, rgba.height);
-        if rect.is_empty() {
-            rect = IntRect::from_size(rgba.width, rgba.height);
-        }
-        let rgba = resample_to(rgba, rect.width() as u32, rect.height() as u32);
-        if rgba.pixels.len() != rect.width() as usize * rect.height() as usize * 4 {
-            return None;
-        }
-
+        let (rect, rgba) = self.place_raster(node, rgba)?;
         let mut layer = Layer::new_raster(name);
         blit_rgba8(
             &mut layer.as_raster_mut().unwrap().tiles,
@@ -860,48 +988,157 @@ impl Walker<'_> {
         Some(layer)
     }
 
-    /// Where a bitmap lands on the canvas.
+    /// The map from a bitmap's pixel space onto the canvas.
     ///
     /// Preference order: the pixel rect `BitR` when set (Photo writes an
-    /// `i32::MIN+1` sentinel when it isn't); else the layer transform —
-    /// row-major 2×3, `[sx, kx, tx, ky, sy, ty]` — applied to the bitmap
-    /// rect, dropping rotation/shear; else the origin at natural size.
-    fn placement(&self, node: &Node, name: &str, w: u32, h: u32) -> IntRect {
+    /// `i32::MIN+1` sentinel when it isn't), placed through the ancestor
+    /// transform; else the layer transform applied to the bitmap's
+    /// natural rect.
+    fn raster_map(&self, node: &Node, w: u32, h: u32) -> Mat {
         if let Some(Value::VecI(r)) = node.field(b"BitR") {
             if let [x0, y0, x1, y1] = r[..] {
                 let sane = |v: i32| v.abs() < 1 << 24;
                 if x1 > x0 && y1 > y0 && sane(x0) && sane(y0) && sane(x1) && sane(y1) {
-                    let c = self.ctm;
-                    let ax = (x0 as f64 * c[0] + c[2]).round() as i32;
-                    let ay = (y0 as f64 * c[1] + c[3]).round() as i32;
-                    let bx = (x1 as f64 * c[0] + c[2]).round() as i32;
-                    let by = (y1 as f64 * c[1] + c[3]).round() as i32;
-                    let rect = IntRect::new(ax.min(bx), ay.min(by), ax.max(bx), ay.max(by));
-                    if !rect.is_empty() {
-                        return rect;
-                    }
+                    let to_rect = Mat([
+                        (x1 - x0) as f64 / w as f64,
+                        0.0,
+                        x0 as f64,
+                        0.0,
+                        (y1 - y0) as f64 / h as f64,
+                        y0 as f64,
+                    ]);
+                    return self.ctm.then(&to_rect);
                 }
             }
         }
-        let c = self.node_ctm(node, name);
-        let (dw, dh) = (
-            (w as f64 * c[0].abs()).round(),
-            (h as f64 * c[1].abs()).round(),
-        );
-        if dw >= 1.0 && dh >= 1.0 && dw < (1 << 24) as f64 && dh < (1 << 24) as f64 {
-            return IntRect::from_xywh(
-                c[2].round() as i32,
-                c[3].round() as i32,
-                dw as u32,
-                dh as u32,
-            );
+        self.node_ctm(node)
+    }
+
+    /// Place a decoded bitmap on the canvas. Axis-aligned placements
+    /// scale bilinearly (identity is free); rotated or sheared ones go
+    /// through a full affine resample.
+    fn place_raster(&self, node: &Node, img: RgbaImage) -> Option<(IntRect, RgbaImage)> {
+        let map = self.raster_map(node, img.width, img.height);
+        if !map.axis_aligned() {
+            return affine_resample(&img, &map);
         }
-        IntRect::from_size(w, h)
+        let (ax, ay) = map.apply(0.0, 0.0);
+        let (bx, by) = map.apply(img.width as f64, img.height as f64);
+        let sane = |v: f64| v.is_finite() && v.abs() < (1 << 24) as f64;
+        let rect = if sane(ax) && sane(ay) && sane(bx) && sane(by) {
+            IntRect::new(
+                ax.min(bx).round() as i32,
+                ay.min(by).round() as i32,
+                ax.max(bx).round() as i32,
+                ay.max(by).round() as i32,
+            )
+        } else {
+            IntRect::EMPTY
+        };
+        let rect = if rect.is_empty() {
+            IntRect::from_size(img.width, img.height)
+        } else {
+            rect
+        };
+        let img = resample_to(img, rect.width() as u32, rect.height() as u32);
+        (img.pixels.len() == rect.width() as usize * rect.height() as usize * 4)
+            .then_some((rect, img))
     }
 
     fn decode_bitmap(&self, bitm: &Node) -> Result<RgbaImage, AffinityError> {
         decode_bitmap(self.archive, self.graph, bitm)
     }
+}
+
+/// Resample an image through a full affine map (bitmap pixel space →
+/// canvas space): the destination is the transformed rect's bounding
+/// box; every destination pixel centre inverse-maps into the source and
+/// samples bilinearly, transparent outside it.
+fn affine_resample(img: &RgbaImage, map: &Mat) -> Option<(IntRect, RgbaImage)> {
+    let inv = map.invert()?;
+    let (sw, sh) = (img.width as f64, img.height as f64);
+    let corners = [
+        map.apply(0.0, 0.0),
+        map.apply(sw, 0.0),
+        map.apply(0.0, sh),
+        map.apply(sw, sh),
+    ];
+    let mut lo = (f64::INFINITY, f64::INFINITY);
+    let mut hi = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for (x, y) in corners {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        lo = (lo.0.min(x), lo.1.min(y));
+        hi = (hi.0.max(x), hi.1.max(y));
+    }
+    if lo.0.abs().max(lo.1.abs()).max(hi.0.abs()).max(hi.1.abs()) > (1 << 24) as f64 {
+        return None;
+    }
+    let rect = IntRect::new(
+        lo.0.floor() as i32,
+        lo.1.floor() as i32,
+        hi.0.ceil() as i32,
+        hi.1.ceil() as i32,
+    );
+    let (dw, dh) = (rect.width() as usize, rect.height() as usize);
+    if rect.is_empty() || dw * dh > (1 << 28) {
+        return None;
+    }
+
+    let (iw, ih) = (img.width as i64, img.height as i64);
+    let fetch = |x: i64, y: i64| -> [f32; 4] {
+        if x < 0 || y < 0 || x >= iw || y >= ih {
+            return [0.0; 4];
+        }
+        let at = ((y as usize * iw as usize) + x as usize) * 4;
+        let p = &img.pixels[at..at + 4];
+        // Premultiplied, so transparent neighbours don't drag colour in.
+        let a = p[3] as f32 / 255.0;
+        [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a, a]
+    };
+    let mut pixels = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        for x in 0..dw {
+            let (sx, sy) = inv.apply(
+                rect.left as f64 + x as f64 + 0.5,
+                rect.top as f64 + y as f64 + 0.5,
+            );
+            let (fx, fy) = (sx - 0.5, sy - 0.5);
+            if fx < -1.0 || fy < -1.0 || fx > sw || fy > sh {
+                continue;
+            }
+            let (x0, y0) = (fx.floor() as i64, fy.floor() as i64);
+            let (wx, wy) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
+            let mut acc = [0.0f32; 4];
+            for (dxy, wgt) in [
+                ((0, 0), (1.0 - wx) * (1.0 - wy)),
+                ((1, 0), wx * (1.0 - wy)),
+                ((0, 1), (1.0 - wx) * wy),
+                ((1, 1), wx * wy),
+            ] {
+                let p = fetch(x0 + dxy.0, y0 + dxy.1);
+                for (a, v) in acc.iter_mut().zip(p) {
+                    *a += v * wgt;
+                }
+            }
+            let out = &mut pixels[(y * dw + x) * 4..][..4];
+            if acc[3] > f32::EPSILON {
+                for i in 0..3 {
+                    out[i] = (acc[i] / acc[3] + 0.5).clamp(0.0, 255.0) as u8;
+                }
+                out[3] = (acc[3] * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Some((
+        rect,
+        RgbaImage {
+            width: dw as u32,
+            height: dh as u32,
+            pixels,
+        },
+    ))
 }
 
 struct RgbaImage {
@@ -1259,12 +1496,17 @@ fn source_image(
     })
 }
 
+/// The colour of a fill class ("FilS" solid): its `Colr` child as RGBA
+/// bytes. "None" fills and gradients give nothing.
+fn fill_color(graph: &Graph, fill: &Node) -> Option<[u8; 4]> {
+    let colr = graph.child(fill, b"Colr")?;
+    color_bytes(colr)
+}
+
 /// The colour behind a fill descriptor (`FDsc.FDeF`): solid fills give
 /// their colour; "none" fills and gradients give nothing.
 fn descriptor_color(graph: &Graph, fdsc: &Node) -> Option<[u8; 4]> {
-    let fill = graph.child(fdsc, b"FDeF")?;
-    let colr = graph.child(fill, b"Colr")?;
-    color_bytes(colr)
+    fill_color(graph, graph.child(fdsc, b"FDeF")?)
 }
 
 /// A gradient fill ("FilG"): colour stops plus the 2×3 transform that
@@ -1277,9 +1519,11 @@ struct GradientFill {
     radial: bool,
 }
 
-fn descriptor_gradient(graph: &Graph, fdsc: &Node) -> Option<GradientFill> {
-    let fill = graph.child(fdsc, b"FDeF")?;
-    if &fill.type_tag().to_be_bytes() != b"FilG" {
+/// Read a gradient off a fill class ("FilG"), with `host` the fill
+/// descriptor when one wraps it (newer files hang the gradient's
+/// transform there; older ones put it on the fill itself).
+fn gradient_fill(graph: &Graph, fill: &Node, host: Option<&Node>) -> Option<GradientFill> {
+    if fill.types.iter().all(|(t, _)| *t != graph::tag(b"FilG")) {
         return None;
     }
     let radial = matches!(fill.field(b"Type"), Some(Value::Enum { id: 2.., .. }));
@@ -1304,7 +1548,10 @@ fn descriptor_gradient(graph: &Graph, fdsc: &Node) -> Option<GradientFill> {
     }
     // The gradient transform hangs off the descriptor in newer files
     // and off the fill itself in older ones.
-    let m: [f64; 6] = match fdsc.field(b"FDeX").or_else(|| fill.field(b"FDeX")) {
+    let m: [f64; 6] = match host
+        .and_then(|h| h.field(b"FDeX"))
+        .or_else(|| fill.field(b"FDeX"))
+    {
         Some(Value::VecD(v)) => v.first_chunk().copied()?,
         _ => return None,
     };
@@ -1395,95 +1642,349 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     (r + m, g + m, b + m)
 }
 
-/// Assemble a subpath from PCrv records: cubic segments as
-/// (control₁, control₂, endpoint), each starting at the previous
-/// endpoint. A closed path begins mid-cycle — its first point is the
-/// stream's final endpoint.
+/// Assemble a subpath from PCrv records.
+///
+/// The marker pair classifies each record: (1,0) and (2,0) are
+/// on-curve points (terminal and interior respectively), (0,1) is the
+/// previous point's outgoing control and (0,2) the next point's
+/// incoming control. A closed path's trailing controls belong to the
+/// segment joining back to the first point.
 fn subpath_from_records(
     records: &[(f32, f32, u8, u8)],
     closed: bool,
 ) -> Option<schist_core::SubPath> {
     use schist_core::Anchor;
-    // Split into (endpoint, incoming c1, incoming c2) per segment.
-    let mut points: Vec<(f32, f32)> = Vec::new();
-    let mut c1s: Vec<Option<(f32, f32)>> = Vec::new();
-    let mut c2s: Vec<Option<(f32, f32)>> = Vec::new();
-    let (mut c1, mut c2) = (None, None);
+    let mut anchors: Vec<Anchor> = Vec::new();
+    let mut incoming: Option<(f32, f32)> = None;
     for &(x, y, m0, m1) in records {
         match (m0, m1) {
-            (1, 0) => c1 = Some((x, y)),
-            (0, 1) => c2 = Some((x, y)),
+            (0, 1) => {
+                if let Some(prev) = anchors.last_mut() {
+                    prev.handle_out = (x - prev.point.0, y - prev.point.1);
+                }
+            }
+            (0, 2) => incoming = Some((x, y)),
             _ => {
-                points.push((x, y));
-                c1s.push(c1.take());
-                c2s.push(c2.take());
+                let handle_in = incoming
+                    .take()
+                    .map(|c| (c.0 - x, c.1 - y))
+                    .unwrap_or((0.0, 0.0));
+                anchors.push(Anchor {
+                    point: (x, y),
+                    handle_in,
+                    handle_out: (0.0, 0.0),
+                });
             }
         }
     }
-    // Trailing controls belong to the segment closing back to the first
-    // recorded endpoint (closed paths start mid-cycle).
-    if closed && (c1.is_some() || c2.is_some()) && !points.is_empty() {
-        points.rotate_right(1);
-        c1s.rotate_right(1);
-        c2s.rotate_right(1);
-        c1s[0] = c1;
-        c2s[0] = c2;
+    if closed {
+        if let (Some(c), Some(first)) = (incoming, anchors.first_mut()) {
+            first.handle_in = (c.0 - first.point.0, c.1 - first.point.1);
+        }
     }
-    if points.len() < 2 {
+    if anchors.len() < 2 {
         return None;
     }
-
-    let n = points.len();
-    let anchors = (0..n)
-        .map(|i| {
-            let p = points[i];
-            // Incoming control₂ of segment i; outgoing control₁ of the
-            // next segment.
-            let hin = c2s[i].map(|c| (c.0 - p.0, c.1 - p.1)).unwrap_or((0.0, 0.0));
-            let hout = c1s[(i + 1) % n]
-                .filter(|_| closed || i + 1 < n)
-                .map(|c| (c.0 - p.0, c.1 - p.1))
-                .unwrap_or((0.0, 0.0));
-            Anchor {
-                point: p,
-                handle_in: hin,
-                handle_out: hout,
-            }
-        })
-        .collect();
     Some(schist_core::SubPath { anchors, closed })
 }
 
 /// Circle-to-Bezier handle length as a fraction of the radius.
 const KAPPA: f32 = 0.552_284_8;
 
-/// Anchors for a clockwise rounded rectangle (plain corners at r = 0).
-fn rounded_rect_anchors(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> Vec<schist_core::Anchor> {
-    use schist_core::Anchor;
-    if r < 0.25 {
-        return vec![
-            Anchor::corner(x0, y0),
-            Anchor::corner(x1, y0),
-            Anchor::corner(x1, y1),
-            Anchor::corner(x0, y1),
-        ];
+/// Build a shape's outline in its local `ShpB` box, from its `Shpe`
+/// parameters. Returns the display name Affinity's own panel would show
+/// and the anchors of one closed subpath — or `None` for kinds whose
+/// geometry we can't rebuild (those are reported, not guessed).
+fn shape_geometry(
+    shpe: &Node,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+) -> Option<(&'static str, Vec<schist_core::Anchor>)> {
+    let (w, h) = (x1 - x0, y1 - y0);
+    let tag_bytes = shpe.type_tag().to_be_bytes();
+    match &tag_bytes {
+        b"ShNR" | b"ShRR" => {
+            let mut radii = match shpe.field(b"ShCR") {
+                Some(Value::VecF(r)) if r.len() >= 4 => [r[0], r[1], r[2], r[3]],
+                Some(Value::VecF(r)) if !r.is_empty() => [r[0]; 4],
+                _ => [0.0; 4],
+            };
+            // Designer's rectangle tool keeps default radii in ShCR but
+            // only rounds corners whose type (`CTyp`) says rounded
+            // (enum 0) — a CTyp-less ShNR renders sharp in Affinity's
+            // own thumbnail, radii notwithstanding.
+            match shpe.field(b"CTyp") {
+                Some(Value::Array(types)) => {
+                    for (i, r) in radii.iter_mut().enumerate() {
+                        match types.get(i) {
+                            Some(Value::Enum { id: 0, .. }) => {}
+                            _ => *r = 0.0,
+                        }
+                    }
+                }
+                _ if &tag_bytes == b"ShNR" => radii = [0.0; 4],
+                _ => {}
+            }
+            let scale = if matches!(shpe.field(b"AbSz"), Some(Value::Bool(true))) {
+                1.0 // absolute: already in local units
+            } else {
+                w.min(h) * 0.5 // fraction of half the shorter side
+            };
+            let radii = radii.map(|r| (r * scale).clamp(0.0, w.min(h) * 0.5));
+            let kind = if radii.iter().all(|r| *r < 0.25) {
+                "Rectangle"
+            } else {
+                "Rounded Rectangle"
+            };
+            Some((kind, rounded_rect_anchors(x0, y0, x1, y1, radii)))
+        }
+        b"ShCE" | b"ShpE" => Some(("Ellipse", ellipse_anchors(x0, y0, x1, y1))),
+        b"ShSt" => {
+            // Star: `Pnts` points alternating between the ellipse
+            // inscribed in the box and `IRad` of it; the first point is
+            // up. Curved edges (`CrvL`/`CrvR`) aren't mapped.
+            let bend = f32_last(shpe, b"CrvL").unwrap_or(0.0).abs()
+                + f32_last(shpe, b"CrvR").unwrap_or(0.0).abs();
+            if bend > 0.01 {
+                return None;
+            }
+            let points = u16_of(shpe, b"Pnts").unwrap_or(5).clamp(3, 100) as usize;
+            let inner = f32_last(shpe, b"IRad").unwrap_or(0.5).clamp(0.0, 1.0);
+            let anchors = (0..points * 2)
+                .map(|i| {
+                    let r = if i % 2 == 0 { 1.0 } else { inner };
+                    let ang = -std::f32::consts::FRAC_PI_2
+                        + std::f32::consts::PI * i as f32 / points as f32;
+                    unit_anchor(ang.cos() * r, ang.sin() * r, x0, y0, x1, y1)
+                })
+                .collect();
+            Some(("Star", anchors))
+        }
+        b"ShSS" => Some(("Square Star", square_star_anchors(shpe, x0, y0, x1, y1))),
+        b"ShCl" => Some(("Cloud", cloud_anchors(shpe, x0, y0, x1, y1))),
+        b"ShHt" => {
+            let spread = f32_last(shpe, b"Sprd").unwrap_or(0.2).clamp(0.0, 1.0);
+            Some(("Heart", heart_anchors(x0, y0, x1, y1, spread)))
+        }
+        _ => None,
     }
-    let k = KAPPA * r;
+}
+
+/// A corner anchor at unit-circle coordinates (centre 0, radius 1)
+/// mapped onto the ellipse inscribed in the box.
+fn unit_anchor(ux: f32, uy: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> schist_core::Anchor {
+    schist_core::Anchor::corner(
+        (x0 + x1) * 0.5 + ux * (x1 - x0) * 0.5,
+        (y0 + y1) * 0.5 + uy * (y1 - y0) * 0.5,
+    )
+}
+
+/// Square star ("ShSS"): `Side` rectangular arms radiating from the
+/// centre, the first pointing down. The arms are the middle `COut` of
+/// each edge of the regular `Side`-gon whose vertices sit on the
+/// inscribed ellipse — flat tips at the polygon's apothem, sides
+/// perpendicular to them, adjacent arms meeting in a V notch at `COut`
+/// of the radius. (All measured off Affinity's own thumbnail render.)
+fn square_star_anchors(
+    shpe: &Node,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+) -> Vec<schist_core::Anchor> {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let sides = u16_of(shpe, b"Side").unwrap_or(4).clamp(3, 100) as usize;
+    let cut = f32_last(shpe, b"COut").unwrap_or(0.5).clamp(0.01, 0.99);
+    let step = TAU / sides as f32;
+    let tip = (PI / sides as f32).cos(); // the polygon's apothem
+    let hw = cut * (PI / sides as f32).sin(); // arm half-width
+    let mut out = Vec::with_capacity(sides * 3);
+    for k in 0..sides {
+        let ang = FRAC_PI_2 + step * k as f32;
+        let (ux, uy) = (ang.cos(), ang.sin());
+        let (px, py) = (-uy, ux); // toward the next arm
+        out.push(unit_anchor(
+            ux * tip - px * hw,
+            uy * tip - py * hw,
+            x0,
+            y0,
+            x1,
+            y1,
+        ));
+        out.push(unit_anchor(
+            ux * tip + px * hw,
+            uy * tip + py * hw,
+            x0,
+            y0,
+            x1,
+            y1,
+        ));
+        let na = ang + step * 0.5;
+        out.push(unit_anchor(na.cos() * cut, na.sin() * cut, x0, y0, x1, y1));
+    }
+    out
+}
+
+/// Cloud ("ShCl"): `Bubl` circular arcs bulging outward around the
+/// inscribed ellipse, meeting each other at `IRad` of the radius.
+fn cloud_anchors(shpe: &Node, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<schist_core::Anchor> {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let bubbles = u16_of(shpe, b"Bubl").unwrap_or(12).clamp(3, 100) as usize;
+    let meet = f32_last(shpe, b"IRad").unwrap_or(0.8).clamp(0.1, 0.999);
+    let step = TAU / bubbles as f32;
+
+    // Anchors alternate meet points and bubble peaks; handles come from
+    // the exact circular arc through (meet, peak, meet) in unit space.
+    let mut out: Vec<schist_core::Anchor> = (0..bubbles * 2)
+        .map(|i| {
+            let ang = -FRAC_PI_2 + step * 0.5 * i as f32 - step * 0.5;
+            let r = if i % 2 == 0 { meet } else { 1.0 };
+            schist_core::Anchor::corner(ang.cos() * r, ang.sin() * r)
+        })
+        .collect();
+    let n = out.len();
+    for k in 0..bubbles {
+        let p0 = out[2 * k].point;
+        let p1 = out[2 * k + 1].point;
+        let p2 = out[(2 * k + 2) % n].point;
+        if let Some((c, r)) = circle_through(p0, p1, p2) {
+            let ang = |p: (f32, f32)| (p.1 - c.1).atan2(p.0 - c.0);
+            let (a0, mut a1, mut a2) = (ang(p0), ang(p1), ang(p2));
+            // Walk monotonically a0 → a1 → a2 the short way round.
+            while a1 - a0 > std::f32::consts::PI {
+                a1 -= TAU;
+            }
+            while a1 - a0 < -std::f32::consts::PI {
+                a1 += TAU;
+            }
+            while a2 - a1 > std::f32::consts::PI {
+                a2 -= TAU;
+            }
+            while a2 - a1 < -std::f32::consts::PI {
+                a2 += TAU;
+            }
+            let tangent = |a: f32, k: f32| (-a.sin() * k * r, a.cos() * k * r);
+            let k01 = (4.0 / 3.0) * ((a1 - a0) / 4.0).tan();
+            let k12 = (4.0 / 3.0) * ((a2 - a1) / 4.0).tan();
+            out[2 * k].handle_out = tangent(a0, k01);
+            out[2 * k + 1].handle_in = {
+                let t = tangent(a1, k01);
+                (-t.0, -t.1)
+            };
+            out[2 * k + 1].handle_out = tangent(a1, k12);
+            out[(2 * k + 2) % n].handle_in = {
+                let t = tangent(a2, k12);
+                (-t.0, -t.1)
+            };
+        }
+    }
+    for a in &mut out {
+        let mapped = unit_anchor(a.point.0, a.point.1, x0, y0, x1, y1);
+        let (sx, sy) = ((x1 - x0) * 0.5, (y1 - y0) * 0.5);
+        a.point = mapped.point;
+        a.handle_in = (a.handle_in.0 * sx, a.handle_in.1 * sy);
+        a.handle_out = (a.handle_out.0 * sx, a.handle_out.1 * sy);
+    }
+    out
+}
+
+/// The circle through three points, unless they are collinear.
+fn circle_through(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> Option<((f32, f32), f32)> {
+    let d = 2.0 * (p0.0 * (p1.1 - p2.1) + p1.0 * (p2.1 - p0.1) + p2.0 * (p0.1 - p1.1));
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    let sq = |p: (f32, f32)| p.0 * p.0 + p.1 * p.1;
+    let cx = (sq(p0) * (p1.1 - p2.1) + sq(p1) * (p2.1 - p0.1) + sq(p2) * (p0.1 - p1.1)) / d;
+    let cy = (sq(p0) * (p2.0 - p1.0) + sq(p1) * (p0.0 - p2.0) + sq(p2) * (p1.0 - p0.0)) / d;
+    Some(((cx, cy), (p0.0 - cx).hypot(p0.1 - cy)))
+}
+
+/// Heart ("ShHt"): two Bezier lobes over a point, the notch between
+/// them deepening as `Sprd` grows. Proportions traced from Affinity's
+/// own thumbnail render at the default spread of 0.2: lobes touch the
+/// top, flanks stay near-vertical to mid-height, sides sweep gently
+/// convex into the tip.
+fn heart_anchors(x0: f32, y0: f32, x1: f32, y1: f32, spread: f32) -> Vec<schist_core::Anchor> {
+    use schist_core::Anchor;
+    let (w, h) = (x1 - x0, y1 - y0);
+    let p = |ux: f32, uy: f32| (x0 + ux * w, y0 + uy * h);
+    let v = |ux: f32, uy: f32| (ux * w, uy * h);
+    let notch = (spread * 0.82).clamp(0.0, 0.6);
+    let a = |pt: (f32, f32), hin: (f32, f32), hout: (f32, f32)| Anchor {
+        point: pt,
+        handle_in: hin,
+        handle_out: hout,
+    };
+    vec![
+        // Bottom tip; sides sweep out symmetrically.
+        a(p(0.5, 1.0), v(0.26, -0.14), v(-0.26, -0.14)),
+        // Left flank.
+        a(p(0.0, 0.35), v(0.0, 0.25), v(0.0, -0.20)),
+        // Left lobe top.
+        a(p(0.25, 0.0), v(-0.14, 0.0), v(0.14, 0.0)),
+        // Notch.
+        a(p(0.5, notch), v(-0.045, -0.10), v(0.045, -0.10)),
+        // Right lobe top.
+        a(p(0.75, 0.0), v(-0.14, 0.0), v(0.14, 0.0)),
+        // Right flank.
+        a(p(1.0, 0.35), v(0.0, -0.20), v(0.0, 0.25)),
+    ]
+}
+
+/// Anchors for a clockwise rounded rectangle with per-corner radii
+/// `[top-left, top-right, bottom-right, bottom-left]` (a plain corner
+/// at r = 0).
+fn rounded_rect_anchors(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    r: [f32; 4],
+) -> Vec<schist_core::Anchor> {
+    use schist_core::Anchor;
+    let [tl, tr, br, bl] = r.map(|v| if v < 0.25 { 0.0 } else { v });
     let a = |px, py, ix, iy, ox, oy| Anchor {
         point: (px, py),
         handle_in: (ix, iy),
         handle_out: (ox, oy),
     };
-    vec![
-        a(x0 + r, y0, -k, 0.0, 0.0, 0.0),
-        a(x1 - r, y0, 0.0, 0.0, k, 0.0),
-        a(x1, y0 + r, 0.0, -k, 0.0, 0.0),
-        a(x1, y1 - r, 0.0, 0.0, 0.0, k),
-        a(x1 - r, y1, k, 0.0, 0.0, 0.0),
-        a(x0 + r, y1, 0.0, 0.0, -k, 0.0),
-        a(x0, y1 - r, 0.0, k, 0.0, 0.0),
-        a(x0, y0 + r, 0.0, 0.0, 0.0, -k),
-    ]
+    let mut out = Vec::with_capacity(8);
+    // Each corner contributes its arc's entry and exit anchors — or,
+    // when square, the corner point itself.
+    for (radius, corner, entry, exit) in [
+        (tl, (x0, y0), (0.0f32, 1.0f32), (1.0f32, 0.0f32)),
+        (tr, (x1, y0), (-1.0, 0.0), (0.0, 1.0)),
+        (br, (x1, y1), (0.0, -1.0), (-1.0, 0.0)),
+        (bl, (x0, y1), (1.0, 0.0), (0.0, -1.0)),
+    ] {
+        if radius == 0.0 {
+            out.push(Anchor::corner(corner.0, corner.1));
+            continue;
+        }
+        // The straight edges either side keep zero handles; the arc
+        // between the two anchors bends toward the corner point.
+        let k = KAPPA * radius;
+        out.push(a(
+            corner.0 + entry.0 * radius,
+            corner.1 + entry.1 * radius,
+            0.0,
+            0.0,
+            -entry.0 * k,
+            -entry.1 * k,
+        ));
+        out.push(a(
+            corner.0 + exit.0 * radius,
+            corner.1 + exit.1 * radius,
+            -exit.0 * k,
+            -exit.1 * k,
+            0.0,
+            0.0,
+        ));
+    }
+    out
 }
 
 /// Anchors for a clockwise ellipse filling the box.
@@ -1625,10 +2126,11 @@ fn rasterize_shape(
     );
 }
 
-/// Write a decoded mask image (channel 0) into mask tiles at `rect`.
-fn blit_mask(tiles: &mut schist_core::MaskTileMap, rect: IntRect, gray: &RgbaImage) {
+/// Write a gray coverage buffer (one byte per pixel, rect-sized) into
+/// mask tiles at `rect`.
+fn blit_mask(tiles: &mut schist_core::MaskTileMap, rect: IntRect, gray: &[u8]) {
     use schist_core::{TileCoord, TILE_SIZE};
-    let w = gray.width as usize;
+    let w = rect.width() as usize;
     for coord in TileCoord::covering(&rect) {
         let trect = coord.rect();
         let clip = trect.intersect(&rect);
@@ -1642,7 +2144,7 @@ fn blit_mask(tiles: &mut schist_core::MaskTileMap, rect: IntRect, gray: &RgbaIma
             for x in clip.left..clip.right {
                 let sx = (x - rect.left) as usize;
                 let lx = (x - trect.left) as usize;
-                buf[ly * TILE_SIZE as usize + lx] = gray.pixels[(sy * w + sx) * 4];
+                buf[ly * TILE_SIZE as usize + lx] = gray[sy * w + sx];
             }
         }
     }
@@ -1863,5 +2365,78 @@ fn dump_value(graph: &Graph, value: &Value, depth: usize, out: &mut String, seen
         other => {
             let _ = writeln!(out, "{other:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mat_compose_matches_manual_application() {
+        let rot = Mat([0.0, -1.0, 3.0, 1.0, 0.0, 5.0]); // 90° + translate
+        let scale = Mat([2.0, 0.0, 1.0, 0.0, 3.0, -1.0]);
+        let m = rot.then(&scale);
+        let (ax, ay) = scale.apply(7.0, 11.0);
+        assert_eq!(m.apply(7.0, 11.0), rot.apply(ax, ay));
+        assert!(!m.axis_aligned());
+        assert!(scale.axis_aligned());
+    }
+
+    #[test]
+    fn mat_inverts() {
+        let m = Mat([1.5, -0.5, 3.0, 0.25, 2.0, -7.0]);
+        let inv = m.invert().unwrap();
+        let (x, y) = inv.apply(m.apply(4.0, -9.0).0, m.apply(4.0, -9.0).1);
+        assert!((x - 4.0).abs() < 1e-9 && (y + 9.0).abs() < 1e-9);
+        assert!(Mat([0.0; 6]).invert().is_none());
+    }
+
+    #[test]
+    fn affine_resample_rotates_a_quarter_turn() {
+        // A 4×2 image, red left half, blue right, rotated 90°
+        // clockwise about the origin: x' = -y, y' = x.
+        let mut pixels = vec![0u8; 4 * 2 * 4];
+        for y in 0..2 {
+            for x in 0..4 {
+                let px = &mut pixels[(y * 4 + x) * 4..][..4];
+                px[0] = if x < 2 { 255 } else { 0 };
+                px[2] = if x < 2 { 0 } else { 255 };
+                px[3] = 255;
+            }
+        }
+        let img = RgbaImage {
+            width: 4,
+            height: 2,
+            pixels,
+        };
+        let (rect, out) = affine_resample(&img, &Mat([0.0, -1.0, 0.0, 1.0, 0.0, 0.0])).unwrap();
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (-2, 0, 0, 4)
+        );
+        assert_eq!((out.width, out.height), (2, 4));
+        // The red half (x<2) lands at the top (y'<2) of the rotated image.
+        let px = |x: usize, y: usize| &out.pixels[(y * 2 + x) * 4..][..4];
+        assert_eq!(px(1, 0)[..3], [255, 0, 0]);
+        assert_eq!(px(1, 3)[..3], [0, 0, 255]);
+        assert_eq!(px(1, 0)[3], 255);
+    }
+
+    #[test]
+    fn subpath_records_read_on_curve_markers() {
+        // start (1,0) · c-out (0,1) · c-in (0,2) · end (1,0)
+        let records = [
+            (0.0, 0.0, 1u8, 0u8),
+            (1.0, 0.0, 0, 1),
+            (2.0, 3.0, 0, 2),
+            (3.0, 3.0, 1, 0),
+        ];
+        let sub = subpath_from_records(&records, false).unwrap();
+        assert_eq!(sub.anchors.len(), 2);
+        assert_eq!(sub.anchors[0].handle_out, (1.0, 0.0));
+        assert_eq!(sub.anchors[1].handle_in, (-1.0, 0.0));
+        // A lone point is not a path.
+        assert!(subpath_from_records(&records[..1], false).is_none());
     }
 }
