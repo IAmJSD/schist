@@ -1,3 +1,5 @@
+<img src="assets/logo/schist-512.png" alt="" width="88" align="right">
+
 # Schist
 
 A layered image editor written in Rust on [GPUI], with first-class PSD
@@ -26,6 +28,11 @@ cargo run --release -p schist-app -- [file.psd|file.png|…]
 `cargo test --workspace` runs everything. Packaging scripts for macOS,
 Windows and Linux live in [packaging/](packaging); tagging `vX.Y.Z` builds
 them all in CI.
+
+The logo is generated, not drawn: [`tools/logo.py`](tools/logo.py) holds the
+geometry and `python3 tools/logo.py` re-emits the SVGs and every `.icns`,
+`.ico` and `.png` the packaging needs. Edit the constants at the top of that
+file, never its output.
 
 ## What it does
 

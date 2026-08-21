@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <pattern id="foliation" patternUnits="userSpaceOnUse"
+             x="0" y="248"
+             width="512" height="216"
+             patternTransform="rotate(148 256 256)">
+      <rect x="0" y="0" width="512" height="36" fill="#EDEFF3"/>
+      <rect x="0" y="36" width="512" height="36" fill="#8FB2D8"/>
+      <rect x="0" y="72" width="512" height="36" fill="#4A80BC"/>
+      <rect x="0" y="108" width="512" height="36" fill="#2A4E78"/>
+      <rect x="0" y="144" width="512" height="36" fill="#4A80BC"/>
+      <rect x="0" y="180" width="512" height="36" fill="#8FB2D8"/>
+    </pattern>
+  </defs>
+  <path d="M328 186C328 152 294 130 252 130C210 130 178 152 178 184C178 216 206 232 256 242C310 253 336 274 336 314C336 356 300 384 250 384C206 384 176 366 172 336" fill="none" stroke="url(#foliation)"
+        stroke-width="50" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

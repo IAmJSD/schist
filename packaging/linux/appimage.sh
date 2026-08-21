@@ -14,11 +14,11 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" \
 cp "$root/target/release/schist" "$appdir/usr/bin/"
 cp "$root/packaging/linux/schist.desktop" "$appdir/usr/share/applications/"
 cp "$root/packaging/linux/schist.desktop" "$appdir/schist.desktop"
-if [ -f "$root/packaging/linux/schist.png" ]; then
-    cp "$root/packaging/linux/schist.png" \
-       "$appdir/usr/share/icons/hicolor/256x256/apps/"
-    cp "$root/packaging/linux/schist.png" "$appdir/schist.png"
-fi
+# appimagetool looks the icon up by the desktop entry's Icon= key, so both
+# copies have to carry the app ID as their name.
+icon="$appdir/usr/share/icons/hicolor/256x256/apps/place.astrid.schist.png"
+cp "$root/packaging/linux/schist.png" "$icon"
+cp "$icon" "$appdir/place.astrid.schist.png"
 
 cat > "$appdir/AppRun" <<'RUN'
 #!/bin/sh
