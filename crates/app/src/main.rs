@@ -148,5 +148,20 @@ fn main() {
             )
             .expect("failed to open window");
             cx.activate(true);
+            // Closing the last window ends the session. The X11, Wayland and
+            // Windows backends already stop themselves once no window is left;
+            // AppKit instead keeps a window-less app sitting in the dock, and
+            // Schist has nothing to offer in that state — no menu item opens a
+            // second window. Quitting from anywhere but macOS would panic
+            // besides: `Platform::quit` is synchronous on Linux and re-enters
+            // the client state this callback is already dispatching from.
+            if cfg!(target_os = "macos") {
+                cx.on_window_closed(|cx| {
+                    if cx.windows().is_empty() {
+                        cx.quit();
+                    }
+                })
+                .detach();
+            }
         });
 }
