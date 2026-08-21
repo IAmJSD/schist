@@ -32,6 +32,8 @@ pub struct ImportReport {
     pub masks: usize,
     /// Text layers re-rendered through the text engine.
     pub text_layers: usize,
+    /// Shape layers rebuilt as live vectors.
+    pub shapes: usize,
     /// Layers present in the file but not recoverable as pixels:
     /// `(name, kind tag)` — shapes, text, adjustments…
     pub skipped: Vec<(String, String)>,
@@ -227,6 +229,15 @@ impl Walker<'_> {
                     return None;
                 }
             },
+            // Simple geometric shapes carry their bounds, corner radii
+            // and fill/stroke; rebuild them as live vector layers.
+            b"ShpN" => match self.shape_layer(node, &display) {
+                Some(layer) => layer,
+                None => {
+                    self.report.skipped.push((display, tag_name(kind)));
+                    return None;
+                }
+            },
             _ => {
                 // No pixels exist in the file for live shapes, text or
                 // adjustments — only their parameters. Record the gap.
@@ -258,6 +269,95 @@ impl Walker<'_> {
                 ),
             }
         }
+        Some(layer)
+    }
+
+    /// Rebuild a shape layer as a live vector layer.
+    ///
+    /// Supported geometry: rectangles with per-corner rounding ("ShNR" /
+    /// "ShRR", radii in `ShCR` as fractions of half the shorter side
+    /// unless `AbSz`) and ellipses ("ShCE"), over the layer's `ShpB`
+    /// bounds through its transform. Fill from `BFFl`, stroke from
+    /// `LIFl`/`LILn`. Anything fancier (stars, hearts, polygons) is
+    /// reported instead of guessed.
+    fn shape_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
+        use photoslop_color::Rgba;
+        let graph = self.graph;
+        let shpe = graph.child(node, b"Shpe")?;
+        let b = f64s(node, b"ShpB").filter(|b| b.len() == 4)?;
+        let xf: [f64; 6] = f64s(node, b"Xfrm")
+            .and_then(|v| v.first_chunk().copied())
+            .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        if xf[1] != 0.0 || xf[3] != 0.0 {
+            log::warn!("affinity: shape {name:?} is rotated; importing axis-aligned");
+        }
+        let (sx, sy) = (xf[0].abs(), xf[4].abs());
+        let x0 = (b[0] * xf[0] + xf[2] - self.origin.0) as f32;
+        let y0 = (b[1] * xf[4] + xf[5] - self.origin.1) as f32;
+        let x1 = (b[2] * xf[0] + xf[2] - self.origin.0) as f32;
+        let y1 = (b[3] * xf[4] + xf[5] - self.origin.1) as f32;
+        let (x0, x1) = (x0.min(x1), x0.max(x1));
+        let (y0, y1) = (y0.min(y1), y0.max(y1));
+        let (w, h) = (x1 - x0, y1 - y0);
+        if w < 0.5 || h < 0.5 || w > 1e6 || h > 1e6 {
+            return None;
+        }
+
+        let fill = graph
+            .children(node, b"BFFl")
+            .first()
+            .and_then(|f| descriptor_color(graph, f));
+        let stroke_color = graph
+            .children(node, b"LIFl")
+            .first()
+            .and_then(|f| descriptor_color(graph, f));
+        let stroke_width = graph
+            .children(node, b"LILn")
+            .first()
+            .and_then(|l| graph.child(l, b"LDeL"))
+            .and_then(|s| match s.field(b"Wght") {
+                Some(Value::F64(v)) => Some((*v * (sx + sy) / 2.0) as f32),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let stroke = stroke_color.filter(|_| stroke_width > 0.05);
+        fill.or(stroke)?; // invisible shape: nothing to import
+
+        let anchors = match &shpe.type_tag().to_be_bytes() {
+            b"ShNR" | b"ShRR" => {
+                let mut radius = match shpe.field(b"ShCR") {
+                    Some(Value::VecF(r)) if !r.is_empty() => r[0],
+                    _ => 0.0,
+                };
+                if !matches!(shpe.field(b"AbSz"), Some(Value::Bool(true))) {
+                    radius *= w.min(h) * 0.5;
+                } else {
+                    radius *= ((sx + sy) / 2.0) as f32;
+                }
+                rounded_rect_anchors(x0, y0, x1, y1, radius.clamp(0.0, w.min(h) * 0.5))
+            }
+            b"ShCE" => ellipse_anchors(x0, y0, x1, y1),
+            _ => return None,
+        };
+
+        let mut path = photoslop_core::VectorPath::new(name);
+        path.subpaths.push(photoslop_core::SubPath {
+            anchors,
+            closed: true,
+        });
+        let to_rgba = |c: [u8; 4]| Rgba::from_u8(c[0], c[1], c[2], c[3]);
+        let shape = photoslop_core::VectorShape {
+            path,
+            fill: fill.map(to_rgba).unwrap_or(Rgba::TRANSPARENT),
+            stroke: stroke.map(|c| (to_rgba(c), stroke_width)),
+            even_odd: false,
+        };
+
+        let mut layer = Layer::new_raster(name);
+        rasterize_shape(&mut layer, &shape);
+        layer.shape_key = shape.key();
+        layer.shape = Some(Box::new(shape));
+        self.report.shapes += 1;
         Some(layer)
     }
 
@@ -871,13 +971,24 @@ fn source_image(
     })
 }
 
+/// The colour behind a fill descriptor (`FDsc.FDeF`): solid fills give
+/// their colour; "none" fills and gradients give nothing.
+fn descriptor_color(graph: &Graph, fdsc: &Node) -> Option<[u8; 4]> {
+    let fill = graph.child(fdsc, b"FDeF")?;
+    let colr = graph.child(fill, b"Colr")?;
+    color_bytes(colr)
+}
+
 /// The fill colour of a text run: the first `Objs` descriptor whose
 /// `FDeF` fill carries a `Colr` class, converted to RGBA bytes.
 fn run_color(graph: &Graph, run_item: &Node) -> Option<[u8; 4]> {
     let objs = graph.children(run_item, b"Objs");
-    objs.iter().find_map(|obj| {
-        let fill = graph.child(obj, b"FDeF")?;
-        let colr = graph.child(fill, b"Colr")?;
+    objs.iter().find_map(|obj| descriptor_color(graph, obj))
+}
+
+/// Convert a colour class (`RGBA`/`HSLA`/`GRAY`/`CMYK`) to RGBA bytes.
+fn color_bytes(colr: &Node) -> Option<[u8; 4]> {
+    {
         let Value::Struct(raw) = colr.field(b"_col")? else {
             return None;
         };
@@ -902,7 +1013,7 @@ fn run_color(graph: &Graph, run_item: &Node) -> Option<[u8; 4]> {
             (_, 4) => Some([raw[0], raw[1], raw[2], raw[3]]),
             _ => None,
         }
-    })
+    }
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
@@ -919,6 +1030,139 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     };
     let m = l - c / 2.0;
     (r + m, g + m, b + m)
+}
+
+/// Circle-to-Bezier handle length as a fraction of the radius.
+const KAPPA: f32 = 0.552_284_8;
+
+/// Anchors for a clockwise rounded rectangle (plain corners at r = 0).
+fn rounded_rect_anchors(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> Vec<photoslop_core::Anchor> {
+    use photoslop_core::Anchor;
+    if r < 0.25 {
+        return vec![
+            Anchor::corner(x0, y0),
+            Anchor::corner(x1, y0),
+            Anchor::corner(x1, y1),
+            Anchor::corner(x0, y1),
+        ];
+    }
+    let k = KAPPA * r;
+    let a = |px, py, ix, iy, ox, oy| Anchor {
+        point: (px, py),
+        handle_in: (ix, iy),
+        handle_out: (ox, oy),
+    };
+    vec![
+        a(x0 + r, y0, -k, 0.0, 0.0, 0.0),
+        a(x1 - r, y0, 0.0, 0.0, k, 0.0),
+        a(x1, y0 + r, 0.0, -k, 0.0, 0.0),
+        a(x1, y1 - r, 0.0, 0.0, 0.0, k),
+        a(x1 - r, y1, k, 0.0, 0.0, 0.0),
+        a(x0 + r, y1, 0.0, 0.0, -k, 0.0),
+        a(x0, y1 - r, 0.0, k, 0.0, 0.0),
+        a(x0, y0 + r, 0.0, 0.0, 0.0, -k),
+    ]
+}
+
+/// Anchors for a clockwise ellipse filling the box.
+fn ellipse_anchors(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<photoslop_core::Anchor> {
+    use photoslop_core::Anchor;
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let (kx, ky) = (KAPPA * (x1 - x0) / 2.0, KAPPA * (y1 - y0) / 2.0);
+    vec![
+        Anchor::smooth(cx, y0, kx, 0.0),
+        Anchor::smooth(x1, cy, 0.0, ky),
+        Anchor::smooth(cx, y1, -kx, 0.0),
+        Anchor::smooth(x0, cy, 0.0, -ky),
+    ]
+}
+
+/// Rasterize a vector shape into the layer's tiles: fill, then stroke
+/// composited over it, blitted once.
+fn rasterize_shape(layer: &mut Layer, shape: &photoslop_core::VectorShape) {
+    let mut builder = photoslop_vector::PathBuilder::new();
+    for sub in &shape.path.subpaths {
+        let Some(first) = sub.anchors.first() else {
+            continue;
+        };
+        builder.move_to(first.point.0, first.point.1);
+        let n = sub.anchors.len();
+        for i in 1..=n {
+            let from = &sub.anchors[i - 1];
+            let to = &sub.anchors[i % n];
+            if i == n && !sub.closed {
+                break;
+            }
+            builder.cubic_to(
+                from.point.0 + from.handle_out.0,
+                from.point.1 + from.handle_out.1,
+                to.point.0 + to.handle_in.0,
+                to.point.1 + to.handle_in.1,
+                to.point.0,
+                to.point.1,
+            );
+        }
+        if sub.closed {
+            builder.close();
+        }
+    }
+    let flat = builder.build(0.25);
+
+    let pad = shape.stroke.map(|(_, w)| w / 2.0 + 1.0).unwrap_or(1.0).ceil() as i32;
+    let mut rect = shape.path.bounds();
+    rect.left -= pad;
+    rect.top -= pad;
+    rect.right += pad;
+    rect.bottom += pad;
+    let (w, h) = (rect.width() as usize, rect.height() as usize);
+    if w == 0 || h == 0 || w * h > (1 << 28) {
+        return;
+    }
+
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut layer_in = |cov: Vec<u8>, color: photoslop_color::Rgba| {
+        let c = color.to_u8();
+        for (px, &a) in rgba.chunks_exact_mut(4).zip(&cov) {
+            if a == 0 {
+                continue;
+            }
+            // Straight-alpha source-over.
+            let sa = a as u32 * c[3] as u32 / 255;
+            let da = px[3] as u32;
+            let out_a = sa + da * (255 - sa) / 255;
+            if out_a == 0 {
+                continue;
+            }
+            for i in 0..3 {
+                px[i] = ((c[i] as u32 * sa + px[i] as u32 * da * (255 - sa) / 255) / out_a) as u8;
+            }
+            px[3] = out_a as u8;
+        }
+    };
+    if shape.fill.a > 0.0 {
+        layer_in(
+            photoslop_vector::rasterize(&flat, rect, photoslop_vector::FillRule::NonZero),
+            shape.fill,
+        );
+    }
+    if let Some((color, width)) = shape.stroke {
+        let stroked = photoslop_vector::stroke_path(
+            &flat,
+            photoslop_vector::StrokeStyle::new(width)
+                .with_cap(photoslop_vector::LineCap::Round)
+                .with_join(photoslop_vector::LineJoin::Round),
+        );
+        layer_in(
+            photoslop_vector::rasterize(&stroked, rect, photoslop_vector::FillRule::NonZero),
+            color,
+        );
+    }
+    blit_rgba8(
+        &mut layer.as_raster_mut().unwrap().tiles,
+        Depth::Eight,
+        rect,
+        &rgba,
+    );
 }
 
 /// Write a decoded mask image (channel 0) into mask tiles at `rect`.

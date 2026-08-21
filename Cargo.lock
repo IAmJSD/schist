@@ -4375,6 +4375,7 @@ dependencies = [
  "photoslop-color",
  "photoslop-core",
  "photoslop-text-engine",
+ "photoslop-vector",
  "ruzstd",
  "serde",
  "serde_json",

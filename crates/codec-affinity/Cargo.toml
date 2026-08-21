@@ -15,6 +15,7 @@ image.workspace = true
 # Text layers re-render through our text engine; the spec is stored the
 # same way the type tool stores it, so imported text stays editable.
 photoslop-text-engine.workspace = true
+photoslop-vector.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

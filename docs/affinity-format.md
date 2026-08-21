@@ -140,6 +140,17 @@ ink box to the transformed frame box (fitting the size to the frame
 width when a substituted font's metrics disagree), and stores the type
 tool's `PsTx` block so the layer stays editable.
 
+**Shapes** (`ShpN`): the layer's `ShpB` `f64[4]` bounds (through the
+layer transform) plus a `Shpe` class giving the kind — "ShNR"/"ShRR"
+rounded rectangles carry `ShCR` per-corner radii (fractions of half
+the shorter side unless `AbSz`), "ShCE" is an ellipse; stars, hearts,
+polygons and friends have their own tags and parameters. Fill comes
+from `BFFl` (a fill descriptor: `FilS` solid with a colour, `FilN`
+none, gradients otherwise), stroke colour from `LIFl` and width from
+`LILn` → `LDeL.Wght`. Import rebuilds rectangles/rounded
+rectangles/ellipses as live vector layers (editable, re-rasterized by
+the app); other kinds are reported.
+
 **Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
 a full layer node with its own `Xfrm` and a single-channel bitmap
 (format 6) where white reveals. A layer can carry several (they
@@ -200,8 +211,9 @@ were recovered, and adds the preview as a hidden reference layer.
   (`AdjP` spline data) but not yet mapped to our adjustments.
 - Fill layers (`FlRN`): parameters only (colour/gradient); could be
   synthesized on import.
-- Shape geometry: `ShpN`/`PCrv` carry curve records we keep raw;
-  mapping them onto Photoslop's vector layers is the obvious next step.
+- Shapes beyond rectangles/rounded rectangles/ellipses (stars, hearts,
+  polygons…), gradient fills, and `PCrv` free paths: parameters are
+  parsed but not yet turned into geometry.
 - Text: single style per layer (first run wins), no per-run styling,
   effects on text (drop shadows) not yet applied, `TxtF` frame text
   gets artistic-text treatment.
