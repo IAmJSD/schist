@@ -32,9 +32,42 @@ they will not break the plugin ABI or saved files.
 1. Update the version in the root `Cargo.toml` and `packaging/macos/Info.plist`.
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
 3. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-4. The release workflow builds a Linux AppImage, a macOS `.app`
-   (signed/notarized when the `MACOS_CERT_NAME` and `MACOS_NOTARY_PROFILE`
-   secrets exist), and a Windows installer, then drafts the release.
+4. The release workflow builds a Linux AppImage, a macOS `Schist.zip`
+   (signed and notarized when the secrets below exist), and a Windows
+   installer, then drafts the release.
 
 Unsigned builds are still produced when signing credentials are absent, so
 forks and local builds work without secrets.
+
+## Signing secrets
+
+macOS signing and notarization are driven entirely by repository secrets.
+Set all five and tagged builds come out notarized and stapled; leave them
+unset and the same workflow produces an unsigned bundle.
+
+| Secret | What it is |
+| --- | --- |
+| `MACOS_CERT_P12_BASE64` | The *Developer ID Application* certificate and its private key, exported from Keychain Access as a `.p12` and then `base64 -i cert.p12 \| pbcopy`. |
+| `MACOS_CERT_P12_PASSWORD` | The password set on that `.p12` during export. |
+| `APPLE_ID` | The Apple ID of an account on the developer team. |
+| `APPLE_APP_SPECIFIC_PASSWORD` | An app-specific password for that Apple ID, from appleid.apple.com — not the account password. |
+| `APPLE_TEAM_ID` | The ten-character team ID, the part in brackets in the certificate's name. |
+
+The workflow imports the certificate into a keychain it creates in
+`$RUNNER_TEMP` and throws away with the runner, so it never touches the
+login keychain. `KEYCHAIN_PASSWORD` may be set to pin that keychain's
+password; otherwise the job generates a random one, which is all it needs
+since nothing outside the job ever unlocks it.
+
+The identity name is read back out of the imported certificate rather than
+configured, so renewing the certificate means replacing two secrets and
+nothing else.
+
+Signing runs under the hardened runtime, which notarization requires. That
+in turn requires the JIT entitlement in
+[`packaging/macos/entitlements.plist`](../packaging/macos/entitlements.plist):
+the plugin host compiles every plugin with Cranelift at load time, and
+without that entitlement a notarized build dies as soon as it loads one.
+
+Windows builds are not signed — there is no certificate for them yet, so
+the installer triggers SmartScreen on first download.

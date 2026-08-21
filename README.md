@@ -27,7 +27,8 @@ cargo run --release -p schist-app -- [file.psd|file.png|…]
 
 `cargo test --workspace` runs everything. Packaging scripts for macOS,
 Windows and Linux live in [packaging/](packaging); tagging `vX.Y.Z` builds
-them all in CI.
+them all in CI, signing and notarizing the macOS bundle when the
+[signing secrets](docs/versioning.md#signing-secrets) are set.
 
 The logo is generated, not drawn: [`tools/logo.py`](tools/logo.py) holds the
 geometry and `python3 tools/logo.py` re-emits the SVGs and every `.icns`,

@@ -48,12 +48,76 @@ jobs:
           APPIMAGETOOL=/tmp/appimagetool ./packaging/linux/appimage.sh || true
           mkdir -p dist && cp target/release/schist dist/ 2>/dev/null || true
 
+      - name: Set up the signing keychain (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_P12_PASSWORD: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -eo pipefail
+          if [ -z "${MACOS_CERT_P12_BASE64}" ]; then
+            echo "No MACOS_CERT_P12_BASE64 secret; this build will be unsigned."
+            exit 0
+          fi
+
+          CERT_PATH="$RUNNER_TEMP/developer_id_application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/schist-signing.keychain-db"
+          # The keychain is thrown away with the runner, so a password only has
+          # to be unguessable for the length of this job.
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -base64 24)}"
+
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" \
+            -P "$MACOS_CERT_P12_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
+
+          # Prepend rather than replace: notarytool still wants the login
+          # keychain on the search list.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | tr -d '"')
+
+          # Let codesign use the key without prompting for the password.
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          echo "Available code signing identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          if [ -z "$IDENTITY" ]; then
+            echo "The certificate imported but holds no Developer ID Application identity." >&2
+            exit 1
+          fi
+          echo "MACOS_CERT_NAME=$IDENTITY" >> "$GITHUB_ENV"
+          echo "MACOS_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
         env:
-          MACOS_CERT_NAME: ${{ secrets.MACOS_CERT_NAME }}
-          MACOS_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
-        run: ./packaging/macos/bundle.sh release
+          # MACOS_CERT_NAME and MACOS_KEYCHAIN come from the keychain step
+          # above; these three are what notarytool authenticates with.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ./packaging/macos/bundle.sh release
+          # Upload the zip alone: actions/upload-artifact does not preserve the
+          # bundle's permissions or symlinks, which would void the signature.
+          rm -rf dist/Schist.app
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
