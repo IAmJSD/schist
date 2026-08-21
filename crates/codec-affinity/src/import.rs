@@ -211,12 +211,29 @@ impl Walker<'_> {
     fn layer(&mut self, node: &Node) -> Option<Layer> {
         let kind = node.type_tag();
         let name = str_of(node, b"Desc").unwrap_or_default().to_string();
+        // Unnamed layers get the same kind-based names Affinity's own
+        // layers panel shows, not internal tags.
         let display = if name.is_empty() {
-            tag_name(kind)
+            match &kind.to_be_bytes() {
+                b"Scop" => "Layer".to_string(),
+                b"Grup" => "Group".to_string(),
+                b"Rstr" | b"FRst" | b"MRst" => "Pixel".to_string(),
+                b"ImgN" => "Image".to_string(),
+                b"PCrv" => "Curve".to_string(),
+                b"TxtA" | b"TxtF" => String::new(), // named from the text below
+                b"CrRA" => "Curves Adjustment".to_string(),
+                b"ShpN" => String::new(), // named from the shape kind below
+                _ => tag_name(kind),
+            }
         } else {
             name.clone()
         };
 
+        let skip_label = if display.is_empty() {
+            tag_name(kind)
+        } else {
+            display.clone()
+        };
         let mut layer = match &kind.to_be_bytes() {
             // "Grup" is a group in both apps; "Scop" is Designer's layer
             // container (every layers-panel "Layer" wraps its content in
@@ -243,8 +260,11 @@ impl Walker<'_> {
             // conveniently also carries its rendered pixels as a DyBm —
             // the original file rides along, but the bitmap is enough.
             b"Rstr" | b"ImgN" => {
-                let display = if display.is_empty() || display == "ImgN" {
-                    str_of(node, b"IRFN").filter(|s| !s.is_empty()).unwrap_or(&display).to_string()
+                let display = if display.is_empty() || display == "Image" {
+                    str_of(node, b"IRFN")
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Image")
+                        .to_string()
                 } else {
                     display
                 };
@@ -256,7 +276,7 @@ impl Walker<'_> {
             b"TxtA" | b"TxtF" => match self.text_layer(node, &display) {
                 Some(layer) => layer,
                 None => {
-                    self.report.skipped.push((display, tag_name(kind)));
+                    self.report.skipped.push((skip_label, tag_name(kind)));
                     return None;
                 }
             },
@@ -265,7 +285,7 @@ impl Walker<'_> {
             b"ShpN" => match self.shape_layer(node, &display) {
                 Some(layer) => layer,
                 None => {
-                    self.report.skipped.push((display, tag_name(kind)));
+                    self.report.skipped.push((skip_label, tag_name(kind)));
                     return None;
                 }
             },
@@ -273,7 +293,7 @@ impl Walker<'_> {
             b"PCrv" => match self.path_layer(node, &display) {
                 Some(layer) => layer,
                 None => {
-                    self.report.skipped.push((display, tag_name(kind)));
+                    self.report.skipped.push((skip_label, tag_name(kind)));
                     return None;
                 }
             },
@@ -282,7 +302,7 @@ impl Walker<'_> {
             b"CrRA" => match self.curves_adjustment(node, &display) {
                 Some(layer) => layer,
                 None => {
-                    self.report.skipped.push((display, tag_name(kind)));
+                    self.report.skipped.push((skip_label, tag_name(kind)));
                     return None;
                 }
             },
@@ -293,7 +313,7 @@ impl Walker<'_> {
             _ => {
                 // No pixels exist in the file for other live layer
                 // kinds — only their parameters. Record the gap.
-                self.report.skipped.push((display, tag_name(kind)));
+                self.report.skipped.push((skip_label, tag_name(kind)));
                 return None;
             }
         };
@@ -349,6 +369,14 @@ impl Walker<'_> {
             return None;
         }
 
+        let square = matches!(shpe.field(b"ShCR"), Some(Value::VecF(r)) if r.iter().all(|v| *v == 0.0));
+        let kind_name = match &shpe.type_tag().to_be_bytes() {
+            b"ShNR" | b"ShRR" if square => "Rectangle",
+            b"ShNR" | b"ShRR" => "Rounded Rectangle",
+            b"ShCE" | b"ShpE" => "Ellipse",
+            _ => "Shape",
+        };
+        let name = if name.is_empty() { kind_name } else { name };
         let anchors = match &shpe.type_tag().to_be_bytes() {
             b"ShNR" | b"ShRR" => {
                 let mut radius = match shpe.field(b"ShCR") {
@@ -735,7 +763,21 @@ impl Walker<'_> {
             frame_left - raster.bounds.left,
             frame_top - raster.bounds.top,
         );
-        let mut layer = Layer::new_raster(if name.is_empty() { "Text" } else { name });
+        // Affinity's panel names text layers after their content.
+        let display_name = if name.is_empty() {
+            let first_line = spec.text.lines().next().unwrap_or("Text").trim();
+            let mut label: String = first_line.chars().take(32).collect();
+            if label.len() < first_line.len() {
+                label.push('…');
+            }
+            if label.is_empty() {
+                label = "Text".to_string();
+            }
+            label
+        } else {
+            name.to_string()
+        };
+        let mut layer = Layer::new_raster(display_name);
         let bounds = raster.bounds.translated(origin.0, origin.1);
         let mut rgba = vec![0u8; raster.coverage.len() * 4];
         for (px, &cov) in rgba.chunks_exact_mut(4).zip(&raster.coverage) {

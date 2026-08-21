@@ -21,6 +21,18 @@ fn main() {
         let bytes = std::fs::read(&path).expect("read file");
         match photoslop_codec_affinity::read_affinity(&bytes) {
             Ok((doc, report)) => {
+                if std::env::var("AFTRIAGE_NAMES").is_ok() {
+                    fn walk(layers: &[photoslop_core::Layer], depth: usize) {
+                        for l in layers {
+                            println!("{}- {:?}{}", "  ".repeat(depth), l.name,
+                                if l.mask.is_some() { " [mask]" } else { "" });
+                            if let Some(children) = l.children() {
+                                walk(children, depth + 1);
+                            }
+                        }
+                    }
+                    walk(&doc.tree.layers, 1);
+                }
                 let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
                 for (_, k) in &report.skipped {
                     *kinds.entry(k.clone()).or_default() += 1;
