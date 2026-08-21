@@ -28,7 +28,10 @@ cargo run --release -p schist-app -- [file.psd|file.png|…]
 `cargo test --workspace` runs everything. Packaging scripts for macOS,
 Windows and Linux live in [packaging/](packaging); tagging `vX.Y.Z` builds
 them all in CI, signing and notarizing the macOS bundle when the
-[signing secrets](docs/versioning.md#signing-secrets) are set.
+[signing secrets](docs/versioning.md#signing-secrets) are set. All three
+register `.psd`, `.psb`, `.afphoto`, `.afdesign`, `.afpub` and `.af` as
+openable, never as the default handler: an installed Schist joins the
+"Open with" menu rather than taking files off Photoshop or Affinity.
 
 The logo is generated, not drawn: [`tools/logo.py`](tools/logo.py) holds the
 geometry and `python3 tools/logo.py` re-emits the SVGs and every `.icns`,

@@ -12,9 +12,14 @@ cargo build --release -p schist-app
 
 rm -rf "$appdir"
 mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" \
+         "$appdir/usr/share/mime/packages" \
          "$appdir/usr/share/icons/hicolor/256x256/apps"
 cp "$root/target/release/schist" "$appdir/usr/bin/"
 cp "$root/packaging/linux/schist.desktop" "$appdir/usr/share/applications/"
+# The Affinity MIME types the desktop entry names; a desktop integrator that
+# installs the entry finds them here rather than binding it to nothing.
+cp "$root/packaging/linux/place.astrid.schist.mime.xml" \
+   "$appdir/usr/share/mime/packages/"
 cp "$root/packaging/linux/schist.desktop" "$appdir/schist.desktop"
 # appimagetool looks the icon up by the desktop entry's Icon= key, so both
 # copies have to carry the app ID as their name.

@@ -15,8 +15,14 @@ mod ui;
 mod workspace;
 
 use actions::{HideApp, HideOthers, Quit, ShowAll};
-use gpui::{px, size, App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{
+    px, size, App, AppContext as _, Application, AsyncApp, Bounds, WindowBounds, WindowHandle,
+    WindowOptions,
+};
 use schist_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
 use workspace::Workspace;
 
 /// PSD/PSB import and export via `schist-codec-psd`.
@@ -108,6 +114,53 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
     (registry, manager)
 }
 
+/// Documents the platform hands over outside argv, and the window they are
+/// destined for. The handler has to be installed before the app runs, so at
+/// launch the window may not exist yet; anything that arrives that early
+/// waits here until it does.
+#[derive(Default)]
+struct OpenRequests {
+    window: Option<(AsyncApp, WindowHandle<Workspace>)>,
+    queued: Vec<PathBuf>,
+}
+
+/// A `file://` URL as a local path, or `None` for anything that is not one.
+///
+/// macOS opens documents by handing the app percent-encoded URLs; every
+/// other platform Schist is associated on passes a plain path on argv.
+fn path_from_url(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    // An empty authority and "localhost" both mean this machine; anything
+    // else is a remote file we cannot open by path anyway.
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    // "file:///C:/..." -- the drive letter, not the root, starts the path.
+    #[cfg(windows)]
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // A truncated or non-hex escape means this is not a URL we
+            // understand, so decline it rather than guessing at the bytes.
+            let hex = bytes.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(out).ok()?))
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // Opt-in: SCHIST_CRASH_REPORTS=1, or the preference file's
@@ -115,18 +168,41 @@ fn main() {
     crash::install_handler(crash_reports_enabled());
     let (registry, plugin_manager) = build_registry();
 
-    Application::new()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            cx.bind_keys(keymap::build_bindings(&registry));
-            // The macOS application menu, which is reachable with no window
-            // open, so these are global rather than on the workspace.
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
-            cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
-            cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
-            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-            cx.open_window(
+    let requests: Rc<RefCell<OpenRequests>> = Rc::default();
+    let app = Application::new().with_assets(assets::Assets);
+    // Finder does not use argv: a double-clicked document arrives as an Apple
+    // event, both at launch and while Schist is already running.
+    app.on_open_urls({
+        let requests = requests.clone();
+        move |urls| {
+            let paths: Vec<PathBuf> = urls.iter().filter_map(|u| path_from_url(u)).collect();
+            if paths.is_empty() {
+                return;
+            }
+            let window = requests.borrow().window.clone();
+            match window {
+                Some((async_cx, window)) => {
+                    let opened = async_cx.update(|cx| open_all(paths, window, cx));
+                    if let Err(err) = opened {
+                        log::error!("open failed: {err:#}");
+                    }
+                }
+                None => requests.borrow_mut().queued.extend(paths),
+            }
+        }
+    });
+
+    app.run(move |cx: &mut App| {
+        cx.bind_keys(keymap::build_bindings(&registry));
+        // The macOS application menu, which is reachable with no window
+        // open, so these are global rather than on the workspace.
+        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+        cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
+        cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
+        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+        let window = cx
+            .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
@@ -147,21 +223,68 @@ fn main() {
                 },
             )
             .expect("failed to open window");
-            cx.activate(true);
-            // Closing the last window ends the session. The X11, Wayland and
-            // Windows backends already stop themselves once no window is left;
-            // AppKit instead keeps a window-less app sitting in the dock, and
-            // Schist has nothing to offer in that state — no menu item opens a
-            // second window. Quitting from anywhere but macOS would panic
-            // besides: `Platform::quit` is synchronous on Linux and re-enters
-            // the client state this callback is already dispatching from.
-            if cfg!(target_os = "macos") {
-                cx.on_window_closed(|cx| {
-                    if cx.windows().is_empty() {
-                        cx.quit();
-                    }
-                })
-                .detach();
-            }
-        });
+
+        let queued = {
+            let mut requests = requests.borrow_mut();
+            requests.window = Some((cx.to_async(), window));
+            std::mem::take(&mut requests.queued)
+        };
+        open_all(queued, window, cx);
+        cx.activate(true);
+        // Closing the last window ends the session. The X11, Wayland and
+        // Windows backends already stop themselves once no window is left;
+        // AppKit instead keeps a window-less app sitting in the dock, and
+        // Schist has nothing to offer in that state — no menu item opens a
+        // second window. Quitting from anywhere but macOS would panic
+        // besides: `Platform::quit` is synchronous on Linux and re-enters
+        // the client state this callback is already dispatching from.
+        if cfg!(target_os = "macos") {
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+        }
+    });
+}
+
+fn open_all(paths: Vec<PathBuf>, window: WindowHandle<Workspace>, cx: &mut App) {
+    for path in paths {
+        if let Err(err) = window.update(cx, |ws, _window, cx| ws.load_file(path, cx)) {
+            log::error!("open failed: {err:#}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_from_url;
+    use std::path::PathBuf;
+
+    #[test]
+    fn finder_urls_become_paths() {
+        assert_eq!(
+            path_from_url("file:///Users/astrid/Pictures/moss.afphoto"),
+            Some(PathBuf::from("/Users/astrid/Pictures/moss.afphoto"))
+        );
+        // Spaces and non-ASCII arrive percent-encoded.
+        assert_eq!(
+            path_from_url("file:///tmp/two%20words/gr%C3%BCn.afdesign"),
+            Some(PathBuf::from("/tmp/two words/grün.afdesign"))
+        );
+        assert_eq!(
+            path_from_url("file://localhost/tmp/a.psb"),
+            Some(PathBuf::from("/tmp/a.psb"))
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_local_file_is_declined() {
+        assert_eq!(path_from_url("https://example.com/a.psd"), None);
+        assert_eq!(path_from_url("schist://open"), None);
+        assert_eq!(path_from_url("file://server/share/a.psd"), None);
+        // A truncated escape is malformed, not a path with a stray '%'.
+        assert_eq!(path_from_url("file:///tmp/a%2"), None);
+    }
 }

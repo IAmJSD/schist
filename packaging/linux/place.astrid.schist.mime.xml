@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MIME types shared-mime-info does not ship, so the desktop entry has
+     something real to associate with. Installed to
+     $PREFIX/share/mime/packages/, after which update-mime-database runs. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+
+  <!-- Every Affinity file, whatever the app that wrote it, starts with the
+       same four bytes; only the object graph inside differs. So the magic
+       identifies the family, and the globs pick the member out of it. -->
+  <mime-type type="application/x-affinity-document">
+    <comment>Affinity document</comment>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.af"/>
+    <magic priority="60">
+      <match type="string" value="\x00\xffKA" offset="0"/>
+    </magic>
+  </mime-type>
+
+  <mime-type type="application/x-affinity-photo">
+    <comment>Affinity Photo document</comment>
+    <sub-class-of type="application/x-affinity-document"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.afphoto"/>
+  </mime-type>
+
+  <mime-type type="application/x-affinity-designer">
+    <comment>Affinity Designer document</comment>
+    <sub-class-of type="application/x-affinity-document"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.afdesign"/>
+  </mime-type>
+
+  <mime-type type="application/x-affinity-publisher">
+    <comment>Affinity Publisher document</comment>
+    <sub-class-of type="application/x-affinity-document"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.afpub"/>
+  </mime-type>
+
+  <!-- Large Document Format is a PSD with 64-bit offsets: same type, and
+       the same codec reads it, but shared-mime-info only globs *.psd. -->
+  <mime-type type="image/vnd.adobe.photoshop">
+    <glob pattern="*.psb"/>
+  </mime-type>
+
+</mime-info>

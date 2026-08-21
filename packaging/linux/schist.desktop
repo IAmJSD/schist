@@ -7,4 +7,4 @@ Exec=schist %f
 Icon=place.astrid.schist
 Terminal=false
 Categories=Graphics;2DGraphics;RasterGraphics;
-MimeType=image/vnd.adobe.photoshop;image/png;image/jpeg;image/tiff;image/webp;
+MimeType=image/vnd.adobe.photoshop;application/x-affinity-photo;application/x-affinity-designer;application/x-affinity-publisher;application/x-affinity-document;image/png;image/jpeg;image/tiff;image/webp;
