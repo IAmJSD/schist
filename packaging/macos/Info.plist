@@ -12,14 +12,106 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
+
+    <!-- Types nobody else on the system declares. Launch Services will not
+         bind an extension to the app unless some bundle names the UTI, and
+         only Adobe and Serif ship the ones below, so import them, using
+         the vendors' own identifiers where they are known, rather than
+         minting place.astrid.* types that would shadow the real apps. -->
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.adobe.photoshop-large-image</string>
+            <key>UTTypeDescription</key><string>Photoshop Large Document</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.image</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>psb</string></array>
+                <key>public.mime-type</key><array><string>image/vnd.adobe.photoshop</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.seriflabs.afphoto</string>
+            <key>UTTypeDescription</key><string>Affinity Photo Document</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>afphoto</string></array>
+                <key>public.mime-type</key><array><string>application/x-affinity-photo</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.seriflabs.afdesign</string>
+            <key>UTTypeDescription</key><string>Affinity Designer Document</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>afdesign</string></array>
+                <key>public.mime-type</key><array><string>application/x-affinity-designer</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.seriflabs.afpub</string>
+            <key>UTTypeDescription</key><string>Affinity Publisher Document</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>afpub</string></array>
+                <key>public.mime-type</key><array><string>application/x-affinity-publisher</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <!-- The unified extension of Canva-era Affinity. Serif has not
+                 published an identifier for it; this one is ours in all but
+                 name, and costs nothing if they later declare their own. -->
+            <key>UTTypeIdentifier</key><string>com.seriflabs.af</string>
+            <key>UTTypeDescription</key><string>Affinity Document</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>af</string></array>
+                <key>public.mime-type</key><array><string>application/x-affinity-document</string></array>
+            </dict>
+        </dict>
+    </array>
+
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
             <key>CFBundleTypeName</key><string>Photoshop Document</string>
             <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
             <key>LSItemContentTypes</key>
             <array>
                 <string>com.adobe.photoshop-image</string>
+                <string>com.adobe.photoshop-large-image</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Import-only: there is no way to write a file Affinity would
+                 accept, so Schist opens these but never claims to edit them. -->
+            <key>CFBundleTypeName</key><string>Affinity Document</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.seriflabs.afphoto</string>
+                <string>com.seriflabs.afdesign</string>
+                <string>com.seriflabs.afpub</string>
+                <string>com.seriflabs.af</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>Image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
                 <string>public.png</string>
                 <string>public.jpeg</string>
                 <string>public.tiff</string>
