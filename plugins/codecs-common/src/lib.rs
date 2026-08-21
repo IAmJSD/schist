@@ -1,12 +1,16 @@
 //! Common raster format codecs (PNG, JPEG, WebP, TIFF) via the `image`
-//! crate, wrapped as `CodecPlugin`s. Import produces a single "Background"
-//! layer; export flattens through the compositor.
+//! crate, wrapped as `CodecPlugin`s, plus import-only Affinity support.
+//! Import produces a single "Background" layer; export flattens through
+//! the compositor.
 
+pub use affinity::AffinityCodec;
 use anyhow::Context as _;
 use image::ImageFormat;
 use photoslop_color::Depth;
 use photoslop_core::{blit_rgba8, Document, IntRect, Layer};
 use photoslop_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
+
+mod affinity;
 
 fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result<Document> {
     let img = image::load_from_memory_with_format(bytes, format)
@@ -152,6 +156,7 @@ impl PluginManifest for CommonCodecsPlugin {
         registry.register_codec(Box::new(JpegCodec));
         registry.register_codec(Box::new(WebPCodec));
         registry.register_codec(Box::new(TiffCodec));
+        registry.register_codec(Box::new(AffinityCodec));
     }
 }
 
@@ -202,6 +207,14 @@ mod tests {
             "codec.jpeg"
         );
         assert_eq!(reg.codec_for(b"", Some("tiff")).unwrap().id(), "codec.tiff");
+        assert_eq!(
+            reg.codec_for(b"\x00\xFFKA....", None).unwrap().id(),
+            "codec.affinity"
+        );
+        assert_eq!(
+            reg.codec_for(b"", Some("afphoto")).unwrap().id(),
+            "codec.affinity"
+        );
         assert!(reg.codec_for(b"garbage", Some("xyz")).is_none());
     }
 }

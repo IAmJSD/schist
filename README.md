@@ -35,7 +35,12 @@ all 27 blend modes, adjustment layers, layer effects, vector shapes,
 channels. Every block Photoslop doesn't understand is preserved
 byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
-than transforming it once. Also PNG, JPEG, WebP and TIFF.
+than transforming it once. Also PNG, JPEG, WebP and TIFF. Affinity files
+(`.afphoto`/`.afdesign`/`.afpub`) open through a natively
+reverse-engineered reader ([docs/affinity-format.md](docs/affinity-format.md)):
+pixel layers come in as real layers — names, groups, opacity,
+visibility, blend modes — and documents using live shapes, text or
+Affinity 2's zstd payloads fall back to the embedded flattened preview.
 
 **Selecting.** Rectangular and elliptical marquee; free, polygonal and
 magnetic lassos; magic wand with tolerance and contiguity; quick selection

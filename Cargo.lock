@@ -4366,6 +4366,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "photoslop-codec-affinity"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "miniz_oxide",
+ "photoslop-color",
+ "photoslop-core",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "photoslop-codec-psd"
 version = "0.1.0"
 dependencies = [
@@ -4386,6 +4397,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "image",
+ "log",
+ "photoslop-codec-affinity",
  "photoslop-color",
  "photoslop-colormgmt",
  "photoslop-compositor",

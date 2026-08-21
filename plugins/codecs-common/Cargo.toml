@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 photoslop-core.workspace = true
 photoslop-plugin-api.workspace = true
+photoslop-codec-affinity.workspace = true
 anyhow.workspace = true
+log.workspace = true
 image.workspace = true
 photoslop-color.workspace = true
 photoslop-colormgmt.workspace = true

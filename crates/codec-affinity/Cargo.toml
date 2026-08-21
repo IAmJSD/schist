@@ -1,0 +1,12 @@
+[package]
+name = "photoslop-codec-affinity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photoslop-core.workspace = true
+photoslop-color.workspace = true
+miniz_oxide.workspace = true
+thiserror.workspace = true
+log.workspace = true

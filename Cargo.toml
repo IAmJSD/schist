@@ -13,6 +13,7 @@ members = [
     "crates/compositor",
     "crates/color",
     "crates/codec-psd",
+    "crates/codec-affinity",
     "crates/vector",
     "crates/text-engine",
     "crates/adjustments",
@@ -47,6 +48,7 @@ photoslop-pixel-ops = { path = "crates/pixel-ops" }
 photoslop-compositor = { path = "crates/compositor" }
 photoslop-color = { path = "crates/color" }
 photoslop-codec-psd = { path = "crates/codec-psd" }
+photoslop-codec-affinity = { path = "crates/codec-affinity" }
 photoslop-vector = { path = "crates/vector" }
 photoslop-layer-fx = { path = "crates/layer-fx" }
 photoslop-neural = { path = "crates/neural" }
