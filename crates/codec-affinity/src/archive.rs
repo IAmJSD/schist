@@ -142,7 +142,7 @@ impl<'a> Archive<'a> {
         let version = c.u16()?;
         let flags = c.u16()?;
         let class_tag = c.tag()?;
-        if !(7..=11).contains(&version) {
+        if !(7..=12).contains(&version) {
             return Err(AffinityError::UnsupportedVersion(version));
         }
         if flags & 3 != 0 {
@@ -322,7 +322,15 @@ impl<'a> Archive<'a> {
                 )
                 .map_err(|e| malformed(format!("zlib: {e}")))?
             }
-            2 => return Err(AffinityError::Zstd),
+            2 => {
+                let raw = c.take(entry.compressed_size as usize)?;
+                let mut decoder = ruzstd::decoding::StreamingDecoder::new(raw)
+                    .map_err(|e| malformed(format!("zstd: {e}")))?;
+                let mut out = Vec::with_capacity(entry.size as usize);
+                std::io::Read::read_to_end(&mut decoder, &mut out)
+                    .map_err(|e| malformed(format!("zstd: {e}")))?;
+                out
+            }
             _ => c.take(entry.size as usize)?.to_vec(),
         };
         if plain.len() as u64 != entry.size {

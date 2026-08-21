@@ -8,5 +8,9 @@ license.workspace = true
 photoslop-core.workspace = true
 photoslop-color.workspace = true
 miniz_oxide.workspace = true
+ruzstd.workspace = true
+# Placed images keep their original file (PNG/JPEG…) in the container;
+# tiles marked "source-backed" decode from it.
+image.workspace = true
 thiserror.workspace = true
 log.workspace = true

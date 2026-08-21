@@ -10,10 +10,8 @@ pub enum AffinityError {
     NotAffinity,
     #[error("truncated file: needed {needed} bytes at offset {offset}")]
     Truncated { offset: usize, needed: usize },
-    #[error("unsupported container version {0} (known: 7–11)")]
+    #[error("unsupported container version {0} (known: 7–12)")]
     UnsupportedVersion(u16),
-    #[error("zstd-compressed entry (Affinity 2 file): structured parse not supported yet")]
-    Zstd,
     #[error("{0}")]
     Malformed(String),
 }

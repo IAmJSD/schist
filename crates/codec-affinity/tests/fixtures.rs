@@ -10,24 +10,35 @@ fn fixture_dir() -> PathBuf {
 }
 
 fn fixtures() -> Vec<(String, Vec<u8>)> {
-    let Ok(entries) = std::fs::read_dir(fixture_dir()) else {
-        eprintln!("skipping: no fixtures at {}", fixture_dir().display());
-        return Vec::new();
-    };
-    let mut out: Vec<(String, Vec<u8>)> = entries
-        .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|x| x.to_string_lossy().starts_with("af"))
-        })
-        .map(|e| {
-            (
-                e.file_name().to_string_lossy().into_owned(),
-                std::fs::read(e.path()).unwrap(),
-            )
-        })
-        .collect();
+    // The vendored corpus, plus (when set) PHOTOSLOP_AFFINITY_CORPUS —
+    // colon-separated directories of private real-world files to sweep
+    // in addition.
+    let mut dirs = vec![fixture_dir()];
+    if let Ok(extra) = std::env::var("PHOTOSLOP_AFFINITY_CORPUS") {
+        dirs.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+    }
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("skipping: no fixtures at {}", dir.display());
+            continue;
+        };
+        out.extend(
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|x| x.to_string_lossy().starts_with("af"))
+                })
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).unwrap(),
+                    )
+                }),
+        );
+    }
     out.sort();
     out
 }

@@ -56,6 +56,8 @@ photoslop-psd-descriptor = { path = "crates/psd-descriptor" }
 
 # zlib for PSD's zip-compressed channels; pure Rust, no C toolchain.
 miniz_oxide = "0.8"
+# zstd for Affinity 2 files; also pure Rust.
+ruzstd = "0.9"
 photoslop-text-engine = { path = "crates/text-engine" }
 photoslop-adjustments = { path = "crates/adjustments" }
 photoslop-plugin-host-wasm = { path = "crates/plugin-host-wasm" }

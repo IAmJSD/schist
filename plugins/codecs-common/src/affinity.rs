@@ -45,7 +45,9 @@ impl CodecPlugin for AffinityCodec {
         "Affinity (flattened)"
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["afphoto", "afdesign", "afpub"]
+        // ".af" is the unified extension of Canva-era Affinity; the
+        // container inside is the same family (version 12).
+        &["afphoto", "afdesign", "afpub", "af"]
     }
     fn probe(&self, bytes: &[u8]) -> bool {
         bytes.starts_with(&MAGIC)
@@ -55,15 +57,36 @@ impl CodecPlugin for AffinityCodec {
             Ok((doc, report)) if report.complete() && !doc.tree.layers.is_empty() => {
                 return Ok(doc);
             }
+            // Partial recovery still beats the preview — real files have
+            // been seen shipping stale, half-rendered previews — as long
+            // as some actual pixels came through. The skipped layers
+            // (text, shapes, fills) are covered by tucking the preview
+            // underneath as a hidden reference layer.
+            Ok((mut doc, report)) if report.raster_layers > 0 => {
+                log::info!(
+                    "affinity: {} layer(s) have no pixels in the file ({:?}); \
+                     adding the flattened preview as a hidden reference layer",
+                    report.skipped.len(),
+                    report
+                        .skipped
+                        .iter()
+                        .map(|(name, kind)| format!("{name} [{kind}]"))
+                        .collect::<Vec<_>>()
+                );
+                if let Some(mut reference) =
+                    self.preview_layer(bytes, doc.width, doc.height)
+                {
+                    reference.visible = false;
+                    doc.tree.layers.insert(0, reference);
+                    doc.damage_all();
+                    doc.dirty = false;
+                }
+                return Ok(doc);
+            }
             Ok((_, report)) => log::info!(
-                "affinity: {} layer(s) not recoverable as pixels ({:?}); \
+                "affinity: no pixel layers recoverable ({} skipped); \
                  opening the flattened preview instead",
                 report.skipped.len(),
-                report
-                    .skipped
-                    .iter()
-                    .map(|(name, kind)| format!("{name} [{kind}]"))
-                    .collect::<Vec<_>>()
             ),
             Err(e) => log::info!("affinity: structured parse failed ({e}); using preview"),
         }
@@ -72,9 +95,8 @@ impl CodecPlugin for AffinityCodec {
 }
 
 impl AffinityCodec {
-    /// The flattened-preview fallback: carve the largest embedded
-    /// PNG/JPEG stream that decodes and open it as a single layer.
-    fn import_preview(&self, bytes: &[u8]) -> anyhow::Result<Document> {
+    /// The largest embedded PNG/JPEG preview that actually decodes.
+    fn best_preview(&self, bytes: &[u8]) -> Option<image::RgbaImage> {
         let mut candidates = scan_pngs(bytes);
         candidates.extend(scan_jpegs(bytes));
         // Largest first; a candidate that fails to decode (truncated, or a
@@ -86,10 +108,33 @@ impl AffinityCodec {
                 continue;
             };
             let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            if w == 0 || h == 0 {
-                continue;
+            if rgba.width() > 0 && rgba.height() > 0 {
+                return Some(rgba);
             }
+        }
+        None
+    }
+
+    /// The preview scaled to canvas size, as a reference layer.
+    fn preview_layer(&self, bytes: &[u8], width: u32, height: u32) -> Option<Layer> {
+        let mut rgba = self.best_preview(bytes)?;
+        if (rgba.width(), rgba.height()) != (width, height) {
+            rgba = image::imageops::resize(&rgba, width, height, image::imageops::Triangle);
+        }
+        let mut layer = Layer::new_raster("Flattened preview");
+        blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(width, height),
+            rgba.as_raw(),
+        );
+        Some(layer)
+    }
+
+    /// The flattened-preview fallback: open the preview as the document.
+    fn import_preview(&self, bytes: &[u8]) -> anyhow::Result<Document> {
+        if let Some(rgba) = self.best_preview(bytes) {
+            let (w, h) = rgba.dimensions();
             let mut doc = Document::new("Affinity import", w, h, Depth::Eight);
             let mut layer = Layer::new_raster("Background");
             blit_rgba8(

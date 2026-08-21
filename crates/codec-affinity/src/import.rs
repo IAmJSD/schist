@@ -28,6 +28,8 @@ pub struct ImportReport {
     pub raster_layers: usize,
     /// Groups recovered (structure only, no pixels of their own).
     pub groups: usize,
+    /// Layer masks recovered and attached.
+    pub masks: usize,
     /// Layers present in the file but not recoverable as pixels:
     /// `(name, kind tag)` — shapes, text, adjustments…
     pub skipped: Vec<(String, String)>,
@@ -106,15 +108,20 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
         .first()
         .ok_or_else(|| malformed("document has no spreads"))?;
 
-    // Canvas: the spread bounds, [x0, y0, x1, y1] in document points
-    // (pixels for raster documents).
-    let bounds = f64s(spread, b"SprB").ok_or_else(|| malformed("spread has no bounds"))?;
-    if bounds.len() != 4 {
-        return Err(malformed("spread bounds are not a rect"));
-    }
-    let (org_x, org_y) = (bounds[0], bounds[1]);
-    let width = (bounds[2] - bounds[0]).round().max(0.0) as u32;
-    let height = (bounds[3] - bounds[1]).round().max(0.0) as u32;
+    // Canvas: Designer spreads carry SprB bounds [x0, y0, x1, y1];
+    // Photo documents instead put the size in the document node's DfSz.
+    let (org_x, org_y, width, height) = match f64s(spread, b"SprB") {
+        Some([x0, y0, x1, y1]) => (
+            *x0,
+            *y0,
+            (x1 - x0).round().max(0.0) as u32,
+            (y1 - y0).round().max(0.0) as u32,
+        ),
+        _ => match f64s(doc_node, b"DfSz") {
+            Some([w, h]) => (0.0, 0.0, w.round().max(0.0) as u32, h.round().max(0.0) as u32),
+            _ => return Err(malformed("no spread bounds or document size")),
+        },
+    };
     if width == 0 || height == 0 || width > 1 << 20 || height > 1 << 20 {
         return Err(malformed(format!("implausible canvas {width}×{height}")));
     }
@@ -136,10 +143,17 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
     }
 
     // A Photo-style spread stores its base pixels in a raster-spread
-    // node; import it as the bottom layer when present.
+    // node; import it as the bottom layer when present. Photo 2 leaves
+    // an evicted composite cache here (statuses all empty) — absence,
+    // not content, so it must not spoil the report.
     if let Some(ras) = graph.child(spread, b"RasS") {
-        if let Some(layer) = walker.raster_layer(ras, "Background") {
-            doc.push_layer(layer);
+        let has_content = graph
+            .child(ras, b"Bitm")
+            .is_some_and(bitmap_has_content);
+        if has_content {
+            if let Some(layer) = walker.raster_layer(ras, "Background") {
+                doc.push_layer(layer);
+            }
         }
     }
 
@@ -190,7 +204,17 @@ impl Walker<'_> {
                 }
                 group
             }
-            b"Rstr" => self.raster_layer(node, &display)?,
+            // "Rstr" is a pixel layer. "ImgN" is a placed image, which
+            // conveniently also carries its rendered pixels as a DyBm —
+            // the original file rides along, but the bitmap is enough.
+            b"Rstr" | b"ImgN" => {
+                let display = if display.is_empty() || display == "ImgN" {
+                    str_of(node, b"IRFN").filter(|s| !s.is_empty()).unwrap_or(&display).to_string()
+                } else {
+                    display
+                };
+                self.raster_layer(node, &display)?
+            }
             _ => {
                 // No pixels exist in the file for live shapes, text or
                 // adjustments — only their parameters. Record the gap.
@@ -199,6 +223,7 @@ impl Walker<'_> {
             }
         };
 
+        self.apply_mask(node, &mut layer);
         if let Some(v) = bool_of(node, b"Visi") {
             layer.visible = v;
         }
@@ -224,6 +249,50 @@ impl Walker<'_> {
         Some(layer)
     }
 
+    /// Attach the layer's mask, if it carries one: a "MRst" (mask
+    /// raster) node in the `AdCh` list, holding a single-channel bitmap
+    /// where white reveals. It becomes a real, editable [`LayerMask`].
+    fn apply_mask(&mut self, node: &Node, layer: &mut Layer) {
+        let masks: Vec<&Node> = self
+            .graph
+            .children(node, b"AdCh")
+            .into_iter()
+            .filter(|n| n.types.iter().any(|(t, _)| *t == graph::tag(b"MRst")))
+            .collect();
+        let Some(&mask_node) = masks.first() else {
+            return;
+        };
+        if masks.len() > 1 {
+            log::warn!(
+                "affinity: layer {:?} has {} masks; applying the first",
+                layer.name,
+                masks.len()
+            );
+        }
+        let Some(bitm) = self.graph.child(mask_node, b"Bitm") else {
+            return;
+        };
+        let gray = match self.decode_bitmap(bitm) {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("affinity: mask of {:?}: {e}", layer.name);
+                self.report
+                    .skipped
+                    .push((format!("{} (mask)", layer.name), "MRst".to_string()));
+                return;
+            }
+        };
+        let rect = self.placement(mask_node, &format!("{} (mask)", layer.name), gray.width, gray.height);
+        let gray = resample_to(gray, rect.width() as u32, rect.height() as u32);
+
+        let mut mask = photoslop_core::LayerMask::new_revealing();
+        mask.bounds = rect;
+        mask.enabled = bool_of(mask_node, b"Visi").unwrap_or(true);
+        blit_mask(&mut mask.tiles, rect, &gray);
+        layer.mask = Some(mask);
+        self.report.masks += 1;
+    }
+
     /// Build a raster layer from a node holding a `Bitm` bitmap.
     fn raster_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
         let bitm = self.graph.child(node, b"Bitm")?;
@@ -244,22 +313,10 @@ impl Walker<'_> {
             }
         };
 
-        // Placement: the layer transform's translation, relative to the
-        // spread origin. Rotation/shear (b, c) can't be represented
-        // without resampling; import unrotated and let the user fix up.
-        let (mut x, mut y) = (0.0f64, 0.0f64);
-        if let Some(xf) = f64s(node, b"Xfrm") {
-            if xf.len() == 6 {
-                x = xf[4] - self.origin.0;
-                y = xf[5] - self.origin.1;
-                if xf[1] != 0.0 || xf[2] != 0.0 {
-                    log::warn!("affinity: layer {name:?} is rotated; importing unrotated");
-                }
-            }
-        }
+        let rect = self.placement(node, name, rgba.width, rgba.height);
+        let rgba = resample_to(rgba, rect.width() as u32, rect.height() as u32);
 
         let mut layer = Layer::new_raster(name);
-        let rect = IntRect::from_xywh(x.round() as i32, y.round() as i32, rgba.width, rgba.height);
         blit_rgba8(
             &mut layer.as_raster_mut().unwrap().tiles,
             Depth::Eight,
@@ -268,6 +325,40 @@ impl Walker<'_> {
         );
         self.report.raster_layers += 1;
         Some(layer)
+    }
+
+    /// Where a bitmap lands on the canvas.
+    ///
+    /// Preference order: the pixel rect `BitR` when set (Photo writes an
+    /// `i32::MIN+1` sentinel when it isn't); else the layer transform —
+    /// row-major 2×3, `[sx, kx, tx, ky, sy, ty]` — applied to the bitmap
+    /// rect, dropping rotation/shear; else the origin at natural size.
+    fn placement(&self, node: &Node, name: &str, w: u32, h: u32) -> IntRect {
+        if let Some(Value::VecI(r)) = node.field(b"BitR") {
+            if let [x0, y0, x1, y1] = r[..] {
+                let sane = |v: i32| v.abs() < 1 << 24;
+                if x1 > x0 && y1 > y0 && sane(x0) && sane(y0) && sane(x1) && sane(y1) {
+                    return IntRect::new(
+                        x0 - self.origin.0.round() as i32,
+                        y0 - self.origin.1.round() as i32,
+                        x1 - self.origin.0.round() as i32,
+                        y1 - self.origin.1.round() as i32,
+                    );
+                }
+            }
+        }
+        if let Some(&[sx, kx, tx, ky, sy, ty]) = f64s(node, b"Xfrm").and_then(|v| v.first_chunk()) {
+            if kx != 0.0 || ky != 0.0 {
+                log::warn!("affinity: layer {name:?} is rotated/sheared; importing axis-aligned");
+            }
+            let (dw, dh) = ((w as f64 * sx.abs()).round(), (h as f64 * sy.abs()).round());
+            if dw >= 1.0 && dh >= 1.0 && dw < (1 << 24) as f64 && dh < (1 << 24) as f64 {
+                let x = (tx - self.origin.0).round() as i32;
+                let y = (ty - self.origin.1).round() as i32;
+                return IntRect::from_xywh(x, y, dw as u32, dh as u32);
+            }
+        }
+        IntRect::from_size(w, h)
     }
 
     fn decode_bitmap(&self, bitm: &Node) -> Result<RgbaImage, AffinityError> {
@@ -293,6 +384,8 @@ enum FormatKind {
     Gray,
     Cmyk,
     Lab,
+    /// One channel; decodes to (v, v, v, opaque).
+    Mask,
 }
 
 fn format(id: u16) -> Option<Format> {
@@ -303,6 +396,9 @@ fn format(id: u16) -> Option<Format> {
         3 => (2, 2, FormatKind::Gray),
         4 => (1, 5, FormatKind::Cmyk),
         5 => (2, 4, FormatKind::Lab),
+        // Single 8-bit channel: layer masks, and Photo 2's (usually
+        // evicted) composite caches.
+        6 => (1, 1, FormatKind::Mask),
         9 => (4, 4, FormatKind::Rgba),
         _ => return None,
     };
@@ -311,6 +407,28 @@ fn format(id: u16) -> Option<Format> {
         channels,
         kind,
     })
+}
+
+/// Every tile status of every channel, flattened; missing `Sta` fields
+/// read as empty.
+fn all_statuses(bitm: &Node) -> Vec<u8> {
+    let mut out = Vec::new();
+    for sta in [b"Sta1", b"Sta2", b"Sta3", b"Sta4", b"Sta5"] {
+        if let Some(Value::Array(items)) = bitm.field(sta) {
+            out.extend(items.iter().filter_map(|v| match v {
+                Value::U8(b) => Some(*b),
+                _ => None,
+            }));
+        }
+    }
+    out
+}
+
+/// True when a bitmap stores or synthesizes any pixel at all. Photo 2
+/// keeps evicted composite caches around (all statuses 0) — those are
+/// absence, not content.
+fn bitmap_has_content(bitm: &Node) -> bool {
+    all_statuses(bitm).iter().any(|&s| s > 1)
 }
 
 fn decode_bitmap(archive: &Archive, graph: &Graph, bitm: &Node) -> Result<RgbaImage, AffinityError> {
@@ -327,21 +445,31 @@ fn decode_bitmap(archive: &Archive, graph: &Graph, bitm: &Node) -> Result<RgbaIm
     let pitch = row_bytes.div_ceil(256) * 256;
     let rows = height.div_ceil(256) * 256;
 
+    // Placed images don't duplicate their pixels: tiles with status 5
+    // pull from the original file, carried in the Bckg entry.
+    let source = if all_statuses(bitm).contains(&5) {
+        Some(source_image(archive, bitm, width, height)?)
+    } else {
+        None
+    };
+
     let sta_names: [&[u8; 4]; 5] = [b"Sta1", b"Sta2", b"Sta3", b"Sta4", b"Sta5"];
     let idx_names: [&[u8; 4]; 5] = [b"Idx1", b"Idx2", b"Idx3", b"Idx4", b"Idx5"];
     let mut planes = Vec::with_capacity(fmt.channels);
     for channel in 0..fmt.channels {
-        planes.push(load_plane(
+        planes.push(load_plane(PlaneJob {
             archive,
             graph,
             bitm,
-            sta_names[channel],
-            idx_names[channel],
+            sta: sta_names[channel],
+            idx: idx_names[channel],
             pitch,
             rows,
             row_bytes,
             height,
-        )?);
+            bytes_per_sample: fmt.bytes_per_sample,
+            source: source.as_ref().map(|s| (s, channel)),
+        })?);
     }
 
     // Interleave planes into straight-alpha RGBA8. Higher depths are
@@ -369,6 +497,10 @@ fn decode_bitmap(archive: &Archive, graph: &Graph, bitm: &Node) -> Result<RgbaIm
                 FormatKind::Gray => {
                     let g = sample(&planes[0], x, y);
                     (g, g, g, sample(&planes[1], x, y))
+                }
+                FormatKind::Mask => {
+                    let v = sample(&planes[0], x, y);
+                    (v, v, v, 1.0)
                 }
                 FormatKind::Cmyk => {
                     let (c, m, yl, k) = (
@@ -400,20 +532,25 @@ fn decode_bitmap(archive: &Archive, graph: &Graph, bitm: &Node) -> Result<RgbaIm
     })
 }
 
-/// Rebuild one channel plane from its tile status list and blocks.
-#[allow(clippy::too_many_arguments)]
-fn load_plane(
-    archive: &Archive,
-    graph: &Graph,
-    bitm: &Node,
-    sta: &[u8; 4],
-    idx: &[u8; 4],
+struct PlaneJob<'a> {
+    archive: &'a Archive<'a>,
+    graph: &'a Graph,
+    bitm: &'a Node,
+    sta: &'a [u8; 4],
+    idx: &'a [u8; 4],
     pitch: usize,
     rows: usize,
     row_bytes: usize,
     height: usize,
-) -> Result<Vec<u8>, AffinityError> {
-    let statuses: Vec<u8> = match bitm.field(sta) {
+    bytes_per_sample: usize,
+    /// The bitmap's original file and which of its channels this plane
+    /// is, when any tile is source-backed (status 5).
+    source: Option<(&'a RgbaImage, usize)>,
+}
+
+/// Rebuild one channel plane from its tile status list and blocks.
+fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
+    let statuses: Vec<u8> = match job.bitm.field(job.sta) {
         Some(Value::Array(items)) => items
             .iter()
             .map(|v| match v {
@@ -421,59 +558,209 @@ fn load_plane(
                 _ => Err(malformed("tile status is not a byte")),
             })
             .collect::<Result<_, _>>()?,
-        _ => return Err(malformed(format!("bitmap has no {}", tag_name(graph::tag(sta))))),
+        // Fully evicted bitmaps drop their status arrays entirely.
+        _ => Vec::new(),
     };
-    let blocks = graph.children(bitm, idx);
+    let blocks = job.graph.children(job.bitm, job.idx);
     let mut next_block = blocks.iter();
 
-    let mut plane = vec![0u8; pitch * rows];
+    let mut plane = vec![0u8; job.pitch * job.rows];
     let (mut x, mut y) = (0usize, 0usize);
     for &status in &statuses {
         match status {
             0 | 1 => {}
-            2 => fill_tile(&mut plane, pitch, x, y, &[0xFF]),
-            3 => fill_tile(&mut plane, pitch, x, y, &0x3F80_0000u32.to_le_bytes()),
+            2 => fill_tile(&mut plane, job.pitch, x, y, &[0xFF]),
+            3 => fill_tile(&mut plane, job.pitch, x, y, &0x3F80_0000u32.to_le_bytes()),
             4 => {
                 let block = next_block
                     .next()
                     .ok_or_else(|| malformed("more stored tiles than blocks"))?;
-                let rect = match block.field(b"Rect") {
-                    Some(Value::VecI(v)) if v.len() == 4 => v,
-                    _ => return Err(malformed("block has no rect")),
+                // Photo 2 omits the rect on full tiles; the copy below
+                // clips to the plane, so the full default is safe.
+                let rect: [i32; 4] = match block.field(b"Rect").or_else(|| block.field(b"IRct")) {
+                    Some(Value::VecI(v)) if v.len() == 4 => [v[0], v[1], v[2], v[3]],
+                    _ => [0, 0, 256, 256],
                 };
                 let name = match block.field(b"Data") {
                     Some(Value::Embedded { name, .. }) => name,
                     _ => return Err(malformed("block has no data reference")),
                 };
-                let entry = archive
+                let entry = job
+                    .archive
                     .head(name)
                     .ok_or_else(|| malformed(format!("missing tile entry {name:?}")))?;
-                let tile = tile_payload(archive.extract(entry)?)
+                let tile = tile_payload(job.archive.extract(entry)?)
                     .ok_or_else(|| malformed(format!("tile {name:?} has no 64 KiB payload")))?;
                 let (x0, y0) = (rect[0].clamp(0, 256) as usize, rect[1].clamp(0, 256) as usize);
                 let (x1, y1) = (rect[2].clamp(0, 256) as usize, rect[3].clamp(0, 256) as usize);
                 for ty in y0..y1 {
-                    if y + ty >= rows {
+                    if y + ty >= job.rows {
                         break;
                     }
-                    let dst = (y + ty) * pitch + x + x0;
+                    let dst = (y + ty) * job.pitch + x + x0;
                     let src = ty * 256 + x0;
-                    let n = x1.saturating_sub(x0).min(pitch - (x + x0)) ;
+                    let n = x1.saturating_sub(x0).min(job.pitch - (x + x0));
                     plane[dst..dst + n].copy_from_slice(&tile[src..src + n]);
                 }
+            }
+            // Source-backed: the pixels live in the bitmap's original
+            // file (Bckg), not in tile entries.
+            5 => {
+                let Some((source, channel)) = job.source else {
+                    return Err(malformed("source-backed tile without a source image"));
+                };
+                copy_source_tile(&mut plane, &job, source, channel, x, y)?;
             }
             other => return Err(malformed(format!("unknown tile status {other}"))),
         }
         x += 256;
-        if x >= row_bytes.max(1) {
+        if x >= job.row_bytes.max(1) {
             x = 0;
             y += 256;
-            if y >= height {
+            if y >= job.height {
                 break;
             }
         }
     }
     Ok(plane)
+}
+
+/// Fill one tile of a channel plane from the decoded source image.
+/// `x` is a byte offset into the plane; the source is always RGBA8, so
+/// wider formats spread each 8-bit sample across the sample width.
+fn copy_source_tile(
+    plane: &mut [u8],
+    job: &PlaneJob,
+    source: &RgbaImage,
+    channel: usize,
+    x: usize,
+    y: usize,
+) -> Result<(), AffinityError> {
+    if channel >= 4 {
+        return Err(malformed("source-backed tile in a >4 channel format"));
+    }
+    let px0 = x / job.bytes_per_sample;
+    let per_tile = 256 / job.bytes_per_sample;
+    let sw = source.width as usize;
+    for ty in 0..256usize {
+        let sy = y + ty;
+        if sy >= source.height as usize || sy >= job.rows {
+            break;
+        }
+        for tx in 0..per_tile {
+            let sx = px0 + tx;
+            if sx >= sw {
+                break;
+            }
+            let v = source.pixels[(sy * sw + sx) * 4 + channel];
+            let at = sy * job.pitch + x + tx * job.bytes_per_sample;
+            match job.bytes_per_sample {
+                1 => plane[at] = v,
+                2 => plane[at..at + 2].copy_from_slice(&(v as u16 * 257).to_le_bytes()),
+                _ => plane[at..at + 4].copy_from_slice(&(v as f32 / 255.0).to_le_bytes()),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decode a bitmap's original file: the Bckg entry is a tiny "Blck"
+/// graph document whose Data blob is the file bytes (PNG, JPEG…).
+fn source_image(
+    archive: &Archive,
+    bitm: &Node,
+    width: usize,
+    height: usize,
+) -> Result<RgbaImage, AffinityError> {
+    let name = match bitm.field(b"Bckg") {
+        Some(Value::Embedded { name, .. }) => name,
+        _ => return Err(malformed("source-backed bitmap has no Bckg entry")),
+    };
+    let entry = archive
+        .head(name)
+        .ok_or_else(|| malformed(format!("missing source entry {name:?}")))?;
+    let data = archive.extract(entry)?;
+    let graph = graph::parse(&data)?;
+    let file = graph
+        .node(graph::ROOT)
+        .field(b"Data")
+        .and_then(|v| match v {
+            Value::Blob(b) => Some(b),
+            _ => None,
+        })
+        .ok_or_else(|| malformed("source entry has no file data"))?;
+    let img = image::load_from_memory(file)
+        .map_err(|e| malformed(format!("decoding source image: {e}")))?
+        .to_rgba8();
+    if (img.width() as usize, img.height() as usize) != (width, height) {
+        return Err(malformed(format!(
+            "source image is {}×{}, bitmap says {width}×{height}",
+            img.width(),
+            img.height()
+        )));
+    }
+    Ok(RgbaImage {
+        width: img.width(),
+        height: img.height(),
+        pixels: img.into_raw(),
+    })
+}
+
+/// Write a decoded mask image (channel 0) into mask tiles at `rect`.
+fn blit_mask(tiles: &mut photoslop_core::MaskTileMap, rect: IntRect, gray: &RgbaImage) {
+    use photoslop_core::{TileCoord, TILE_SIZE};
+    let w = gray.width as usize;
+    for coord in TileCoord::covering(&rect) {
+        let trect = coord.rect();
+        let clip = trect.intersect(&rect);
+        if clip.is_empty() {
+            continue;
+        }
+        let buf = tiles.get_mut_or_insert(coord);
+        for y in clip.top..clip.bottom {
+            let sy = (y - rect.top) as usize;
+            let ly = (y - trect.top) as usize;
+            for x in clip.left..clip.right {
+                let sx = (x - rect.left) as usize;
+                let lx = (x - trect.left) as usize;
+                buf[ly * TILE_SIZE as usize + lx] = gray.pixels[(sy * w + sx) * 4];
+            }
+        }
+    }
+}
+
+/// Scale an image to the placement rect's size (bilinear). Identity is
+/// free; import-time quality matches what a one-off resample costs.
+fn resample_to(img: RgbaImage, dw: u32, dh: u32) -> RgbaImage {
+    if (img.width, img.height) == (dw, dh) || dw == 0 || dh == 0 {
+        return img;
+    }
+    let (sw, sh) = (img.width as usize, img.height as usize);
+    let mut pixels = vec![0u8; dw as usize * dh as usize * 4];
+    for y in 0..dh as usize {
+        let fy = (y as f32 + 0.5) * sh as f32 / dh as f32 - 0.5;
+        let y0 = (fy.floor().max(0.0) as usize).min(sh - 1);
+        let y1 = (y0 + 1).min(sh - 1);
+        let wy = (fy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..dw as usize {
+            let fx = (x as f32 + 0.5) * sw as f32 / dw as f32 - 0.5;
+            let x0 = (fx.floor().max(0.0) as usize).min(sw - 1);
+            let x1 = (x0 + 1).min(sw - 1);
+            let wx = (fx - x0 as f32).clamp(0.0, 1.0);
+            let at = |px: usize, py: usize, c: usize| img.pixels[(py * sw + px) * 4 + c] as f32;
+            let out = &mut pixels[(y * dw as usize + x) * 4..][..4];
+            for (c, slot) in out.iter_mut().enumerate() {
+                let top = at(x0, y0, c) * (1.0 - wx) + at(x1, y0, c) * wx;
+                let bot = at(x0, y1, c) * (1.0 - wx) + at(x1, y1, c) * wx;
+                *slot = (top * (1.0 - wy) + bot * wy + 0.5) as u8;
+            }
+        }
+    }
+    RgbaImage {
+        width: dw,
+        height: dh,
+        pixels,
+    }
 }
 
 /// A tile entry is either the bare 64 KiB plane, or (older files) a tiny

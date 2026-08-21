@@ -4,10 +4,15 @@ What Photoslop knows about Serif's `.afphoto` / `.afdesign` / `.afpub`
 format, as implemented by `crates/codec-affinity`. Serif publishes no
 spec. This knowledge comes from prior art — [afread] by Vladimir Mamonov
 (MIT) and [AFDesignLoad] by Nick Beeuwsaert (MIT) — plus our own
-inspection of real files (`fixtures/affinity/`, written by Affinity
-Designer 1.x). Verified for **Affinity 1** (container versions 7–11).
-Affinity 2 keeps the container but compresses entries with zstd; we
-don't parse those payloads yet and fall back to the embedded preview.
+inspection of real files: `fixtures/affinity/` (Affinity Designer 1.x)
+plus private corpora of Affinity Photo 2.6 documents and Canva-era
+Affinity `.af` documents (not vendored — point
+`PHOTOSLOP_AFFINITY_CORPUS` at colon-separated directories of real
+files to sweep them in the codec tests). Every generation uses the
+same container and object graph: Affinity 2 swaps zlib for zstd, adds
+a few fields, and stores placed-image pixels by reference; the unified
+`.af` format bumps the container version to 12 with **no other
+observed change**.
 
 All integers are little-endian. Two tag conventions coexist, and mixing
 them up costs an afternoon: **container** tags (`#Inf`, `Prot`, `#FAT`,
@@ -19,7 +24,7 @@ tags in the object graph are stored reversed (`DocR` on disk is
 
 ```text
 00 FF 4B 41            magic
-u16  version           7–11 seen
+u16  version           7–11 seen (Affinity 1/2); 12 = unified ".af"
 u16  flags             0; low bits nonzero → layout we don't know
 u32  class tag         "Prsn" (persona/document); other values exist
                        for presets, brushes, macros…
@@ -99,19 +104,34 @@ in the stream.
 
 ```text
 Pers                        persona (root)
+├─ OVer/NVer: ApVs          writing app: name, version, build, platform
 └─ DocR: DocN               document node
+   ├─ DfSz: f64[2]          canvas size (Photo; Designer uses SprB)
    └─ Chld: [Sprd]          spreads / artboards
       ├─ SprB: f64[4]       spread bounds [x0 y0 x1 y1] — the canvas
-      ├─ RasS: SRst         Photo: the spread's base raster (Bitm inside)
+      ├─ RasS: SRst         spread base raster (Bitm inside); Photo 2
+      │                     leaves an *evicted* composite cache here —
+      │                     format 6, every tile status 0, no data
       └─ Chld: [layer]      layer tree, recursively via Chld
 ```
 
 Layer node type tags seen: `Scop` (Designer's layers-panel "Layer" —
-a container; treat as group), `Grup` (group), `Rstr` (pixels), `ShpN`
-(live shape), `PCrv` (curves/path), `TxtA`/`TxtF` (text), plus
-adjustment types. Common fields: `Desc` name · `Visi` visible · `Opac`
-opacity (f32) · `Blnd` blend enum · `PasT` false = a group isolates
-(default passthrough) · `Xfrm` f64[6] 2×3 transform · `FiEf` effects.
+a container; treat as group), `Grup` (group), `Rstr` (pixels), `ImgN`
+(placed image — carries both the original file *and* rendered pixels),
+`ShpN` (live shape), `PCrv` (curves/path), `TxtA`/`TxtF` (text),
+`FlRN` (fill layer), plus adjustment types. Common fields: `Desc` name
+· `Visi` visible · `Opac` opacity (f32) · `Blnd` blend enum · `PasT`
+false = a group isolates (default passthrough) · `Xfrm` f64[6]
+**row-major** 2×3 transform `[sx kx tx ky sy ty]` · `BitR` i32[4]
+on-canvas pixel rect (Photo; `i32::MIN+1` sentinels when unset) ·
+`FiEf` effects · `AdCh` mask/adjustment children.
+
+**Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
+a full layer node with its own `Xfrm` and a single-channel bitmap
+(format 6) where white reveals. A layer can carry several (they
+multiply); adjustment layers (`CrRA` curves, etc.) nest their own
+masks the same way. Import attaches the first as a real, editable
+layer mask.
 
 **Blend enum**, read from `layer_mode.afdesign` (a file with one layer
 per mode). The *(id, version)* pair is the key — later modes reuse ids
@@ -123,33 +143,55 @@ light · 12 pin light · 13 hard mix · 14 difference · 15 exclusion ·
 19 luminosity · 20 colour · 21–25 average/negation/reflect/glow/erase
 (no Photoshop-model equivalent).
 
-**Raster pixels** (`Rstr` → `Bitm`, class `DyBm`): `Frmt` enum — 0
-RGBA8 · 1 RGBA16 · 2 Gray8+A · 3 Gray16+A · 4 CMYK8+A · 5 LAB16+A ·
-9 RGBA32f — with `BmpW`/`BmpH`. Channels are **planar**, each a grid of
-**256-byte × 256-row tiles** (so a 16-bit channel is 128 px per tile
-column). Per channel N: `StaN`, one status byte per tile in row-major
-order — 0/1 empty · 2 fill 0xFF · 3 fill f32 1.0 · 4 stored — and
-`IdxN`, a list of `Blck { Rect: i32[4] valid region, IRct, Data }` for
-the status-4 tiles in order. `Blck.Data` (type 0x33) names a container
-entry whose payload is the 64 KiB tile plane — either bare or wrapped
-in a one-field graph document of type `Data` (field `DatI`, blob).
-`MI*`/`MT*` fields are mip levels of the same shape; ignored.
+**Raster pixels** (`Rstr`/`ImgN` → `Bitm`, class `DyBm`): `Frmt` enum
+— 0 RGBA8 · 1 RGBA16 · 2 Gray8+A · 3 Gray16+A · 4 CMYK8+A · 5 LAB16+A
+· 6 single 8-bit channel (masks; also Photo 2's usually-evicted
+composite caches) · 9 RGBA32f — with `BmpW`/`BmpH`
+(Photo 2 adds explicit tile-grid dims `TWiN`/`THiN`). Channels are
+**planar**, each a grid of **256-byte × 256-row tiles** (so a 16-bit
+channel is 128 px per tile column). Per channel N: `StaN`, one status
+byte per tile in row-major order — 0/1 empty · 2 fill 0xFF · 3 fill
+f32 1.0 · 4 stored · 5 **source-backed** (Photo 2) — and `IdxN`, a
+list of `Blck { Rect: i32[4] valid region, Data }` for the status-4
+tiles in order. Photo 2 omits `Rect` on full tiles and deduplicates:
+identical tiles are one shared `Blck` object linked repeatedly.
+`Blck.Data` (type 0x33) names a container entry whose payload is the
+64 KiB tile plane — bare, or wrapped in a one-field graph document of
+type `Data` (field `DatI`, blob). A fully evicted bitmap drops its
+`Sta` arrays entirely. `MI*`/`MT*` fields are mip levels of the same
+shape (the tag's third byte is the level number); ignored.
+
+**Source-backed tiles** (status 5): a placed image doesn't duplicate
+its pixels as tiles. The bitmap's `Bckg` entry (a graph document of
+type `Blck` with `Link` bool, `Size` u64, `Data` blob) holds the
+*original file bytes* (PNG, JPEG…) at exactly `BmpW`×`BmpH`; status-5
+tiles decode from it. Mip levels for such bitmaps do store real tiles.
 
 Live shapes, text and adjustments store **parameters only** — Affinity
 re-renders them — so no pixel recovery is possible for them without
 reimplementing Affinity's renderers. That's why the codec falls back to
 the file's embedded flattened preview whenever a document contains any.
 
+One field observation worth keeping: embedded flattened previews in
+real Photo 2 files can be **stale** (one corpus file's preview showed a
+half-rendered state while its layers were intact). The codec therefore
+prefers a partial layered import over the preview whenever any pixels
+were recovered, and adds the preview as a hidden reference layer.
+
 ## What's still unknown / to do
 
-- Affinity 2: zstd payloads (algorithm 2). Container parses; needs a
-  corpus to verify the graph against before enabling.
+- Multiple masks on one layer are combined by taking only the first;
+  they should multiply. Mask (and raster) rotation/shear is dropped.
+- Adjustment layers (`CrRA` curves and friends): parameters are parsed
+  (`AdjP` spline data) but not yet mapped to our adjustments.
+- Fill layers (`FlRN`): parameters only (colour/gradient); could be
+  synthesized on import.
 - Shape/text geometry: `ShpN`/`PCrv` carry curve records we keep raw;
   mapping them onto Photoslop's vector layers is the obvious next step.
-- Layer masks, adjustment parameters, ICC profiles: present in the
-  graph (e.g. `VisM`, adjustment classes), not yet interpreted.
-- `Xfrm` rotation/shear on rasters is dropped (translation only) —
-  resample on import when a real rotated-raster sample exists.
+- Adjustment parameters, ICC profiles (`Prof` on DyBm holds the raw
+  ICC blob): parsed but not yet interpreted.
+- `Xfrm` rotation/shear on rasters is dropped (axis-aligned scale and
+  translation only) — full affine resampling on import would fix it.
 
 `cargo run -p photoslop-codec-affinity --example afdump -- file.afphoto`
 prints any file's container listing and full object graph.
