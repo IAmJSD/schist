@@ -75,7 +75,7 @@ pub fn render(
                         .px_1()
                         .pt_2()
                         .text_size(px(11.0))
-                        .text_color(gpui::rgb(ui::TEXT_DIM))
+                        .text_color(gpui::rgb(ui::palette().text_dim))
                         .child(SharedString::from(name)),
                 )
                 .children(list.into_iter().map(|(id, label)| {
@@ -84,7 +84,7 @@ pub fn render(
                         .h(px(20.0))
                         .rounded_sm()
                         .text_size(px(12.0))
-                        .hover(|s| s.bg(gpui::rgb(0x2A2A2A)))
+                        .hover(|s| s.bg(gpui::rgb(ui::palette().hover)))
                         .child(SharedString::from(label))
                         .on_mouse_down(
                             MouseButton::Left,
@@ -139,7 +139,11 @@ pub fn render(
                 .h(px(22.0))
                 .rounded_sm()
                 .text_size(px(12.0))
-                .bg(gpui::rgb(if is_selected { 0x2F5B8C } else { 0x1E1E1E }))
+                .bg(gpui::rgb(if is_selected {
+                    ui::palette().selection_bg
+                } else {
+                    ui::palette().window_bg
+                }))
                 .child(ui::checkbox(
                     "",
                     on,
@@ -157,7 +161,7 @@ pub fn render(
                     div()
                         .px_1()
                         .text_size(px(11.0))
-                        .text_color(gpui::rgb(ui::TEXT_DIM))
+                        .text_color(gpui::rgb(ui::palette().text_dim))
                         .child("\u{2715}")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -191,7 +195,7 @@ pub fn render(
             params = params.child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(gpui::rgb(ui::TEXT_DIM))
+                    .text_color(gpui::rgb(ui::palette().text_dim))
                     .child("This filter has no settings."),
             );
         }
@@ -227,11 +231,11 @@ pub fn render(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child("Stack (applied bottom to top)"),
         )
         .child(stack_panel)
-        .child(div().h(px(1.0)).bg(gpui::rgb(0x2A2A2A)))
+        .child(div().h(px(1.0)).bg(gpui::rgb(ui::palette().divider)))
         .child(params)
         .child(ui::checkbox(
             "Preview",

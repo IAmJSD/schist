@@ -283,7 +283,7 @@ fn image_size(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(format!("Currently {doc_w} × {doc_h} px")),
         );
 
@@ -327,9 +327,13 @@ fn anchor_grid(anchor: (f32, f32), cx: &mut Context<Workspace>) -> impl IntoElem
                 div()
                     .size(px(18.0))
                     .rounded_sm()
-                    .bg(gpui::rgb(if selected { ui::ACCENT } else { ui::FIELD_BG }))
+                    .bg(gpui::rgb(if selected {
+                        ui::palette().accent
+                    } else {
+                        ui::palette().field_bg
+                    }))
                     .border_1()
-                    .border_color(gpui::rgb(ui::EDGE))
+                    .border_color(gpui::rgb(ui::palette().edge))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(move |ws, _e, _w, cx| {
@@ -411,7 +415,7 @@ fn canvas_size(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(format!("Currently {doc_w} × {doc_h} px")),
         );
 
@@ -569,7 +573,7 @@ fn filter_dialog(
         body = body.child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(SharedString::from(note)),
         );
     }
@@ -600,7 +604,7 @@ fn filter_dialog(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child("Applies to the active layer, inside the selection."),
         );
 
@@ -771,7 +775,7 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             } else if busy {
                 div()
                     .text_size(px(11.0))
-                    .text_color(gpui::rgb(ui::TEXT_DIM))
+                    .text_color(gpui::rgb(ui::palette().text_dim))
                     .child("\u{2026}")
                     .into_any_element()
             } else if installed {
@@ -814,7 +818,7 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(gpui::rgb(ui::TEXT_DIM))
+                                .text_color(gpui::rgb(ui::palette().text_dim))
                                 .child(SharedString::from(format!(
                                     "{state} \u{b7} {}",
                                     spec.license
@@ -823,7 +827,7 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(gpui::rgb(ui::TEXT_DIM))
+                                .text_color(gpui::rgb(ui::palette().text_dim))
                                 .child(SharedString::from(spec.note)),
                         ),
                 )
@@ -845,7 +849,7 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             div()
                 .pt_2()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(SharedString::from(format!(
                     "Models are kept in {}. Filters that have no model fall \
                      back to signal processing and say so.",
@@ -917,7 +921,7 @@ fn content_aware_scale_dialog(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child("Carves low-detail seams. A selection marks what to protect."),
         );
     let actions = div()
@@ -1015,7 +1019,7 @@ fn stroke_dialog(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child("Strokes the selection in the foreground colour."),
         );
     let actions = div()
@@ -1227,7 +1231,7 @@ fn color_range_dialog(
                         .size(px(18.0))
                         .rounded_sm()
                         .border_1()
-                        .border_color(gpui::rgb(0x3A3A3A))
+                        .border_color(gpui::rgb(ui::palette().edge))
                         .bg(gpui::rgb(swatch)),
                 )
                 .child(ui::button(
@@ -1267,7 +1271,7 @@ fn color_range_dialog(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child("Selects pixels near the sampled colour on the active layer."),
         );
     let actions = div()
@@ -1409,7 +1413,11 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .text_color(gpui::rgb(if failed { 0xD08770 } else { ui::TEXT_DIM }))
+                                .text_color(gpui::rgb(if failed {
+                                    0xD08770
+                                } else {
+                                    ui::palette().text_dim
+                                }))
                                 .child(detail),
                         ),
                 )
@@ -1438,7 +1446,7 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(format!("Plugins load from {dir}")),
         )
         .when(rows.is_empty(), |d| {
@@ -1627,7 +1635,7 @@ fn profile_dialog(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(explanation),
         );
 
@@ -1782,13 +1790,13 @@ fn preferences(
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(format!("Keyboard shortcuts: {keymap_path}")),
         )
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::TEXT_DIM))
+                .text_color(gpui::rgb(ui::palette().text_dim))
                 .child(format!("Version {}", crate::crash::current_version())),
         );
 
@@ -1826,9 +1834,13 @@ fn layer_properties(
             .flex()
             .items_center()
             .rounded_sm()
-            .bg(gpui::rgb(ui::FIELD_BG))
+            .bg(gpui::rgb(ui::palette().field_bg))
             .border_1()
-            .border_color(gpui::rgb(if focused { ui::ACCENT } else { ui::FIELD_BG }))
+            .border_color(gpui::rgb(if focused {
+                ui::palette().accent
+            } else {
+                ui::palette().field_bg
+            }))
             .text_size(px(12.0))
             .on_mouse_down(
                 gpui::MouseButton::Left,

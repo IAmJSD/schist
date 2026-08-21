@@ -416,6 +416,9 @@ struct ViewportKey {
     size: (u32, u32),
     color_epoch: u64,
     rotation: u32,
+    /// The surround outside the document is baked into the image, so a
+    /// theme change must invalidate it.
+    surround: u32,
 }
 
 /// Which modal dialog is open.
@@ -3420,6 +3423,7 @@ impl Workspace {
     /// (dialog dropdowns already notify).
     pub fn set_theme_quiet(&mut self, theme: Theme) {
         self.view.theme = theme;
+        crate::ui::set_light(theme == Theme::Light);
         self.save_view_options();
     }
 
@@ -4216,8 +4220,9 @@ impl Workspace {
     /// Assemble everything visible into one BGRA image the size of the
     /// canvas element, resampling on the way.
     ///
-    /// Zooming in uses nearest-neighbour so pixels stay crisp (what an
-    /// image editor wants); zooming out uses bilinear to damp aliasing.
+    /// Integer zooms stay nearest-neighbour so pixels stay crisp (what an
+    /// image editor wants); fractional and rotated views interpolate, and
+    /// zooming out averages the whole pixel footprint to damp aliasing.
     /// Transparency is checkered at a fixed *screen* size, like Photoshop.
     fn assemble_viewport(
         &mut self,
@@ -4244,6 +4249,7 @@ impl Workspace {
             size: (width as u32, height as u32),
             color_epoch: self.color_epoch,
             rotation: self.rotation.to_bits(),
+            surround: crate::ui::palette().canvas_bg,
         };
         if let Some((cached_key, image)) = &self.viewport_image {
             if *cached_key == key {
@@ -4287,7 +4293,8 @@ impl Workspace {
         let visible = span.intersect(&canvas_rect);
         if visible.is_empty() {
             // Nothing but background: a 1x1 image keeps the paint path simple.
-            let buffer = image::RgbaImage::from_raw(1, 1, vec![0x26, 0x26, 0x26, 255])?;
+            let s = (key.surround & 0xFF) as u8;
+            let buffer = image::RgbaImage::from_raw(1, 1, vec![s, s, s, 255])?;
             let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
             self.viewport_image = Some((key, img.clone()));
             return Some(img);
@@ -4333,7 +4340,40 @@ impl Workspace {
             }
         };
 
-        let magnify = zoom >= 1.0;
+        // How a screen pixel samples the document:
+        //  - Integer zoom, unrotated: nearest. One document pixel maps to
+        //    an exact block, so this is crisp and alias-free.
+        //  - Other magnification (fractional zoom, or any rotation):
+        //    bilinear. Nearest here duplicates rows and columns unevenly
+        //    and staircases every antialiased edge.
+        //  - Minification: several document pixels land inside each screen
+        //    pixel, so average an n x n grid spanning the pixel's whole
+        //    footprint. Bilinear reads only the four nearest and skips
+        //    pixels outright below 50% zoom, which is where the shimmer
+        //    and jagged edges came from.
+        let crisp = self.rotation == 0.0 && zoom >= 1.0 && zoom.fract() == 0.0;
+        let box_taps = if zoom < 1.0 {
+            // Tap spacing stays under one document pixel up to 8x
+            // minification; past that the cost stops being worth it.
+            (inv_zoom.ceil() as usize).clamp(2, 8)
+        } else {
+            0
+        };
+        // Straight-alpha result from a premultiplied accumulator, so
+        // averaging across an edge doesn't fringe.
+        let resolve = |acc: [f32; 4]| -> [u8; 4] {
+            if acc[3] <= 1e-6 {
+                [0, 0, 0, 0]
+            } else {
+                [
+                    (acc[0] / acc[3]).round().clamp(0.0, 255.0) as u8,
+                    (acc[1] / acc[3]).round().clamp(0.0, 255.0) as u8,
+                    (acc[2] / acc[3]).round().clamp(0.0, 255.0) as u8,
+                    (acc[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]
+            }
+        };
+        let surround = key.surround & 0xFF;
         let mut bgra = vec![0u8; width * height * 4];
         bgra.par_chunks_mut(width * 4)
             .enumerate()
@@ -4342,12 +4382,10 @@ impl Workspace {
                 for col in 0..width {
                     let dx = col as f32 + 0.5;
                     let (fx, fy) = doc_at(dx, dy);
-                    let px = if magnify {
-                        // Nearest: one document pixel becomes a crisp block.
+                    let px = if crisp {
                         sample(fx.floor() as i32, fy.floor() as i32)
-                    } else {
-                        // Bilinear over the four neighbours, in
-                        // premultiplied space so edges don't fringe.
+                    } else if box_taps == 0 {
+                        // Bilinear over the four neighbours.
                         let (sx, sy) = (fx - 0.5, fy - 0.5);
                         let (ix, iy) = (sx.floor(), sy.floor());
                         let (tx, ty) = (sx - ix, sy - iy);
@@ -4359,23 +4397,33 @@ impl Workspace {
                                     continue;
                                 }
                                 let s = sample(ix as i32 + dxi, iy as i32 + dyi);
-                                let a = s[3] as f32 / 255.0;
-                                acc[0] += s[0] as f32 * a * w;
-                                acc[1] += s[1] as f32 * a * w;
-                                acc[2] += s[2] as f32 * a * w;
-                                acc[3] += a * w;
+                                let a = s[3] as f32 / 255.0 * w;
+                                acc[0] += s[0] as f32 * a;
+                                acc[1] += s[1] as f32 * a;
+                                acc[2] += s[2] as f32 * a;
+                                acc[3] += a;
                             }
                         }
-                        if acc[3] <= 1e-6 {
-                            [0, 0, 0, 0]
-                        } else {
-                            [
-                                (acc[0] / acc[3]).round().clamp(0.0, 255.0) as u8,
-                                (acc[1] / acc[3]).round().clamp(0.0, 255.0) as u8,
-                                (acc[2] / acc[3]).round().clamp(0.0, 255.0) as u8,
-                                (acc[3] * 255.0).round().clamp(0.0, 255.0) as u8,
-                            ]
+                        resolve(acc)
+                    } else {
+                        // Box average over the footprint. The box is kept
+                        // axis-aligned even for rotated views: a square is
+                        // near enough rotation-invariant at this size.
+                        let n = box_taps;
+                        let mut acc = [0.0f32; 4];
+                        for sy in 0..n {
+                            let oy = ((sy as f32 + 0.5) / n as f32 - 0.5) * inv_zoom;
+                            for sx in 0..n {
+                                let ox = ((sx as f32 + 0.5) / n as f32 - 0.5) * inv_zoom;
+                                let s = sample((fx + ox).floor() as i32, (fy + oy).floor() as i32);
+                                let a = s[3] as f32 / 255.0;
+                                acc[0] += s[0] as f32 * a;
+                                acc[1] += s[1] as f32 * a;
+                                acc[2] += s[2] as f32 * a;
+                                acc[3] += a;
+                            }
                         }
+                        resolve(acc)
                     };
 
                     // Transparency shows the checkerboard inside the canvas
@@ -4391,7 +4439,7 @@ impl Workspace {
                             0xCCu32
                         }
                     } else {
-                        0x26u32
+                        surround
                     };
                     let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
                     let inv = 255 - a;
@@ -4702,7 +4750,7 @@ impl Workspace {
             .flex_grow()
             .size_full()
             .overflow_hidden()
-            .bg(gpui::rgb(0x262626))
+            .bg(gpui::rgb(crate::ui::palette().canvas_bg))
             .track_focus(&self.focus)
             .on_mouse_down(
                 MouseButton::Left,
@@ -4903,6 +4951,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Every colour below comes from the palette, so the theme must be
+        // selected before any child renders.
+        crate::ui::set_light(self.view.theme == Theme::Light);
         if !self.focused_once {
             // The focus handle only exists in the dispatch tree once we've
             // rendered, so this can't happen at construction time.
@@ -4921,16 +4972,8 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui::rgb(if self.view.theme == Theme::Light {
-                0xE8E8E8
-            } else {
-                0x1E1E1E
-            }))
-            .text_color(gpui::rgb(if self.view.theme == Theme::Light {
-                0x1C1C1C
-            } else {
-                0xD8D8D8
-            }))
+            .bg(gpui::rgb(crate::ui::palette().window_bg))
+            .text_color(gpui::rgb(crate::ui::palette().text))
             .text_size(px(12.0))
             // While a tool is capturing typing the context loses "editable",
             // which is what single-letter shortcuts are bound against — so

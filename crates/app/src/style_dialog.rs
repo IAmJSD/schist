@@ -428,7 +428,7 @@ pub fn render(
                         .size(px(18.0))
                         .rounded_sm()
                         .border_1()
-                        .border_color(gpui::rgb(0x3A3A3A))
+                        .border_color(gpui::rgb(ui::palette().edge))
                         .bg(gpui::rgb(rgb_of(c))),
                 )
                 .child(ui::button(
@@ -697,7 +697,7 @@ fn rgb_of(c: Rgba) -> u32 {
 trait Selected: Styled + Sized {
     fn when_selected(self, on: bool) -> Self {
         if on {
-            self.bg(gpui::rgb(0x2F5B8C))
+            self.bg(gpui::rgb(ui::palette().selection_bg))
         } else {
             self
         }

@@ -7,6 +7,7 @@
 //! color — no emoji.
 
 use crate::ui;
+use crate::ui::palette;
 use crate::workspace::{ColorTarget, ContextTarget, Modal, Popup, Workspace};
 use gpui::{
     canvas, deferred, div, img, px, svg, Context, InteractiveElement as _, IntoElement,
@@ -16,14 +17,6 @@ use gpui::{
 use schist_color::Rgba;
 use schist_core::{BlendMode, Layer, LayerId, LayerKind};
 use std::sync::Arc;
-
-const PANEL_BG: u32 = 0x1A1A1A;
-const PANEL_EDGE: u32 = 0x111111;
-const TEXT_DIM: u32 = 0x9A9A9A;
-const TEXT: u32 = 0xD8D8D8;
-const ACCENT: u32 = 0x3A6EA5;
-const HOVER: u32 = 0x2E2E2E;
-const POPUP_BG: u32 = 0x242424;
 
 fn swatch_hex(c: Rgba) -> gpui::Rgba {
     let [r, g, b, _] = c.to_u8();
@@ -40,7 +33,8 @@ pub fn icon(name: &str, size: f32, color: u32) -> impl IntoElement {
 trait ActiveExt: Styled + Sized {
     fn when_active(self, active: bool) -> Self {
         if active {
-            self.bg(gpui::rgb(ACCENT))
+            self.bg(gpui::rgb(palette().accent))
+                .text_color(gpui::rgb(palette().accent_text))
         } else {
             self
         }
@@ -819,7 +813,10 @@ fn menu_row_checked(
         .justify_between()
         .px_2()
         .h(px(24.0))
-        .hover(|s| s.bg(gpui::rgb(ACCENT)))
+        .hover(|s| {
+            s.bg(gpui::rgb(palette().accent))
+                .text_color(gpui::rgb(palette().accent_text))
+        })
         .on_mouse_down(MouseButton::Left, cx.listener(on_click))
         .child(
             div()
@@ -830,17 +827,18 @@ fn menu_row_checked(
                 .child(
                     // Fixed-width gutter so labels line up whether or not
                     // the item is checkable.
-                    div()
-                        .w(px(12.0))
-                        .flex_none()
-                        .children(checked.unwrap_or(false).then(|| icon("check", 10.0, TEXT))),
+                    div().w(px(12.0)).flex_none().children(
+                        checked
+                            .unwrap_or(false)
+                            .then(|| icon("check", 10.0, palette().text)),
+                    ),
                 )
                 .child(div().text_size(px(12.0)).child(label)),
         )
         .child(
             div()
                 .text_size(px(10.0))
-                .text_color(gpui::rgb(TEXT_DIM))
+                .text_color(gpui::rgb(palette().text_dim))
                 .child(hint),
         )
 }
@@ -858,13 +856,16 @@ fn menu_row(
         .justify_between()
         .px_2()
         .h(px(24.0))
-        .hover(|s| s.bg(gpui::rgb(ACCENT)))
+        .hover(|s| {
+            s.bg(gpui::rgb(palette().accent))
+                .text_color(gpui::rgb(palette().accent_text))
+        })
         .on_mouse_down(MouseButton::Left, cx.listener(on_click))
         .child(div().text_size(px(12.0)).child(label))
         .child(
             div()
                 .text_size(px(10.0))
-                .text_color(gpui::rgb(TEXT_DIM))
+                .text_color(gpui::rgb(palette().text_dim))
                 .child(hint),
         )
 }
@@ -878,9 +879,9 @@ pub fn menu_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .h(px(28.0))
         .flex_none()
         .px_1()
-        .bg(gpui::rgb(PANEL_BG))
+        .bg(gpui::rgb(palette().panel_bg))
         .border_b_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .children(
             menus(ws)
                 .into_iter()
@@ -896,7 +897,7 @@ pub fn menu_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                         .rounded_sm()
                         .text_size(px(12.0))
                         .when_active(is_open)
-                        .hover(|s| s.bg(gpui::rgb(HOVER)))
+                        .hover(|s| s.bg(gpui::rgb(palette().hover)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |ws, _e, _w, cx| ws.toggle_popup(Popup::Menu(i), cx)),
@@ -939,9 +940,10 @@ fn menu_panel(
         .left(px(left))
         .w(px(230.0))
         .py_1()
-        .bg(gpui::rgb(POPUP_BG))
+        .bg(gpui::rgb(palette().popup_bg))
+        .text_color(gpui::rgb(palette().text))
         .border_1()
-        .border_color(gpui::rgb(0x3A3A3A))
+        .border_color(gpui::rgb(palette().edge))
         .rounded_sm()
         .shadow_lg()
         .occlude()
@@ -959,7 +961,7 @@ fn menu_entry_row(
         MenuEntry::Sep => div()
             .h(px(1.0))
             .my_1()
-            .bg(gpui::rgb(0x3A3A3A))
+            .bg(gpui::rgb(palette().edge))
             .into_any_element(),
         MenuEntry::Cmd(id) => {
             let (label, hint) = ws
@@ -1041,7 +1043,7 @@ fn menu_entry_row(
                 .px_2()
                 .h(px(22.0))
                 .text_size(px(12.0))
-                .hover(|s| s.bg(gpui::rgb(HOVER)))
+                .hover(|s| s.bg(gpui::rgb(palette().hover)))
                 // Photoshop opens submenus on hover, and the pointer has to
                 // cross the parent row to reach the child panel anyway.
                 .on_mouse_move(cx.listener(move |ws, _e: &MouseMoveEvent, _w, cx| {
@@ -1051,7 +1053,7 @@ fn menu_entry_row(
                     }
                 }))
                 .child(div().child(label))
-                .child(icon("chevron-right", 10.0, TEXT_DIM));
+                .child(icon("chevron-right", 10.0, palette().text_dim));
             if open {
                 // Sits alongside its own row, clear of this panel's width.
                 // Not wrapped in `deferred`: the panel containing this row
@@ -1150,7 +1152,7 @@ fn slider(
         .h(px(12.0))
         .flex_none()
         .rounded_sm()
-        .bg(gpui::rgb(0x0E0E0E))
+        .bg(gpui::rgb(palette().field_bg))
         .child(
             div()
                 .absolute()
@@ -1159,7 +1161,7 @@ fn slider(
                 .bottom_0()
                 .w(px(72.0 * ratio))
                 .rounded_sm()
-                .bg(gpui::rgb(ACCENT)),
+                .bg(gpui::rgb(palette().accent)),
         )
         .child(
             canvas(
@@ -1202,7 +1204,7 @@ fn slider(
         row = row.child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(TEXT_DIM))
+                .text_color(gpui::rgb(palette().text_dim))
                 .child(label),
         );
     }
@@ -1229,9 +1231,9 @@ pub fn tab_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .items_end()
         .h(px(26.0))
         .flex_none()
-        .bg(gpui::rgb(0x141414))
+        .bg(gpui::rgb(palette().deep_bg))
         .border_b_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .overflow_hidden()
         .children(tabs.into_iter().enumerate().map(|(i, (title, dirty))| {
             let is_active = i == active;
@@ -1250,14 +1252,15 @@ pub fn tab_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                 .pr_1()
                 .max_w(px(180.0))
                 .border_r_1()
-                .border_color(gpui::rgb(PANEL_EDGE))
+                .border_color(gpui::rgb(palette().panel_edge))
                 .text_size(px(11.0));
             tab = if is_active {
-                tab.bg(gpui::rgb(0x2A2A2A)).text_color(gpui::rgb(TEXT))
+                tab.bg(gpui::rgb(palette().control_bg))
+                    .text_color(gpui::rgb(palette().text))
             } else {
-                tab.bg(gpui::rgb(PANEL_BG))
-                    .text_color(gpui::rgb(TEXT_DIM))
-                    .hover(|s| s.bg(gpui::rgb(HOVER)))
+                tab.bg(gpui::rgb(palette().panel_bg))
+                    .text_color(gpui::rgb(palette().text_dim))
+                    .hover(|s| s.bg(gpui::rgb(palette().hover)))
             };
             tab.on_mouse_down(
                 MouseButton::Left,
@@ -1282,7 +1285,7 @@ pub fn tab_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                     .justify_center()
                     .size(px(16.0))
                     .rounded_sm()
-                    .hover(|s| s.bg(gpui::rgb(0x3E3E3E)))
+                    .hover(|s| s.bg(gpui::rgb(palette().button_hover)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |ws, _e, _w, cx| {
@@ -1290,7 +1293,7 @@ pub fn tab_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                             ws.request_close_tab(i, cx);
                         }),
                     )
-                    .child(icon("close", 9.0, TEXT_DIM)),
+                    .child(icon("close", 9.0, palette().text_dim)),
             )
         }))
 }
@@ -1315,9 +1318,9 @@ pub fn tool_options_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl
         .h(px(32.0))
         .flex_none()
         .px_3()
-        .bg(gpui::rgb(PANEL_BG))
+        .bg(gpui::rgb(palette().panel_bg))
         .border_b_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .child(
             div()
                 .flex()
@@ -1326,7 +1329,7 @@ pub fn tool_options_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl
                 .gap_2()
                 .w(px(130.0))
                 .flex_none()
-                .child(icon(tool_icon, 15.0, TEXT))
+                .child(icon(tool_icon, 15.0, palette().text))
                 .child(div().text_size(px(12.0)).child(tool_name)),
         );
     if is_paint {
@@ -1447,7 +1450,7 @@ fn tool_option_control(
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(gpui::rgb(TEXT_DIM))
+                        .text_color(gpui::rgb(palette().text_dim))
                         .child(opt.label),
                 )
                 .child(control)
@@ -1483,9 +1486,9 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .w(px(40.0))
         .flex_none()
         .items_center()
-        .bg(gpui::rgb(PANEL_BG))
+        .bg(gpui::rgb(palette().panel_bg))
         .border_r_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .pt_1()
         .children(
             slots
@@ -1500,7 +1503,13 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                         .my(px(1.0))
                         .rounded_sm()
                         .when_active(is_active)
-                        .hover(move |s| if is_active { s } else { s.bg(gpui::rgb(HOVER)) })
+                        .hover(move |s| {
+                            if is_active {
+                                s
+                            } else {
+                                s.bg(gpui::rgb(palette().hover))
+                            }
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
@@ -1524,7 +1533,11 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                         .child(icon(
                             icon_name,
                             16.0,
-                            if is_active { 0xFFFFFF } else { TEXT },
+                            if is_active {
+                                palette().accent_text
+                            } else {
+                                palette().text
+                            },
                         ))
                         .children(has_siblings.then(|| {
                             // The corner mark that means "more tools here".
@@ -1533,7 +1546,11 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                                 .right(px(2.0))
                                 .bottom(px(2.0))
                                 .size(px(4.0))
-                                .bg(gpui::rgb(if is_active { 0xFFFFFF } else { TEXT_DIM }))
+                                .bg(gpui::rgb(if is_active {
+                                    palette().accent_text
+                                } else {
+                                    palette().text_dim
+                                }))
                         }))
                 }),
         )
@@ -1573,7 +1590,13 @@ pub fn tool_flyout(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gp
                 .px_2()
                 .h(px(24.0))
                 .when_active(selected)
-                .hover(move |s| if selected { s } else { s.bg(gpui::rgb(HOVER)) })
+                .hover(move |s| {
+                    if selected {
+                        s
+                    } else {
+                        s.bg(gpui::rgb(palette().hover))
+                    }
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ws, _e, _w, cx| {
@@ -1581,12 +1604,12 @@ pub fn tool_flyout(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gp
                         ws.activate_tool(id, cx);
                     }),
                 )
-                .child(icon(icon_name, 14.0, TEXT))
+                .child(icon(icon_name, 14.0, palette().text))
                 .child(div().flex_grow().text_size(px(12.0)).child(name))
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(gpui::rgb(TEXT_DIM))
+                        .text_color(gpui::rgb(palette().text_dim))
                         .child(shortcut),
                 )
                 .into_any_element()
@@ -1602,9 +1625,10 @@ pub fn tool_flyout(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gp
                 .top(px(f32::from(position.y) - 12.0))
                 .w(px(200.0))
                 .py_1()
-                .bg(gpui::rgb(POPUP_BG))
+                .bg(gpui::rgb(palette().popup_bg))
+                .text_color(gpui::rgb(palette().text))
                 .border_1()
-                .border_color(gpui::rgb(0x3A3A3A))
+                .border_color(gpui::rgb(palette().edge))
                 .rounded_sm()
                 .shadow_lg()
                 .occlude()
@@ -1628,7 +1652,7 @@ fn color_wells(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .size(px(18.0))
                 .bg(swatch_hex(ws.editor.background))
                 .border_1()
-                .border_color(gpui::rgb(0x777777))
+                .border_color(gpui::rgb(palette().text_faint))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, _ev, _w, cx| {
@@ -1644,7 +1668,7 @@ fn color_wells(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .size(px(18.0))
                 .bg(swatch_hex(ws.editor.foreground))
                 .border_1()
-                .border_color(gpui::rgb(0xEEEEEE))
+                .border_color(gpui::rgb(palette().text))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, _ev, _w, cx| {
@@ -1660,7 +1684,7 @@ fn color_wells(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .top(px(-1.0))
                 .right(px(-1.0))
                 .size(px(11.0))
-                .child(icon("swap", 11.0, TEXT_DIM))
+                .child(icon("swap", 11.0, palette().text_dim))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, _ev, _w, cx| {
@@ -1679,9 +1703,9 @@ pub fn side_panels(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl Into
         .flex_col()
         .w(px(260.0))
         .flex_none()
-        .bg(gpui::rgb(PANEL_BG))
+        .bg(gpui::rgb(palette().panel_bg))
         .border_l_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .child(navigator(ws, cx))
         .child(color_panel(ws, cx))
         .child(layers_panel(ws, cx))
@@ -1718,7 +1742,7 @@ fn color_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                         .size(px(18.0))
                         .bg(gpui::rgb(hex))
                         .border_1()
-                        .border_color(gpui::rgb(0x333333))
+                        .border_color(gpui::rgb(palette().divider))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
@@ -1771,14 +1795,14 @@ fn color_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .text_color(gpui::rgb(TEXT_DIM))
+                        .text_color(gpui::rgb(palette().text_dim))
                         .child(format!("#{:02X}{:02X}{:02X}", fg[0], fg[1], fg[2])),
                 )
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .text_color(gpui::rgb(TEXT_DIM))
-                        .hover(|s| s.text_color(gpui::rgb(TEXT)))
+                        .text_color(gpui::rgb(palette().text_dim))
+                        .hover(|s| s.text_color(gpui::rgb(palette().text)))
                         .child("Picker\u{2026}")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1795,7 +1819,7 @@ fn color_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
 fn panel_title(name: &'static str) -> impl IntoElement {
     div()
         .text_size(px(11.0))
-        .text_color(gpui::rgb(TEXT_DIM))
+        .text_color(gpui::rgb(palette().text_dim))
         .pb_1()
         .child(name.to_uppercase())
 }
@@ -1864,12 +1888,12 @@ fn icon_button(
         .justify_center()
         .size(px(22.0))
         .rounded_sm()
-        .hover(|s| s.bg(gpui::rgb(HOVER)))
+        .hover(|s| s.bg(gpui::rgb(palette().hover)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, _e, _w, cx| ws.run_command(command, cx)),
         )
-        .child(icon(icon_name, 14.0, TEXT))
+        .child(icon(icon_name, 14.0, palette().text))
 }
 
 fn blend_mode_control(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
@@ -1889,14 +1913,14 @@ fn blend_mode_control(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl I
         .h(px(20.0))
         .px_1()
         .rounded_sm()
-        .bg(gpui::rgb(0x0E0E0E))
+        .bg(gpui::rgb(palette().field_bg))
         .text_size(px(11.0))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|ws, _e, _w, cx| ws.toggle_popup(Popup::BlendModes, cx)),
         )
         .child(current.display_name())
-        .child(icon("chevron-down", 11.0, TEXT_DIM));
+        .child(icon("chevron-down", 11.0, palette().text_dim));
     if is_open {
         if let Some(layer_id) = active_layer {
             let rows: Vec<gpui::AnyElement> = BlendMode::layer_modes()
@@ -1911,7 +1935,13 @@ fn blend_mode_control(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl I
                         .items_center()
                         .text_size(px(11.0))
                         .when_active(selected)
-                        .hover(move |s| if selected { s } else { s.bg(gpui::rgb(HOVER)) })
+                        .hover(move |s| {
+                            if selected {
+                                s
+                            } else {
+                                s.bg(gpui::rgb(palette().hover))
+                            }
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |ws, _e, _w, cx| {
@@ -1933,9 +1963,10 @@ fn blend_mode_control(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl I
                     .max_h(px(320.0))
                     .overflow_y_scroll()
                     .py_1()
-                    .bg(gpui::rgb(POPUP_BG))
+                    .bg(gpui::rgb(palette().popup_bg))
+                    .text_color(gpui::rgb(palette().text))
                     .border_1()
-                    .border_color(gpui::rgb(0x3A3A3A))
+                    .border_color(gpui::rgb(palette().edge))
                     .rounded_sm()
                     .shadow_lg()
                     .occlude()
@@ -1968,7 +1999,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .p_2()
         .gap_1()
         .border_t_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .child(panel_title("Layers"))
         .child(
             div()
@@ -2015,7 +2046,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                             if is_active_row {
                                 s
                             } else {
-                                s.bg(gpui::rgb(HOVER))
+                                s.bg(gpui::rgb(palette().hover))
                             }
                         })
                         .on_mouse_down(
@@ -2056,7 +2087,11 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                 .child(icon(
                                     if row.visible { "eye" } else { "eye-off" },
                                     13.0,
-                                    if row.visible { TEXT } else { TEXT_DIM },
+                                    if row.visible {
+                                        palette().text
+                                    } else {
+                                        palette().text_dim
+                                    },
                                 )),
                         )
                         .child(div().w(px(row.depth as f32 * 12.0)).flex_none())
@@ -2081,7 +2116,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                         "chevron-right"
                                     },
                                     11.0,
-                                    TEXT_DIM,
+                                    palette().text_dim,
                                 ))
                                 .into_any_element(),
                             _ => div().w(px(0.0)).into_any_element(),
@@ -2095,7 +2130,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                 .w(px(38.0))
                                 .h(px(30.0))
                                 .flex_none()
-                                .bg(gpui::rgb(0x0E0E0E))
+                                .bg(gpui::rgb(palette().field_bg))
                                 .rounded_sm()
                                 // Adjustment layers open their settings
                                 // from the thumbnail, like Photoshop.
@@ -2108,9 +2143,11 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                         img(t).max_w(px(36.0)).max_h(px(28.0)).into_any_element()
                                     }
                                     (RowKind::Group, _) => {
-                                        icon("folder", 14.0, TEXT_DIM).into_any_element()
+                                        icon("folder", 14.0, palette().text_dim).into_any_element()
                                     }
-                                    _ => icon("adjust", 13.0, TEXT_DIM).into_any_element(),
+                                    _ => {
+                                        icon("adjust", 13.0, palette().text_dim).into_any_element()
+                                    }
                                 }),
                         )
                         .child(
@@ -2126,8 +2163,8 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                 .px_1()
                                 .rounded_sm()
                                 .text_size(px(10.0))
-                                .text_color(gpui::rgb(TEXT_DIM))
-                                .bg(gpui::rgb(0x2A2A2A))
+                                .text_color(gpui::rgb(palette().text_dim))
+                                .bg(gpui::rgb(palette().control_bg))
                                 .child("SO")
                         }))
                         .children(row.fx.then(|| {
@@ -2136,8 +2173,8 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                                 .px_1()
                                 .rounded_sm()
                                 .text_size(px(10.0))
-                                .text_color(gpui::rgb(TEXT_DIM))
-                                .bg(gpui::rgb(0x2A2A2A))
+                                .text_color(gpui::rgb(palette().text_dim))
+                                .bg(gpui::rgb(palette().control_bg))
                                 .child("fx")
                         }))
                 })),
@@ -2152,7 +2189,7 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                 .gap_1()
                 .pt_1()
                 .border_t_1()
-                .border_color(gpui::rgb(0x2A2A2A))
+                .border_color(gpui::rgb(palette().divider))
                 .child(icon_button("layer-new", "layer.new", cx))
                 .child(icon_button("group-new", "layer.group", cx))
                 .child(icon_button("duplicate", "layer.duplicate", cx))
@@ -2190,7 +2227,7 @@ fn history_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .p_2()
         .gap_1()
         .border_t_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .child(
             div()
                 .flex()
@@ -2236,7 +2273,7 @@ fn history_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                             if is_current {
                                 s
                             } else {
-                                s.bg(gpui::rgb(HOVER))
+                                s.bg(gpui::rgb(palette().hover))
                             }
                         })
                         .on_mouse_down(
@@ -2253,8 +2290,8 @@ fn history_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                         .flex_none()
                         .text_size(px(11.0))
                         .rounded_sm()
-                        .text_color(gpui::rgb(0x666666))
-                        .hover(|s| s.bg(gpui::rgb(HOVER)))
+                        .text_color(gpui::rgb(palette().text_faint))
+                        .hover(|s| s.bg(gpui::rgb(palette().hover)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |ws, _e, _w, cx| ws.history_jump(steps, cx)),
@@ -2290,11 +2327,11 @@ pub fn status_bar(ws: &Workspace) -> impl IntoElement {
         .h(px(24.0))
         .flex_none()
         .px_2()
-        .bg(gpui::rgb(0x161616))
+        .bg(gpui::rgb(palette().status_bg))
         .border_t_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .text_size(px(11.0))
-        .text_color(gpui::rgb(TEXT_DIM))
+        .text_color(gpui::rgb(palette().text_dim))
         .child(title)
         .child(zoom)
         .child(brush)
@@ -2422,7 +2459,7 @@ pub fn context_menu(
             ContextEntry::Sep => div()
                 .h(px(1.0))
                 .my_1()
-                .bg(gpui::rgb(0x3A3A3A))
+                .bg(gpui::rgb(palette().edge))
                 .into_any_element(),
             ContextEntry::Cmd(id) => {
                 let (label, hint) = ws
@@ -2473,9 +2510,10 @@ pub fn context_menu(
                 .top(px(top))
                 .w(px(WIDTH))
                 .py_1()
-                .bg(gpui::rgb(POPUP_BG))
+                .bg(gpui::rgb(palette().popup_bg))
+                .text_color(gpui::rgb(palette().text))
                 .border_1()
-                .border_color(gpui::rgb(0x3A3A3A))
+                .border_color(gpui::rgb(palette().edge))
                 .rounded_sm()
                 .shadow_lg()
                 .occlude()
@@ -2542,9 +2580,9 @@ pub fn rulers(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                 .left(px(size))
                 .right_0()
                 .h(px(size))
-                .bg(gpui::rgb(0x202020))
+                .bg(gpui::rgb(palette().ruler_bg))
                 .border_b_1()
-                .border_color(gpui::rgb(PANEL_EDGE))
+                .border_color(gpui::rgb(palette().panel_edge))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
@@ -2557,7 +2595,7 @@ pub fn rulers(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                     div().absolute().top_0().left(px(sx)).h(px(size)).child(
                         div()
                             .text_size(px(9.0))
-                            .text_color(gpui::rgb(TEXT_DIM))
+                            .text_color(gpui::rgb(palette().text_dim))
                             .pl(px(2.0))
                             .child(format!("{value:.0}")),
                     )
@@ -2571,9 +2609,9 @@ pub fn rulers(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                 .left_0()
                 .bottom_0()
                 .w(px(size))
-                .bg(gpui::rgb(0x202020))
+                .bg(gpui::rgb(palette().ruler_bg))
                 .border_r_1()
-                .border_color(gpui::rgb(PANEL_EDGE))
+                .border_color(gpui::rgb(palette().panel_edge))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, ev: &MouseDownEvent, _w, cx| {
@@ -2589,7 +2627,7 @@ pub fn rulers(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                         .top(px(sy))
                         .w(px(size))
                         .text_size(px(9.0))
-                        .text_color(gpui::rgb(TEXT_DIM))
+                        .text_color(gpui::rgb(palette().text_dim))
                         .child(format!("{value:.0}"))
                 })),
         )
@@ -2600,7 +2638,7 @@ pub fn rulers(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                 .top_0()
                 .left_0()
                 .size(px(size))
-                .bg(gpui::rgb(0x1A1A1A)),
+                .bg(gpui::rgb(palette().panel_bg)),
         )
 }
 
@@ -2618,7 +2656,7 @@ pub fn navigator(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .p_2()
         .gap_1()
         .border_t_1()
-        .border_color(gpui::rgb(PANEL_EDGE))
+        .border_color(gpui::rgb(palette().panel_edge))
         .child(panel_title("Navigator"))
         .on_mouse_down(
             MouseButton::Right,
@@ -2632,7 +2670,7 @@ pub fn navigator(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 .items_center()
                 .justify_center()
                 .h(px(90.0))
-                .bg(gpui::rgb(0x0E0E0E))
+                .bg(gpui::rgb(palette().field_bg))
                 .rounded_sm()
                 .children(thumb.map(|t| img(t).max_w(px(220.0)).max_h(px(84.0)))),
         )

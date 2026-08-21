@@ -186,7 +186,7 @@ pub fn hue_ramp(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .h(px(16.0))
         .w_full()
         .border_1()
-        .border_color(rgb(ui::EDGE))
+        .border_color(rgb(ui::palette().edge))
         .child(img(ramp).absolute().size_full())
         .child(
             canvas(
@@ -301,7 +301,7 @@ fn field_square(
         .h(px(FIELD))
         .flex_none()
         .border_1()
-        .border_color(rgb(ui::EDGE))
+        .border_color(rgb(ui::palette().edge))
         .child(img(field).absolute().size_full())
         .child(ring(s * FIELD, (1.0 - v) * FIELD))
         .child(
@@ -360,7 +360,7 @@ fn hue_strip(ws: &mut Workspace, h: f32, cx: &mut Context<Workspace>) -> impl In
         .h(px(FIELD))
         .flex_none()
         .border_1()
-        .border_color(rgb(ui::EDGE))
+        .border_color(rgb(ui::palette().edge))
         .child(img(strip).absolute().size_full())
         .child(
             // A bar rather than Photoshop's pair of arrows, because the
@@ -459,7 +459,7 @@ fn comparison(chosen: Rgba, original: Rgba) -> impl IntoElement {
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui::TEXT_DIM))
+                    .text_color(rgb(ui::palette().text_dim))
                     .child(label),
             )
     };
@@ -643,9 +643,13 @@ fn hex_field(
             .h(px(20.0))
             .px_1()
             .rounded_sm()
-            .bg(rgb(ui::FIELD_BG))
+            .bg(rgb(ui::palette().field_bg))
             .border_1()
-            .border_color(rgb(if focused { ui::ACCENT } else { ui::FIELD_BG }))
+            .border_color(rgb(if focused {
+                ui::palette().accent
+            } else {
+                ui::palette().field_bg
+            }))
             .text_size(px(11.0))
             .on_mouse_down(
                 MouseButton::Left,

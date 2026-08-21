@@ -144,9 +144,9 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         .w(px(SIZE))
         .h(px(SIZE))
         .flex_none()
-        .bg(gpui::rgb(0x141414))
+        .bg(gpui::rgb(ui::palette().deep_bg))
         .border_1()
-        .border_color(gpui::rgb(0x3A3A3A))
+        .border_color(gpui::rgb(ui::palette().edge))
         .rounded_sm()
         .child(
             canvas(
@@ -250,7 +250,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(gpui::rgb(ui::TEXT_DIM))
+                        .text_color(gpui::rgb(ui::palette().text_dim))
                         .child("Drag to shape · click to add · alt-click to remove"),
                 ),
         )
@@ -289,7 +289,7 @@ fn paint_graph(
                 },
                 size: gpui::size(px(bw), px(bh)),
             },
-            gpui::rgba(0x3A3A3A80),
+            gpui::rgba((ui::palette().edge << 8) | 0x80),
         ));
     }
 
@@ -304,7 +304,7 @@ fn paint_graph(
                 },
                 size: gpui::size(px(1.0), px(h)),
             },
-            gpui::rgb(0x262626),
+            gpui::rgb(ui::palette().grid),
         ));
         window.paint_quad(gpui::fill(
             Bounds {
@@ -314,14 +314,14 @@ fn paint_graph(
                 },
                 size: gpui::size(px(w), px(1.0)),
             },
-            gpui::rgb(0x262626),
+            gpui::rgb(ui::palette().grid),
         ));
     }
     stroke_polyline(
         window,
         &[to_screen(0.0, 0.0), to_screen(1.0, 1.0)],
         1.0,
-        gpui::rgb(0x333333),
+        gpui::rgb(ui::palette().edge),
     );
 
     let screen: Vec<Point<Pixels>> = plotted.iter().map(|(x, y)| to_screen(*x, *y)).collect();
@@ -339,7 +339,7 @@ fn paint_graph(
                 size: gpui::size(px(7.0), px(7.0)),
             },
             px(1.0),
-            gpui::rgb(0x101010),
+            gpui::rgb(ui::palette().field_bg),
             px(1.0),
             gpui::rgb(tint),
             gpui::BorderStyle::Solid,
