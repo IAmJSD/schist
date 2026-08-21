@@ -26,9 +26,9 @@ fn main() {
                     *kinds.entry(k.clone()).or_default() += 1;
                 }
                 println!(
-                    "{name}: {}x{} raster:{} groups:{} masks:{} skipped:{} {:?}",
+                    "{name}: {}x{} raster:{} groups:{} masks:{} text:{} skipped:{} {:?}",
                     doc.width, doc.height, report.raster_layers, report.groups,
-                    report.masks, report.skipped.len(), kinds
+                    report.masks, report.text_layers, report.skipped.len(), kinds
                 );
             }
             Err(e) => println!("{name}: ERROR {e}"),

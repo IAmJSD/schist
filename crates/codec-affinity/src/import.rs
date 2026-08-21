@@ -30,6 +30,8 @@ pub struct ImportReport {
     pub groups: usize,
     /// Layer masks recovered and attached.
     pub masks: usize,
+    /// Text layers re-rendered through the text engine.
+    pub text_layers: usize,
     /// Layers present in the file but not recoverable as pixels:
     /// `(name, kind tag)` — shapes, text, adjustments…
     pub skipped: Vec<(String, String)>,
@@ -215,6 +217,16 @@ impl Walker<'_> {
                 };
                 self.raster_layer(node, &display)?
             }
+            // Text stores no pixels, but it stores everything needed to
+            // set it again: string, font, size, colour, and the frame
+            // box that places it. Re-render through our text engine.
+            b"TxtA" | b"TxtF" => match self.text_layer(node, &display) {
+                Some(layer) => layer,
+                None => {
+                    self.report.skipped.push((display, tag_name(kind)));
+                    return None;
+                }
+            },
             _ => {
                 // No pixels exist in the file for live shapes, text or
                 // adjustments — only their parameters. Record the gap.
@@ -291,6 +303,159 @@ impl Walker<'_> {
         blit_mask(&mut mask.tiles, rect, &gray);
         layer.mask = Some(mask);
         self.report.masks += 1;
+    }
+
+    /// Rebuild a text layer by re-setting its type.
+    ///
+    /// The graph stores the string (`StSt` story → `Blok` → `Glyp`
+    /// `Utf8`), the first run's font size (`Doub[0]`) and resolved font
+    /// (`RFnt`/`DFnt` PostScript + family names), the fill colour (run
+    /// `Objs` → `FDsc.FDeF` → `Colr`), and the frame box `FrmB` whose
+    /// transformed bottom edge is the first baseline. The rendered
+    /// layer carries the same `PsTx` extras block the type tool writes,
+    /// so imported text stays editable.
+    fn text_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
+        let graph = self.graph;
+        let story = graph.child(node, b"StSt")?;
+        let blocks = graph.children(story, b"Blok");
+        let text = blocks
+            .iter()
+            .filter_map(|b| graph.child(b, b"Glyp"))
+            .filter_map(|g| str_of(g, b"Utf8"))
+            .map(|s| s.trim_end_matches('\0'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.trim().is_empty() {
+            return None;
+        }
+
+        // First run's character attributes speak for the whole layer.
+        let run_item = blocks.iter().find_map(|b| {
+            let runs = graph.children(graph.child(b, b"GAtt")?, b"Runs");
+            graph.child(*runs.first()?, b"Item")
+        })?;
+        let size = match run_item.field(b"Doub") {
+            Some(Value::Array(d)) => match d.first() {
+                Some(Value::F64(s)) => *s,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let font = graph
+            .child(run_item, b"RFnt")
+            .or_else(|| graph.child(run_item, b"DFnt"));
+        let (family, post) = font
+            .map(|f| {
+                (
+                    str_of(f, b"Famy").unwrap_or_default().to_string(),
+                    str_of(f, b"Post").unwrap_or_default().to_string(),
+                )
+            })
+            .unwrap_or_default();
+        let color = run_color(graph, run_item).unwrap_or([0, 0, 0, 255]);
+
+        // Placement: the frame box, through the layer transform. Its
+        // bottom edge is the first baseline (the box spans the visual
+        // cap height), which is exactly what the rasterizer's layout
+        // origin means.
+        let frame = graph.child(node, b"TxtH")?;
+        let frmb = f64s(frame, b"FrmB").filter(|b| b.len() == 4)?;
+        let xf: [f64; 6] = f64s(node, b"Xfrm")
+            .and_then(|v| v.first_chunk().copied())
+            .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        if xf[1] != 0.0 || xf[3] != 0.0 {
+            log::warn!("affinity: text layer {name:?} is rotated; importing axis-aligned");
+        }
+        let frame_left = (frmb[0] * xf[0] + xf[2] - self.origin.0).round() as i32;
+        let frame_top = (frmb[1] * xf[4] + xf[5] - self.origin.1).round() as i32;
+        let frame_width = ((frmb[2] - frmb[0]) * xf[0].abs()).round() as i32;
+        let eff_size = (size * xf[4].abs()) as f32;
+        if !(0.5..=10_000.0).contains(&eff_size) {
+            return None;
+        }
+
+        let mut spec = photoslop_text_engine::TextSpec {
+            text,
+            family,
+            bold: post.contains("Bold"),
+            italic: post.contains("Italic") || post.contains("Oblique"),
+            size: eff_size,
+            align: photoslop_text_engine::Align::Left,
+            line_height: 1.0,
+            tracking: 0.0,
+            wrap_width: None,
+        };
+        let mut raster = match photoslop_text_engine::rasterize(&spec) {
+            Some(r) => r,
+            None => {
+                let fallback = photoslop_text_engine::default_family();
+                log::warn!(
+                    "affinity: font {:?} not installed; setting {name:?} in {fallback:?}",
+                    spec.family
+                );
+                spec.family = fallback;
+                photoslop_text_engine::rasterize(&spec)?
+            }
+        };
+        if raster.is_empty() {
+            return None;
+        }
+        // The frame box records exactly how wide Affinity set this text.
+        // When our face's metrics disagree (usually a substituted font),
+        // scale the size so the line still fills its box.
+        if frame_width > 8 && !spec.text.contains('\n') {
+            let ratio = frame_width as f32 / raster.bounds.width() as f32;
+            if (ratio - 1.0).abs() > 0.02 {
+                spec.size *= ratio;
+                raster = photoslop_text_engine::rasterize(&spec)?;
+                if raster.is_empty() {
+                    return None;
+                }
+            }
+        }
+
+        // Anchor our ink box to the frame box: ink-to-ink placement is
+        // immune to differing ascent conventions between engines.
+        let origin = (
+            frame_left - raster.bounds.left,
+            frame_top - raster.bounds.top,
+        );
+        let mut layer = Layer::new_raster(if name.is_empty() { "Text" } else { name });
+        let bounds = raster.bounds.translated(origin.0, origin.1);
+        let mut rgba = vec![0u8; raster.coverage.len() * 4];
+        for (px, &cov) in rgba.chunks_exact_mut(4).zip(&raster.coverage) {
+            px[0] = color[0];
+            px[1] = color[1];
+            px[2] = color[2];
+            px[3] = (cov as u16 * color[3] as u16 / 255) as u8;
+        }
+        blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            bounds,
+            &rgba,
+        );
+
+        // The type tool's persistence block, so double-clicking with T
+        // reopens this text for editing.
+        #[derive(serde::Serialize)]
+        struct StoredText<'a> {
+            spec: &'a photoslop_text_engine::TextSpec,
+            origin: (i32, i32),
+            color: [u8; 4],
+        }
+        if let Ok(data) = serde_json::to_vec(&StoredText {
+            spec: &spec,
+            origin,
+            color,
+        }) {
+            layer.extras.push(photoslop_core::RawBlock {
+                key: *b"PsTx",
+                data,
+            });
+        }
+        self.report.text_layers += 1;
+        Some(layer)
     }
 
     /// Build a raster layer from a node holding a `Bitm` bitmap.
@@ -704,6 +869,56 @@ fn source_image(
         height: img.height(),
         pixels: img.into_raw(),
     })
+}
+
+/// The fill colour of a text run: the first `Objs` descriptor whose
+/// `FDeF` fill carries a `Colr` class, converted to RGBA bytes.
+fn run_color(graph: &Graph, run_item: &Node) -> Option<[u8; 4]> {
+    let objs = graph.children(run_item, b"Objs");
+    objs.iter().find_map(|obj| {
+        let fill = graph.child(obj, b"FDeF")?;
+        let colr = graph.child(fill, b"Colr")?;
+        let Value::Struct(raw) = colr.field(b"_col")? else {
+            return None;
+        };
+        let f = |i: usize| f32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+        let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        match (&colr.type_tag().to_be_bytes(), raw.len()) {
+            (b"RGBA", 16) => Some([to(f(0)), to(f(1)), to(f(2)), to(f(3))]),
+            (b"HSLA", 16) => {
+                let (r, g, b) = hsl_to_rgb(f(0), f(1), f(2));
+                Some([to(r), to(g), to(b), to(f(3))])
+            }
+            (b"GRAY", 8) => Some([to(f(0)), to(f(0)), to(f(0)), to(f(1))]),
+            (b"CMYK", 20) => {
+                let k = f(3);
+                Some([
+                    to((1.0 - f(0)) * (1.0 - k)),
+                    to((1.0 - f(1)) * (1.0 - k)),
+                    to((1.0 - f(2)) * (1.0 - k)),
+                    to(f(4)),
+                ])
+            }
+            (_, 4) => Some([raw[0], raw[1], raw[2], raw[3]]),
+            _ => None,
+        }
+    })
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h.rem_euclid(1.0)) * 6.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    (r + m, g + m, b + m)
 }
 
 /// Write a decoded mask image (channel 0) into mask tiles at `rect`.

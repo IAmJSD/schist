@@ -4374,7 +4374,10 @@ dependencies = [
  "miniz_oxide",
  "photoslop-color",
  "photoslop-core",
+ "photoslop-text-engine",
  "ruzstd",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

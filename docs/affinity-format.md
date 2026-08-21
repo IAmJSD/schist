@@ -126,6 +126,20 @@ false = a group isolates (default passthrough) · `Xfrm` f64[6]
 on-canvas pixel rect (Photo; `i32::MIN+1` sentinels when unset) ·
 `FiEf` effects · `AdCh` mask/adjustment children.
 
+**Text** (`TxtA` artistic / `TxtF` frame): no pixels, but the full
+model. `StSt` (story) → `Blok` blocks → `Glyp` (`GStr`) holds the
+UTF-8 string; each block's `GAtt` → `Runs` → `Item` carries character
+attributes — `Doub[0]` is the font size, `RFnt`/`DFnt` the resolved
+font (`Post` PostScript name, `Famy` family), and `Objs` holds fill
+descriptors (`FDsc.FDeF` → `Colr` → an `RGBA`/`HSLA`/… `_col` struct).
+`TxtH` is the frame (`ArFr` for artistic text): `FrmB` `f64[4]` is the
+layout box in pre-transform coordinates — its transformed bottom edge
+is the first baseline, its height the visual cap height (`ArtV`).
+Import re-sets the text through the text engine, anchors the rendered
+ink box to the transformed frame box (fitting the size to the frame
+width when a substituted font's metrics disagree), and stores the type
+tool's `PsTx` block so the layer stays editable.
+
 **Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
 a full layer node with its own `Xfrm` and a single-channel bitmap
 (format 6) where white reveals. A layer can carry several (they
@@ -186,8 +200,11 @@ were recovered, and adds the preview as a hidden reference layer.
   (`AdjP` spline data) but not yet mapped to our adjustments.
 - Fill layers (`FlRN`): parameters only (colour/gradient); could be
   synthesized on import.
-- Shape/text geometry: `ShpN`/`PCrv` carry curve records we keep raw;
+- Shape geometry: `ShpN`/`PCrv` carry curve records we keep raw;
   mapping them onto Photoslop's vector layers is the obvious next step.
+- Text: single style per layer (first run wins), no per-run styling,
+  effects on text (drop shadows) not yet applied, `TxtF` frame text
+  gets artistic-text treatment.
 - Adjustment parameters, ICC profiles (`Prof` on DyBm holds the raw
   ICC blob): parsed but not yet interpreted.
 - `Xfrm` rotation/shear on rasters is dropped (axis-aligned scale and
