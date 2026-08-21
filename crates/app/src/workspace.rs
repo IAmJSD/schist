@@ -29,6 +29,10 @@ use std::sync::Arc;
 /// of hundreds of tile quads.
 const PREVIEW_ZOOM_CUTOFF: f32 = 0.35;
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
+/// How long after the last zoom/pan event the view is rebuilt at full
+/// quality. Long enough to outlast the gap between wheel ticks, short
+/// enough that the crisp frame lands as soon as the hand stops.
+const VIEW_GESTURE_SETTLE_MS: u64 = 120;
 /// Where view preferences are stored.
 fn prefs_path() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -80,6 +84,13 @@ pub struct Workspace {
     viewport_image: Option<(ViewportKey, Arc<RenderImage>)>,
     /// Images replaced this frame; freed from the sprite atlas after paint.
     retired_images: Vec<Arc<RenderImage>>,
+    /// Whether a continuous zoom/pan gesture is streaming events. While
+    /// set, the canvas repaints `viewport_image` stretched to the current
+    /// transform instead of resampling the document every event.
+    view_gesture_active: bool,
+    /// Counts view-gesture events. Each event arms a settle timer that
+    /// captures the count, so only the timer for the last event fires.
+    view_gesture_seq: u64,
     /// Colour-picker imagery. Painted pixel by pixel rather than drawn as
     /// gradient quads -- see `color_picker::field_image` for why -- so it
     /// is cached: the square by the hue it was built for, the two
@@ -572,6 +583,8 @@ impl Workspace {
             display_tiles: FxHashMap::default(),
             viewport_image: None,
             retired_images: Vec::new(),
+            view_gesture_active: false,
+            view_gesture_seq: 0,
             picker_field: None,
             picker_strip: None,
             picker_ramp: None,
@@ -1087,6 +1100,40 @@ impl Workspace {
         );
         self.zoom = new;
         self.editor.zoom = new;
+    }
+
+    /// A continuous zoom/pan event arrived. Marks the gesture live and arms
+    /// a settle timer; the timer only ends the gesture if no further event
+    /// has bumped the sequence, so a stream of wheel ticks costs one
+    /// full-quality rebuild at the end rather than one per tick.
+    fn view_gesture_event(&mut self, cx: &mut Context<Self>) {
+        self.view_gesture_active = true;
+        self.view_gesture_seq += 1;
+        let seq = self.view_gesture_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(VIEW_GESTURE_SETTLE_MS))
+                .await;
+            this.update(cx, |ws, cx| {
+                if ws.view_gesture_seq == seq {
+                    ws.view_gesture_active = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The input stream has a definite end (pinch ended, pan released):
+    /// rebuild crisp now instead of waiting out the settle timer.
+    fn end_view_gesture(&mut self, cx: &mut Context<Self>) {
+        if self.view_gesture_active {
+            self.view_gesture_active = false;
+            // Orphan any pending settle timer.
+            self.view_gesture_seq += 1;
+            cx.notify();
+        }
     }
 
     fn doc_pos(&self, canvas_local: Point<Pixels>) -> (f32, f32) {
@@ -2493,6 +2540,7 @@ impl Workspace {
                 self.offset.y + (ev.position.y - last.y),
             );
             self.pan_last = Some(ev.position);
+            self.view_gesture_event(cx);
             cx.notify();
             return;
         }
@@ -2515,6 +2563,7 @@ impl Workspace {
             return;
         }
         if self.pan_last.take().is_some() {
+            self.end_view_gesture(cx);
             return;
         }
         if !self.pointer_down {
@@ -2556,9 +2605,11 @@ impl Workspace {
             if steps.abs() > f32::EPSILON {
                 let local = self.to_local(ev.position);
                 self.zoom_by(2f32.powf(steps), Some(local));
+                self.view_gesture_event(cx);
             }
         } else {
             self.offset = point(self.offset.x + delta.x, self.offset.y + delta.y);
+            self.view_gesture_event(cx);
         }
         cx.notify();
     }
@@ -2572,11 +2623,16 @@ impl Workspace {
     fn on_pinch(&mut self, ev: &PinchEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // `delta` is already the multiplicative change since the previous
         // event of the gesture, so it composes straight into `zoom_by`.
+        if ev.phase == TouchPhase::Ended {
+            self.end_view_gesture(cx);
+            return;
+        }
         if ev.phase != TouchPhase::Moved || !(ev.delta.is_finite() && ev.delta > 0.0) {
             return;
         }
         let local = self.to_local(ev.position);
         self.zoom_by(ev.delta, Some(local));
+        self.view_gesture_event(cx);
         cx.notify();
     }
 
@@ -4460,6 +4516,73 @@ impl Workspace {
         Some(img)
     }
 
+    /// Mid-gesture stand-in for `assemble_viewport`: the previous frame's
+    /// image, positioned so GPUI stretches it to the current zoom and pan
+    /// on its GPU. Resampling the document and uploading a fresh
+    /// full-viewport texture on every wheel tick is what made zooming lag;
+    /// a slightly soft frame is invisible while the view is in motion, and
+    /// the settle timer rebuilds it crisp the moment the hand stops.
+    ///
+    /// Old and new transforms share the rotation about the viewport
+    /// centre, and uniform scaling commutes with rotation, so old-screen
+    /// to new-screen composes to scale-plus-translate:
+    /// `s1 = k*s0 + (1-k)*c + R((k-1)*c - k*o0 + o1)`. One axis-aligned
+    /// quad is therefore exact even for a turned view.
+    fn gesture_viewport_quad(
+        &self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> Option<(Bounds<Pixels>, Arc<RenderImage>)> {
+        if !self.view_gesture_active {
+            return None;
+        }
+        let (key, image) = self.viewport_image.as_ref()?;
+        let doc = self.doc.as_ref()?;
+        let sf = scale_factor.max(0.01);
+        let width = (f32::from(bounds.size.width) * sf).round().max(1.0) as u32;
+        let height = (f32::from(bounds.size.height) * sf).round().max(1.0) as u32;
+        // Reuse is only sound when everything but zoom and pan matches
+        // what the image was built for.
+        if key.revision != doc.revision
+            || key.size != (width, height)
+            || key.color_epoch != self.color_epoch
+            || key.rotation != self.rotation.to_bits()
+            || key.surround != crate::ui::palette().canvas_bg
+        {
+            return None;
+        }
+        let z0 = f32::from_bits(key.zoom);
+        if !z0.is_finite() || z0 <= 0.0 {
+            return None;
+        }
+        let k = self.zoom / z0;
+        let c = (
+            f32::from(bounds.size.width) / 2.0,
+            f32::from(bounds.size.height) / 2.0,
+        );
+        let o0 = (key.offset.0 as f32 / sf, key.offset.1 as f32 / sf);
+        let o1 = (f32::from(self.offset.x), f32::from(self.offset.y));
+        let (ux, uy) = (
+            (k - 1.0) * c.0 - k * o0.0 + o1.0,
+            (k - 1.0) * c.1 - k * o0.1 + o1.1,
+        );
+        let (rs, rc) = self.rotation.sin_cos();
+        let t = (
+            (1.0 - k) * c.0 + ux * rc - uy * rs,
+            (1.0 - k) * c.1 + ux * rs + uy * rc,
+        );
+        Some((
+            Bounds {
+                origin: point(bounds.origin.x + px(t.0), bounds.origin.y + px(t.1)),
+                size: size(
+                    px(f32::from(bounds.size.width) * k),
+                    px(f32::from(bounds.size.height) * k),
+                ),
+            },
+            image.clone(),
+        ))
+    }
+
     fn refresh_preview(&mut self) -> Option<Arc<RenderImage>> {
         let doc = self.doc.as_ref()?;
         let (w, h) = (
@@ -4609,6 +4732,13 @@ impl Workspace {
             if let Some(img) = self.refresh_preview() {
                 job.tiles.push((snapped_bounds(canvas_rect), img));
             }
+        } else if let Some(quad) = self.gesture_viewport_quad(bounds, scale_factor) {
+            // Zooming out or panning can expose ground the stale image
+            // never covered; fill it with the surround so those edges
+            // don't flash stale pixels or bare window.
+            let surround = crate::ui::palette().canvas_bg;
+            job.backdrop = Some((bounds, gpui::rgb(surround).into()));
+            job.tiles.push(quad);
         } else if let Some(img) = self.assemble_viewport(bounds, scale_factor) {
             // One image covering the whole canvas element, already
             // resampled and checkered, so there are no tile edges to seam.
@@ -4796,7 +4926,9 @@ impl Workspace {
             .on_key_up(cx.listener(|ws, ev: &gpui::KeyUpEvent, _w, cx| {
                 if ev.keystroke.key == "space" {
                     ws.space_held = false;
-                    ws.pan_last = None;
+                    if ws.pan_last.take().is_some() {
+                        ws.end_view_gesture(cx);
+                    }
                     cx.notify();
                 }
             }))
@@ -4807,6 +4939,9 @@ impl Workspace {
                         entity.update(cx, |ws, _| ws.prepare_paint(bounds, scale))
                     },
                     move |_bounds, job: PaintJob, window, _cx| {
+                        if let Some((bounds, color)) = job.backdrop {
+                            window.paint_quad(gpui::fill(bounds, color));
+                        }
                         for (bounds, img) in job.tiles {
                             let _ =
                                 window.paint_image(bounds, gpui::Corners::default(), img, 0, false);
@@ -4931,6 +5066,9 @@ pub struct Ants {
 
 #[derive(Default)]
 pub struct PaintJob {
+    /// Filled beneath the artwork when a mid-gesture stale image may not
+    /// cover the whole canvas element.
+    backdrop: Option<(Bounds<Pixels>, gpui::Hsla)>,
     tiles: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
     outlines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
     polylines: Vec<(Vec<Point<Pixels>>, gpui::Hsla)>,
