@@ -16,6 +16,7 @@ image.workspace = true
 # same way the type tool stores it, so imported text stays editable.
 photoslop-text-engine.workspace = true
 photoslop-vector.workspace = true
+photoslop-adjustments.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

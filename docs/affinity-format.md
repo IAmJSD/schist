@@ -140,16 +140,44 @@ ink box to the transformed frame box (fitting the size to the frame
 width when a substituted font's metrics disagree), and stores the type
 tool's `PsTx` block so the layer stays editable.
 
+**Layer transforms nest**: a group's `Xfrm` defines the coordinate
+space its children's transforms (and `BitR` rects) live in; composing
+down the tree is what places deeply-nested tiles correctly.
+
 **Shapes** (`ShpN`): the layer's `ShpB` `f64[4]` bounds (through the
-layer transform) plus a `Shpe` class giving the kind — "ShNR"/"ShRR"
-rounded rectangles carry `ShCR` per-corner radii (fractions of half
-the shorter side unless `AbSz`), "ShCE" is an ellipse; stars, hearts,
-polygons and friends have their own tags and parameters. Fill comes
-from `BFFl` (a fill descriptor: `FilS` solid with a colour, `FilN`
-none, gradients otherwise), stroke colour from `LIFl` and width from
-`LILn` → `LDeL.Wght`. Import rebuilds rectangles/rounded
+composed transform) plus a `Shpe` class giving the kind —
+"ShNR"/"ShRR" rounded rectangles carry `ShCR` per-corner radii
+(fractions of half the shorter side unless `AbSz`), "ShpE" is an
+ellipse; stars, hearts, polygons and friends have their own tags and
+parameters. Fill comes from `BFFl` (a fill descriptor: `FilS` solid
+with a colour, `FilN` none, `FilG` gradient), stroke colour from
+`LIFl` and width from `LILn` → `LDeL.Wght`. A gradient holds stop
+positions (`Grad.Posn`), stop colours (`Cols`), a linear/radial `Type`
+enum, and `FDeX` — a 2×3 transform mapping the unit gradient axis into
+path space — which hangs off the *descriptor* in newer files and the
+fill itself in older ones. Import rebuilds rectangles/rounded
 rectangles/ellipses as live vector layers (editable, re-rasterized by
-the app); other kinds are reported.
+the app); gradient-filled ones keep rasterized pixels only.
+
+**Free paths** (`PCrv`): `Crvs` → "PCvD" → `Data`, an untagged record
+holding a subpath count then per subpath a closed flag and an array of
+18-byte records — f64 x, f64 y, and a marker pair: (1,0) control₁,
+(0,1) control₂, (0,2) on-curve endpoint. Each cubic segment starts at
+the previous endpoint; a closed path's stream begins mid-cycle, its
+first point being the final endpoint. Coordinates are in a local
+design space (`CvsB` bounds) mapped by the layer transform. Imported
+as live vector layers, even-odd filled so traced outlines keep their
+holes.
+
+**Curves adjustments** (`CrRA`): `AdjP` → "CrvP" with one `Spln` per
+channel (`Mast`, `C1Sp`–`C5Sp`): `Cnt` control points, `Vals` as xs
+then ys then tangents, in 0..1. Imported as a real curves adjustment
+layer (master + RGB channels).
+
+**Live filter nodes** (`FlRN`): a `Filt` pipeline warping the content
+below between source and destination `Quad`s. Every corpus sighting
+maps each quad onto itself — configured but inert — and imports as
+nothing; a genuine warp would be reported.
 
 **Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
 a full layer node with its own `Xfrm` and a single-channel bitmap
@@ -207,13 +235,11 @@ were recovered, and adds the preview as a hidden reference layer.
 
 - Multiple masks on one layer are combined by taking only the first;
   they should multiply. Mask (and raster) rotation/shear is dropped.
-- Adjustment layers (`CrRA` curves and friends): parameters are parsed
-  (`AdjP` spline data) but not yet mapped to our adjustments.
-- Fill layers (`FlRN`): parameters only (colour/gradient); could be
-  synthesized on import.
+- Adjustments beyond curves (levels, HSL, recolour…): same `AdjP`
+  pattern, not yet mapped.
+- Non-identity `FlRN` filter warps (none seen in the corpora).
 - Shapes beyond rectangles/rounded rectangles/ellipses (stars, hearts,
-  polygons…), gradient fills, and `PCrv` free paths: parameters are
-  parsed but not yet turned into geometry.
+  polygons…) are parsed but not yet turned into geometry.
 - Text: single style per layer (first run wins), no per-run styling,
   effects on text (drop shadows) not yet applied, `TxtF` frame text
   gets artistic-text treatment.

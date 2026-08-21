@@ -4372,6 +4372,7 @@ dependencies = [
  "image",
  "log",
  "miniz_oxide",
+ "photoslop-adjustments",
  "photoslop-color",
  "photoslop-core",
  "photoslop-text-engine",

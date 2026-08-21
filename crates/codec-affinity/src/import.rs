@@ -32,8 +32,10 @@ pub struct ImportReport {
     pub masks: usize,
     /// Text layers re-rendered through the text engine.
     pub text_layers: usize,
-    /// Shape layers rebuilt as live vectors.
+    /// Shape and path layers rebuilt as live vectors.
     pub shapes: usize,
+    /// Adjustment layers mapped onto our own adjustments.
+    pub adjustments: usize,
     /// Layers present in the file but not recoverable as pixels:
     /// `(name, kind tag)` — shapes, text, adjustments…
     pub skipped: Vec<(String, String)>,
@@ -136,7 +138,7 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
         archive,
         graph,
         report: &mut report,
-        origin: (org_x, org_y),
+        ctm: [1.0, 1.0, -org_x, -org_y],
     };
 
     if spreads.len() > 1 {
@@ -176,11 +178,36 @@ struct Walker<'a> {
     archive: &'a Archive<'a>,
     graph: &'a Graph,
     report: &'a mut ImportReport,
-    /// Canvas origin: layer transforms are in spread space.
-    origin: (f64, f64),
+    /// Current transform: (sx, sy, tx, ty), the composition of every
+    /// ancestor group's transform plus the canvas origin. Rotation and
+    /// shear are dropped (with a warning) — axis-aligned import.
+    ctm: [f64; 4],
+}
+
+/// Compose an axis-aligned CTM with a node's 2×3 row-major transform.
+fn compose(ctm: [f64; 4], xf: [f64; 6]) -> [f64; 4] {
+    [
+        ctm[0] * xf[0],
+        ctm[1] * xf[4],
+        ctm[0] * xf[2] + ctm[2],
+        ctm[1] * xf[5] + ctm[3],
+    ]
 }
 
 impl Walker<'_> {
+    /// This node's transform composed onto the current transform.
+    fn node_ctm(&self, node: &Node, what: &str) -> [f64; 4] {
+        match f64s(node, b"Xfrm").and_then(|v| v.first_chunk::<6>().copied()) {
+            Some(xf) => {
+                if xf[1] != 0.0 || xf[3] != 0.0 {
+                    log::warn!("affinity: {what} is rotated/sheared; importing axis-aligned");
+                }
+                compose(self.ctm, xf)
+            }
+            None => self.ctm,
+        }
+    }
+
     fn layer(&mut self, node: &Node) -> Option<Layer> {
         let kind = node.type_tag();
         let name = str_of(node, b"Desc").unwrap_or_default().to_string();
@@ -197,12 +224,16 @@ impl Walker<'_> {
             b"Grup" | b"Scop" => {
                 self.report.groups += 1;
                 let mut group = Layer::new_group(display);
+                // Children live in the group's coordinate space.
+                let saved = self.ctm;
+                self.ctm = self.node_ctm(node, "group");
                 let children: Vec<Layer> = self
                     .graph
                     .children(node, b"Chld")
                     .into_iter()
                     .filter_map(|c| self.layer(c))
                     .collect();
+                self.ctm = saved;
                 if let photoslop_core::LayerKind::Group(g) = &mut group.kind {
                     g.children = children;
                 }
@@ -238,9 +269,30 @@ impl Walker<'_> {
                     return None;
                 }
             },
+            // Free bezier paths (pen tool, traced outlines).
+            b"PCrv" => match self.path_layer(node, &display) {
+                Some(layer) => layer,
+                None => {
+                    self.report.skipped.push((display, tag_name(kind)));
+                    return None;
+                }
+            },
+            // Curves adjustment layers map onto our own curves
+            // adjustment; the compositor applies them non-destructively.
+            b"CrRA" => match self.curves_adjustment(node, &display) {
+                Some(layer) => layer,
+                None => {
+                    self.report.skipped.push((display, tag_name(kind)));
+                    return None;
+                }
+            },
+            // A live filter node warps the content below it between two
+            // quads. When source and destination coincide the filter is
+            // configured but inert — absence, not content.
+            b"FlRN" if self.filter_is_identity(node) => return None,
             _ => {
-                // No pixels exist in the file for live shapes, text or
-                // adjustments — only their parameters. Record the gap.
+                // No pixels exist in the file for other live layer
+                // kinds — only their parameters. Record the gap.
                 self.report.skipped.push((display, tag_name(kind)));
                 return None;
             }
@@ -281,47 +333,21 @@ impl Walker<'_> {
     /// `LIFl`/`LILn`. Anything fancier (stars, hearts, polygons) is
     /// reported instead of guessed.
     fn shape_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
-        use photoslop_color::Rgba;
         let graph = self.graph;
         let shpe = graph.child(node, b"Shpe")?;
         let b = f64s(node, b"ShpB").filter(|b| b.len() == 4)?;
-        let xf: [f64; 6] = f64s(node, b"Xfrm")
-            .and_then(|v| v.first_chunk().copied())
-            .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
-        if xf[1] != 0.0 || xf[3] != 0.0 {
-            log::warn!("affinity: shape {name:?} is rotated; importing axis-aligned");
-        }
-        let (sx, sy) = (xf[0].abs(), xf[4].abs());
-        let x0 = (b[0] * xf[0] + xf[2] - self.origin.0) as f32;
-        let y0 = (b[1] * xf[4] + xf[5] - self.origin.1) as f32;
-        let x1 = (b[2] * xf[0] + xf[2] - self.origin.0) as f32;
-        let y1 = (b[3] * xf[4] + xf[5] - self.origin.1) as f32;
+        let c = self.node_ctm(node, name);
+        let (sx, sy) = (c[0].abs(), c[1].abs());
+        let x0 = (b[0] * c[0] + c[2]) as f32;
+        let y0 = (b[1] * c[1] + c[3]) as f32;
+        let x1 = (b[2] * c[0] + c[2]) as f32;
+        let y1 = (b[3] * c[1] + c[3]) as f32;
         let (x0, x1) = (x0.min(x1), x0.max(x1));
         let (y0, y1) = (y0.min(y1), y0.max(y1));
         let (w, h) = (x1 - x0, y1 - y0);
         if w < 0.5 || h < 0.5 || w > 1e6 || h > 1e6 {
             return None;
         }
-
-        let fill = graph
-            .children(node, b"BFFl")
-            .first()
-            .and_then(|f| descriptor_color(graph, f));
-        let stroke_color = graph
-            .children(node, b"LIFl")
-            .first()
-            .and_then(|f| descriptor_color(graph, f));
-        let stroke_width = graph
-            .children(node, b"LILn")
-            .first()
-            .and_then(|l| graph.child(l, b"LDeL"))
-            .and_then(|s| match s.field(b"Wght") {
-                Some(Value::F64(v)) => Some((*v * (sx + sy) / 2.0) as f32),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-        let stroke = stroke_color.filter(|_| stroke_width > 0.05);
-        fill.or(stroke)?; // invisible shape: nothing to import
 
         let anchors = match &shpe.type_tag().to_be_bytes() {
             b"ShNR" | b"ShRR" => {
@@ -336,7 +362,7 @@ impl Walker<'_> {
                 }
                 rounded_rect_anchors(x0, y0, x1, y1, radius.clamp(0.0, w.min(h) * 0.5))
             }
-            b"ShCE" => ellipse_anchors(x0, y0, x1, y1),
+            b"ShCE" | b"ShpE" => ellipse_anchors(x0, y0, x1, y1),
             _ => return None,
         };
 
@@ -345,19 +371,208 @@ impl Walker<'_> {
             anchors,
             closed: true,
         });
+        self.vector_layer(node, name, path, false)
+    }
+
+    /// Rebuild a free path layer ("PCrv") from its curve data.
+    ///
+    /// `Crvs` → "PCvD" → an untagged record: a subpath count, then per
+    /// subpath a closed flag and a stream of 18-byte records — f64 x,
+    /// f64 y, and a marker: (1,0) control₁, (0,1) control₂, (0,2)
+    /// on-curve endpoint. Each cubic segment starts at the previous
+    /// endpoint; a closed path's first point is its final endpoint.
+    fn path_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
+        let graph = self.graph;
+        let data = graph
+            .child(graph.child(node, b"Crvs")?, b"Data")
+            .filter(|d| !d.fields.is_empty())?;
+
+        let c = self.node_ctm(node, name);
+        let to_doc = |x: f64, y: f64| ((x * c[0] + c[2]) as f32, (y * c[1] + c[3]) as f32);
+
+        let mut path = photoslop_core::VectorPath::new(name);
+        let mut closed = true;
+        for (_, value) in &data.fields {
+            match value {
+                Value::Bool(c) => closed = *c,
+                Value::Array(items)
+                    if items.iter().any(|v| matches!(v, Value::Curve(_))) =>
+                {
+                    let mut records = Vec::new();
+                    for item in items {
+                        let Value::Curve(raw) = item else { continue };
+                        if raw.len() != 18 {
+                            return None;
+                        }
+                        let x = f64::from_le_bytes(raw[0..8].try_into().unwrap());
+                        let y = f64::from_le_bytes(raw[8..16].try_into().unwrap());
+                        let (px, py) = to_doc(x, y);
+                        records.push((px, py, raw[16], raw[17]));
+                    }
+                    if let Some(sub) = subpath_from_records(&records, closed) {
+                        path.subpaths.push(sub);
+                    }
+                    closed = true;
+                }
+                _ => {}
+            }
+        }
+        if path.is_empty() {
+            return None;
+        }
+        // Traced outlines carry holes as counter-subpaths; even-odd
+        // renders them correctly regardless of winding.
+        self.vector_layer(node, name, path, true)
+    }
+
+    /// Shared tail for vector layers: fill/stroke lookup, live shape,
+    /// rasterization.
+    fn vector_layer(
+        &mut self,
+        node: &Node,
+        name: &str,
+        path: photoslop_core::VectorPath,
+        even_odd: bool,
+    ) -> Option<Layer> {
+        use photoslop_color::Rgba;
+        let graph = self.graph;
+        let c = self.node_ctm(node, name);
+        let fill_desc = graph.children(node, b"BFFl");
+        let fill = fill_desc.first().and_then(|f| descriptor_color(graph, f));
+        let mut gradient = match fill {
+            Some(_) => None,
+            None => fill_desc.first().and_then(|f| descriptor_gradient(graph, f)),
+        };
+        // Gradient axis into document space.
+        if let Some(g) = &mut gradient {
+            let map = |p: (f64, f64)| (p.0 * c[0] + c[2], p.1 * c[1] + c[3]);
+            g.start = map(g.start);
+            g.end = map(g.end);
+        }
+        let stroke_color = graph
+            .children(node, b"LIFl")
+            .first()
+            .and_then(|f| descriptor_color(graph, f));
+        let stroke_width = graph
+            .children(node, b"LILn")
+            .first()
+            .and_then(|l| graph.child(l, b"LDeL"))
+            .and_then(|s| match s.field(b"Wght") {
+                Some(Value::F64(v)) => Some((*v * (c[0].abs() + c[1].abs()) / 2.0) as f32),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let stroke = stroke_color.filter(|_| stroke_width > 0.05);
+        if fill.is_none() && gradient.is_none() && stroke.is_none() {
+            return None; // invisible: nothing to import
+        }
+
         let to_rgba = |c: [u8; 4]| Rgba::from_u8(c[0], c[1], c[2], c[3]);
         let shape = photoslop_core::VectorShape {
             path,
             fill: fill.map(to_rgba).unwrap_or(Rgba::TRANSPARENT),
             stroke: stroke.map(|c| (to_rgba(c), stroke_width)),
-            even_odd: false,
+            even_odd,
         };
 
         let mut layer = Layer::new_raster(name);
-        rasterize_shape(&mut layer, &shape);
-        layer.shape_key = shape.key();
-        layer.shape = Some(Box::new(shape));
+        rasterize_shape(&mut layer, &shape, gradient.as_ref());
+        if gradient.is_none() {
+            // Solid shapes stay live vectors; a gradient has no home in
+            // our shape model yet, so those keep their pixels only.
+            layer.shape_key = shape.key();
+            layer.shape = Some(Box::new(shape));
+        }
         self.report.shapes += 1;
+        Some(layer)
+    }
+
+    /// True when a live filter node's warp maps every source quad onto
+    /// itself — it changes nothing on screen.
+    fn filter_is_identity(&self, node: &Node) -> bool {
+        let Some(filt) = self.graph.child(node, b"Filt") else {
+            return false;
+        };
+        // A quad's corners are its eight F64 fields, in file order.
+        let corners = |name: &[u8; 4]| -> Option<Vec<f64>> {
+            let q = self.graph.child(filt, name)?;
+            let out: Vec<f64> = q
+                .fields
+                .iter()
+                .filter_map(|(_, v)| match v {
+                    Value::F64(f) => Some(*f),
+                    _ => None,
+                })
+                .collect();
+            (out.len() >= 8).then_some(out)
+        };
+        for (src, dst) in [
+            (b"DSrA", b"DDsA"),
+            (b"DSrB", b"DDsB"),
+            (b"Src ", b"Dst "),
+        ] {
+            match (corners(src), corners(dst)) {
+                (Some(a), Some(b)) => {
+                    if a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-6) {
+                        return false;
+                    }
+                }
+                (None, None) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Rebuild a curves adjustment layer ("CrRA").
+    ///
+    /// `AdjP` → "CrvP" holds one spline per channel: `Mast` master and
+    /// `C1Sp`/`C2Sp`/`C3Sp` for R/G/B. A spline is `Cnt` control points
+    /// with `Vals` laid out as xs, then ys, then tangents (which our
+    /// Catmull-Rom evaluation approximates well enough to drop).
+    fn curves_adjustment(&mut self, node: &Node, name: &str) -> Option<Layer> {
+        let adj = self.graph.child(node, b"AdjP")?;
+        if &adj.type_tag().to_be_bytes() != b"CrvP" {
+            return None;
+        }
+        let curve_of = |tag: &[u8; 4]| -> photoslop_adjustments::Curve {
+            let mut curve = photoslop_adjustments::Curve::default();
+            let Some(spline) = self.graph.child(adj, tag) else {
+                return curve;
+            };
+            let count = match spline.field(b"Cnt ") {
+                Some(Value::I32(n)) => *n as usize,
+                _ => return curve,
+            };
+            let Some(Value::Array(vals)) = spline.field(b"Vals") else {
+                return curve;
+            };
+            if count < 2 || vals.len() < count * 2 {
+                return curve;
+            }
+            let v = |i: usize| match vals.get(i) {
+                Some(Value::F64(f)) => *f as f32,
+                _ => 0.0,
+            };
+            curve.points = (0..count.min(16))
+                .map(|i| (v(i).clamp(0.0, 1.0), v(count + i).clamp(0.0, 1.0)))
+                .collect();
+            curve
+        };
+        let params = photoslop_adjustments::Params::Curves(photoslop_adjustments::Curves {
+            rgb: curve_of(b"Mast"),
+            red: curve_of(b"C1Sp"),
+            green: curve_of(b"C2Sp"),
+            blue: curve_of(b"C3Sp"),
+        });
+
+        let mut layer = Layer::new_raster(if name.is_empty() { "Curves" } else { name });
+        layer.kind = photoslop_core::LayerKind::Adjustment(photoslop_core::AdjustmentData {
+            kind: photoslop_core::AdjustmentKind::Curves,
+            raw: Vec::new(),
+            params_json: serde_json::to_string(&params).ok(),
+        });
+        self.report.adjustments += 1;
         Some(layer)
     }
 
@@ -396,6 +611,11 @@ impl Walker<'_> {
         };
         let rect = self.placement(mask_node, &format!("{} (mask)", layer.name), gray.width, gray.height);
         let gray = resample_to(gray, rect.width() as u32, rect.height() as u32);
+        if rect.is_empty()
+            || gray.pixels.len() != rect.width() as usize * rect.height() as usize * 4
+        {
+            return;
+        }
 
         let mut mask = photoslop_core::LayerMask::new_revealing();
         mask.bounds = rect;
@@ -460,16 +680,11 @@ impl Walker<'_> {
         // origin means.
         let frame = graph.child(node, b"TxtH")?;
         let frmb = f64s(frame, b"FrmB").filter(|b| b.len() == 4)?;
-        let xf: [f64; 6] = f64s(node, b"Xfrm")
-            .and_then(|v| v.first_chunk().copied())
-            .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
-        if xf[1] != 0.0 || xf[3] != 0.0 {
-            log::warn!("affinity: text layer {name:?} is rotated; importing axis-aligned");
-        }
-        let frame_left = (frmb[0] * xf[0] + xf[2] - self.origin.0).round() as i32;
-        let frame_top = (frmb[1] * xf[4] + xf[5] - self.origin.1).round() as i32;
-        let frame_width = ((frmb[2] - frmb[0]) * xf[0].abs()).round() as i32;
-        let eff_size = (size * xf[4].abs()) as f32;
+        let c = self.node_ctm(node, name);
+        let frame_left = (frmb[0] * c[0] + c[2]).round() as i32;
+        let frame_top = (frmb[1] * c[1] + c[3]).round() as i32;
+        let frame_width = ((frmb[2] - frmb[0]) * c[0].abs()).round() as i32;
+        let eff_size = (size * c[1].abs()) as f32;
         if !(0.5..=10_000.0).contains(&eff_size) {
             return None;
         }
@@ -578,8 +793,14 @@ impl Walker<'_> {
             }
         };
 
-        let rect = self.placement(node, name, rgba.width, rgba.height);
+        let mut rect = self.placement(node, name, rgba.width, rgba.height);
+        if rect.is_empty() {
+            rect = IntRect::from_size(rgba.width, rgba.height);
+        }
         let rgba = resample_to(rgba, rect.width() as u32, rect.height() as u32);
+        if rgba.pixels.len() != rect.width() as usize * rect.height() as usize * 4 {
+            return None;
+        }
 
         let mut layer = Layer::new_raster(name);
         blit_rgba8(
@@ -603,25 +824,22 @@ impl Walker<'_> {
             if let [x0, y0, x1, y1] = r[..] {
                 let sane = |v: i32| v.abs() < 1 << 24;
                 if x1 > x0 && y1 > y0 && sane(x0) && sane(y0) && sane(x1) && sane(y1) {
-                    return IntRect::new(
-                        x0 - self.origin.0.round() as i32,
-                        y0 - self.origin.1.round() as i32,
-                        x1 - self.origin.0.round() as i32,
-                        y1 - self.origin.1.round() as i32,
-                    );
+                    let c = self.ctm;
+                    let ax = (x0 as f64 * c[0] + c[2]).round() as i32;
+                    let ay = (y0 as f64 * c[1] + c[3]).round() as i32;
+                    let bx = (x1 as f64 * c[0] + c[2]).round() as i32;
+                    let by = (y1 as f64 * c[1] + c[3]).round() as i32;
+                    let rect = IntRect::new(ax.min(bx), ay.min(by), ax.max(bx), ay.max(by));
+                    if !rect.is_empty() {
+                        return rect;
+                    }
                 }
             }
         }
-        if let Some(&[sx, kx, tx, ky, sy, ty]) = f64s(node, b"Xfrm").and_then(|v| v.first_chunk()) {
-            if kx != 0.0 || ky != 0.0 {
-                log::warn!("affinity: layer {name:?} is rotated/sheared; importing axis-aligned");
-            }
-            let (dw, dh) = ((w as f64 * sx.abs()).round(), (h as f64 * sy.abs()).round());
-            if dw >= 1.0 && dh >= 1.0 && dw < (1 << 24) as f64 && dh < (1 << 24) as f64 {
-                let x = (tx - self.origin.0).round() as i32;
-                let y = (ty - self.origin.1).round() as i32;
-                return IntRect::from_xywh(x, y, dw as u32, dh as u32);
-            }
+        let c = self.node_ctm(node, name);
+        let (dw, dh) = ((w as f64 * c[0].abs()).round(), (h as f64 * c[1].abs()).round());
+        if dw >= 1.0 && dh >= 1.0 && dw < (1 << 24) as f64 && dh < (1 << 24) as f64 {
+            return IntRect::from_xywh(c[2].round() as i32, c[3].round() as i32, dw as u32, dh as u32);
         }
         IntRect::from_size(w, h)
     }
@@ -979,6 +1197,81 @@ fn descriptor_color(graph: &Graph, fdsc: &Node) -> Option<[u8; 4]> {
     color_bytes(colr)
 }
 
+/// A gradient fill ("FilG"): colour stops plus the 2×3 transform that
+/// maps gradient space (t along the unit x axis) into path space.
+struct GradientFill {
+    stops: Vec<(f32, [u8; 4])>,
+    /// Start and end of the gradient axis, in path space.
+    start: (f64, f64),
+    end: (f64, f64),
+    radial: bool,
+}
+
+fn descriptor_gradient(graph: &Graph, fdsc: &Node) -> Option<GradientFill> {
+    let fill = graph.child(fdsc, b"FDeF")?;
+    if &fill.type_tag().to_be_bytes() != b"FilG" {
+        return None;
+    }
+    let radial = matches!(fill.field(b"Type"), Some(Value::Enum { id: 2.., .. }));
+    let grad = graph.child(fill, b"Grad")?;
+    let positions: Vec<f32> = match grad.field(b"Posn") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Value::VecD(p) => p.first().map(|x| *x as f32),
+                _ => None,
+            })
+            .collect(),
+        _ => return None,
+    };
+    let colors: Vec<[u8; 4]> = graph
+        .children(grad, b"Cols")
+        .iter()
+        .filter_map(|c| color_bytes(c))
+        .collect();
+    if positions.len() != colors.len() || positions.len() < 2 {
+        return None;
+    }
+    // The gradient transform hangs off the descriptor in newer files
+    // and off the fill itself in older ones.
+    let m: [f64; 6] = match fdsc.field(b"FDeX").or_else(|| fill.field(b"FDeX")) {
+        Some(Value::VecD(v)) => v.first_chunk().copied()?,
+        _ => return None,
+    };
+    Some(GradientFill {
+        stops: positions.into_iter().zip(colors).collect(),
+        start: (m[2], m[5]),
+        end: (m[0] + m[2], m[3] + m[5]),
+        radial,
+    })
+}
+
+impl GradientFill {
+    fn color_at(&self, t: f32) -> [u8; 4] {
+        let t = t.clamp(0.0, 1.0);
+        let mut prev = self.stops[0];
+        for &(pos, col) in &self.stops {
+            if t <= pos {
+                let span = pos - prev.0;
+                let f = if span <= f32::EPSILON {
+                    1.0
+                } else {
+                    (t - prev.0) / span
+                };
+                let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f + 0.5) as u8;
+                return [
+                    mix(prev.1[0], col[0]),
+                    mix(prev.1[1], col[1]),
+                    mix(prev.1[2], col[2]),
+                    mix(prev.1[3], col[3]),
+                ];
+            }
+            prev = (pos, col);
+        }
+        self.stops.last().unwrap().1
+    }
+}
+
 /// The fill colour of a text run: the first `Objs` descriptor whose
 /// `FDeF` fill carries a `Colr` class, converted to RGBA bytes.
 fn run_color(graph: &Graph, run_item: &Node) -> Option<[u8; 4]> {
@@ -1032,6 +1325,65 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     (r + m, g + m, b + m)
 }
 
+/// Assemble a subpath from PCrv records: cubic segments as
+/// (control₁, control₂, endpoint), each starting at the previous
+/// endpoint. A closed path begins mid-cycle — its first point is the
+/// stream's final endpoint.
+fn subpath_from_records(
+    records: &[(f32, f32, u8, u8)],
+    closed: bool,
+) -> Option<photoslop_core::SubPath> {
+    use photoslop_core::Anchor;
+    // Split into (endpoint, incoming c1, incoming c2) per segment.
+    let mut points: Vec<(f32, f32)> = Vec::new();
+    let mut c1s: Vec<Option<(f32, f32)>> = Vec::new();
+    let mut c2s: Vec<Option<(f32, f32)>> = Vec::new();
+    let (mut c1, mut c2) = (None, None);
+    for &(x, y, m0, m1) in records {
+        match (m0, m1) {
+            (1, 0) => c1 = Some((x, y)),
+            (0, 1) => c2 = Some((x, y)),
+            _ => {
+                points.push((x, y));
+                c1s.push(c1.take());
+                c2s.push(c2.take());
+            }
+        }
+    }
+    // Trailing controls belong to the segment closing back to the first
+    // recorded endpoint (closed paths start mid-cycle).
+    if closed && (c1.is_some() || c2.is_some()) && !points.is_empty() {
+        points.rotate_right(1);
+        c1s.rotate_right(1);
+        c2s.rotate_right(1);
+        c1s[0] = c1;
+        c2s[0] = c2;
+    }
+    if points.len() < 2 {
+        return None;
+    }
+
+    let n = points.len();
+    let anchors = (0..n)
+        .map(|i| {
+            let p = points[i];
+            // Incoming control₂ of segment i; outgoing control₁ of the
+            // next segment.
+            let hin = c2s[i].map(|c| (c.0 - p.0, c.1 - p.1)).unwrap_or((0.0, 0.0));
+            let hout = c1s[(i + 1) % n]
+                .filter(|_| closed || i + 1 < n)
+                .map(|c| (c.0 - p.0, c.1 - p.1))
+                .unwrap_or((0.0, 0.0));
+            Anchor {
+                point: p,
+                handle_in: hin,
+                handle_out: hout,
+            }
+        })
+        .collect();
+    Some(photoslop_core::SubPath { anchors, closed })
+}
+
 /// Circle-to-Bezier handle length as a fraction of the radius.
 const KAPPA: f32 = 0.552_284_8;
 
@@ -1077,9 +1429,13 @@ fn ellipse_anchors(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<photoslop_core::An
     ]
 }
 
-/// Rasterize a vector shape into the layer's tiles: fill, then stroke
-/// composited over it, blitted once.
-fn rasterize_shape(layer: &mut Layer, shape: &photoslop_core::VectorShape) {
+/// Rasterize a vector shape into the layer's tiles: fill (solid or
+/// gradient-shaded), then stroke composited over it, blitted once.
+fn rasterize_shape(
+    layer: &mut Layer,
+    shape: &photoslop_core::VectorShape,
+    gradient: Option<&GradientFill>,
+) {
     let mut builder = photoslop_vector::PathBuilder::new();
     for sub in &shape.path.subpaths {
         let Some(first) = sub.anchors.first() else {
@@ -1119,31 +1475,60 @@ fn rasterize_shape(layer: &mut Layer, shape: &photoslop_core::VectorShape) {
         return;
     }
 
+    // Straight-alpha source-over of one coverage pixel.
+    fn over(px: &mut [u8], c: [u8; 4], cov: u8) {
+        let sa = cov as u32 * c[3] as u32 / 255;
+        let da = px[3] as u32;
+        let out_a = sa + da * (255 - sa) / 255;
+        if out_a == 0 {
+            return;
+        }
+        for i in 0..3 {
+            px[i] = ((c[i] as u32 * sa + px[i] as u32 * da * (255 - sa) / 255) / out_a) as u8;
+        }
+        px[3] = out_a as u8;
+    }
+
     let mut rgba = vec![0u8; w * h * 4];
-    let mut layer_in = |cov: Vec<u8>, color: photoslop_color::Rgba| {
+    fn layer_in(rgba: &mut [u8], cov: Vec<u8>, color: photoslop_color::Rgba) {
         let c = color.to_u8();
         for (px, &a) in rgba.chunks_exact_mut(4).zip(&cov) {
-            if a == 0 {
-                continue;
+            if a > 0 {
+                over(px, c, a);
             }
-            // Straight-alpha source-over.
-            let sa = a as u32 * c[3] as u32 / 255;
-            let da = px[3] as u32;
-            let out_a = sa + da * (255 - sa) / 255;
-            if out_a == 0 {
-                continue;
-            }
-            for i in 0..3 {
-                px[i] = ((c[i] as u32 * sa + px[i] as u32 * da * (255 - sa) / 255) / out_a) as u8;
-            }
-            px[3] = out_a as u8;
         }
+    }
+    let rule = if shape.even_odd {
+        photoslop_vector::FillRule::EvenOdd
+    } else {
+        photoslop_vector::FillRule::NonZero
     };
-    if shape.fill.a > 0.0 {
-        layer_in(
-            photoslop_vector::rasterize(&flat, rect, photoslop_vector::FillRule::NonZero),
-            shape.fill,
-        );
+    if let Some(g) = gradient {
+        let cov = photoslop_vector::rasterize(&flat, rect, rule);
+        let (dx, dy) = (g.end.0 - g.start.0, g.end.1 - g.start.1);
+        let len2 = (dx * dx + dy * dy).max(1e-9);
+        for y in 0..h {
+            for x in 0..w {
+                let a = cov[y * w + x];
+                if a == 0 {
+                    continue;
+                }
+                let px = (rect.left + x as i32) as f64 + 0.5 - g.start.0;
+                let py = (rect.top + y as i32) as f64 + 0.5 - g.start.1;
+                let t = if g.radial {
+                    ((px * px + py * py) / len2).sqrt()
+                } else {
+                    (px * dx + py * dy) / len2
+                };
+                over(
+                    &mut rgba[(y * w + x) * 4..][..4],
+                    g.color_at(t as f32),
+                    a,
+                );
+            }
+        }
+    } else if shape.fill.a > 0.0 {
+        layer_in(&mut rgba, photoslop_vector::rasterize(&flat, rect, rule), shape.fill);
     }
     if let Some((color, width)) = shape.stroke {
         let stroked = photoslop_vector::stroke_path(
@@ -1153,6 +1538,7 @@ fn rasterize_shape(layer: &mut Layer, shape: &photoslop_core::VectorShape) {
                 .with_join(photoslop_vector::LineJoin::Round),
         );
         layer_in(
+            &mut rgba,
             photoslop_vector::rasterize(&stroked, rect, photoslop_vector::FillRule::NonZero),
             color,
         );
