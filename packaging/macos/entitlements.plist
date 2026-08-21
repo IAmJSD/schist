@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
     <!-- The plugin host is wasmtime with Cranelift, so it compiles every
-         plugin to native code at load time.  Under the hardened runtime that
-         needs MAP_JIT, and MAP_JIT needs this entitlement -- without it a
+         plugin to native code at load time. Under the hardened runtime that
+         needs MAP_JIT, and MAP_JIT needs this entitlement. Without it a
          notarized Schist launches and then dies the moment it loads a
          plugin, which is to say immediately. -->
     <key>com.apple.security.cs.allow-jit</key><true/>
