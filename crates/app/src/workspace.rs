@@ -52,10 +52,24 @@ fn load_view_options() -> ViewOptions {
 /// How often a dirty document is snapshotted for crash recovery.
 const AUTOSAVE_SECS: u64 = 30;
 
+/// A document open in another tab, parked with its view transform so
+/// switching back lands on the same spot at the same zoom.
+struct DocTab {
+    doc: Document,
+    zoom: f32,
+    offset: Point<Pixels>,
+    rotation: f32,
+}
+
 pub struct Workspace {
     pub registry: PluginRegistry,
     pub editor: EditorState,
     pub doc: Option<Document>,
+    /// The other open documents, in tab order with a gap at `active_tab`
+    /// where the checked-out `doc` sits.
+    background_tabs: Vec<DocTab>,
+    /// Position of the active document in the tab strip.
+    active_tab: usize,
     cache: TileCache,
     /// Composited tiles after colour management, ready to sample.
     display_tiles: FxHashMap<TileCoord, Arc<Vec<u8>>>,
@@ -474,6 +488,8 @@ pub enum Modal {
         /// dialog's swatch.
         original: Rgba,
     },
+    /// "Save changes before closing?" for the active tab.
+    ConfirmCloseTab,
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -547,6 +563,8 @@ impl Workspace {
             registry,
             editor: EditorState::default(),
             doc: None,
+            background_tabs: Vec::new(),
+            active_tab: 0,
             cache: TileCache::new(),
             display_tiles: FxHashMap::default(),
             viewport_image: None,
@@ -646,22 +664,180 @@ impl Workspace {
         );
         doc.push_layer(bg);
         doc.dirty = false;
-        self.install_document(doc);
+        self.open_in_tab(doc, false);
     }
 
-    pub fn install_document(&mut self, mut doc: Document) {
+    /// Open `doc` in a new tab and switch to it. An untouched Untitled in
+    /// the active slot is replaced instead, so opening a file right after
+    /// launch doesn't leave a blank tab behind.
+    pub fn install_document(&mut self, doc: Document) {
+        self.open_in_tab(doc, true);
+    }
+
+    fn open_in_tab(&mut self, mut doc: Document, replace_pristine: bool) {
         // Photoshop's History Brush paints back from the state the file
         // was opened in, so that is what gets snapshotted here.
         doc.snapshot_history_source();
+        let pristine = replace_pristine
+            && self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.path.is_none() && !d.dirty && !d.history.can_undo());
+        if !pristine {
+            self.stash_active_tab();
+            self.active_tab = self.background_tabs.len();
+        }
         self.doc = Some(doc);
+        self.reset_per_document_caches();
+        self.zoom = 1.0;
+        self.offset = point(px(40.0), px(40.0));
+        self.fit_to_view();
+    }
+
+    // ----- tabs -----
+
+    pub fn tab_count(&self) -> usize {
+        self.background_tabs.len() + self.doc.is_some() as usize
+    }
+
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
+    }
+
+    /// Title and dirty flag of every tab, in tab-strip order.
+    pub fn tab_strip(&self) -> Vec<(SharedString, bool)> {
+        let mut out = Vec::with_capacity(self.tab_count());
+        let mut parked = self.background_tabs.iter();
+        for index in 0..self.tab_count() {
+            let (title, dirty) = if index == self.active_tab && self.doc.is_some() {
+                let doc = self.doc.as_ref().unwrap();
+                (doc.title.clone(), doc.dirty)
+            } else if let Some(tab) = parked.next() {
+                (tab.doc.title.clone(), tab.doc.dirty)
+            } else {
+                continue;
+            };
+            out.push((title.into(), dirty));
+        }
+        out
+    }
+
+    /// Park the active document, view transform and all, back into the
+    /// tab list at its current position.
+    fn stash_active_tab(&mut self) {
+        if let Some(doc) = self.doc.take() {
+            let at = self.active_tab.min(self.background_tabs.len());
+            self.background_tabs.insert(
+                at,
+                DocTab {
+                    doc,
+                    zoom: self.zoom,
+                    offset: self.offset,
+                    rotation: self.rotation,
+                },
+            );
+        }
+    }
+
+    /// Check a parked tab out onto the canvas, restoring its view.
+    fn wake_tab(&mut self, tab: DocTab) {
+        self.doc = Some(tab.doc);
+        self.zoom = tab.zoom;
+        self.editor.zoom = tab.zoom;
+        self.offset = tab.offset;
+        self.rotation = tab.rotation;
+        self.reset_per_document_caches();
+    }
+
+    /// Drop every cache keyed by document state. Revision and selection
+    /// generation counters restart per document, so caches tagged with
+    /// them (nav thumbnail, selection outline) must go too or a collision
+    /// would show the previous document's pixels.
+    fn reset_per_document_caches(&mut self) {
         self.rebuild_color_transforms();
         self.cache.invalidate_all();
         self.display_tiles.clear();
         self.viewport_image = None;
         self.preview = Preview::default();
-        self.zoom = 1.0;
-        self.offset = point(px(40.0), px(40.0));
-        self.fit_to_view();
+        self.selection_outline = None;
+        self.nav_thumb = None;
+        self.filter_preview = None;
+        self.dragging_guide = None;
+    }
+
+    /// Make the document at `index` the one on the canvas.
+    pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.doc.is_some() && index == self.active_tab {
+            return;
+        }
+        self.stash_active_tab();
+        if self.background_tabs.is_empty() {
+            return;
+        }
+        let index = index.min(self.background_tabs.len() - 1);
+        let tab = self.background_tabs.remove(index);
+        self.active_tab = index;
+        self.wake_tab(tab);
+        cx.notify();
+    }
+
+    /// Step to an adjacent tab, wrapping at the ends.
+    pub fn cycle_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.tab_count();
+        if count < 2 {
+            return;
+        }
+        let next = (self.active_tab as isize + delta).rem_euclid(count as isize) as usize;
+        self.select_tab(next, cx);
+    }
+
+    /// Close a tab, asking about unsaved changes first. A dirty tab is
+    /// brought to the front so the prompt is about what's on screen.
+    pub fn request_close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let dirty = self.tab_strip().get(index).is_some_and(|(_, dirty)| *dirty);
+        if dirty {
+            self.select_tab(index, cx);
+            self.open_modal(Modal::ConfirmCloseTab, cx);
+        } else {
+            self.close_tab(index, cx);
+        }
+    }
+
+    /// Close tab `index` outright, discarding any unsaved changes. Closing
+    /// the last tab leaves an empty workspace.
+    pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.doc.is_none() {
+            return;
+        }
+        if index == self.active_tab {
+            if let Some(doc) = self.doc.take() {
+                self.remove_recovery_for(doc.id);
+            }
+            if self.background_tabs.is_empty() {
+                self.active_tab = 0;
+            } else {
+                // The tab to the right slides into the closed slot; at
+                // the end, fall back to the new last tab.
+                let next = index.min(self.background_tabs.len() - 1);
+                let tab = self.background_tabs.remove(next);
+                self.active_tab = next;
+                self.wake_tab(tab);
+            }
+        } else if index < self.tab_count() {
+            let parked = if index < self.active_tab {
+                index
+            } else {
+                index - 1
+            };
+            let tab = self.background_tabs.remove(parked);
+            self.remove_recovery_for(tab.doc.id);
+            if index < self.active_tab {
+                self.active_tab -= 1;
+            }
+        } else {
+            return;
+        }
+        cx.notify();
     }
 
     pub fn load_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -740,6 +916,10 @@ impl Workspace {
             .doc
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no document"))?;
+        self.write_doc_to(doc, path)
+    }
+
+    fn write_doc_to(&self, doc: &Document, path: &std::path::Path) -> anyhow::Result<()> {
         let codec = self.exporter_for(path).ok_or_else(|| {
             anyhow::anyhow!(
                 "no exporter for .{}",
@@ -770,41 +950,55 @@ impl Workspace {
         Some(base.join("photoslop/recovery"))
     }
 
-    fn recovery_path(&self) -> Option<PathBuf> {
-        Some(Self::recovery_dir()?.join(format!("session-{}.psd", std::process::id())))
+    /// One snapshot file per open document, so every dirty tab survives a
+    /// crash, not just the frontmost one.
+    fn recovery_path(&self, id: photoslop_core::DocumentId) -> Option<PathBuf> {
+        Some(Self::recovery_dir()?.join(format!("session-{}-{}.psd", std::process::id(), id.0)))
     }
 
-    /// Write a recovery snapshot if the document has unsaved changes.
-    /// Returns true when a snapshot was written.
+    /// Write a recovery snapshot for every document with unsaved changes.
+    /// Returns true when at least one snapshot was written.
     pub fn autosave(&mut self) -> bool {
-        let dirty = self.doc.as_ref().map(|d| d.dirty).unwrap_or(false);
-        if !dirty {
+        let dirty: Vec<&Document> = self
+            .doc
+            .iter()
+            .chain(self.background_tabs.iter().map(|t| &t.doc))
+            .filter(|d| d.dirty)
+            .collect();
+        if dirty.is_empty() {
             return false;
         }
-        let Some(path) = self.recovery_path() else {
+        let Some(dir) = Self::recovery_dir() else {
             return false;
         };
-        let Some(dir) = path.parent() else {
-            return false;
-        };
-        if let Err(err) = std::fs::create_dir_all(dir) {
+        if let Err(err) = std::fs::create_dir_all(&dir) {
             log::warn!("autosave: cannot create {dir:?}: {err}");
             return false;
         }
-        match self.write_document_to(&path) {
-            Ok(()) => {
-                log::debug!("autosaved recovery snapshot to {path:?}");
-                true
-            }
-            Err(err) => {
-                log::warn!("autosave failed: {err:#}");
-                false
+        let mut wrote = false;
+        for doc in dirty {
+            let Some(path) = self.recovery_path(doc.id) else {
+                continue;
+            };
+            match self.write_doc_to(doc, &path) {
+                Ok(()) => {
+                    log::debug!("autosaved recovery snapshot to {path:?}");
+                    wrote = true;
+                }
+                Err(err) => log::warn!("autosave failed: {err:#}"),
             }
         }
+        wrote
     }
 
     fn clear_recovery(&self) {
-        if let Some(path) = self.recovery_path() {
+        if let Some(doc) = &self.doc {
+            self.remove_recovery_for(doc.id);
+        }
+    }
+
+    fn remove_recovery_for(&self, id: photoslop_core::DocumentId) {
+        if let Some(path) = self.recovery_path(id) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -818,11 +1012,11 @@ impl Workspace {
             if path.extension().and_then(|e| e.to_str()) != Some("psd") {
                 continue;
             }
-            // Skip a snapshot this very process owns.
+            // Skip snapshots this very process owns.
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n == format!("session-{}.psd", std::process::id()))
+                .is_some_and(|n| n.starts_with(&format!("session-{}-", std::process::id())))
             {
                 continue;
             }
@@ -2817,6 +3011,7 @@ impl Workspace {
             }
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
+            | Modal::ConfirmCloseTab
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }
@@ -4889,9 +5084,15 @@ impl Render for Workspace {
                     ws.open_modal(modal, cx);
                 }
             }))
+            .on_action(cx.listener(|ws, _: &CloseTab, _w, cx| {
+                ws.request_close_tab(ws.active_tab(), cx);
+            }))
+            .on_action(cx.listener(|ws, _: &NextTab, _w, cx| ws.cycle_tab(1, cx)))
+            .on_action(cx.listener(|ws, _: &PrevTab, _w, cx| ws.cycle_tab(-1, cx)))
             .on_action(|_: &Quit, _w, cx| cx.quit())
             .children(chrome.then(|| panels::menu_bar(self, cx)))
             .children(chrome.then(|| panels::tool_options_bar(self, cx)))
+            .children(chrome.then(|| panels::tab_bar(self, cx)))
             .child(
                 div()
                     .flex()

@@ -71,6 +71,7 @@ enum MenuEntry {
 enum AppItem {
     New,
     Open,
+    Close,
     Save,
     SaveAs,
     Quit,
@@ -154,6 +155,7 @@ fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
             vec![
                 App("New", New, Some("cmd-n")),
                 App("Open…", Open, Some("cmd-o")),
+                App("Close", Close, Some("cmd-w")),
                 App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
                 App("Export…", Export, Some("cmd-shift-alt-s")),
@@ -571,6 +573,7 @@ fn run_app_item(
     match item {
         AppItem::New => ws.new_document(),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
+        AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),
         AppItem::Save => ws.save_current(window, cx),
         AppItem::SaveAs => crate::keymap::save_file_dialog(ws, window, cx),
         AppItem::Quit => cx.quit(),
@@ -1210,6 +1213,86 @@ fn slider(
             .text_size(px(11.0))
             .child(display),
     )
+}
+
+// ===== document tabs =====
+
+/// Photoshop-style document tabs: one per open file, the active one lit,
+/// a dot marking unsaved changes. Click to switch, middle-click or the ×
+/// to close.
+pub fn tab_bar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let active = ws.active_tab();
+    let tabs = ws.tab_strip();
+    div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .h(px(26.0))
+        .flex_none()
+        .bg(gpui::rgb(0x141414))
+        .border_b_1()
+        .border_color(gpui::rgb(PANEL_EDGE))
+        .overflow_hidden()
+        .children(tabs.into_iter().enumerate().map(|(i, (title, dirty))| {
+            let is_active = i == active;
+            let label: SharedString = if dirty {
+                format!("{title} •").into()
+            } else {
+                title
+            };
+            let mut tab = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .h(px(25.0))
+                .pl_2()
+                .pr_1()
+                .max_w(px(180.0))
+                .border_r_1()
+                .border_color(gpui::rgb(PANEL_EDGE))
+                .text_size(px(11.0));
+            tab = if is_active {
+                tab.bg(gpui::rgb(0x2A2A2A)).text_color(gpui::rgb(TEXT))
+            } else {
+                tab.bg(gpui::rgb(PANEL_BG))
+                    .text_color(gpui::rgb(TEXT_DIM))
+                    .hover(|s| s.bg(gpui::rgb(HOVER)))
+            };
+            tab.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _e, _w, cx| ws.select_tab(i, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |ws, _e, _w, cx| ws.request_close_tab(i, cx)),
+            )
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(16.0))
+                    .rounded_sm()
+                    .hover(|s| s.bg(gpui::rgb(0x3E3E3E)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _e, _w, cx| {
+                            cx.stop_propagation();
+                            ws.request_close_tab(i, cx);
+                        }),
+                    )
+                    .child(icon("close", 9.0, TEXT_DIM)),
+            )
+        }))
 }
 
 // ===== tool options bar =====
