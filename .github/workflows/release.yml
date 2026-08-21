@@ -25,6 +25,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Work out the version
+        shell: bash
+        run: |
+          set -eo pipefail
+          # A tag build is named after its tag. A manual run has no tag to
+          # read, so fall back to the version in the workspace manifest.
+          version="${GITHUB_REF_NAME#v}"
+          if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          fi
+          echo "packaging as $version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Linux system deps
         if: runner.os == 'Linux'
         run: |
@@ -127,7 +140,7 @@ jobs:
           Copy-Item target/release/schist.exe dist/
           # NSIS ships with the runner image; skip the installer if absent.
           if (Get-Command makensis -ErrorAction SilentlyContinue) {
-            makensis -DVERSION=0.1.0 packaging/windows/installer.nsi
+            makensis -DVERSION=$env:VERSION packaging/windows/installer.nsi
           }
 
       - uses: actions/upload-artifact@v4
