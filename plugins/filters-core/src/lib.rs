@@ -1,4 +1,4 @@
-//! Destructive filters: blur, sharpen, noise, median (M8).
+//! Destructive filters: blur, sharpen, noise, median.
 //!
 //! Every filter works on a straight-alpha f32 RGBA buffer. Blurs run in
 //! premultiplied space (otherwise transparent pixels bleed their colour

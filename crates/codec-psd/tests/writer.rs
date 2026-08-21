@@ -1,4 +1,4 @@
-//! M6: writer + round-trip tests.
+//! Writer + round-trip tests.
 //!
 //! Every test here goes through the public API in both directions —
 //! build/read a `Document`, `write_psd`, then `read_psd` the bytes back —

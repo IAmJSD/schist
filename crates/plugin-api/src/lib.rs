@@ -1,9 +1,9 @@
-//! The plugin contract surface (PLAN.md §3.2).
+//! The plugin contract surface.
 //!
 //! Every user-facing feature implements one of these traits and registers
 //! through a `PluginManifest`. First-party plugins are workspace crates
 //! compiled in; the same conceptual API is projected to sandboxed WASM
-//! plugins in M9. Tool/command plugins are deliberately GPUI-free: input
+//! plugins. Tool/command plugins are deliberately GPUI-free: input
 //! arrives as our own event types and overlays are returned as primitive
 //! shapes the canvas draws — which also makes tools unit-testable headless.
 

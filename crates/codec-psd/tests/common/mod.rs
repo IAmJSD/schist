@@ -1,6 +1,6 @@
 //! Minimal hand-rolled PSD *builder* for tests only.
 //!
-//! This is deliberately NOT the M6 writer: it emits just enough of the
+//! This is deliberately NOT the real writer: it emits just enough of the
 //! format (header, resources, layer records, lsct group markers, masks,
 //! luni names, raw/RLE channels, PSB length widening, composite) to
 //! exercise the reader. Byte layout follows the Adobe spec.

@@ -1,4 +1,4 @@
-//! Modal dialogs: Image Size, Canvas Size, and (from M8/M10) filters,
+//! Modal dialogs: Image Size, Canvas Size, filters,
 //! adjustments, export options and preferences.
 
 use crate::ui;

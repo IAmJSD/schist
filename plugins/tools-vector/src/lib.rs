@@ -3,7 +3,7 @@
 //! Shapes and pen paths are rasterized onto their own layer through
 //! `schist-vector`. They are *not* PSD vector shape layers: we render
 //! pixels and keep no editable vector data, which is why re-opening a saved
-//! file gives raster layers (noted in PLAN.md §7 as an M7 scope cut).
+//! file gives raster layers (a deliberate v1 scope cut).
 
 pub mod paths;
 

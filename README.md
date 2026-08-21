@@ -6,7 +6,7 @@ menu command is a plugin, including the built-in ones.
 
 [GPUI]: https://gpui.rs
 
-**Status: v1 feature-complete (milestones M0–M12 of [PLAN.md](PLAN.md)),
+**Status: v1 feature-complete,
 plus two Photoshop-parity passes — 55 tools, 57 filters, 16 adjustments,
 all nine layer effects, and live vector shapes.** 432 tests,
 clippy-clean, verified end-to-end under a real window. [What is still
@@ -179,7 +179,7 @@ Remap anything in `~/.config/schist/keymap.json`:
 - **Text is not on a path**, and the type engine has no OpenType
   feature controls.
 - **The GPU compositor.** Deliberate: the CPU path already meets the
-  interactivity target (measurements in PLAN.md §7/M8), so a wgpu
+  interactivity target, so a wgpu
   backend would add complexity without a demonstrated win.
 
 ## Plugins
@@ -204,7 +204,6 @@ and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 
 ## Documentation
 
-* [PLAN.md](PLAN.md) — the roadmap this was built against, with status
 * [docs/architecture.md](docs/architecture.md) — how the pieces fit
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
 * [docs/versioning.md](docs/versioning.md) — compatibility and releases

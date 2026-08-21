@@ -3,7 +3,7 @@
 //! Children are stored bottom-to-top (index 0 composites first), matching
 //! PSD file order; UIs display the reverse. Text layers and smart objects
 //! import as raster layers carrying their original PSD blocks in `extras`
-//! so they round-trip unharmed (see PLAN.md §4).
+//! so they round-trip unharmed.
 
 use crate::geom::IntRect;
 use crate::tile::{MaskTileMap, TileMap};
@@ -63,7 +63,7 @@ impl LayerMask {
 }
 
 /// Which adjustment a non-destructive adjustment layer performs. Parameter
-/// *parsing* and rendering land in M8; until then `raw` preserves the exact
+/// *parsing* and rendering live in the adjustments crate; `raw` preserves the exact
 /// PSD payload for round-trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdjustmentKind {

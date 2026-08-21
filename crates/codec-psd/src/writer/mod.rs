@@ -1,8 +1,8 @@
-//! PSD/PSB writer (milestone M6).
+//! PSD/PSB writer.
 //!
 //! Emits the five sections a PSD file needs — header, color mode data,
 //! image resources, layer & mask info, merged image data — from a
-//! [`Document`]. The fidelity strategy from `PLAN.md` §4 lives here: every
+//! [`Document`]. The fidelity strategy lives here: every
 //! block the reader preserved verbatim (unknown image resources, layer
 //! effects, text engine data, smart object references, adjustment payloads)
 //! is re-emitted byte-for-byte, so a file survives an open/edit/save cycle
@@ -291,7 +291,7 @@ fn write_layer_record(b: &mut Buf, p: &Prepared, psb: bool) {
         }
         None => b.u32(0),
     }
-    // Layer blending ranges: regenerated as "none" (see PLAN.md §4).
+    // Layer blending ranges: regenerated as "none".
     b.u32(0);
     b.pascal(&p.name, 4);
     for (key, payload) in &p.extras {

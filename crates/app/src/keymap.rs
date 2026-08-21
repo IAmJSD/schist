@@ -1,7 +1,7 @@
 //! Keymap assembly and file dialogs.
 //!
 //! Defaults come from the plugin registry (each command/tool declares its
-//! own binding, PLAN.md §5); a user keymap file overlays them. "cmd-" in
+//! own binding); a user keymap file overlays them. "cmd-" in
 //! plugin bindings means the platform primary modifier and is rewritten to
 //! "ctrl-" on Linux/Windows.
 
@@ -242,7 +242,7 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
-    // PSD is the native save format (PLAN.md §2); keep an existing
+    // PSD is the native save format; keep an existing
     // extension when the document already has a writable one.
     let suggested = ws
         .doc

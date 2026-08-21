@@ -1,4 +1,4 @@
-//! ICC colour management (M10).
+//! ICC colour management.
 //!
 //! Three jobs:
 //!

@@ -38,7 +38,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/infrawrench/schist"
+repository = "https://github.com/IAmJSD/schist"
 
 [workspace.dependencies]
 # internal

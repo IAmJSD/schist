@@ -1,4 +1,4 @@
-//! Sandboxed third-party plugin host (M9).
+//! Sandboxed third-party plugin host.
 //!
 //! Loads `wasm32-unknown-unknown` modules, reads their [`abi::Manifest`],
 //! and wraps them as ordinary [`FilterPlugin`]/[`CodecPlugin`]

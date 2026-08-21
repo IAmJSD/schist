@@ -1,4 +1,4 @@
-//! Resampling and affine transforms over tile maps (M7).
+//! Resampling and affine transforms over tile maps.
 //!
 //! All interpolation happens in **premultiplied** alpha and is converted
 //! back to straight alpha afterwards: interpolating straight-alpha colour

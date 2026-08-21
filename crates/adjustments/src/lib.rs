@@ -1,4 +1,4 @@
-//! Adjustment parameters, their pixel math, and PSD payload parsing (M8).
+//! Adjustment parameters, their pixel math, and PSD payload parsing.
 //!
 //! An adjustment layer modifies whatever is beneath it rather than carrying
 //! pixels of its own. The compositor asks this crate for a [`Params`] value

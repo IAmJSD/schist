@@ -49,7 +49,7 @@ fn curves_layer() -> Layer {
 }
 
 fn main() {
-    // ~100 megapixels, the figure PLAN.md §7 sets as the M8 target.
+    // ~100 megapixels, the interactivity benchmark target.
     let (w, h) = (11_000u32, 9_100u32);
     println!(
         "building a {}x{} document ({:.0} MP)…",

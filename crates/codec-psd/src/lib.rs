@@ -1,11 +1,11 @@
-//! PSD/PSB reader (and, from M6 on, writer) for Schist.
+//! PSD/PSB reader and writer for Schist.
 //!
-//! Milestone M5 scope (see `PLAN.md` §4): read the five PSD sections —
+//! Scope: read the five PSD sections —
 //! header, color mode data, image resources, layer & mask info, merged image
 //! data — into a [`schist_core::Document`]. Everything we do not
 //! interpret (unknown image resources, unknown additional-layer-info keys,
 //! text engine data, smart objects, effects) is preserved verbatim on the
-//! document / layers so the M6 writer can round-trip it byte-for-byte.
+//! document / layers so the writer can round-trip it byte-for-byte.
 //!
 //! Supported: PSD (version 1) and PSB (version 2); 8/16/32-bit depth; RGB
 //! and Grayscale color modes; raw and RLE (PackBits) channel compression;

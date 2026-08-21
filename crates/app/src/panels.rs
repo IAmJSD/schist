@@ -2,7 +2,7 @@
 //! panels, status bar.
 //!
 //! These render directly from the Workspace (third-party panel plugins get
-//! their seam in M9; the registry shape in plugin-api reserves it). Icons
+//! their seam later; the registry shape in plugin-api reserves it). Icons
 //! are monochrome SVGs from the embedded asset source, tinted by text
 //! color — no emoji.
 

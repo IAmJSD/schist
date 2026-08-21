@@ -143,7 +143,7 @@ pub struct Workspace {
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
-    /// Third-party plugin registry state (M9).
+    /// Third-party plugin registry state.
     pub plugins: schist_plugin_host_wasm::PluginManager,
     /// Plugin enable/disable requested from the manager UI, applied on the
     /// next render pass (the checkbox callback has no context to do it).

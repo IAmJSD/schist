@@ -1,4 +1,4 @@
-//! Path construction and antialiased rasterization (M7).
+//! Path construction and antialiased rasterization.
 //!
 //! Paths are built from lines and cubic Béziers, flattened to polylines,
 //! then filled by a scanline rasterizer that supersamples vertically and

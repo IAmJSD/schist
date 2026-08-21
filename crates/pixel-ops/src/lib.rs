@@ -1,6 +1,6 @@
 //! CPU reference implementation of pixel math: PSD blend modes and
 //! compositing. This is the semantic contract — the future GPU path must
-//! match it tile-for-tile (PLAN.md §2).
+//! match it tile-for-tile.
 //!
 //! Separable modes follow the W3C compositing spec formulas, which match
 //! Photoshop for 8/16-bit documents. Non-separable modes (Hue/Saturation/

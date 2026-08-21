@@ -270,7 +270,7 @@ fn merge_down(ctx: &mut CommandCtx) {
         (upper.clone(), parent_children[ix - 1].clone())
     };
     if !matches!(lower.kind, LayerKind::Raster(_)) {
-        return; // merging into groups/adjustments lands with M7 flatten work
+        return; // merging into groups/adjustments lands with the flatten work
     }
     let mut scratch = Document::new("merge", ctx.doc.width, ctx.doc.height, ctx.doc.depth);
     let bounds = upper.content_bounds().union(&lower.content_bounds());

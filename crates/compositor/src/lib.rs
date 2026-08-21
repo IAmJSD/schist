@@ -1,12 +1,12 @@
 //! CPU tile compositor — the reference implementation of Schist's
-//! rendering semantics (a future GPU compositor must match it, PLAN.md §2).
+//! rendering semantics (a future GPU compositor must match it).
 //!
 //! Measured on a 16-core desktop (see `examples/bench.rs`): a
 //! 1920×1080 viewport of a 100 MP document with three full-canvas blend
 //! layers plus a curves adjustment recomposites in ~16 ms (62 fps), and a
 //! single dirty tile — what a brush stroke actually costs — in ~3 ms.
 //! That meets the milestone's interactivity target without a GPU backend,
-//! which is why the wgpu path in PLAN.md §2 stays deferred: GPUI 0.2 does
+//! which is why the wgpu path stays deferred: GPUI 0.2 does
 //! not expose its device, so a second wgpu instance would have to read
 //! every composited tile back over PCIe, and the damage-driven workloads
 //! here are too small to amortize that.
@@ -62,7 +62,7 @@ impl Scratch {
     }
 }
 
-/// The rendering backend seam (PLAN.md §2).
+/// The rendering backend seam.
 ///
 /// Only [`CpuCompositor`] exists today. A GPU implementation would slot in
 /// here without the rest of the app noticing — see the crate docs for why

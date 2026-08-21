@@ -1,10 +1,10 @@
-//! Text layout and rasterization for text layers (M7).
+//! Text layout and rasterization for text layers.
 //!
 //! Scope: system font discovery, a single font/size/colour per layer,
 //! left-to-right line layout with kerning, word wrapping and alignment,
 //! rasterized to an 8-bit coverage mask. Complex shaping (ligature
 //! substitution, bidi, vertical scripts) is out of scope for v1 — those
-//! need a full shaper, which is why `PLAN.md` §2 named parley/swash as the
+//! need a full shaper, which is why parley/swash is the
 //! eventual home for this crate.
 
 use schist_core::IntRect;

@@ -15,7 +15,7 @@ use schist_core::{Document, IntRect, Layer, PreservedResource, RasterLayer};
 
 /// Sentinel `PreservedResource::id` under which the Color Mode Data section
 /// is stashed (with name `b"colormodedata"`). Real Adobe image resource ids
-/// never reach 0xFFFF, so the M6 writer can recognize and re-emit it as the
+/// never reach 0xFFFF, so the writer can recognize and re-emit it as the
 /// Color Mode Data section rather than as an image resource.
 pub const COLOR_MODE_DATA_SENTINEL_ID: u16 = 0xFFFF;
 

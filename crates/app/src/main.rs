@@ -1,4 +1,4 @@
-//! Schist — a plugin-first image editor on GPUI. See PLAN.md.
+//! Schist — a plugin-first image editor on GPUI.
 
 mod actions;
 mod assets;
@@ -98,7 +98,7 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
         log::info!("loading plugin {}", manifest.id());
         manifest.register(&mut registry);
     }
-    // Third-party WebAssembly plugins, sandboxed (M9).
+    // Third-party WebAssembly plugins, sandboxed.
     let manager = match schist_plugin_host_wasm::PluginManager::plugin_dir() {
         Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
         None => schist_plugin_host_wasm::PluginManager::default(),

@@ -87,7 +87,7 @@ pub fn parse_layer_and_mask_info(
     };
 
     // Global Layer Mask Info: u32 length + data.
-    // TODO(M6): preserve this block for round-trip; the writer will need it.
+    // TODO: preserve this block for round-trip; the writer will need it.
     if sec.remaining() >= 4 {
         let gl = sec.u32()? as usize;
         sec.skip(gl.min(sec.remaining()))?;
@@ -97,7 +97,7 @@ pub fn parse_layer_and_mask_info(
     // ('Patt', 'FMsk', 'Txt2', ...). Spec quirk: at document level these are
     // padded to 4-byte boundaries (layer-record-level blocks pad to 2).
     //
-    // TODO(M6): preserve these verbatim for round-trip. For now we only
+    // TODO: preserve these verbatim for round-trip. For now we only
     // *interpret* 'Lr16'/'Lr32'/'Layr', which is where Photoshop actually
     // stores the layer tree for 16/32-bit documents (Layer Info above is
     // empty in those files).
@@ -214,7 +214,7 @@ fn parse_layer_record(cur: &mut Cursor, header: &Header) -> Result<Rec, PsdError
     let mask = parse_mask_block(&mut extra)?;
 
     // --- Layer blending ranges ---
-    // TODO(M6): regenerated as defaults by the writer for now; revisit if a
+    // TODO: regenerated as defaults by the writer for now; revisit if a
     // fixture shows customized ranges mattering.
     let ranges_len = extra.u32()? as usize;
     extra.skip(ranges_len)?;
@@ -322,7 +322,7 @@ fn parse_additional_blocks(
             _ => {
                 // Adjustment layers: interpret the kind, keep the raw
                 // payload. ('lyid' and every other key — interpreted or not
-                // — is ALSO preserved verbatim below for M6 round-trip.)
+                // — is ALSO preserved verbatim below for round-trip.)
                 if let Some(kind) = AdjustmentKind::from_psd_key(&key) {
                     rec.adjustment = Some(AdjustmentData {
                         kind,
@@ -516,7 +516,7 @@ fn fold_groups(parsed: Vec<(Rec, TileMap, Option<MaskTileMap>)>, header: &Header
                     Some(adj) => LayerKind::Adjustment(adj),
                     // Text layers ('TySh') and smart objects ('SoLd'/'PlLd')
                     // import as raster layers of their rasterization, with
-                    // the raw blocks riding along in `extras` (PLAN.md §4).
+                    // the raw blocks riding along in `extras`.
                     None => LayerKind::Raster(RasterLayer { tiles }),
                 };
                 let mut layer = make_layer(rec, mask_tiles, kind, header);

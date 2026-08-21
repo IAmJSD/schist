@@ -74,8 +74,7 @@ tiles recomposite. On a 100 MP document with three full-canvas blend layers
 plus a curves adjustment, a 1920×1080 viewport recomposites in ~16 ms and a
 single dirty tile — what a brush stroke actually costs — in ~3 ms
 (`cargo run --release -p schist-compositor --example bench`). A `Compositor`
-trait marks where a GPU backend would slot in; see PLAN.md §2 for why it
-isn't there yet.
+trait marks where a GPU backend would slot in.
 
 Tools declare a `group()`, so related tools share one toolbar slot with a
 flyout and a shared shortcut letter — third-party tools can join an existing

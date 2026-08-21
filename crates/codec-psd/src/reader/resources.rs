@@ -1,7 +1,7 @@
 //! Image Resources section: a list of "8BIM" resource blocks.
 //!
 //! Every block is preserved verbatim (id + raw pascal-name bytes + data)
-//! into `Document::preserved_resources` in file order so the M6 writer can
+//! into `Document::preserved_resources` in file order so the writer can
 //! re-emit them; on top of that we *interpret* the resolution (0x03ED) and
 //! ICC profile (0x040F).
 
