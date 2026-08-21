@@ -559,35 +559,64 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
             }),
             cmd("layer.delete", "Delete Layer", None, |ctx| {
-                let Some(id) = ctx.doc.active_layer else {
+                // Deletes the panel's whole multi-selection as one edit.
+                let ids = selection_roots(ctx.doc);
+                if ids.is_empty() {
                     return;
-                };
-                let mut edit = ctx.doc.begin_edit("Delete Layer");
-                edit.remove_layer(id);
+                }
+                let mut edit = ctx.doc.begin_edit(if ids.len() > 1 {
+                    "Delete Layers"
+                } else {
+                    "Delete Layer"
+                });
+                for id in ids {
+                    edit.remove_layer(id);
+                }
                 edit.commit();
             }),
-            cmd("layer.group", "Group Layer", Some("cmd-g"), |ctx| {
-                // Wraps the active layer in a group (multi-select lands
-                // with the layers-panel selection model).
-                let Some(id) = ctx.doc.active_layer else {
-                    return;
-                };
-                let Some(path) = ctx.doc.tree.path_of(id) else {
+            cmd("layer.group", "Group Layers", Some("cmd-g"), |ctx| {
+                // Wraps the selected layers in a group, which lands where
+                // the topmost of them was.
+                let ids = selection_roots(ctx.doc);
+                let Some(mut insert) = ids.first().and_then(|&id| ctx.doc.tree.path_of(id)) else {
                     return;
                 };
                 let mut group = Layer::new_group("Group");
                 let group_id = group.id;
-                let mut edit = ctx.doc.begin_edit("Group Layer");
-                // Remove the layer, put it inside the group, insert group.
-                let removed = ctx_remove(&mut edit, id);
-                if let Some(layer) = removed {
-                    if let LayerKind::Group(g) = &mut group.kind {
-                        g.children.push(layer);
+                let mut edit = ctx.doc.begin_edit(if ids.len() > 1 {
+                    "Group Layers"
+                } else {
+                    "Group Layer"
+                });
+                let mut children = Vec::new();
+                for id in ids {
+                    let Some(path) = edit.doc().tree.path_of(id) else {
+                        continue;
+                    };
+                    let Some(layer) = ctx_remove(&mut edit, id) else {
+                        continue;
+                    };
+                    children.push(layer);
+                    // A removal earlier in the same sibling vec shifts the
+                    // insertion slot down by one.
+                    let d = path.0.len() - 1;
+                    if insert.0.len() > d && insert.0[..d] == path.0[..d] && insert.0[d] > path.0[d]
+                    {
+                        insert.0[d] -= 1;
                     }
-                    edit.insert_layer(path, group);
+                }
+                if !children.is_empty() {
+                    // Collected topmost first; children are stored
+                    // bottom-to-top.
+                    children.reverse();
+                    if let LayerKind::Group(g) = &mut group.kind {
+                        g.children = children;
+                    }
+                    edit.insert_layer(insert, group);
                 }
                 edit.commit();
                 ctx.doc.active_layer = Some(group_id);
+                ctx.doc.selected = vec![group_id];
             }),
             cmd("select.reselect", "Reselect", Some("cmd-shift-d"), |ctx| {
                 let Some(previous) = ctx.doc.last_selection.clone() else {
@@ -800,6 +829,33 @@ fn move_layer_to_end(ctx: &mut CommandCtx, to_front: bool) {
 /// Remove a layer through the builder but get the removed value back
 /// (EditBuilder::remove_layer records the op; we reconstruct the layer from
 /// the document *before* removal).
+/// The panel's multi-selection reduced to independent roots: descendants
+/// of another selected layer are dropped (the ancestor carries them), and
+/// the result is in panel order, topmost first.
+fn selection_roots(doc: &Document) -> Vec<LayerId> {
+    let mut paths: Vec<(LayerId, LayerPath)> = doc
+        .selected_layers()
+        .into_iter()
+        .filter_map(|id| doc.tree.path_of(id).map(|p| (id, p)))
+        .collect();
+    // Siblings render top-of-stack first, so descending path order is
+    // panel order.
+    paths.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    let roots: Vec<bool> = paths
+        .iter()
+        .map(|(_, p)| {
+            !paths
+                .iter()
+                .any(|(_, q)| q.0.len() < p.0.len() && p.0[..q.0.len()] == q.0[..])
+        })
+        .collect();
+    paths
+        .into_iter()
+        .zip(roots)
+        .filter_map(|((id, _), root)| root.then_some(id))
+        .collect()
+}
+
 fn ctx_remove(edit: &mut schist_core::EditBuilder<'_>, id: LayerId) -> Option<Layer> {
     let layer = edit.doc().tree.find(id)?.clone();
     if edit.remove_layer(id) {
@@ -1055,6 +1111,86 @@ mod m11_tests {
 
         run(&reg, "edit.undo", &mut doc, &mut state);
         assert_eq!(names(&doc), vec!["L1", "L2", "L0"], "ordering undoes");
+    }
+
+    #[test]
+    fn delete_removes_the_whole_multi_selection_as_one_edit() {
+        let reg = registry();
+        let mut doc = doc_with_layers(4);
+        let mut state = EditorState::default();
+        let (l0, l2) = (doc.tree.layers[0].id, doc.tree.layers[2].id);
+        doc.active_layer = Some(l0);
+        doc.selected = vec![l0, l2];
+
+        run(&reg, "layer.delete", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L1", "L3"]);
+        assert_eq!(doc.history.undo_name(), Some("Delete Layers"));
+
+        run(&reg, "edit.undo", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0", "L1", "L2", "L3"], "one undo step");
+    }
+
+    #[test]
+    fn group_wraps_the_selection_where_the_topmost_layer_was() {
+        let reg = registry();
+        let mut doc = doc_with_layers(4);
+        let mut state = EditorState::default();
+        let (l1, l3) = (doc.tree.layers[1].id, doc.tree.layers[3].id);
+        doc.active_layer = Some(l3);
+        doc.selected = vec![l1, l3];
+
+        run(&reg, "layer.group", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0", "L2", "Group"]);
+        let group = &doc.tree.layers[2];
+        let children: Vec<&str> = group
+            .children()
+            .unwrap()
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(children, vec!["L1", "L3"], "stack order kept");
+        assert_eq!(doc.active_layer, Some(group.id));
+
+        run(&reg, "edit.undo", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0", "L1", "L2", "L3"]);
+    }
+
+    #[test]
+    fn selected_descendants_ride_along_with_their_group() {
+        let reg = registry();
+        let mut doc = doc_with_layers(2);
+        let mut state = EditorState::default();
+        // Group L1, then select both the group and its child: deleting
+        // must not remove the child twice.
+        doc.active_layer = Some(doc.tree.layers[1].id);
+        run(&reg, "layer.group", &mut doc, &mut state);
+        let group_id = doc.tree.layers[1].id;
+        let child_id = doc.tree.layers[1].children().unwrap()[0].id;
+        doc.active_layer = Some(group_id);
+        doc.selected = vec![group_id, child_id];
+
+        run(&reg, "layer.delete", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0"]);
+        assert_eq!(doc.history.undo_name(), Some("Delete Layer"));
+    }
+
+    #[test]
+    fn stale_multi_selection_collapses_to_the_active_layer() {
+        let reg = registry();
+        let mut doc = doc_with_layers(3);
+        let mut state = EditorState::default();
+        let (l0, l1, l2) = (
+            doc.tree.layers[0].id,
+            doc.tree.layers[1].id,
+            doc.tree.layers[2].id,
+        );
+        // Something moved the active layer without touching `selected`,
+        // as commands do; the extras no longer apply.
+        doc.selected = vec![l0, l1];
+        doc.active_layer = Some(l2);
+
+        run(&reg, "layer.delete", &mut doc, &mut state);
+        assert_eq!(names(&doc), vec!["L0", "L1"]);
     }
 
     #[test]

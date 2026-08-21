@@ -47,6 +47,11 @@ pub struct Document {
     pub tree: LayerTree,
     pub selection: Selection,
     pub active_layer: Option<LayerId>,
+    /// The layers-panel multi-selection: every highlighted row, including
+    /// the active layer. UI state like `active_layer`, so not undoable.
+    /// Read it through `selected_layers()`, which prunes stale ids and
+    /// falls back to the active layer when the two disagree.
+    pub selected: Vec<LayerId>,
     pub history: History,
     /// PSD image resources we preserve for round-trip fidelity.
     pub preserved_resources: Vec<PreservedResource>,
@@ -100,6 +105,7 @@ impl Document {
             tree: LayerTree::default(),
             selection: Selection::new(),
             active_layer: None,
+            selected: Vec::new(),
             history: History::new(),
             preserved_resources: Vec::new(),
             revision: 0,
@@ -137,6 +143,25 @@ impl Document {
                 crate::layer::LayerKind::Group(g) => stack.extend(g.children.iter()),
                 crate::layer::LayerKind::Adjustment(_) => {}
             }
+        }
+    }
+
+    /// The effective layers-panel selection. When `selected` still contains
+    /// the active layer it is the multi-selection (minus any ids whose
+    /// layers have since been deleted); when something changed the active
+    /// layer without touching `selected` — a command, a right-click on an
+    /// unselected row — the extras are stale and the selection collapses to
+    /// just the active layer.
+    pub fn selected_layers(&self) -> Vec<LayerId> {
+        match self.active_layer {
+            Some(active) if self.selected.contains(&active) => self
+                .selected
+                .iter()
+                .copied()
+                .filter(|&id| self.tree.find(id).is_some())
+                .collect(),
+            Some(active) => self.tree.find(active).map(|l| l.id).into_iter().collect(),
+            None => Vec::new(),
         }
     }
 
