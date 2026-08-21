@@ -132,16 +132,17 @@ Two-finger scroll pans; **Ctrl/⌘/Alt + scroll zooms** toward the pointer.
 Prefer it the other way round? **Preferences ▸ Zoom with scroll wheel**
 swaps them, so plain scrolling zooms and the modifier pans.
 
-**Pinch-to-zoom** works on macOS and Linux/Wayland, zooming about the
+**Pinch-to-zoom** works on macOS, Linux — Wayland, and X11 on
+xorg-server 21.1+ (XI 2.4) — and Windows touchscreens, zooming about the
 centre of the gesture, and **stylus pressure** drives brush size on
-macOS. Upstream GPUI surfaces neither, so both come from a fork —
-[IAmJSD/gpui](https://github.com/IAmJSD/gpui), which adds `PinchEvent`,
-`on_pinch` and a `pressure` field on the mouse events on top of gpui
-0.2.2 — pinned by revision in the workspace `Cargo.toml`.
+macOS, Linux/X11 and Windows. Upstream GPUI surfaces neither, so both
+come from a fork — [IAmJSD/gpui](https://github.com/IAmJSD/gpui), which
+adds `PinchEvent`, `on_pinch` and a `pressure` field on the mouse events
+on top of gpui 0.2.2 — pinned by revision in the workspace `Cargo.toml`.
 
-There is no pinch under X11: XI2 has no pinch gesture, so touchpad
-pinches are never forwarded to X11 clients, and Windows is not yet
-implemented in the fork. Ctrl+scroll, the zoom-with-scroll preference,
+The one pinch gap left is Windows precision touchpads: Windows delivers
+their pinches as Ctrl+scroll rather than a gesture — which is already a
+zoom here anyway. Ctrl+scroll, the zoom-with-scroll preference,
 ⌘+/⌘-, and the navigator's zoom slider work everywhere.
 
 Remap anything in `~/.config/schist/keymap.json`:
@@ -154,10 +155,13 @@ Remap anything in `~/.config/schist/keymap.json`:
 
 - **3D.** Never built, and not planned: Adobe deprecated it right after
   CC 2020 and removed it in 2022.
-- **Tablet pressure off macOS.** The pipeline carries pressure end to
-  end and macOS reads it from `NSEvent`; Wayland, X11 and Windows each
-  need their own tablet protocol and hardware to develop against, so
-  they report full pressure.
+- **Tablet pressure on Wayland.** The pipeline carries pressure end to
+  end, and macOS (`NSEvent`), X11 (the XInput2 pressure valuator) and
+  Windows (pen pointer messages) all feed it; Wayland still needs
+  `zwp_tablet_v2` and hardware to develop against, so it reports full
+  pressure. The X11 and Windows paths are new and verified against the
+  platform documentation rather than a physical tablet — reports from
+  real hardware welcome.
 - **Only two Neural Filters run a network.** Super Zoom uses a small
   residual CNN trained for this application (`tools/train/detail.py`,
   39k parameters and 153 KB, shipped in the binary); Style Transfer uses
