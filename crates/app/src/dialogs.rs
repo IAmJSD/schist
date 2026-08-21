@@ -87,6 +87,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             hsv,
             original,
         } => crate::color_picker::render(ws, target, hsv, original, cx).into_any_element(),
+        Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::ModelManager => model_manager(ws, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),
@@ -100,6 +101,59 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             profile_dialog(&state, convert, selected, cx).into_any_element()
         }
     })
+}
+
+/// "Save changes before closing?" for the active tab. Save falls back to
+/// the Save As dialog for never-saved documents; the tab then stays open
+/// (now clean) rather than chaining a close onto an async file prompt.
+fn confirm_close_tab(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let title = ws
+        .doc
+        .as_ref()
+        .map(|d| d.title.clone())
+        .unwrap_or_else(|| "Untitled".into());
+    ui::modal_frame(
+        "Unsaved Changes",
+        380.0,
+        div()
+            .text_size(px(12.0))
+            .child(format!("Save changes to \u{201C}{title}\u{201D} before closing?")),
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(ui::button(
+                "Don't Save",
+                false,
+                |ws, _window, cx| {
+                    ws.close_modal(cx);
+                    let index = ws.active_tab();
+                    ws.close_tab(index, cx);
+                },
+                cx,
+            ))
+            .child(ui::button(
+                "Cancel",
+                false,
+                |ws, _window, cx| ws.close_modal(cx),
+                cx,
+            ))
+            .child(ui::button(
+                "Save…",
+                true,
+                |ws, window, cx| {
+                    ws.close_modal(cx);
+                    ws.save_current(window, cx);
+                    // The synchronous path (a known, writable path) leaves
+                    // the document clean; only then is closing safe.
+                    if ws.doc.as_ref().is_some_and(|d| !d.dirty) {
+                        let index = ws.active_tab();
+                        ws.close_tab(index, cx);
+                    }
+                },
+                cx,
+            )),
+    )
 }
 
 fn filter_options() -> Vec<(SharedString, Filter)> {
