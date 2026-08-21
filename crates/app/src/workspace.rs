@@ -2845,11 +2845,7 @@ impl Workspace {
         out
     }
 
-    pub fn record_layer_row_bounds(
-        &mut self,
-        id: schist_core::LayerId,
-        bounds: Bounds<Pixels>,
-    ) {
+    pub fn record_layer_row_bounds(&mut self, id: schist_core::LayerId, bounds: Bounds<Pixels>) {
         self.layer_row_bounds.insert(id, bounds);
     }
 

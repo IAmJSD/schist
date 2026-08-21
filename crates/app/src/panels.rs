@@ -2068,208 +2068,205 @@ fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
                             s.bg(gpui::rgb(palette().hover))
                         }
                     })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                ws.layer_row_mouse_down(id, ev, cx);
-                            }),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                            ws.layer_row_mouse_down(id, ev, cx);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |ws, ev: &MouseMoveEvent, _w, cx| {
+                        ws.layer_row_mouse_move(id, ev, cx);
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _ev: &MouseUpEvent, _w, cx| {
+                            ws.finish_layer_drag(cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                            ws.open_context_menu(ContextTarget::Layer(id), ev.position, cx);
+                        }),
+                    )
+                    .child(
+                        // Row bounds, so a drag knows which half of the
+                        // row the pointer is in.
+                        canvas(
+                            move |bounds, _window, cx| {
+                                entity.update(cx, |ws, _| ws.record_layer_row_bounds(id, bounds));
+                            },
+                            |_, _, _, _| {},
                         )
-                        .on_mouse_move(cx.listener(move |ws, ev: &MouseMoveEvent, _w, cx| {
-                            ws.layer_row_mouse_move(id, ev, cx);
-                        }))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(move |ws, _ev: &MouseUpEvent, _w, cx| {
-                                ws.finish_layer_drag(cx);
-                            }),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                ws.open_context_menu(ContextTarget::Layer(id), ev.position, cx);
-                            }),
-                        )
-                        .child(
-                            // Row bounds, so a drag knows which half of the
-                            // row the pointer is in.
-                            canvas(
-                                move |bounds, _window, cx| {
-                                    entity
-                                        .update(cx, |ws, _| ws.record_layer_row_bounds(id, bounds));
-                                },
-                                |_, _, _, _| {},
+                        .absolute()
+                        .size_full(),
+                    )
+                    .child(
+                        // Visibility eye.
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(20.0))
+                            .flex_none()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |ws, _e, _w, cx| {
+                                    if let Some(doc) = &mut ws.doc {
+                                        let mut edit = doc.begin_edit("Toggle Visibility");
+                                        edit.change_props(id, |l| l.visible = !l.visible);
+                                        edit.commit();
+                                    }
+                                    ws.after_change(cx);
+                                    cx.stop_propagation();
+                                }),
                             )
-                            .absolute()
-                            .size_full(),
-                        )
-                        .child(
-                            // Visibility eye.
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(20.0))
-                                .flex_none()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |ws, _e, _w, cx| {
-                                        if let Some(doc) = &mut ws.doc {
-                                            let mut edit = doc.begin_edit("Toggle Visibility");
-                                            edit.change_props(id, |l| l.visible = !l.visible);
-                                            edit.commit();
-                                        }
-                                        ws.after_change(cx);
+                            .child(icon(
+                                if row.visible { "eye" } else { "eye-off" },
+                                13.0,
+                                if row.visible {
+                                    palette().text
+                                } else {
+                                    palette().text_dim
+                                },
+                            )),
+                    )
+                    .child(div().w(px(row.depth as f32 * 12.0)).flex_none())
+                    .child(match &row.kind {
+                        RowKind::Group => div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(16.0))
+                            .flex_none()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |ws, _e, _w, cx| {
+                                    ws.toggle_group_open(id, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(icon(
+                                if row.open {
+                                    "chevron-down"
+                                } else {
+                                    "chevron-right"
+                                },
+                                11.0,
+                                palette().text_dim,
+                            ))
+                            .into_any_element(),
+                        _ => div().w(px(0.0)).into_any_element(),
+                    })
+                    .child(
+                        // Thumbnail (raster) or type icon.
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(38.0))
+                            .h(px(30.0))
+                            .flex_none()
+                            .bg(gpui::rgb(palette().field_bg))
+                            .rounded_sm()
+                            // Adjustment layers open their settings
+                            // from the thumbnail, like Photoshop.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |ws, _e, _w, cx| ws.edit_adjustment(id, cx)),
+                            )
+                            .child(match (&row.kind, thumb) {
+                                (RowKind::Raster, Some(t)) => {
+                                    img(t).max_w(px(36.0)).max_h(px(28.0)).into_any_element()
+                                }
+                                (RowKind::Group, _) => {
+                                    icon("folder", 14.0, palette().text_dim).into_any_element()
+                                }
+                                _ => icon("adjust", 13.0, palette().text_dim).into_any_element(),
+                            }),
+                    )
+                    .child(match &rename {
+                        // Inline rename: an editable field with the
+                        // dialogs' caret convention.
+                        Some((rid, buffer)) if *rid == id => div()
+                            .flex_grow()
+                            .h(px(22.0))
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .rounded_sm()
+                            .bg(gpui::rgb(palette().field_bg))
+                            .border_1()
+                            .border_color(gpui::rgb(palette().accent))
+                            .text_size(px(12.0))
+                            .text_color(gpui::rgb(palette().text))
+                            .child(format!("{buffer}|"))
+                            .into_any_element(),
+                        _ => div()
+                            .flex_grow()
+                            .text_size(px(12.0))
+                            .overflow_hidden()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                                    if ev.click_count >= 2 {
+                                        ws.begin_layer_rename(id, cx);
                                         cx.stop_propagation();
-                                    }),
-                                )
-                                .child(icon(
-                                    if row.visible { "eye" } else { "eye-off" },
-                                    13.0,
-                                    if row.visible {
-                                        palette().text
-                                    } else {
-                                        palette().text_dim
-                                    },
-                                )),
-                        )
-                        .child(div().w(px(row.depth as f32 * 12.0)).flex_none())
-                        .child(match &row.kind {
-                            RowKind::Group => div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(16.0))
-                                .flex_none()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |ws, _e, _w, cx| {
-                                        ws.toggle_group_open(id, cx);
-                                        cx.stop_propagation();
-                                    }),
-                                )
-                                .child(icon(
-                                    if row.open {
-                                        "chevron-down"
-                                    } else {
-                                        "chevron-right"
-                                    },
-                                    11.0,
-                                    palette().text_dim,
-                                ))
-                                .into_any_element(),
-                            _ => div().w(px(0.0)).into_any_element(),
-                        })
-                        .child(
-                            // Thumbnail (raster) or type icon.
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(px(38.0))
-                                .h(px(30.0))
-                                .flex_none()
-                                .bg(gpui::rgb(palette().field_bg))
-                                .rounded_sm()
-                                // Adjustment layers open their settings
-                                // from the thumbnail, like Photoshop.
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |ws, _e, _w, cx| ws.edit_adjustment(id, cx)),
-                                )
-                                .child(match (&row.kind, thumb) {
-                                    (RowKind::Raster, Some(t)) => {
-                                        img(t).max_w(px(36.0)).max_h(px(28.0)).into_any_element()
-                                    }
-                                    (RowKind::Group, _) => {
-                                        icon("folder", 14.0, palette().text_dim).into_any_element()
-                                    }
-                                    _ => {
-                                        icon("adjust", 13.0, palette().text_dim).into_any_element()
                                     }
                                 }),
-                        )
-                        .child(match &rename {
-                            // Inline rename: an editable field with the
-                            // dialogs' caret convention.
-                            Some((rid, buffer)) if *rid == id => div()
-                                .flex_grow()
-                                .h(px(22.0))
-                                .px_1()
-                                .flex()
-                                .items_center()
-                                .rounded_sm()
-                                .bg(gpui::rgb(palette().field_bg))
-                                .border_1()
-                                .border_color(gpui::rgb(palette().accent))
-                                .text_size(px(12.0))
-                                .text_color(gpui::rgb(palette().text))
-                                .child(format!("{buffer}|"))
-                                .into_any_element(),
-                            _ => div()
-                                .flex_grow()
-                                .text_size(px(12.0))
-                                .overflow_hidden()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                        if ev.click_count >= 2 {
-                                            ws.begin_layer_rename(id, cx);
-                                            cx.stop_propagation();
-                                        }
-                                    }),
-                                )
-                                .child(row.name)
-                                .into_any_element(),
-                        })
-                        .children(row.smart.then(|| {
-                            div()
-                                .flex_none()
-                                .px_1()
-                                .rounded_sm()
-                                .text_size(px(10.0))
-                                .text_color(gpui::rgb(palette().text_dim))
-                                .bg(gpui::rgb(palette().control_bg))
-                                .child("SO")
-                        }))
-                        .children(row.fx.then(|| {
-                            div()
-                                .flex_none()
-                                .px_1()
-                                .rounded_sm()
-                                .text_size(px(10.0))
-                                .text_color(gpui::rgb(palette().text_dim))
-                                .bg(gpui::rgb(palette().control_bg))
-                                .child("fx")
-                        }))
-                        // Drop indicators while a row drag is in flight: a
-                        // bar on the receiving edge, or an outline when the
-                        // drop lands inside a group.
-                        .children((layer_drop == Some(LayerDrop::Above(id))).then(|| {
-                            div()
-                                .absolute()
-                                .top(px(0.0))
-                                .left_0()
-                                .right_0()
-                                .h(px(2.0))
-                                .bg(gpui::rgb(palette().accent))
-                        }))
-                        .children((layer_drop == Some(LayerDrop::Below(id))).then(|| {
-                            div()
-                                .absolute()
-                                .bottom(px(0.0))
-                                .left_0()
-                                .right_0()
-                                .h(px(2.0))
-                                .bg(gpui::rgb(palette().accent))
-                        }))
-                        .children((layer_drop == Some(LayerDrop::Into(id))).then(|| {
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .rounded_sm()
-                                .border_2()
-                                .border_color(gpui::rgb(palette().accent))
-                        }))
+                            )
+                            .child(row.name)
+                            .into_any_element(),
+                    })
+                    .children(row.smart.then(|| {
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .text_size(px(10.0))
+                            .text_color(gpui::rgb(palette().text_dim))
+                            .bg(gpui::rgb(palette().control_bg))
+                            .child("SO")
+                    }))
+                    .children(row.fx.then(|| {
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .text_size(px(10.0))
+                            .text_color(gpui::rgb(palette().text_dim))
+                            .bg(gpui::rgb(palette().control_bg))
+                            .child("fx")
+                    }))
+                    // Drop indicators while a row drag is in flight: a
+                    // bar on the receiving edge, or an outline when the
+                    // drop lands inside a group.
+                    .children((layer_drop == Some(LayerDrop::Above(id))).then(|| {
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left_0()
+                            .right_0()
+                            .h(px(2.0))
+                            .bg(gpui::rgb(palette().accent))
+                    }))
+                    .children((layer_drop == Some(LayerDrop::Below(id))).then(|| {
+                        div()
+                            .absolute()
+                            .bottom(px(0.0))
+                            .left_0()
+                            .right_0()
+                            .h(px(2.0))
+                            .bg(gpui::rgb(palette().accent))
+                    }))
+                    .children((layer_drop == Some(LayerDrop::Into(id))).then(|| {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded_sm()
+                            .border_2()
+                            .border_color(gpui::rgb(palette().accent))
+                    }))
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
