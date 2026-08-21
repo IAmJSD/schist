@@ -995,15 +995,7 @@ impl Workspace {
 
     /// Directory holding autosaved recovery snapshots.
     pub fn recovery_dir() -> Option<PathBuf> {
-        let base = std::env::var("XDG_STATE_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| PathBuf::from(h).join(".local/state"))
-            })?;
-        Some(base.join("schist/recovery"))
+        Some(crate::crash::state_dir()?.join("schist/recovery"))
     }
 
     /// One snapshot file per open document, so every dirty tab survives a

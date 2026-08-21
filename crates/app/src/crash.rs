@@ -8,17 +8,28 @@
 
 use std::path::PathBuf;
 
+/// Per-user state directory: XDG on Unix, local app data on Windows.
+pub fn state_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var("LOCALAPPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+            .map(PathBuf::from)
+    } else {
+        std::env::var("XDG_STATE_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".local/state"))
+            })
+    }
+}
+
 /// Where crash reports are written.
 pub fn crash_dir() -> Option<PathBuf> {
-    let base = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".local/state"))
-        })?;
-    Some(base.join("schist/crashes"))
+    Some(state_dir()?.join("schist/crashes"))
 }
 
 /// Install a panic hook that records a report next to the recovery
@@ -185,7 +196,7 @@ mod tests {
 
     #[test]
     fn crash_dir_is_under_the_state_directory() {
-        let dir = crash_dir().expect("HOME is set in tests");
+        let dir = crash_dir().expect("a state directory exists in test environments");
         assert!(dir.ends_with("schist/crashes"), "{dir:?}");
     }
 }
