@@ -5,6 +5,19 @@
 //! cargo run -p schist-codec-affinity --example afdiff -- file.afdesign out.png
 //! ```
 
+/// The app rebuilds styled rasters when a document opens; these tools
+/// must do the same for effects to composite.
+fn restyle(layers: &mut [schist_core::Layer]) {
+    for l in layers {
+        if let schist_core::LayerKind::Group(g) = &mut l.kind {
+            restyle(&mut g.children);
+        }
+        if !l.style.is_empty() {
+            l.styled = schist_layer_fx::render(l).map(std::sync::Arc::new);
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("usage: afdiff <file> <out.png>");
@@ -14,8 +27,9 @@ fn main() {
     let thumb = image::load_from_memory(archive.thumbnail().expect("thumb"))
         .expect("decode")
         .to_rgba8();
-    let (doc, report) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+    let (mut doc, report) = schist_codec_affinity::read_affinity(&bytes).expect("import");
     eprintln!("{report:?}");
+    restyle(&mut doc.tree.layers);
 
     // Match the thumbnail's proportions: composite at document size,
     // then scale to the thumbnail's height for the side-by-side.

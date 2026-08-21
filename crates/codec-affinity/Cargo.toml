@@ -28,3 +28,4 @@ log.workspace = true
 # example composites imported documents for the same comparison.
 image.workspace = true
 schist-compositor.workspace = true
+schist-layer-fx.workspace = true

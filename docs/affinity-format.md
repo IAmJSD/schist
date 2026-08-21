@@ -160,17 +160,24 @@ the class tag.
 
 **Text** (`TxtA` artistic / `TxtF` frame): no pixels, but the full
 model. `StSt` (story) → `Blok` blocks → `Glyp` (`GStr`) holds the
-UTF-8 string; each block's `GAtt` → `Runs` → `Item` carries character
-attributes — `Doub[0]` is the font size, `RFnt`/`DFnt` the resolved
-font (`Post` PostScript name, `Famy` family), and `Objs` holds fill
-descriptors (`FDsc.FDeF` → `Colr` → an `RGBA`/`HSLA`/… `_col` struct).
-`TxtH` is the frame (`ArFr` for artistic text): `FrmB` `f64[4]` is the
-layout box in pre-transform coordinates — its transformed bottom edge
-is the first baseline, its height the visual cap height (`ArtV`).
-Import re-sets the text through the text engine, anchors the rendered
-ink box to the transformed frame box (fitting the size to the frame
-width when a substituted font's metrics disagree), and stores the type
-tool's `PsTx` block so the layer stays editable.
+UTF-8 string — line breaks are the Unicode paragraph/line separators
+(U+2029/U+2028) or a vertical tab, *not* `\n`. Each block's `GAtt` →
+`Runs` → `Item` carries character attributes — `Doub[0]` is the font
+size, `RFnt`/`DFnt` the resolved and document fonts (`Post`
+PostScript name, `Famy` family, `Wegt` weight, `Ital`; an *unresolved*
+`RFnt` is present with empty names, so prefer whichever actually names
+a family; bold lives in the PostScript name more reliably than in
+`Wegt`), and `Objs` holds fill descriptors (`FDsc.FDeF` → `Colr` → an
+`RGBA`/`HSLA`/… `_col` struct). Paragraph attributes mirror the run
+shape: block `PAtt` → `Runs` → `Item` → `Ints[0]` is the alignment
+(0 left · 1 centre · 2 right). `TxtH` is the frame (`ArFr` for
+artistic text): `FrmB` `f64[4]` is the layout box in pre-transform
+coordinates — its transformed bottom edge is the first baseline, its
+height the visual cap height (`ArtV`). Import re-sets the text through
+the text engine — frame text reflows to the frame width, artistic text
+fits its size to the frame when a substituted font's metrics disagree —
+anchors the ink box to the transformed frame box per the alignment,
+and stores the type tool's `PsTx` block so the layer stays editable.
 
 **Layer transforms nest**: a group's `Xfrm` defines the coordinate
 space its children's transforms live in; composing down the tree is
@@ -245,6 +252,20 @@ range, an `HSV` mode flag, and six per-hue-range tweak arrays
 (`HueC`/`SatC`/`LumC` over `RngC` boundary angles in degrees, 315–345
 = reds and so on). Imported as a real hue/saturation adjustment
 (master shifts only; per-range tweaks warn).
+
+**Layer effects** (`FiEf`, an array of `FilE`-derived classes): every
+entry shares `Enab`, `BlnM` (the layer blend table), `Opac` (0..1),
+`SclO` (scale measures with the object) and usually `Radi`
+(blur/width in px) and a `Colr`. `Shad`/`InSh` shadows add `Offs`
+(distance) and `Angl` — the *offset direction* in radians, y-down, so
+the 45° default points down-right — plus `Knck` knockout; `OutG`/
+`InnG` glows add `Comp` (contour range, unmapped); `ColO` is a colour
+overlay; `Strk` an outline stroke (`Radi` width, `Alig` position,
+`Ftyp` solid/gradient with `GrFl` holding the gradient); `BevE` a
+bevel (`Azim`/`Elev` light direction in radians, `Dept`, `Sftn`,
+`Beve` subtype — only seen disabled, so its mapping is a guess);
+`Gaus` a gaussian blur (no layer-style equivalent — reported).
+Enabled effects import onto our layer style.
 
 **Live filter nodes** (`FlRN`): a `Filt` pipeline warping the content
 below between source and destination `Quad`s. Every corpus sighting
@@ -328,14 +349,11 @@ prints the imported layer tree with bounds.
 - Shapes beyond the kinds above (polygons, cogs, callouts, curved-edge
   stars…) are parsed but not turned into geometry; a fixture drawn
   with each tool (plus its thumbnail) is all it takes to add one.
-- Text: single style per layer (first run wins), no per-run styling,
-  no line wrapping — a `TxtF` frame text whose story breaks into
-  several `Blok`s renders as one line (the corpus stream overlays
-  show this) — and effects on text are not applied.
-- Layer effects (`FiEf`): corpus files carry `Gaus` (blur), `OutG`
-  (outer glow), `Shad` (shadow), `ColO` (colour overlay), `Strk`
-  (stroke) and `BevE` (bevel) parameter classes; none are mapped onto
-  our layer-fx yet.
+- Text: single style per layer (first run wins), no per-run styling.
+- Layer effect gaps: `Gaus` blur has no layer-style home; glow
+  contour range (`Comp`) and shadow spread are unmapped; the `BevE`
+  subtype enum and the `Strk` `Alig` values are only part-verified
+  (every corpus bevel is disabled).
 - ICC profiles: `ICCP` nodes carry the profile name and blob; every
   corpus sighting is sRGB, so no conversion has been needed yet.
 - Rotated/sheared *text* still imports axis-aligned (the text engine

@@ -1,5 +1,19 @@
 //! Dev tool: RMS difference between a composited import and the file's
 //! embedded thumbnail (lower is better).
+
+/// The app rebuilds styled rasters when a document opens; these tools
+/// must do the same for effects to composite.
+fn restyle(layers: &mut [schist_core::Layer]) {
+    for l in layers {
+        if let schist_core::LayerKind::Group(g) = &mut l.kind {
+            restyle(&mut g.children);
+        }
+        if !l.style.is_empty() {
+            l.styled = schist_layer_fx::render(l).map(std::sync::Arc::new);
+        }
+    }
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("usage: afscore <file>");
     let bytes = std::fs::read(&path).expect("read");
@@ -8,6 +22,8 @@ fn main() {
         .expect("decode")
         .to_rgba8();
     let (doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+    let mut doc = doc;
+    restyle(&mut doc.tree.layers);
     let region = schist_core::IntRect::from_size(doc.width, doc.height);
     let pixels = schist_compositor::composite_region_rgba8(&doc, region);
     let ours = image::RgbaImage::from_raw(doc.width, doc.height, pixels).expect("buffer");

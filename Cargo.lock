@@ -5449,6 +5449,7 @@ dependencies = [
  "schist-color",
  "schist-compositor",
  "schist-core",
+ "schist-layer-fx",
  "schist-text-engine",
  "schist-vector",
  "serde",

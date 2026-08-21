@@ -90,6 +90,14 @@ fn bool_of(node: &Node, name: &[u8; 4]) -> Option<bool> {
     }
 }
 
+fn f64_of(node: &Node, name: &[u8; 4]) -> Option<f64> {
+    match node.field(name)? {
+        Value::F64(v) => Some(*v),
+        Value::F32(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
 fn enum_of(node: &Node, name: &[u8; 4]) -> Option<u16> {
     match node.field(name)? {
         Value::Enum { id, .. } => Some(*id),
@@ -471,6 +479,7 @@ impl Walker<'_> {
         };
 
         self.apply_mask(node, &mut layer);
+        self.apply_effects(node, &mut layer);
         if let Some(v) = bool_of(node, b"Visi") {
             layer.visible = v;
         }
@@ -793,6 +802,164 @@ impl Walker<'_> {
         Some(layer)
     }
 
+    /// Map a layer's `FiEf` effects onto our layer style.
+    ///
+    /// Each entry is a `FilE`-derived class sharing `Enab`, `BlnM` (the
+    /// layer blend table), `Opac` (0..1), `SclO` (scale with object)
+    /// and usually `Radi` (blur/width) and a `Colr`:
+    /// `Shad`/`InSh` shadows add `Offs` (distance) and `Angl` — the
+    /// *offset direction* in radians, y-down, so 45° points down-right —
+    /// plus `Knck`; `OutG`/`InnG` glows; `ColO` colour overlay; `Strk`
+    /// outline stroke (`Radi` width, `Alig` position); `BevE` bevel
+    /// (`Azim`/`Elev` light direction in radians, `Dept`, `Sftn`);
+    /// `Gaus` gaussian blur, which has no equivalent and is reported.
+    fn apply_effects(&mut self, node: &Node, layer: &mut Layer) {
+        use schist_core::style;
+        let scale = ((self.node_ctm(node).scale_x() + self.node_ctm(node).scale_y()) * 0.5) as f32;
+        for fx in self.graph.children(node, b"FiEf") {
+            if !matches!(bool_of(fx, b"Enab"), Some(true)) {
+                continue;
+            }
+            let tag = fx.type_tag().to_be_bytes();
+            let opacity = f64_of(fx, b"Opac").unwrap_or(1.0) as f32;
+            let blend = match fx.field(b"BlnM") {
+                Some(Value::Enum { id, version }) => blend_mode(*id, *version),
+                _ => None,
+            };
+            let color = self
+                .graph
+                .child(fx, b"Colr")
+                .and_then(color_bytes)
+                .map(|c| schist_color::Rgba::from_u8(c[0], c[1], c[2], c[3]));
+            // "Scale with object" bakes the layer transform into the
+            // effect's pixel measures; otherwise they are canvas-absolute.
+            let s = if bool_of(fx, b"SclO") == Some(true) {
+                scale
+            } else {
+                1.0
+            };
+            let radius = f64_of(fx, b"Radi").unwrap_or(0.0) as f32 * s;
+            fn on<T>(settings: T) -> style::Effect<T> {
+                style::Effect {
+                    enabled: true,
+                    settings,
+                }
+            }
+            match &tag {
+                b"Shad" | b"InSh" => {
+                    let settings = style::ShadowStyle {
+                        color: color.unwrap_or(schist_color::Rgba::new(0.0, 0.0, 0.0, 1.0)),
+                        blend: blend.unwrap_or(schist_core::BlendMode::Multiply),
+                        opacity,
+                        // Ours is where the light comes from (the shadow
+                        // falls opposite); Affinity stores the offset
+                        // direction itself.
+                        angle: 180.0
+                            - f64_of(fx, b"Angl")
+                                .unwrap_or(std::f64::consts::FRAC_PI_4)
+                                .to_degrees() as f32,
+                        distance: f64_of(fx, b"Offs").unwrap_or(0.0) as f32 * s,
+                        spread: 0.0,
+                        size: radius,
+                        knockout: bool_of(fx, b"Knck").unwrap_or(true),
+                    };
+                    if &tag == b"Shad" {
+                        layer.style.drop_shadow = on(settings);
+                    } else {
+                        layer.style.inner_shadow = on(settings);
+                    }
+                }
+                b"OutG" | b"InnG" => {
+                    let settings = style::GlowStyle {
+                        color: color.unwrap_or(schist_color::Rgba::new(1.0, 1.0, 0.75, 1.0)),
+                        blend: blend.unwrap_or(schist_core::BlendMode::Screen),
+                        opacity,
+                        spread: 0.0,
+                        size: radius,
+                        technique: style::Technique::Softer,
+                        from_edge: true,
+                    };
+                    if &tag == b"OutG" {
+                        layer.style.outer_glow = on(settings);
+                    } else {
+                        layer.style.inner_glow = on(settings);
+                    }
+                }
+                b"ColO" => {
+                    layer.style.color_overlay = on(style::ColorOverlayStyle {
+                        color: color.unwrap_or(schist_color::Rgba::new(1.0, 0.0, 0.0, 1.0)),
+                        blend: blend.unwrap_or(schist_core::BlendMode::Normal),
+                        opacity,
+                    });
+                }
+                b"Strk" => {
+                    let color = color.or_else(|| {
+                        // Gradient-filled strokes approximate to their
+                        // first stop.
+                        let fill = self
+                            .graph
+                            .child(fx, b"GrFl")
+                            .and_then(|g| self.graph.child(g, b"FDeF"))?;
+                        let grad = gradient_fill(self.graph, fill, None).or_else(|| {
+                            let c = fill_color(self.graph, fill)?;
+                            Some(GradientFill {
+                                stops: vec![(0.0, c), (1.0, c)],
+                                start: (0.0, 0.0),
+                                end: (1.0, 0.0),
+                                radial: false,
+                            })
+                        })?;
+                        let c = grad.stops.first()?.1;
+                        Some(schist_color::Rgba::from_u8(c[0], c[1], c[2], c[3]))
+                    });
+                    let Some(color) = color else {
+                        continue;
+                    };
+                    layer.style.stroke = on(style::StrokeStyle {
+                        color,
+                        blend: blend.unwrap_or(schist_core::BlendMode::Normal),
+                        opacity,
+                        size: radius,
+                        position: match enum_of(fx, b"Alig") {
+                            Some(1) => style::StrokePosition::Inside,
+                            Some(0) => style::StrokePosition::Center,
+                            _ => style::StrokePosition::Outside,
+                        },
+                    });
+                }
+                b"BevE" => {
+                    // The Beve subtype enum has only been seen disabled;
+                    // the order below is a guess.
+                    log::warn!(
+                        "affinity: bevel on {:?} imported with an unverified subtype mapping",
+                        layer.name
+                    );
+                    layer.style.bevel = on(style::BevelStyle {
+                        style: match enum_of(fx, b"Beve") {
+                            Some(0) => style::BevelStyle_::OuterBevel,
+                            Some(2) => style::BevelStyle_::Emboss,
+                            Some(3) => style::BevelStyle_::PillowEmboss,
+                            _ => style::BevelStyle_::InnerBevel,
+                        },
+                        angle: f64_of(fx, b"Azim").unwrap_or(2.356).to_degrees() as f32,
+                        altitude: f64_of(fx, b"Elev").unwrap_or(0.785).to_degrees() as f32,
+                        size: radius,
+                        soften: f64_of(fx, b"Sftn").unwrap_or(0.0) as f32 * s,
+                        depth: (f64_of(fx, b"Dept").unwrap_or(1.0) as f32 / 10.0).clamp(0.0, 1.0),
+                        ..style::BevelStyle::default()
+                    });
+                }
+                _ => {
+                    // Gaussian blur and anything else we can't restyle
+                    // changes what the layer looks like — record the gap.
+                    self.report
+                        .skipped
+                        .push((format!("{} (effect)", layer.name), tag_name(fx.type_tag())));
+                }
+            }
+        }
+    }
+
     /// Attach the layer's masks: "MRst" (mask raster) nodes in the
     /// `AdCh` list, each a full layer node with its own transform and a
     /// single-channel bitmap where white reveals. Several masks
@@ -883,14 +1050,17 @@ impl Walker<'_> {
     /// Rebuild a text layer by re-setting its type.
     ///
     /// The graph stores the string (`StSt` story → `Blok` → `Glyp`
-    /// `Utf8`), the first run's font size (`Doub[0]`) and resolved font
-    /// (`RFnt`/`DFnt` PostScript + family names), the fill colour (run
-    /// `Objs` → `FDsc.FDeF` → `Colr`), and the frame box `FrmB` whose
-    /// transformed bottom edge is the first baseline. The rendered
-    /// layer carries the same `PsTx` extras block the type tool writes,
-    /// so imported text stays editable.
+    /// `Utf8`, with U+2029 paragraph breaks), the paragraph alignment
+    /// (block `PAtt` → `Ints[0]`: 0 left · 1 centre · 2 right), the
+    /// first run's font size (`Doub[0]`) and resolved font
+    /// (`RFnt`/`DFnt` PostScript + family names, `Wegt` weight, `Ital`),
+    /// the fill colour (run `Objs` → `FDsc.FDeF` → `Colr`), and the
+    /// frame box `FrmB` whose transformed bottom edge is the first
+    /// baseline. The rendered layer carries the same `PsTx` extras
+    /// block the type tool writes, so imported text stays editable.
     fn text_layer(&mut self, node: &Node, name: &str) -> Option<Layer> {
         let graph = self.graph;
+        let frame_text = &node.type_tag().to_be_bytes() == b"TxtF";
         let story = graph.child(node, b"StSt")?;
         let blocks = graph.children(story, b"Blok");
         let text = blocks
@@ -899,10 +1069,38 @@ impl Walker<'_> {
             .filter_map(|g| str_of(g, b"Utf8"))
             .map(|s| s.trim_end_matches('\0'))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+            // Affinity breaks lines with the Unicode paragraph and line
+            // separators (and a vertical tab for soft returns).
+            .replace(['\u{2028}', '\u{2029}', '\u{000B}'], "\n")
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
         if text.trim().is_empty() {
             return None;
         }
+
+        // First block's paragraph attributes give the alignment. Like
+        // the character attributes, they sit behind a run list:
+        // `PAtt` → `Runs` → `Item` → `Ints[0]`.
+        let align = blocks
+            .iter()
+            .find_map(|b| {
+                let runs = graph.children(graph.child(b, b"PAtt")?, b"Runs");
+                let item = graph.child(*runs.first()?, b"Item")?;
+                match item.field(b"Ints") {
+                    Some(Value::Array(v)) => match v.first() {
+                        Some(Value::I32(a)) => Some(*a),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            })
+            .unwrap_or(0);
+        let align = match align {
+            1 => schist_text_engine::Align::Center,
+            2 => schist_text_engine::Align::Right,
+            _ => schist_text_engine::Align::Left,
+        };
 
         // First run's character attributes speak for the whole layer.
         let run_item = blocks.iter().find_map(|b| {
@@ -916,9 +1114,13 @@ impl Walker<'_> {
             },
             _ => return None,
         };
-        let font = graph
-            .child(run_item, b"RFnt")
-            .or_else(|| graph.child(run_item, b"DFnt"));
+        // The resolved font (RFnt) beats the document font (DFnt) — but
+        // an unresolved RFnt is present with empty names, so pick the
+        // first that actually names a family.
+        let font = [b"RFnt", b"DFnt"]
+            .into_iter()
+            .filter_map(|t| graph.child(run_item, t))
+            .find(|f| str_of(f, b"Famy").is_some_and(|s| !s.is_empty()));
         let (family, post) = font
             .map(|f| {
                 (
@@ -927,6 +1129,8 @@ impl Walker<'_> {
                 )
             })
             .unwrap_or_default();
+        let weight = font.and_then(|f| i32_of(f, b"Wegt")).unwrap_or(400);
+        let italic = font.and_then(|f| bool_of(f, b"Ital")).unwrap_or(false);
         let color = run_color(graph, run_item).unwrap_or([0, 0, 0, 255]);
 
         // Placement: the frame box, through the layer transform. Its
@@ -961,13 +1165,17 @@ impl Walker<'_> {
         let mut spec = schist_text_engine::TextSpec {
             text,
             family,
-            bold: post.contains("Bold"),
-            italic: post.contains("Italic") || post.contains("Oblique"),
+            bold: weight >= 600
+                || post.contains("Bold")
+                || post.contains("Black")
+                || post.contains("Heavy"),
+            italic: italic || post.contains("Italic") || post.contains("Oblique"),
             size: eff_size,
-            align: schist_text_engine::Align::Left,
+            align,
             line_height: 1.0,
             tracking: 0.0,
-            wrap_width: None,
+            // Frame text reflows to its box; artistic text never wraps.
+            wrap_width: (frame_text && frame_width > 8).then_some(frame_width as f32),
         };
         let mut raster = match schist_text_engine::rasterize(&spec) {
             Some(r) => r,
@@ -984,10 +1192,11 @@ impl Walker<'_> {
         if raster.is_empty() {
             return None;
         }
-        // The frame box records exactly how wide Affinity set this text.
-        // When our face's metrics disagree (usually a substituted font),
-        // scale the size so the line still fills its box.
-        if frame_width > 8 && !spec.text.contains('\n') {
+        // An artistic-text frame box records exactly how wide Affinity
+        // set this text. When our face's metrics disagree (usually a
+        // substituted font), scale the size so the ink still fills its
+        // box. Frame text keeps its size and reflows instead.
+        if !frame_text && frame_width > 8 {
             let ratio = frame_width as f32 / raster.bounds.width() as f32;
             if (ratio - 1.0).abs() > 0.02 {
                 spec.size *= ratio;
@@ -998,12 +1207,19 @@ impl Walker<'_> {
             }
         }
 
-        // Anchor our ink box to the frame box: ink-to-ink placement is
-        // immune to differing ascent conventions between engines.
-        let origin = (
-            frame_left - raster.bounds.left,
-            frame_top - raster.bounds.top,
-        );
+        // Anchor our ink box to the frame box per the paragraph
+        // alignment: ink-to-ink placement is immune to differing ascent
+        // conventions between engines.
+        let origin_x = match spec.align {
+            schist_text_engine::Align::Center if frame_width > 8 => {
+                frame_left + (frame_width - raster.bounds.width()) / 2 - raster.bounds.left
+            }
+            schist_text_engine::Align::Right if frame_width > 8 => {
+                frame_left + frame_width - raster.bounds.width() - raster.bounds.left
+            }
+            _ => frame_left - raster.bounds.left,
+        };
+        let origin = (origin_x, frame_top - raster.bounds.top);
         // Affinity's panel names text layers after their content.
         let display_name = if name.is_empty() {
             let first_line = spec.text.lines().next().unwrap_or("Text").trim();
