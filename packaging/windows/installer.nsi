@@ -1,7 +1,7 @@
 ; NSIS installer for Schist. Build with:
-;   makensis -DVERSION=0.2.0 packaging/windows/installer.nsi
+;   makensis -DVERSION=0.3.0 packaging/windows/installer.nsi
 !ifndef VERSION
-  !define VERSION "0.2.0"
+  !define VERSION "0.3.0"
 !endif
 
 Name "Schist ${VERSION}"
