@@ -58,8 +58,12 @@ jobs:
           curl -sSL -o /tmp/appimagetool \
             https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x /tmp/appimagetool
-          APPIMAGETOOL=/tmp/appimagetool ./packaging/linux/appimage.sh || true
-          mkdir -p dist && cp target/release/schist dist/ 2>/dev/null || true
+          # appimage.sh writes straight into dist/, so dist/ has to exist
+          # before it runs -- mksquashfs otherwise dies with "Could not create
+          # destination file" and no AppImage is produced.
+          mkdir -p dist
+          APPIMAGETOOL=/tmp/appimagetool ./packaging/linux/appimage.sh
+          cp target/release/schist dist/
 
       - name: Set up the signing keychain (macOS)
         if: runner.os == 'macOS'
@@ -147,7 +151,16 @@ jobs:
             if (-not $found) { throw 'makensis missing after installing NSIS' }
             $makensis = $found.Source
           }
-          & $makensis -DVERSION=$env:VERSION packaging/windows/installer.nsi
+          # Quote the define: unquoted, PowerShell hands makensis the literal
+          # "VERSION=$env:VERSION", and the ':' in the resulting OutFile makes
+          # Windows write the installer into an NTFS alternate data stream,
+          # leaving a 0-byte file behind that the release upload rejects.
+          & $makensis "-DVERSION=$env:VERSION" packaging/windows/installer.nsi
+
+          # That failure was silent last time, so confirm the installer is real.
+          $out = "dist/Schist-$env:VERSION-setup.exe"
+          if (-not (Test-Path $out)) { throw "installer not produced: $out" }
+          if ((Get-Item $out).Length -eq 0) { throw "installer is empty: $out" }
 
       - uses: actions/upload-artifact@v4
         with:
