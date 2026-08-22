@@ -8,7 +8,8 @@
 //! eventual home for this crate.
 
 use schist_core::IntRect;
-use std::sync::{Arc, OnceLock};
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Horizontal alignment of wrapped lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -78,6 +79,13 @@ pub struct TextRaster {
     pub bounds: IntRect,
     /// `bounds.width() * bounds.height()` coverage bytes.
     pub coverage: Vec<u8>,
+    /// Baseline of the first line, in the same space as `bounds`. With
+    /// `bounds.top` this gives the block's cap height, which is what
+    /// page geometry recorded by other apps tends to be measured from.
+    pub first_baseline: f32,
+    /// Baseline-to-baseline distance actually used, so a caller that
+    /// must hit a recorded block height can solve for `line_height`.
+    pub line_advance: f32,
 }
 
 impl TextRaster {
@@ -86,63 +94,162 @@ impl TextRaster {
     }
 }
 
-/// Lazily-scanned system font database.
-fn db() -> &'static fontdb::Database {
-    static DB: OnceLock<fontdb::Database> = OnceLock::new();
-    DB.get_or_init(|| {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        // Point the generic families at something that actually exists, so
-        // an unknown family name resolves through `Family::SansSerif`
-        // instead of failing the query outright.
-        let pick = |db: &fontdb::Database, candidates: &[&str]| -> Option<String> {
-            candidates
-                .iter()
-                .find(|c| db.faces().any(|f| f.families.iter().any(|(n, _)| n == *c)))
-                .map(|c| c.to_string())
-                .or_else(|| {
-                    db.faces()
-                        .next()
-                        .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
-                })
-        };
-        if let Some(name) = pick(
-            &db,
-            &[
-                "DejaVu Sans",
-                "Noto Sans",
-                "Liberation Sans",
-                "Arial",
-                "Helvetica",
-            ],
-        ) {
-            db.set_sans_serif_family(name);
-        }
-        if let Some(name) = pick(
-            &db,
-            &[
-                "DejaVu Serif",
-                "Noto Serif",
-                "Liberation Serif",
-                "Times New Roman",
-            ],
-        ) {
-            db.set_serif_family(name);
-        }
-        if let Some(name) = pick(
-            &db,
-            &[
-                "DejaVu Sans Mono",
-                "Noto Sans Mono",
-                "Liberation Mono",
-                "Courier New",
-            ],
-        ) {
-            db.set_monospace_family(name);
-        }
-        log::debug!("text-engine: {} system font faces", db.len());
-        db
-    })
+/// The process-wide font database, behind a lock rather than a
+/// `OnceLock` because installing a font has to take effect at once: a
+/// document that asked for a family we just fetched should set in it
+/// now, not after a restart.
+fn font_db() -> &'static RwLock<Arc<fontdb::Database>> {
+    static DB: OnceLock<RwLock<Arc<fontdb::Database>>> = OnceLock::new();
+    DB.get_or_init(|| RwLock::new(Arc::new(scan_fonts())))
+}
+
+/// A snapshot of the database. Callers hold an `Arc` so a concurrent
+/// [`refresh`] swapping in a new scan cannot pull it out from under them.
+fn db() -> Arc<fontdb::Database> {
+    let cell = font_db();
+    match cell.read() {
+        Ok(g) => Arc::clone(&g),
+        Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+    }
+}
+
+/// Re-scan the font directories and drop every cached face.
+///
+/// Call after installing a font. Names previously returned by
+/// [`family_names`] stay valid: the list is rebuilt and re-leaked rather
+/// than mutated, so a caller still holding the old slice keeps reading
+/// good memory.
+pub fn refresh() {
+    let scanned = Arc::new(scan_fonts());
+    match font_db().write() {
+        Ok(mut g) => *g = scanned,
+        Err(poisoned) => *poisoned.into_inner() = scanned,
+    }
+    if let Ok(mut cache) = font_cache().lock() {
+        cache.clear();
+    }
+    if let Ok(mut names) = family_name_cache().write() {
+        *names = leak_family_names();
+    }
+}
+
+/// Where fonts fetched by the app are installed, alongside whatever the
+/// platform already provides.
+pub fn font_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Fonts"));
+    #[cfg(target_os = "windows")]
+    let base =
+        std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join("Microsoft/Windows/Fonts"));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .map(|d| d.join("fonts"));
+    base
+}
+
+/// Write one font face into [`font_dir`] and make it usable at once.
+///
+/// `file_name` is trusted only as far as its last component; anything
+/// that looks like a path is rejected rather than escaped, since these
+/// names come from a remote catalogue.
+pub fn install_face(file_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let stem = std::path::Path::new(file_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty() && *n != "." && *n != "..")
+        .ok_or_else(|| format!("unusable font file name {file_name:?}"))?;
+    if !stem
+        .rsplit('.')
+        .next()
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
+    {
+        return Err(format!("{stem:?} is not a font file"));
+    }
+    // Parse it before it lands in a directory the whole system scans:
+    // a catalogue that hands us an HTML error page should fail here, not
+    // pollute every font list on the machine.
+    let mut probe = fontdb::Database::new();
+    probe.load_font_data(bytes.to_vec());
+    if probe.is_empty() {
+        return Err("not a usable font file".into());
+    }
+    let dir = font_dir().ok_or_else(|| "no user font directory on this platform".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(stem);
+    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Parsed faces, keyed by the whole request: the bold face of a family
+/// is a different file from its regular one.
+type FaceKey = (String, bool, bool);
+
+fn font_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<FaceKey, Option<Arc<fontdue::Font>>>> {
+    static CACHE: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<FaceKey, Option<Arc<fontdue::Font>>>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn scan_fonts() -> fontdb::Database {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    if let Some(dir) = font_dir() {
+        db.load_fonts_dir(dir);
+    }
+    // Point the generic families at something that actually exists, so
+    // an unknown family name resolves through `Family::SansSerif`
+    // instead of failing the query outright.
+    let pick = |db: &fontdb::Database, candidates: &[&str]| -> Option<String> {
+        candidates
+            .iter()
+            .find(|c| db.faces().any(|f| f.families.iter().any(|(n, _)| n == *c)))
+            .map(|c| c.to_string())
+            .or_else(|| {
+                db.faces()
+                    .next()
+                    .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+            })
+    };
+    if let Some(name) = pick(
+        &db,
+        &[
+            "DejaVu Sans",
+            "Noto Sans",
+            "Liberation Sans",
+            "Arial",
+            "Helvetica",
+        ],
+    ) {
+        db.set_sans_serif_family(name);
+    }
+    if let Some(name) = pick(
+        &db,
+        &[
+            "DejaVu Serif",
+            "Noto Serif",
+            "Liberation Serif",
+            "Times New Roman",
+        ],
+    ) {
+        db.set_serif_family(name);
+    }
+    if let Some(name) = pick(
+        &db,
+        &[
+            "DejaVu Sans Mono",
+            "Noto Sans Mono",
+            "Liberation Mono",
+            "Courier New",
+        ],
+    ) {
+        db.set_monospace_family(name);
+    }
+    log::debug!("text-engine: {} font faces", db.len());
+    db
 }
 
 /// Families available on this system, sorted and de-duplicated.
@@ -156,19 +263,40 @@ pub fn families() -> Vec<String> {
     names
 }
 
+/// True when this exact family is installed — not a substitute for it.
+///
+/// [`rasterize`] never fails on an unknown family (the query falls
+/// through to the generic sans), so this is the only way to tell that a
+/// document asked for something we do not have.
+pub fn has_family(name: &str) -> bool {
+    let name = name.trim();
+    db().faces()
+        .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+}
+
+fn leak_family_names() -> &'static [&'static str] {
+    let names: Vec<&'static str> = families()
+        .into_iter()
+        .map(|n| &*Box::leak(n.into_boxed_str()))
+        .collect();
+    Box::leak(names.into_boxed_slice())
+}
+
+fn family_name_cache() -> &'static RwLock<&'static [&'static str]> {
+    static NAMES: OnceLock<RwLock<&'static [&'static str]>> = OnceLock::new();
+    NAMES.get_or_init(|| RwLock::new(leak_family_names()))
+}
+
 /// The installed families as a fixed list, for controls that need one.
 ///
-/// The set cannot change while the process runs, so it is built once and
-/// leaked rather than re-collected -- the options bar asks for this on
-/// every frame it draws.
+/// The options bar asks for this on every frame it draws, so the list is
+/// built once and leaked rather than re-collected; [`refresh`] rebuilds
+/// it after an install.
 pub fn family_names() -> &'static [&'static str] {
-    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
-    NAMES.get_or_init(|| {
-        families()
-            .into_iter()
-            .map(|n| &*Box::leak(n.into_boxed_str()))
-            .collect()
-    })
+    match family_name_cache().read() {
+        Ok(g) => *g,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
 }
 
 /// A reasonable default family: whatever the database resolved as its
@@ -177,22 +305,69 @@ pub fn default_family() -> String {
     db().family_name(&fontdb::Family::SansSerif).to_string()
 }
 
+/// Metric-compatible stand-ins for a family this system lacks, best
+/// match first.
+///
+/// A document was laid out against real advance widths, so substituting
+/// Arial with a Helvetica clone reproduces its line breaks and its
+/// measured text extents; falling straight through to the generic sans
+/// (often DejaVu, which is appreciably wider) does not. Only families
+/// designed to share metrics belong here — this is not a lookalike
+/// table.
+pub fn substitutes(family: &str) -> &'static [&'static str] {
+    match family.trim().to_ascii_lowercase().as_str() {
+        "arial" | "arial mt" | "helvetica" | "helvetica neue" | "swiss 721" => &[
+            "Liberation Sans",
+            "Arimo",
+            "Nimbus Sans",
+            "Helvetica",
+            "Arial",
+        ],
+        "times" | "times new roman" | "timesnewromanpsmt" => &[
+            "Liberation Serif",
+            "Tinos",
+            "Nimbus Roman",
+            "Times New Roman",
+        ],
+        "courier" | "courier new" => &[
+            "Liberation Mono",
+            "Cousine",
+            "Nimbus Mono PS",
+            "Courier New",
+        ],
+        "georgia" => &["Gelasio", "Tinos"],
+        "verdana" | "tahoma" => &["DejaVu Sans", "Bitstream Vera Sans"],
+        "calibri" => &["Carlito", "Liberation Sans"],
+        "cambria" => &["Caladea", "Liberation Serif"],
+        _ => &[],
+    }
+}
+
+/// The best metric-compatible stand-in for a family, whether or not it
+/// is installed yet — what to offer someone whose document names a font
+/// they cannot legally be given.
+///
+/// Returns `None` for a family with no such twin; that one has to be
+/// found in a font catalogue or not at all.
+pub fn nearest_substitute(family: &str) -> Option<&'static str> {
+    substitutes(family).first().copied()
+}
+
 /// Load and cache a parsed font by family name.
 fn load_font(family: &str, bold: bool, italic: bool) -> Option<Arc<fontdue::Font>> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    // Keyed by the whole request: the bold face of a family is a different
-    // file from its regular one.
-    type Key = (String, bool, bool);
-    static CACHE: OnceLock<Mutex<HashMap<Key, Option<Arc<fontdue::Font>>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = font_cache();
     let key = (family.to_string(), bold, italic);
     if let Some(hit) = cache.lock().ok()?.get(&key) {
         return hit.clone();
     }
 
+    // Asked-for family first, then its metric equivalents, then the
+    // generic sans as a last resort.
+    let mut families = vec![fontdb::Family::Name(family)];
+    families.extend(substitutes(family).iter().map(|n| fontdb::Family::Name(n)));
+    families.push(fontdb::Family::SansSerif);
     let query = fontdb::Query {
-        families: &[fontdb::Family::Name(family), fontdb::Family::SansSerif],
+        families: &families,
         weight: if bold {
             fontdb::Weight::BOLD
         } else {
@@ -238,7 +413,15 @@ struct PlacedGlyph {
 
 /// Break `spec.text` into lines (honouring explicit newlines and wrapping),
 /// then place glyphs along each baseline.
-fn layout(spec: &TextSpec, font: &fontdue::Font) -> (Vec<PlacedGlyph>, f32) {
+/// Laid-out glyphs, the widest line, the first baseline and the
+/// baseline-to-baseline step.
+struct Layout {
+    glyphs: Vec<PlacedGlyph>,
+    first_baseline: f32,
+    line_advance: f32,
+}
+
+fn layout(spec: &TextSpec, font: &fontdue::Font) -> Layout {
     let metrics = font.horizontal_line_metrics(spec.size);
     let (ascent, line_gap) = metrics
         .map(|m| (m.ascent, m.new_line_size))
@@ -308,7 +491,11 @@ fn layout(spec: &TextSpec, font: &fontdue::Font) -> (Vec<PlacedGlyph>, f32) {
             prev = Some(ch);
         }
     }
-    (placed, max_width)
+    Layout {
+        glyphs: placed,
+        first_baseline: ascent,
+        line_advance,
+    }
 }
 
 /// Lay out and rasterize `spec` into a coverage mask.
@@ -321,13 +508,22 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
         return Some(TextRaster {
             bounds: IntRect::EMPTY,
             coverage: Vec::new(),
+            first_baseline: 0.0,
+            line_advance: 0.0,
         });
     }
-    let (placed, _) = layout(spec, &font);
+    let Layout {
+        glyphs: placed,
+        first_baseline,
+        line_advance,
+        ..
+    } = layout(spec, &font);
     if placed.is_empty() {
         return Some(TextRaster {
             bounds: IntRect::EMPTY,
             coverage: Vec::new(),
+            first_baseline: 0.0,
+            line_advance: 0.0,
         });
     }
 
@@ -349,6 +545,8 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
         return Some(TextRaster {
             bounds: IntRect::EMPTY,
             coverage: Vec::new(),
+            first_baseline: 0.0,
+            line_advance: 0.0,
         });
     }
 
@@ -370,7 +568,12 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
             }
         }
     }
-    Some(TextRaster { bounds, coverage })
+    Some(TextRaster {
+        bounds,
+        coverage,
+        first_baseline,
+        line_advance,
+    })
 }
 
 #[cfg(test)]

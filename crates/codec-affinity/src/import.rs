@@ -4,9 +4,10 @@
 //! `Chld` (spreads) → recursive layer tree. Layers carry `Desc` (name),
 //! `Visi`, `Opac`, `Blnd`, and a 2×3 `Xfrm`. Raster layers ("Rstr")
 //! carry a `Bitm` ("DyBm") whose channels are planar grids of 256-byte ×
-//! 256-row tiles: a status byte per tile (0/1 empty, 2 all-0xFF, 3
-//! all-1.0f, 4 stored) and, for stored tiles, a `Blck` naming the
-//! archive entry with the 64 KiB tile plane plus its valid sub-rect.
+//! 256-row tiles, `TWi<n>` of them across: a status byte per tile (0/1
+//! empty, 2 all-0xFF, 3 all-1.0f, 4 stored) and, for stored tiles, a
+//! `Blck` naming the archive entry with the 64 KiB tile plane plus its
+//! valid sub-rect.
 //!
 //! Everything that isn't raster (live shapes, text, adjustments) has no
 //! pixels in the file at all — Affinity re-renders them — so an import
@@ -989,6 +990,14 @@ impl Walker<'_> {
             visible
         };
 
+        // A mask hangs off the layer and is stored in the layer's own
+        // space, so it has to be placed through the layer's transform
+        // as well as its own — exactly like a clipped child. Placing it
+        // with only its own transform leaves it wherever the untransformed
+        // mask happened to sit, which for a rotated or scaled layer is
+        // nowhere near the pixels it is supposed to be cutting.
+        let saved = self.ctm;
+        self.ctm = self.node_ctm(node);
         let mut placed: Vec<(IntRect, RgbaImage)> = Vec::new();
         for mask_node in &used {
             let Some(bitm) = self.graph.child(mask_node, b"Bitm") else {
@@ -1008,6 +1017,7 @@ impl Walker<'_> {
                 placed.push((rect, gray));
             }
         }
+        self.ctm = saved;
         if placed.is_empty() {
             return;
         }
@@ -1157,6 +1167,7 @@ impl Walker<'_> {
         let frame_left = min(|c| c.0).round() as i32;
         let frame_top = min(|c| c.1).round() as i32;
         let frame_width = (max(|c| c.0) - min(|c| c.0)).round() as i32;
+        let frame_height = (max(|c| c.1) - min(|c| c.1)).round() as i32;
         let eff_size = (size * ctm.scale_y()) as f32;
         if !(0.5..=10_000.0).contains(&eff_size) {
             return None;
@@ -1198,8 +1209,30 @@ impl Walker<'_> {
         // box. Frame text keeps its size and reflows instead.
         if !frame_text && frame_width > 8 {
             let ratio = frame_width as f32 / raster.bounds.width() as f32;
-            if (ratio - 1.0).abs() > 0.02 {
+            if (ratio - 1.0).abs() > 0.002 {
                 spec.size *= ratio;
+                raster = schist_text_engine::rasterize(&spec)?;
+                if raster.is_empty() {
+                    return None;
+                }
+            }
+        }
+
+        // The frame box of multi-line artistic text runs from the first
+        // line's cap down to the last line's baseline, so what it
+        // records beyond that cap is exactly the leading Affinity used.
+        // Our own leading is whatever the face's line metrics say, which
+        // is a different number in every font and in no way the one this
+        // document was set with — so solve for it.
+        let lines = spec.text.lines().count();
+        if !frame_text && lines > 1 && raster.line_advance > 0.0 {
+            let cap = raster.first_baseline - raster.bounds.top as f32;
+            let wanted = (frame_height as f32 - cap) / (lines - 1) as f32;
+            let scale = wanted / raster.line_advance;
+            // A box that implies a collapsed or wildly stretched leading
+            // is one we have misread; keep the face's own spacing.
+            if (0.25..=4.0).contains(&scale) && (scale - 1.0).abs() > 0.01 {
+                spec.line_height *= scale;
                 raster = schist_text_engine::rasterize(&spec)?;
                 if raster.is_empty() {
                     return None;
@@ -1341,7 +1374,12 @@ impl Walker<'_> {
         } else {
             rect
         };
-        let img = resample_to(img, rect.width() as u32, rect.height() as u32);
+        let mut img = resample_to(img, rect.width() as u32, rect.height() as u32);
+        // A mirror is axis-aligned too — zero shear, negative scale — so
+        // it lands here rather than in the resampler. The rect above is
+        // normalised, which puts the box in the right place but leaves
+        // the pixels facing the wrong way; turn them over.
+        mirror(&mut img, map.0[0] < 0.0, map.0[4] < 0.0);
         (img.pixels.len() == rect.width() as usize * rect.height() as usize * 4)
             .then_some((rect, img))
     }
@@ -1541,6 +1579,7 @@ fn decode_bitmap(
 
     let sta_names: [&[u8; 4]; 5] = [b"Sta1", b"Sta2", b"Sta3", b"Sta4", b"Sta5"];
     let idx_names: [&[u8; 4]; 5] = [b"Idx1", b"Idx2", b"Idx3", b"Idx4", b"Idx5"];
+    let twi_names: [&[u8; 4]; 5] = [b"TWi1", b"TWi2", b"TWi3", b"TWi4", b"TWi5"];
     let mut planes = Vec::with_capacity(fmt.channels);
     for channel in 0..fmt.channels {
         planes.push(load_plane(PlaneJob {
@@ -1549,9 +1588,15 @@ fn decode_bitmap(
             bitm,
             sta: sta_names[channel],
             idx: idx_names[channel],
+            // Affinity rounds the tile grid up past the pixels it
+            // needs, so the status array's row stride is the declared
+            // `TWi`, not `ceil(row_bytes / 256)`. Reading it as the
+            // tight grid shears every row after the first.
+            grid_width: i32_of(bitm, twi_names[channel])
+                .filter(|w| *w > 0)
+                .map_or(row_bytes.div_ceil(256), |w| w as usize),
             pitch,
             rows,
-            row_bytes,
             height,
             bytes_per_sample: fmt.bytes_per_sample,
             source: source.as_ref().map(|s| (s, channel)),
@@ -1629,9 +1674,10 @@ struct PlaneJob<'a> {
     bitm: &'a Node,
     sta: &'a [u8; 4],
     idx: &'a [u8; 4],
+    /// Tiles per row of the status array, as the file declares it.
+    grid_width: usize,
     pitch: usize,
     rows: usize,
-    row_bytes: usize,
     height: usize,
     bytes_per_sample: usize,
     /// The bitmap's original file and which of its channels this plane
@@ -1656,8 +1702,8 @@ fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
     let mut next_block = blocks.iter();
 
     let mut plane = vec![0u8; job.pitch * job.rows];
-    let (mut x, mut y) = (0usize, 0usize);
-    for &status in &statuses {
+    let places = tile_offsets(job.grid_width, job.height);
+    for (&status, (x, y)) in statuses.iter().zip(places) {
         match status {
             0 | 1 => {}
             2 => fill_tile(&mut plane, job.pitch, x, y, &[0xFF]),
@@ -1710,16 +1756,20 @@ fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
             }
             other => return Err(malformed(format!("unknown tile status {other}"))),
         }
-        x += 256;
-        if x >= job.row_bytes.max(1) {
-            x = 0;
-            y += 256;
-            if y >= job.height {
-                break;
-            }
-        }
     }
     Ok(plane)
+}
+
+/// Where each entry of a `Sta` array lands in its plane: `x` is a byte
+/// offset, `y` a row. The grid is `grid_width` tiles across — which is
+/// not always the tight `ceil(row_bytes / 256)`, because Affinity
+/// rounds the allocation up (a 5848-byte row can sit in a 32-tile
+/// grid). Walking it at the tight width shears every row but the first.
+fn tile_offsets(grid_width: usize, height: usize) -> impl Iterator<Item = (usize, usize)> {
+    let width = grid_width.max(1);
+    (0..)
+        .map(move |i| ((i % width) * 256, (i / width) * 256))
+        .take_while(move |&(_, y)| y < height)
 }
 
 /// Fill one tile of a channel plane from the decoded source image.
@@ -2459,6 +2509,34 @@ fn blit_mask(tiles: &mut schist_core::MaskTileMap, rect: IntRect, gray: &[u8]) {
 
 /// Scale an image to the placement rect's size (bilinear). Identity is
 /// free; import-time quality matches what a one-off resample costs.
+/// Flip an image in place about either axis.
+fn mirror(img: &mut RgbaImage, horizontal: bool, vertical: bool) {
+    let (w, h) = (img.width as usize, img.height as usize);
+    if horizontal {
+        for row in img.pixels.chunks_exact_mut(w * 4) {
+            let (mut a, mut b) = (0, w - 1);
+            while a < b {
+                for c in 0..4 {
+                    row.swap(a * 4 + c, b * 4 + c);
+                }
+                a += 1;
+                b -= 1;
+            }
+        }
+    }
+    if vertical {
+        let stride = w * 4;
+        let (mut top, mut bottom) = (0, h - 1);
+        while top < bottom {
+            for i in 0..stride {
+                img.pixels.swap(top * stride + i, bottom * stride + i);
+            }
+            top += 1;
+            bottom -= 1;
+        }
+    }
+}
+
 fn resample_to(img: RgbaImage, dw: u32, dh: u32) -> RgbaImage {
     if (img.width, img.height) == (dw, dh) || dw == 0 || dh == 0 {
         return img;
@@ -2678,6 +2756,63 @@ fn dump_value(graph: &Graph, value: &Value, depth: usize, out: &mut String, seen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A layer whose transform has a negative scale is still
+    /// axis-aligned, so it takes the cheap scale-and-blit path; that
+    /// path has to turn the pixels over itself.
+    #[test]
+    fn mirroring_flips_about_each_axis() {
+        // 2x2, one byte per channel, distinct per pixel: a b / c d
+        let px = |v: u8| [v, v, v, 255];
+        let build = || RgbaImage {
+            width: 2,
+            height: 2,
+            pixels: [px(1), px(2), px(3), px(4)].concat(),
+        };
+        let corners = |i: &RgbaImage| [i.pixels[0], i.pixels[4], i.pixels[8], i.pixels[12]];
+
+        let mut h = build();
+        mirror(&mut h, true, false);
+        assert_eq!(corners(&h), [2, 1, 4, 3]);
+
+        let mut v = build();
+        mirror(&mut v, false, true);
+        assert_eq!(corners(&v), [3, 4, 1, 2]);
+
+        let mut both = build();
+        mirror(&mut both, true, true);
+        assert_eq!(corners(&both), [4, 3, 2, 1]);
+
+        let mut none = build();
+        mirror(&mut none, false, false);
+        assert_eq!(corners(&none), [1, 2, 3, 4]);
+    }
+
+    /// A grid wider than the pixels need — Affinity allocates 32 tile
+    /// columns for a 5848-byte row that only fills 23 — must still walk
+    /// row by declared row, skipping the slack columns.
+    #[test]
+    fn tiles_walk_the_declared_grid_width() {
+        let places: Vec<_> = tile_offsets(4, 512).collect();
+        assert_eq!(
+            places,
+            [
+                (0, 0),
+                (256, 0),
+                (512, 0),
+                (768, 0),
+                (0, 256),
+                (256, 256),
+                (512, 256),
+                (768, 256),
+            ]
+        );
+        // The walk stops at the last row holding pixels, however many
+        // statuses the file lists.
+        assert_eq!(tile_offsets(32, 3231).count(), 32 * 13);
+        // A zero width would spin forever; treat it as one column.
+        assert_eq!(tile_offsets(0, 512).count(), 2);
+    }
 
     #[test]
     fn mat_compose_matches_manual_application() {
