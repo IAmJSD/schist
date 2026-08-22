@@ -4525,22 +4525,21 @@ impl Workspace {
     }
 
     /// Show what the open document is missing, on demand. Unlike the
-    /// prompt on open this ignores what has already been offered — the
-    /// user asked, so answer.
+    /// prompt on open this ignores what has already been offered, and
+    /// opens even when the answer is "nothing" — the user asked, so
+    /// answer.
     pub fn show_missing_fonts(&mut self, cx: &mut Context<Self>) {
         let fonts = self
             .doc
             .as_ref()
             .map(crate::fonts::missing_in)
             .unwrap_or_default();
-        if fonts.is_empty() {
-            self.status = "Every font this document uses is installed".into();
-            cx.notify();
-            return;
-        }
         for font in &fonts {
             self.fonts_offered.insert(font.family.clone());
         }
+        // Always open, even with nothing to list. A menu item that asks a
+        // question is entitled to answer "nothing is missing" — leaving
+        // the screen unchanged is indistinguishable from a dead command.
         self.open_modal(Modal::MissingFonts { fonts }, cx);
     }
 
@@ -4555,7 +4554,10 @@ impl Workspace {
             .as_ref()
             .map(crate::fonts::missing_in)
             .unwrap_or_default();
-        self.modal = (!remaining.is_empty()).then_some(Modal::MissingFonts { fonts: remaining });
+        // Keep it open once the last font lands: the empty state is the
+        // confirmation that the job finished. Closing the window out from
+        // under the pointer reads as a glitch.
+        self.modal = Some(Modal::MissingFonts { fonts: remaining });
     }
 
     /// Offer to fetch any font the freshly opened document names but this

@@ -934,6 +934,21 @@ fn missing_fonts(
         })
         .collect();
 
+    // What the dialog says when it has nothing to offer: no document, or
+    // a document whose every font is already here.
+    let preamble: SharedString = if ws.doc.is_none() {
+        "No document is open, so there is nothing to check.".into()
+    } else if fonts.is_empty() {
+        "Every font this document uses is installed. Its text is set in \
+         the fonts it was laid out with."
+            .into()
+    } else {
+        "This document is set in fonts you don't have. Text is readable in \
+         a substitute, but its widths and line breaks are not the ones it \
+         was laid out with."
+            .into()
+    };
+
     let body = div()
         .id("missing-fonts-body")
         .flex()
@@ -947,28 +962,26 @@ fn missing_fonts(
                 .pb_1()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(ui::palette().text_dim))
-                .child(
-                    "This document is set in fonts you don't have. Text is \
-                     readable in a substitute, but its widths and line breaks \
-                     are not the ones it was laid out with.",
-                ),
+                .child(preamble),
         )
         .children(rows)
-        .child(
-            div()
-                .pt_2()
-                .text_size(px(11.0))
-                .text_color(gpui::rgb(ui::palette().text_dim))
-                .child(SharedString::from(format!(
-                    "Downloads come from the Google Fonts open catalogue and are kept in {}. \
+        .when(!fonts.is_empty(), |body| {
+            body.child(
+                div()
+                    .pt_2()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(ui::palette().text_dim))
+                    .child(SharedString::from(format!(
+                        "Downloads come from the Google Fonts open catalogue and are kept in {}. \
                      A font that isn't openly licensed is never fetched — where a \
                      metric-compatible libre design exists it is offered instead, which \
                      restores the layout because the advance widths match.",
-                    schist_text_engine::font_dir()
-                        .map(|d| d.display().to_string())
-                        .unwrap_or_else(|| "your user font directory".into())
-                ))),
-        );
+                        schist_text_engine::font_dir()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_else(|| "your user font directory".into())
+                    ))),
+            )
+        });
     let actions = div().flex().flex_row().gap_2().child(ui::button(
         "Close",
         true,
