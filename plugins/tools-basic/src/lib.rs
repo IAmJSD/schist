@@ -79,6 +79,26 @@ impl MoveTool {
         }
         doc.tree.layers.get(path.0[0]).map(|l| l.id).unwrap_or(id)
     }
+
+    /// Drop the live `render_offset` a drag was previewing with, repainting
+    /// only where the preview actually was.
+    ///
+    /// Damaging the whole document here instead cost every cached tile --
+    /// and the canvas re-composites and colour-manages what it throws away
+    /// -- for a click that moved nothing at all, which is what an ordinary
+    /// click with the Move tool is.
+    fn undo_preview(ctx: &mut ToolCtx, layer_id: schist_core::LayerId) {
+        let Some(layer) = ctx.doc.tree.find_mut(layer_id) else {
+            return;
+        };
+        if layer.render_offset == (0, 0) {
+            return;
+        }
+        let mut damage = layer.content_bounds();
+        layer.render_offset = (0, 0);
+        damage = damage.union(&layer.content_bounds());
+        ctx.doc.add_damage(damage.inflated(1));
+    }
 }
 
 impl ToolPlugin for MoveTool {
@@ -180,11 +200,8 @@ impl ToolPlugin for MoveTool {
         );
         // Put the layer back where its pixels actually are, then record the
         // move as one edit so undo restores the original position.
-        if let Some(layer) = ctx.doc.tree.find_mut(drag.layer) {
-            layer.render_offset = (0, 0);
-        }
+        Self::undo_preview(ctx, drag.layer);
         if dx == 0 && dy == 0 {
-            ctx.doc.damage_all();
             return;
         }
         let mut edit = ctx.doc.begin_edit("Move Layer");
@@ -194,10 +211,7 @@ impl ToolPlugin for MoveTool {
 
     fn on_cancel(&mut self, ctx: &mut ToolCtx) {
         if let Some(drag) = self.drag.take() {
-            if let Some(layer) = ctx.doc.tree.find_mut(drag.layer) {
-                layer.render_offset = (0, 0);
-            }
-            ctx.doc.damage_all();
+            Self::undo_preview(ctx, drag.layer);
         }
     }
 
@@ -571,6 +585,55 @@ mod tests {
         assert_eq!(px(&doc, 15, 15), [255, 0, 0, 255], "undo restores");
         doc.redo();
         assert_eq!(px(&doc, 115, 65), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_click_that_moves_nothing_repaints_nothing() {
+        let mut doc = red_square_doc();
+        let mut state = EditorState::default();
+        let mut tool = MoveTool::new();
+        doc.take_damage();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 20.0));
+        // Damaging the canvas here drops every cached composited tile, and
+        // clicking is how you pick a layer to move in the first place.
+        assert!(doc.take_damage().is_empty());
+    }
+
+    #[test]
+    fn a_drag_back_to_the_start_still_undraws_the_preview() {
+        let mut doc = red_square_doc();
+        let id = doc.active_layer.unwrap();
+        let mut state = EditorState::default();
+        let mut tool = MoveTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        tool.on_pointer_move(&mut ctx, input(40.0, 30.0));
+        doc.take_damage();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        // Released where it started, so there is no edit to record -- but
+        // the preview drawn at +20,+10 is still on screen and has to go.
+        tool.on_pointer_up(&mut ctx, input(20.0, 20.0));
+
+        assert_eq!(doc.tree.find(id).unwrap().render_offset, (0, 0));
+        let covered = doc
+            .take_damage()
+            .iter()
+            .fold(IntRect::EMPTY, |acc, r| acc.union(r));
+        assert!(
+            covered.contains(50, 40),
+            "where the preview was must repaint: {covered:?}"
+        );
     }
 
     #[test]
