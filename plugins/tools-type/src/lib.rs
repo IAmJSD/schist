@@ -102,6 +102,71 @@ fn render_tiles(doc: &Document, stored: &StoredText) -> (TileMap, IntRect) {
     (tiles, bounds)
 }
 
+/// Every font family the document's text layers ask for, in the order
+/// first seen and without repeats.
+pub fn families_used(doc: &Document) -> Vec<String> {
+    fn walk(layers: &[Layer], out: &mut Vec<String>) {
+        for layer in layers {
+            if let Some(children) = layer.children() {
+                walk(children, out);
+            }
+            let Some(stored) = read_stored(layer) else {
+                continue;
+            };
+            let family = stored.spec.family.trim();
+            if !family.is_empty() && !out.iter().any(|f| f == family) {
+                out.push(family.to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&doc.tree.layers, &mut out);
+    out
+}
+
+/// Re-set every text layer in `family` and repaint it.
+///
+/// A layer set in a font that was missing was rasterized in whatever the
+/// engine substituted; once the real font arrives those pixels are stale
+/// and only a re-render fixes them. Returns how many layers changed.
+pub fn rerender_family(doc: &mut Document, family: &str) -> usize {
+    fn collect(layers: &[Layer], family: &str, out: &mut Vec<schist_core::LayerId>) {
+        for layer in layers {
+            if let Some(children) = layer.children() {
+                collect(children, family, out);
+            }
+            if read_stored(layer).is_some_and(|s| s.spec.family.trim().eq_ignore_ascii_case(family))
+            {
+                out.push(layer.id);
+            }
+        }
+    }
+    let mut ids = Vec::new();
+    collect(&doc.tree.layers, family, &mut ids);
+    let mut changed = 0;
+    for id in ids {
+        let Some(stored) = doc.tree.find(id).and_then(read_stored) else {
+            continue;
+        };
+        let before = doc
+            .tree
+            .find(id)
+            .map(|l| l.content_bounds())
+            .unwrap_or(IntRect::EMPTY);
+        let (tiles, bounds) = render_tiles(doc, &stored);
+        if let Some(layer) = doc.tree.find_mut(id) {
+            if let Some(raster) = layer.as_raster_mut() {
+                raster.tiles = tiles;
+            }
+            // The style cache was built from the old glyphs.
+            layer.styled = None;
+            changed += 1;
+        }
+        doc.add_damage(before.union(&bounds));
+    }
+    changed
+}
+
 /// An editing session over one text layer.
 struct Editing {
     layer: LayerId,

@@ -6,6 +6,7 @@ mod color_picker;
 mod crash;
 mod curve_editor;
 mod dialogs;
+mod fonts;
 mod gallery;
 mod keymap;
 mod native_menu;

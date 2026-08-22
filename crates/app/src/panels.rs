@@ -85,6 +85,7 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
                 ),
                 Sep,
                 App("Plugins…", Plugins, None),
+                App("Missing Fonts…", ManageFonts, None),
                 App("Check for Updates…", CheckForUpdates, None),
                 Sep,
                 App("Quit", Quit, Some("cmd-q")),
@@ -615,6 +616,7 @@ pub(crate) fn run_app_item(
         }
         AppItem::FilterGalleryItem => ws.show_filter_gallery(cx),
         AppItem::ManageModels => ws.open_modal(Modal::ModelManager, cx),
+        AppItem::ManageFonts => ws.show_missing_fonts(cx),
         AppItem::NewLayerComp => ws.new_layer_comp(cx),
         AppItem::ApplyLayerComp(i) => ws.apply_layer_comp(i, cx),
         AppItem::DeleteLayerComp(i) => ws.delete_layer_comp(i, cx),

@@ -157,6 +157,7 @@ pub enum AppItem {
     ContentAwareScaleItem,
     FilterGalleryItem,
     ManageModels,
+    ManageFonts,
     NewLayerComp,
     ExportArtboards,
     ExportSlices,

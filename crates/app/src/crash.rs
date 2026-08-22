@@ -136,8 +136,8 @@ pub enum UpdateStatus {
 
 /// Ask GitHub for the latest release. Blocking — call it off the UI thread.
 ///
-/// This is the only network request Schist ever makes, and only when the
-/// user explicitly asks for it.
+/// One of the two requests Schist makes over the network — the other
+/// fetches a missing font — and, like it, only when the user asks.
 pub fn check_for_update() -> UpdateStatus {
     let response = ureq::get(RELEASES_API)
         .header("User-Agent", "schist-update-check")

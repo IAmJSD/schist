@@ -123,6 +123,12 @@ pub struct Workspace {
     /// Models currently being fetched, so the dialog can say so and a
     /// second click does not start a second download.
     pub model_downloads: Vec<&'static str>,
+    /// Font families currently downloading, so a second click does not
+    /// start a second download.
+    pub font_downloads: Vec<String>,
+    /// Families already offered this session. Opening three documents
+    /// that all want the same missing font should ask once, not thrice.
+    pub fonts_offered: std::collections::HashSet<String>,
     pub ant_phase: u32,
     /// Whether the last frame drew any tool overlay, so the ants timer
     /// knows to keep repainting for tools that draw their own.
@@ -542,6 +548,10 @@ pub enum Modal {
         layer: schist_core::LayerId,
         name: String,
     },
+    /// Fonts the open document names that this system doesn't have.
+    MissingFonts {
+        fonts: Vec<crate::fonts::MissingFont>,
+    },
     /// Editing an existing adjustment layer's parameters. `original` is
     /// what the layer held before the dialog opened, so Cancel can put it
     /// back exactly.
@@ -641,6 +651,8 @@ impl Workspace {
             native_menu: None,
             rotation: 0.0,
             model_downloads: Vec::new(),
+            font_downloads: Vec::new(),
+            fonts_offered: std::collections::HashSet::new(),
             ant_phase: 0,
             tool_has_overlay: false,
             curve_channel: Default::default(),
@@ -923,6 +935,7 @@ impl Workspace {
             Ok(doc) => {
                 self.status = format!("Opened {}", path.display()).into();
                 self.install_document(doc);
+                self.offer_missing_fonts(cx);
             }
             Err(err) => {
                 log::error!("open failed: {err:#}");
@@ -3488,6 +3501,7 @@ impl Workspace {
             | Modal::PluginManager
             | Modal::Preferences
             | Modal::Export { .. }
+            | Modal::MissingFonts { .. }
             | Modal::Profile { .. } => {}
         });
     }
@@ -4429,8 +4443,9 @@ impl Workspace {
         .detach();
     }
 
-    /// Ask upstream whether a newer release exists. Opt-in, user-initiated,
-    /// and the only network request the app makes.
+    /// Ask upstream whether a newer release exists. Opt-in and
+    /// user-initiated, like the font fetch — the app makes no other
+    /// network requests.
     pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
         self.status = "Checking for updates…".into();
         cx.notify();
@@ -4461,6 +4476,108 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Fetch a font family and set every layer that wanted it.
+    ///
+    /// `family` is what the document asked for; `target` is what we may
+    /// legally install, which for a proprietary name is its
+    /// metric-compatible twin. Both are needed: we download the twin but
+    /// re-render the layers that named the original.
+    pub fn download_font(&mut self, family: String, target: String, cx: &mut Context<Self>) {
+        if self.font_downloads.contains(&family) {
+            return;
+        }
+        self.font_downloads.push(family.clone());
+        self.status = format!("Downloading {target}\u{2026}").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let fetch_target = target.clone();
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { crate::fonts::fetch_family(&fetch_target) })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.font_downloads.retain(|f| *f != family);
+                ws.status = match fetched.and_then(|faces| install_faces(&faces)) {
+                    Ok(n) => {
+                        // The engine caches parsed faces and the family
+                        // list; both are stale until it re-scans.
+                        schist_text_engine::refresh();
+                        let redrawn = ws
+                            .doc
+                            .as_mut()
+                            .map(|doc| schist_tools_type::rerender_family(doc, &family))
+                            .unwrap_or(0);
+                        ws.refresh_missing_fonts();
+                        format!(
+                            "Installed {target} ({n} faces) \u{b7} re-set {redrawn} text layer(s)"
+                        )
+                        .into()
+                    }
+                    Err(e) => format!("{target}: {e}").into(),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show what the open document is missing, on demand. Unlike the
+    /// prompt on open this ignores what has already been offered — the
+    /// user asked, so answer.
+    pub fn show_missing_fonts(&mut self, cx: &mut Context<Self>) {
+        let fonts = self
+            .doc
+            .as_ref()
+            .map(crate::fonts::missing_in)
+            .unwrap_or_default();
+        if fonts.is_empty() {
+            self.status = "Every font this document uses is installed".into();
+            cx.notify();
+            return;
+        }
+        for font in &fonts {
+            self.fonts_offered.insert(font.family.clone());
+        }
+        self.open_modal(Modal::MissingFonts { fonts }, cx);
+    }
+
+    /// Drop rows from the open Missing Fonts dialog that are now
+    /// satisfied, and close it once nothing is left to install.
+    fn refresh_missing_fonts(&mut self) {
+        let Some(Modal::MissingFonts { .. }) = &self.modal else {
+            return;
+        };
+        let remaining = self
+            .doc
+            .as_ref()
+            .map(crate::fonts::missing_in)
+            .unwrap_or_default();
+        self.modal = (!remaining.is_empty()).then_some(Modal::MissingFonts { fonts: remaining });
+    }
+
+    /// Offer to fetch any font the freshly opened document names but this
+    /// system lacks. Local-only: nothing is requested until a button is
+    /// pressed.
+    fn offer_missing_fonts(&mut self, cx: &mut Context<Self>) {
+        // Never interrupt something the user already has open.
+        if self.modal.is_some() {
+            return;
+        }
+        let Some(doc) = &self.doc else { return };
+        let fonts: Vec<_> = crate::fonts::missing_in(doc)
+            .into_iter()
+            .filter(|f| !self.fonts_offered.contains(&f.family))
+            .collect();
+        if fonts.is_empty() {
+            return;
+        }
+        for font in &fonts {
+            self.fonts_offered.insert(font.family.clone());
+        }
+        self.open_modal(Modal::MissingFonts { fonts }, cx);
     }
 
     /// Enable or disable a third-party plugin.
@@ -5867,6 +5984,16 @@ fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &
         damage.push(before);
         damage.push(layer.content_bounds());
     }
+}
+
+/// Write downloaded faces into the user font directory.
+fn install_faces(faces: &[crate::fonts::Face]) -> Result<usize, String> {
+    let mut installed = 0;
+    for (name, bytes) in faces {
+        schist_text_engine::install_face(name, bytes)?;
+        installed += 1;
+    }
+    Ok(installed)
 }
 
 /// Fetch a model over HTTP. Blocking, so it runs on a background thread.
