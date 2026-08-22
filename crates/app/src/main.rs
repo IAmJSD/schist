@@ -137,8 +137,13 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
         return None;
     }
     // "file:///C:/..." -- the drive letter, not the root, starts the path.
+    // Only when a drive letter really follows: "file:///tmp/a.psb" is a
+    // rooted path, and dropping its slash would silently make it relative.
     #[cfg(windows)]
-    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let rest = match rest.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &rest[1..],
+        _ => rest,
+    };
 
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -276,6 +281,17 @@ mod tests {
         assert_eq!(
             path_from_url("file://localhost/tmp/a.psb"),
             Some(PathBuf::from("/tmp/a.psb"))
+        );
+    }
+
+    // Explorer hands over "file:///C:/...", where the root belongs to the
+    // drive rather than the path.
+    #[cfg(windows)]
+    #[test]
+    fn drive_letters_lose_the_leading_slash() {
+        assert_eq!(
+            path_from_url("file:///C:/Users/astrid/Pictures/moss.afphoto"),
+            Some(PathBuf::from(r"C:/Users/astrid/Pictures/moss.afphoto"))
         );
     }
 
