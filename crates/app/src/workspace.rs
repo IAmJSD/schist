@@ -25,10 +25,21 @@ use smallvec::smallvec;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
+
 /// Zoom below which the canvas paints one downscaled preview image instead
 /// of hundreds of tile quads.
-const PREVIEW_ZOOM_CUTOFF: f32 = 0.35;
-const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
+///
+/// A preview texel is `1 << PREVIEW_SHIFT` document pixels, so it may only
+/// stand in for the real thing while it lands on at most one *device*
+/// pixel. Above that the preview is being magnified, and a fixed cutoff
+/// blurred the view exactly where documents tend to sit after Fit to
+/// Screen: at 1/8 scale and 35% zoom every texel was smeared over 2.8
+/// pixels, and the frame stayed soft until a zoom crossed the threshold.
+fn preview_zoom_cutoff(scale_factor: f32) -> f32 {
+    1.0 / ((1u32 << PREVIEW_SHIFT) as f32 * scale_factor.max(0.01))
+}
+
 /// How long after the last zoom/pan event the view is rebuilt at full
 /// quality. Long enough to outlast the gap between wheel ticks, short
 /// enough that the crisp frame lands as soon as the hand stops.
@@ -4942,11 +4953,19 @@ impl Workspace {
         //    footprint. Bilinear reads only the four nearest and skips
         //    pixels outright below 50% zoom, which is where the shimmer
         //    and jagged edges came from.
-        let crisp = self.rotation == 0.0 && zoom >= 1.0 && zoom.fract() == 0.0;
-        let box_taps = if zoom < 1.0 {
+        //
+        // The rows below are *device* pixels, so the decision is made in
+        // device pixels too: on a 2x display `zoom` reads as minification
+        // all the way to 100% when the screen is really magnifying, and
+        // filtering over a footprint twice the true one threw away half
+        // the resolution the display could show.
+        let dev_zoom = zoom * sf;
+        let footprint = 1.0 / dev_zoom; // document pixels per device pixel
+        let crisp = self.rotation == 0.0 && dev_zoom >= 1.0 && dev_zoom.fract() == 0.0;
+        let box_taps = if dev_zoom < 1.0 {
             // Tap spacing stays under one document pixel up to 8x
             // minification; past that the cost stops being worth it.
-            (inv_zoom.ceil() as usize).clamp(2, 8)
+            (footprint.ceil() as usize).clamp(2, 8)
         } else {
             0
         };
@@ -5003,9 +5022,9 @@ impl Workspace {
                         let n = box_taps;
                         let mut acc = [0.0f32; 4];
                         for sy in 0..n {
-                            let oy = ((sy as f32 + 0.5) / n as f32 - 0.5) * inv_zoom;
+                            let oy = ((sy as f32 + 0.5) / n as f32 - 0.5) * footprint;
                             for sx in 0..n {
-                                let ox = ((sx as f32 + 0.5) / n as f32 - 0.5) * inv_zoom;
+                                let ox = ((sx as f32 + 0.5) / n as f32 - 0.5) * footprint;
                                 let s = sample((fx + ox).floor() as i32, (fy + oy).floor() as i32);
                                 let a = s[3] as f32 / 255.0;
                                 acc[0] += s[0] as f32 * a;
@@ -5261,7 +5280,7 @@ impl Workspace {
             }
         };
 
-        if zoom <= PREVIEW_ZOOM_CUTOFF {
+        if zoom <= preview_zoom_cutoff(scale_factor) {
             // Far out, compositing every tile would be wasteful; the
             // downscaled preview is already one seamless image.
             if let Some(img) = self.refresh_preview() {
@@ -6017,4 +6036,25 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
         return Err("empty response".into());
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The preview stands in for the real composite, so it may never be
+    /// asked to cover more than the pixels it has. A fixed cutoff did,
+    /// and Fit to Screen landed in the magnified band on most documents.
+    #[test]
+    fn the_preview_is_never_magnified() {
+        let texel = (1u32 << PREVIEW_SHIFT) as f32;
+        for scale_factor in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let zoom = preview_zoom_cutoff(scale_factor);
+            assert!(
+                zoom * texel * scale_factor <= 1.0,
+                "a preview texel covers {} device pixels at {scale_factor}x",
+                zoom * texel * scale_factor
+            );
+        }
+    }
 }
