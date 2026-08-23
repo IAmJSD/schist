@@ -658,13 +658,21 @@ mod tests {
             .unwrap();
         let (_, painted) = session.render(None).unwrap();
         assert!(
-            painted.chunks_exact(4).any(|p| p[0] > 200 && p[1] < 100),
+            painted
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[0] > 200 && p[1] < 100),
             "the stroke left no red pixels"
         );
         session.run_command("edit.undo").unwrap();
         let (_, restored) = session.render(None).unwrap();
         assert!(
-            restored.chunks_exact(4).all(|p| p[0] > 240 && p[1] > 240),
+            restored
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[0] > 240 && p[1] > 240),
             "undo did not put the white background back"
         );
     }
@@ -704,7 +712,11 @@ mod tests {
             .unwrap();
         let (_, inverted) = session.render(None).unwrap();
         assert!(
-            inverted.chunks_exact(4).all(|p| p[0] < 15 && p[1] < 15),
+            inverted
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[0] < 15 && p[1] < 15),
             "inverting white did not give black"
         );
         session.run_command("edit.undo").unwrap();
