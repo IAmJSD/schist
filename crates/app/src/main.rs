@@ -172,6 +172,7 @@ fn main() {
     // Opt-in: SCHIST_CRASH_REPORTS=1, or the preference file's
     // crash_reports flag once the user enables it in Preferences.
     crash::install_handler(crash_reports_enabled());
+    workspace::init_compositor_backend(workspace::load_view_options().gpu_compositing);
     let (registry, plugin_manager) = build_registry();
 
     let requests: Rc<RefCell<OpenRequests>> = Rc::default();

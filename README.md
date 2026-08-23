@@ -10,7 +10,7 @@ menu command is a plugin, including the built-in ones.
 
 **Status: v1 feature-complete,
 plus two Photoshop-parity passes — 55 tools, 57 filters, 16 adjustments,
-all nine layer effects, and live vector shapes.** 432 tests,
+all nine layer effects, and live vector shapes.** 513 tests,
 clippy-clean, verified end-to-end under a real window. [What is still
 missing](#not-there-yet) is a short list now.
 
@@ -110,6 +110,16 @@ comps that capture every layer's visibility and appearance under a name.
 operations, a document→display transform, soft proofing, and ordered
 dithering when exporting to 8-bit.
 
+**GPU.** Compositing runs on the GPU when an adapter exists: the layer
+tree — blend modes, masks, clipping, group isolation, adjustment layers —
+compiles to a compute-shader program (wgpu), and zooming, rotating and
+panning resample on the GPU too, which is what keeps large documents
+responsive. The CPU compositor remains the semantic reference: the GPU
+backend is held to it by parity tests, anything it can't express (a few
+adjustment kinds, layers mid-drag) falls back to the CPU for that frame,
+and machines with no usable adapter just run the CPU path. Toggle it in
+Preferences, or override with `SCHIST_GPU=0` / `SCHIST_GPU=1`.
+
 **Image.** Mode (RGB, greyscale, CMYK, Lab, Indexed), Auto Tone /
 Contrast / Colour, image and canvas size, the five rotations and flips,
 crop and trim.
@@ -193,9 +203,21 @@ Remap anything in `~/.config/schist/keymap.json`:
   individual ink channels are not separately editable.
 - **Text is not on a path**, and the type engine has no OpenType
   feature controls.
-- **The GPU compositor.** Deliberate: the CPU path already meets the
-  interactivity target, so a wgpu
-  backend would add complexity without a demonstrated win.
+- **Four adjustment kinds composite on the CPU** even with GPU
+  compositing on: hue/saturation, black & white, threshold and posterize
+  need per-pixel full-colour math the shader doesn't express yet, so
+  documents using them as adjustment *layers* fall back for the affected
+  frames. Applied destructively they cost nothing ongoing.
+- **Tool and filter math is CPU-only.** The GPU accelerates what happens
+  *around* an edit — recompositing the layer stack and resampling the
+  viewport — not the edit itself. For brush-footprint tools (smudge,
+  clone, healing) that's the right call: a GPU round trip per dab would
+  add latency to the most latency-sensitive path for a few thousand
+  pixels of work. Where a second GPU seam *would* pay off is the
+  large-kernel, whole-selection operations — Gaussian and lens blurs,
+  the Filter Gallery previews, Liquify's mesh resample, Content-Aware
+  Scale's energy pass — which sweep the full canvas per keystroke of a
+  dialog. Not built yet.
 
 ## Plugins
 

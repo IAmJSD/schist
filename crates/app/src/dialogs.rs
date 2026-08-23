@@ -1902,6 +1902,22 @@ fn preferences(
             ),
         ))
         .child(ui::field_row(
+            "Rendering",
+            ui::checkbox(
+                "GPU compositing (falls back to CPU without an adapter)",
+                view.gpu_compositing,
+                |ws, cx| {
+                    ws.view.gpu_compositing = !ws.view.gpu_compositing;
+                    ws.save_view_options();
+                    crate::workspace::init_compositor_backend(ws.view.gpu_compositing);
+                    // Cached tiles and the viewport image were composited
+                    // by the old backend; rebuild them on the new one.
+                    ws.rebuild_after_backend_change(cx);
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
             "Diagnostics",
             ui::checkbox(
                 "Write a local crash report on panic",

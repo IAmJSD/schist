@@ -1,20 +1,19 @@
 //! CPU tile compositor — the reference implementation of Schist's
-//! rendering semantics (a future GPU compositor must match it).
+//! rendering semantics. Any other backend must match it tile-for-tile;
+//! `schist-compositor-gpu` is held to that with parity tests.
 //!
-//! Measured on a 16-core desktop (see `examples/bench.rs`): a
-//! 1920×1080 viewport of a 100 MP document with three full-canvas blend
-//! layers plus a curves adjustment recomposites in ~16 ms (62 fps), and a
-//! single dirty tile — what a brush stroke actually costs — in ~3 ms.
-//! That meets the milestone's interactivity target without a GPU backend,
-//! which is why the wgpu path stays deferred: GPUI 0.2 does
-//! not expose its device, so a second wgpu instance would have to read
-//! every composited tile back over PCIe, and the damage-driven workloads
-//! here are too small to amortize that.
+//! The public `composite_*` functions dispatch through the active
+//! [`backend`] (CPU unless the app installs the GPU compositor), so every
+//! caller — canvas, exports, tools — picks up acceleration without
+//! knowing about it. The `*_cpu` variants are the reference
+//! implementation and always run on the CPU.
 //!
 //! Composites the layer tree bottom-up per 256×256 tile:
 //! groups isolate unless pass-through, layer masks multiply source alpha,
 //! clipping layers are confined to their base layer's alpha, and adjustment
 //! layers re-colour the backdrop beneath them (mask- and clip-aware).
+
+pub mod viewport;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -25,7 +24,7 @@ use schist_core::{
     TILE_SIZE,
 };
 use schist_pixel_ops::blend_pixel;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 type TileF32 = Vec<f32>; // TILE_PIXELS * 4, straight-alpha RGBA
 
@@ -64,17 +63,56 @@ impl Scratch {
 
 /// The rendering backend seam.
 ///
-/// Only [`CpuCompositor`] exists today. A GPU implementation would slot in
-/// here without the rest of the app noticing — see the crate docs for why
-/// that isn't the current bottleneck.
+/// [`CpuCompositor`] is the reference; `schist-compositor-gpu` provides a
+/// wgpu implementation that the app installs with [`set_backend`]. The
+/// default methods are the CPU reference, so a backend only overrides
+/// what it accelerates — and a backend that cannot express a document
+/// (unsupported feature, no adapter) is expected to fall back to the
+/// `*_cpu` functions itself, never to return something different.
 pub trait Compositor: Send + Sync {
+    /// Short name for logs and the UI ("cpu", "gpu").
+    fn name(&self) -> &'static str;
+
     /// Composite one tile to straight-alpha f32 RGBA.
     fn tile(&self, doc: &Document, coord: TileCoord) -> Vec<f32>;
 
+    /// Composite several tiles to RGBA8 (straight alpha), one buffer per
+    /// coord in order. The batch form is where a GPU backend earns its
+    /// keep: one upload, one dispatch, one readback.
+    fn tiles_rgba8(&self, doc: &Document, coords: &[TileCoord]) -> Vec<Vec<u8>> {
+        coords
+            .par_iter()
+            .map(|&c| {
+                let f = self.tile(doc, c);
+                let mut bytes = vec![0u8; TILE_PIXELS * 4];
+                for (b, v) in bytes.iter_mut().zip(f.iter()) {
+                    *b = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                }
+                bytes
+            })
+            .collect()
+    }
+
+    /// Composite a region to straight-alpha f32 RGBA.
+    fn region_f32(&self, doc: &Document, region: IntRect) -> Vec<f32> {
+        composite_region_f32_cpu(doc, region)
+    }
+
     /// Composite a region to straight-alpha RGBA8.
     fn region_rgba8(&self, doc: &Document, region: IntRect) -> Vec<u8> {
-        let _ = (doc, region);
-        composite_region_rgba8(doc, region)
+        composite_region_rgba8_cpu(doc, region)
+    }
+
+    /// Resample already-composited display tiles into a viewport image
+    /// (see [`viewport`]). `None` means "not accelerated here" and the
+    /// caller runs [`viewport::render_viewport_cpu`].
+    fn viewport(
+        &self,
+        params: &viewport::ViewportParams,
+        grid: &[Option<Arc<Vec<u8>>>],
+    ) -> Option<Vec<u8>> {
+        let _ = (params, grid);
+        None
     }
 }
 
@@ -84,13 +122,51 @@ pub trait Compositor: Send + Sync {
 pub struct CpuCompositor;
 
 impl Compositor for CpuCompositor {
+    fn name(&self) -> &'static str {
+        "cpu"
+    }
+
     fn tile(&self, doc: &Document, coord: TileCoord) -> Vec<f32> {
-        composite_tile(doc, coord)
+        composite_tile_cpu(doc, coord)
     }
 }
 
-/// Composite one document tile to straight-alpha f32 RGBA.
+/// The active rendering backend. CPU until [`set_backend`] installs
+/// something else.
+static BACKEND: OnceLock<RwLock<Arc<dyn Compositor>>> = OnceLock::new();
+
+fn backend_cell() -> &'static RwLock<Arc<dyn Compositor>> {
+    BACKEND.get_or_init(|| RwLock::new(Arc::new(CpuCompositor)))
+}
+
+/// Install the backend the `composite_*` dispatchers use.
+pub fn set_backend(backend: Arc<dyn Compositor>) {
+    *backend_cell().write().unwrap() = backend;
+}
+
+/// The currently active backend.
+pub fn backend() -> Arc<dyn Compositor> {
+    backend_cell().read().unwrap().clone()
+}
+
+/// Composite one document tile to straight-alpha f32 RGBA on the active
+/// backend.
 pub fn composite_tile(doc: &Document, coord: TileCoord) -> TileF32 {
+    backend().tile(doc, coord)
+}
+
+/// Composite a region to straight-alpha f32 RGBA on the active backend.
+pub fn composite_region_f32(doc: &Document, region: IntRect) -> Vec<f32> {
+    backend().region_f32(doc, region)
+}
+
+/// Composite a region to straight-alpha RGBA8 on the active backend.
+pub fn composite_region_rgba8(doc: &Document, region: IntRect) -> Vec<u8> {
+    backend().region_rgba8(doc, region)
+}
+
+/// Composite one document tile to straight-alpha f32 RGBA (CPU reference).
+pub fn composite_tile_cpu(doc: &Document, coord: TileCoord) -> TileF32 {
     let mut scratch = Scratch::default();
     let mut dst = blank_tile();
     composite_layers(doc, &doc.tree.layers, coord, &mut dst, &mut scratch);
@@ -100,14 +176,15 @@ pub fn composite_tile(doc: &Document, coord: TileCoord) -> TileF32 {
 /// Composite an arbitrary document-space region to straight-alpha f32 RGBA,
 /// tightly packed `region.width() * region.height() * 4` floats. Used where
 /// full precision matters (16/32-bit export, PSD merged-image data).
-pub fn composite_region_f32(doc: &Document, region: IntRect) -> Vec<f32> {
+/// CPU reference.
+pub fn composite_region_f32_cpu(doc: &Document, region: IntRect) -> Vec<f32> {
     let w = region.width() as usize;
     let h = region.height() as usize;
     let mut out = vec![0.0f32; w * h * 4];
     let coords: Vec<TileCoord> = TileCoord::covering(&region).collect();
     let tiles: Vec<(TileCoord, TileF32)> = coords
         .into_par_iter()
-        .map(|c| (c, composite_tile(doc, c)))
+        .map(|c| (c, composite_tile_cpu(doc, c)))
         .collect();
     for (coord, tile) in tiles {
         let trect = coord.rect();
@@ -129,14 +206,15 @@ pub fn composite_region_f32(doc: &Document, region: IntRect) -> Vec<f32> {
 
 /// Composite an arbitrary document-space region to RGBA8 (straight alpha),
 /// tightly packed `region.width() * region.height() * 4` bytes.
-pub fn composite_region_rgba8(doc: &Document, region: IntRect) -> Vec<u8> {
+/// CPU reference.
+pub fn composite_region_rgba8_cpu(doc: &Document, region: IntRect) -> Vec<u8> {
     let w = region.width() as usize;
     let h = region.height() as usize;
     let mut out = vec![0u8; w * h * 4];
     let coords: Vec<TileCoord> = TileCoord::covering(&region).collect();
     let tiles: Vec<(TileCoord, TileF32)> = coords
         .into_par_iter()
-        .map(|c| (c, composite_tile(doc, c)))
+        .map(|c| (c, composite_tile_cpu(doc, c)))
         .collect();
     for (coord, tile) in tiles {
         let trect = coord.rect();
@@ -548,35 +626,27 @@ impl TileCache {
         if let Some(t) = self.tiles.get(&coord) {
             return t.clone();
         }
-        let f = composite_tile(doc, coord);
-        let mut bytes = vec![0u8; TILE_PIXELS * 4];
-        for (b, v) in bytes.iter_mut().zip(f.iter()) {
-            *b = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        }
+        let bytes = backend()
+            .tiles_rgba8(doc, &[coord])
+            .pop()
+            .unwrap_or_else(|| vec![0u8; TILE_PIXELS * 4]);
         let arc = Arc::new(bytes);
         self.tiles.insert(coord, arc.clone());
         arc
     }
 
-    /// Composite several tiles in parallel ahead of `get` calls.
+    /// Composite several tiles in one batch ahead of `get` calls.
     pub fn prewarm(&mut self, doc: &Document, coords: &[TileCoord]) {
         let missing: Vec<TileCoord> = coords
             .iter()
             .copied()
             .filter(|c| !self.tiles.contains_key(c))
             .collect();
-        let computed: Vec<(TileCoord, Vec<u8>)> = missing
-            .into_par_iter()
-            .map(|c| {
-                let f = composite_tile(doc, c);
-                let mut bytes = vec![0u8; TILE_PIXELS * 4];
-                for (b, v) in bytes.iter_mut().zip(f.iter()) {
-                    *b = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                }
-                (c, bytes)
-            })
-            .collect();
-        for (c, bytes) in computed {
+        if missing.is_empty() {
+            return;
+        }
+        let computed = backend().tiles_rgba8(doc, &missing);
+        for (c, bytes) in missing.into_iter().zip(computed) {
             self.tiles.insert(c, Arc::new(bytes));
         }
     }

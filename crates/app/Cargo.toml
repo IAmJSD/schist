@@ -20,12 +20,12 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 image.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
-rayon.workspace = true
 
 schist-core.workspace = true
 schist-color.workspace = true
 schist-plugin-api.workspace = true
 schist-compositor.workspace = true
+schist-compositor-gpu.workspace = true
 schist-layer-fx.workspace = true
 schist-neural.workspace = true
 schist-codec-psd.workspace = true

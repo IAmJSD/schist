@@ -1,0 +1,30 @@
+[package]
+name = "schist-compositor-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+schist-core.workspace = true
+schist-adjustments.workspace = true
+schist-color.workspace = true
+schist-compositor.workspace = true
+serde_json.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+rustc-hash.workspace = true
+wgpu.workspace = true
+# gpui's tree turns on codespan-reporting's "termcolor" feature, which
+# changes an API naga only tolerates with its own "termcolor" on. Keep
+# the two in agreement or naga stops compiling in the full workspace.
+naga = { version = "27", features = ["termcolor"] }
+pollster.workspace = true
+
+[dev-dependencies]
+schist-pixel-ops.workspace = true
+
+# FXC (the default DX12 shader compiler) miscompiles this crate's switch-
+# heavy compute shaders; DXC handles them. Statically linked so nothing
+# extra ships beside the binary.
+[target.'cfg(windows)'.dependencies]
+wgpu = { workspace = true, features = ["static-dxc"] }

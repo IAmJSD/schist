@@ -11,6 +11,7 @@ members = [
     "crates/plugin-api",
     "crates/pixel-ops",
     "crates/compositor",
+    "crates/compositor-gpu",
     "crates/color",
     "crates/codec-psd",
     "crates/codec-affinity",
@@ -46,6 +47,7 @@ schist-core = { path = "crates/core" }
 schist-plugin-api = { path = "crates/plugin-api" }
 schist-pixel-ops = { path = "crates/pixel-ops" }
 schist-compositor = { path = "crates/compositor" }
+schist-compositor-gpu = { path = "crates/compositor-gpu" }
 schist-color = { path = "crates/color" }
 schist-codec-psd = { path = "crates/codec-psd" }
 schist-codec-affinity = { path = "crates/codec-affinity" }
@@ -93,6 +95,10 @@ rustc-hash = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
 byteorder = "1.5"
 log = "0.4"
+# GPU compositing backend; wgpu is its own instance (GPUI's renderer does
+# not expose a device to share).
+wgpu = "27"
+pollster = "0.4"
 env_logger = "0.11"
 
 [profile.dev]
