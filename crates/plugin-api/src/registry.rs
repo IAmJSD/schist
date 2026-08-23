@@ -1,13 +1,16 @@
 //! Plugin registries — the kernel's catalog of everything installed.
 
 use crate::{CodecPlugin, Command, CommandPlugin, FilterPlugin, ToolPlugin};
+use std::sync::Arc;
 
 /// All registered plugins, assembled at startup by the app shell from each
 /// enabled `PluginManifest`.
 #[derive(Default)]
 pub struct PluginRegistry {
     tools: Vec<Box<dyn ToolPlugin>>,
-    codecs: Vec<Box<dyn CodecPlugin>>,
+    /// `Arc`, not `Box`: decoding runs on background threads, which need
+    /// to hold the codec beyond the registry borrow.
+    codecs: Vec<Arc<dyn CodecPlugin>>,
     commands: Vec<Command>,
     filters: Vec<Box<dyn FilterPlugin>>,
 }
@@ -27,7 +30,7 @@ impl PluginRegistry {
     }
 
     pub fn register_codec(&mut self, codec: Box<dyn CodecPlugin>) {
-        self.codecs.push(codec);
+        self.codecs.push(Arc::from(codec));
     }
 
     pub fn register_commands(&mut self, plugin: &dyn CommandPlugin) {
@@ -66,6 +69,11 @@ impl PluginRegistry {
                     .find(|c| c.extensions().contains(&ext.as_str()))
             })
             .map(|c| c.as_ref())
+    }
+
+    /// Clones of every codec, for decoding on a background thread.
+    pub fn shared_codecs(&self) -> Vec<Arc<dyn CodecPlugin>> {
+        self.codecs.clone()
     }
 
     pub fn commands(&self) -> &[Command] {

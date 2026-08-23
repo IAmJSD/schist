@@ -19,6 +19,7 @@
 use crate::archive::Archive;
 use crate::error::{malformed, AffinityError};
 use crate::graph::{self, tag_name, Graph, Node, Value};
+use rayon::prelude::*;
 use schist_color::Depth;
 use schist_core::{blit_rgba8, Document, IntRect, Layer};
 
@@ -47,6 +48,17 @@ impl ImportReport {
     /// layered import shows the same picture Affinity would.
     pub fn complete(&self) -> bool {
         self.skipped.is_empty()
+    }
+
+    /// Fold in the report of a subtree imported on another thread.
+    fn absorb(&mut self, other: ImportReport) {
+        self.raster_layers += other.raster_layers;
+        self.groups += other.groups;
+        self.masks += other.masks;
+        self.text_layers += other.text_layers;
+        self.shapes += other.shapes;
+        self.adjustments += other.adjustments;
+        self.skipped.extend(other.skipped);
     }
 }
 
@@ -200,10 +212,11 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
         }
     }
 
-    for child in graph.children(spread, b"Chld") {
-        for layer in walker.layer_stack(child) {
-            doc.push_layer(layer);
-        }
+    let children = graph.children(spread, b"Chld");
+    let (layers, subreport) = walker.layer_stacks_par(&children, walker.ctm);
+    walker.report.absorb(subreport);
+    for layer in layers {
+        doc.push_layer(layer);
     }
 
     doc.damage_all();
@@ -361,6 +374,33 @@ impl Walker<'_> {
         out
     }
 
+    /// Walk sibling subtrees in parallel — decoding a layer's pixels is
+    /// the bulk of an import, and siblings are independent. Each worker
+    /// gets its own report; the merged result keeps file order.
+    fn layer_stacks_par(&self, nodes: &[&Node], ctm: Mat) -> (Vec<Layer>, ImportReport) {
+        let results: Vec<(Vec<Layer>, ImportReport)> = nodes
+            .par_iter()
+            .map(|node| {
+                let mut report = ImportReport::default();
+                let mut walker = Walker {
+                    archive: self.archive,
+                    graph: self.graph,
+                    report: &mut report,
+                    ctm,
+                };
+                let layers = walker.layer_stack(node);
+                (layers, report)
+            })
+            .collect();
+        let mut layers = Vec::new();
+        let mut report = ImportReport::default();
+        for (subtree, subreport) in results {
+            layers.extend(subtree);
+            report.absorb(subreport);
+        }
+        (layers, report)
+    }
+
     fn layer(&mut self, node: &Node) -> Option<Layer> {
         let kind = node.type_tag();
         let name = str_of(node, b"Desc").unwrap_or_default().to_string();
@@ -396,15 +436,9 @@ impl Walker<'_> {
                 self.report.groups += 1;
                 let mut group = Layer::new_group(display);
                 // Children live in the group's coordinate space.
-                let saved = self.ctm;
-                self.ctm = self.node_ctm(node);
-                let children: Vec<Layer> = self
-                    .graph
-                    .children(node, b"Chld")
-                    .into_iter()
-                    .flat_map(|c| self.layer_stack(c))
-                    .collect();
-                self.ctm = saved;
+                let nodes = self.graph.children(node, b"Chld");
+                let (children, subreport) = self.layer_stacks_par(&nodes, self.node_ctm(node));
+                self.report.absorb(subreport);
                 if let schist_core::LayerKind::Group(g) = &mut group.kind {
                     g.children = children;
                 }
@@ -1426,50 +1460,109 @@ fn affine_resample(img: &RgbaImage, map: &Mat) -> Option<(IntRect, RgbaImage)> {
     }
 
     let (iw, ih) = (img.width as i64, img.height as i64);
+    // Taps are premultiplied (so transparent neighbours don't drag
+    // colour in) but kept on the 0–255 scale; the unpremultiply ratio
+    // and the alpha write-out below are scale-invariant.
     let fetch = |x: i64, y: i64| -> [f32; 4] {
         if x < 0 || y < 0 || x >= iw || y >= ih {
             return [0.0; 4];
         }
         let at = ((y as usize * iw as usize) + x as usize) * 4;
         let p = &img.pixels[at..at + 4];
-        // Premultiplied, so transparent neighbours don't drag colour in.
-        let a = p[3] as f32 / 255.0;
+        let a = p[3] as f32;
         [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a, a]
     };
     let mut pixels = vec![0u8; dw * dh * 4];
-    for y in 0..dh {
-        for x in 0..dw {
-            let (sx, sy) = inv.apply(
-                rect.left as f64 + x as f64 + 0.5,
-                rect.top as f64 + y as f64 + 0.5,
+    let m = &inv.0;
+    // Fully opaque sources (photos, most pasted images) need no
+    // premultiply/unpremultiply when the whole 2×2 neighbourhood is
+    // inside the image: the taps are opaque, so a straight lerp of the
+    // raw channels gives the same result without twelve multiplies and
+    // a divide per pixel.
+    let opaque = img
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .par_iter()
+        .all(|p| p[3] == 0xFF);
+    pixels
+        .par_chunks_exact_mut(dw * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            // The inverse map is affine, so along a row the source point
+            // advances by a constant (m[0], m[3]) per pixel.
+            let py = rect.top as f64 + y as f64 + 0.5;
+            let (row_sx, row_sy) = (
+                m[1] * py + m[2] + m[0] * (rect.left as f64 + 0.5),
+                m[4] * py + m[5] + m[3] * (rect.left as f64 + 0.5),
             );
-            let (fx, fy) = (sx - 0.5, sy - 0.5);
-            if fx < -1.0 || fy < -1.0 || fx > sw || fy > sh {
-                continue;
-            }
-            let (x0, y0) = (fx.floor() as i64, fy.floor() as i64);
-            let (wx, wy) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
-            let mut acc = [0.0f32; 4];
-            for (dxy, wgt) in [
-                ((0, 0), (1.0 - wx) * (1.0 - wy)),
-                ((1, 0), wx * (1.0 - wy)),
-                ((0, 1), (1.0 - wx) * wy),
-                ((1, 1), wx * wy),
-            ] {
-                let p = fetch(x0 + dxy.0, y0 + dxy.1);
-                for (a, v) in acc.iter_mut().zip(p) {
-                    *a += v * wgt;
+            for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (sx, sy) = (row_sx + m[0] * x as f64, row_sy + m[3] * x as f64);
+                let (fx, fy) = (sx - 0.5, sy - 0.5);
+                if fx < -1.0 || fy < -1.0 || fx > sw || fy > sh {
+                    continue;
+                }
+                // Branch-free floor: `as` truncates toward zero, so
+                // adjust down for negative non-integers. (Landing one
+                // texel low on a negative integer just moves all the
+                // weight to the other tap — same sample.)
+                let (tx, ty) = (fx as i64, fy as i64);
+                let x0 = tx - (tx as f64 > fx) as i64;
+                let y0 = ty - (ty as f64 > fy) as i64;
+                let (wx, wy) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
+                if opaque && x0 >= 0 && y0 >= 0 && x0 + 1 < iw && y0 + 1 < ih {
+                    let row0 = &img.pixels[(y0 as usize * iw as usize + x0 as usize) * 4..][..8];
+                    let row1 =
+                        &img.pixels[((y0 + 1) as usize * iw as usize + x0 as usize) * 4..][..8];
+                    for c in 0..3 {
+                        let top = row0[c] as f32 * (1.0 - wx) + row0[c + 4] as f32 * wx;
+                        let bot = row1[c] as f32 * (1.0 - wx) + row1[c + 4] as f32 * wx;
+                        out[c] = (top * (1.0 - wy) + bot * wy + 0.5) as u8;
+                    }
+                    out[3] = 0xFF;
+                    continue;
+                }
+                let acc = if x0 >= 0 && y0 >= 0 && x0 + 1 < iw && y0 + 1 < ih {
+                    // Whole 2×2 neighbourhood inside: read the two row
+                    // pairs directly, skipping the per-tap bounds test.
+                    let at = |px: i64, py: i64| -> [f32; 4] {
+                        let p = &img.pixels[((py as usize * iw as usize) + px as usize) * 4..][..4];
+                        let a = p[3] as f32;
+                        [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a, a]
+                    };
+                    let (p00, p10) = (at(x0, y0), at(x0 + 1, y0));
+                    let (p01, p11) = (at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+                    let mut acc = [0.0f32; 4];
+                    for c in 0..4 {
+                        let top = p00[c] * (1.0 - wx) + p10[c] * wx;
+                        let bot = p01[c] * (1.0 - wx) + p11[c] * wx;
+                        acc[c] = top * (1.0 - wy) + bot * wy;
+                    }
+                    acc
+                } else {
+                    let mut acc = [0.0f32; 4];
+                    for (dxy, wgt) in [
+                        ((0, 0), (1.0 - wx) * (1.0 - wy)),
+                        ((1, 0), wx * (1.0 - wy)),
+                        ((0, 1), (1.0 - wx) * wy),
+                        ((1, 1), wx * wy),
+                    ] {
+                        let p = fetch(x0 + dxy.0, y0 + dxy.1);
+                        for (a, v) in acc.iter_mut().zip(p) {
+                            *a += v * wgt;
+                        }
+                    }
+                    acc
+                };
+                if acc[3] > f32::EPSILON {
+                    let unpremul = 1.0 / acc[3];
+                    for i in 0..3 {
+                        out[i] = (acc[i] * unpremul + 0.5).clamp(0.0, 255.0) as u8;
+                    }
+                    out[3] = (acc[3] + 0.5).clamp(0.0, 255.0) as u8;
                 }
             }
-            let out = &mut pixels[(y * dw + x) * 4..][..4];
-            if acc[3] > f32::EPSILON {
-                for i in 0..3 {
-                    out[i] = (acc[i] / acc[3] + 0.5).clamp(0.0, 255.0) as u8;
-                }
-                out[3] = (acc[3] * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
+        });
     Some((
         rect,
         RgbaImage {
@@ -1580,28 +1673,30 @@ fn decode_bitmap(
     let sta_names: [&[u8; 4]; 5] = [b"Sta1", b"Sta2", b"Sta3", b"Sta4", b"Sta5"];
     let idx_names: [&[u8; 4]; 5] = [b"Idx1", b"Idx2", b"Idx3", b"Idx4", b"Idx5"];
     let twi_names: [&[u8; 4]; 5] = [b"TWi1", b"TWi2", b"TWi3", b"TWi4", b"TWi5"];
-    let mut planes = Vec::with_capacity(fmt.channels);
-    for channel in 0..fmt.channels {
-        planes.push(load_plane(PlaneJob {
-            archive,
-            graph,
-            bitm,
-            sta: sta_names[channel],
-            idx: idx_names[channel],
-            // Affinity rounds the tile grid up past the pixels it
-            // needs, so the status array's row stride is the declared
-            // `TWi`, not `ceil(row_bytes / 256)`. Reading it as the
-            // tight grid shears every row after the first.
-            grid_width: i32_of(bitm, twi_names[channel])
-                .filter(|w| *w > 0)
-                .map_or(row_bytes.div_ceil(256), |w| w as usize),
-            pitch,
-            rows,
-            height,
-            bytes_per_sample: fmt.bytes_per_sample,
-            source: source.as_ref().map(|s| (s, channel)),
-        })?);
-    }
+    let planes = (0..fmt.channels)
+        .into_par_iter()
+        .map(|channel| {
+            load_plane(PlaneJob {
+                archive,
+                graph,
+                bitm,
+                sta: sta_names[channel],
+                idx: idx_names[channel],
+                // Affinity rounds the tile grid up past the pixels it
+                // needs, so the status array's row stride is the declared
+                // `TWi`, not `ceil(row_bytes / 256)`. Reading it as the
+                // tight grid shears every row after the first.
+                grid_width: i32_of(bitm, twi_names[channel])
+                    .filter(|w| *w > 0)
+                    .map_or(row_bytes.div_ceil(256), |w| w as usize),
+                pitch,
+                rows,
+                height,
+                bytes_per_sample: fmt.bytes_per_sample,
+                source: source.as_ref().map(|s| (s, channel)),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Interleave planes into straight-alpha RGBA8. Higher depths are
     // reduced to 8 bits here; precision, not placement, is what's lost.
@@ -1615,52 +1710,115 @@ fn decode_bitmap(
     };
 
     let mut pixels = vec![0u8; width * height * 4];
-    for y in 0..height {
-        for x in 0..width {
-            let out = &mut pixels[(y * width + x) * 4..][..4];
-            let (r, g, b, a) = match fmt.kind {
-                FormatKind::Rgba => (
-                    sample(&planes[0], x, y),
-                    sample(&planes[1], x, y),
-                    sample(&planes[2], x, y),
-                    sample(&planes[3], x, y),
-                ),
-                FormatKind::Gray => {
-                    let g = sample(&planes[0], x, y);
-                    (g, g, g, sample(&planes[1], x, y))
-                }
-                FormatKind::Mask => {
-                    let v = sample(&planes[0], x, y);
-                    (v, v, v, 1.0)
-                }
-                FormatKind::Cmyk => {
-                    let (c, m, yl, k) = (
+    match (fmt.bytes_per_sample, &fmt.kind) {
+        // 8-bit samples map to output bytes unchanged; interleave the
+        // planes directly instead of round-tripping through f32.
+        (1, FormatKind::Rgba) => {
+            pixels
+                .par_chunks_exact_mut(width * 4)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    let at = y * pitch;
+                    let (r, g, b, a) = (
+                        &planes[0][at..at + width],
+                        &planes[1][at..at + width],
+                        &planes[2][at..at + width],
+                        &planes[3][at..at + width],
+                    );
+                    for (x, px) in out_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        *px = [r[x], g[x], b[x], a[x]];
+                    }
+                });
+            return Ok(RgbaImage {
+                width: width as u32,
+                height: height as u32,
+                pixels,
+            });
+        }
+        (1, FormatKind::Gray) => {
+            pixels
+                .par_chunks_exact_mut(width * 4)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    let at = y * pitch;
+                    let (g, a) = (&planes[0][at..at + width], &planes[1][at..at + width]);
+                    for (x, px) in out_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        *px = [g[x], g[x], g[x], a[x]];
+                    }
+                });
+            return Ok(RgbaImage {
+                width: width as u32,
+                height: height as u32,
+                pixels,
+            });
+        }
+        (1, FormatKind::Mask) => {
+            pixels
+                .par_chunks_exact_mut(width * 4)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    let at = y * pitch;
+                    let v = &planes[0][at..at + width];
+                    for (x, px) in out_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        *px = [v[x], v[x], v[x], 0xFF];
+                    }
+                });
+            return Ok(RgbaImage {
+                width: width as u32,
+                height: height as u32,
+                pixels,
+            });
+        }
+        _ => {}
+    }
+    pixels
+        .par_chunks_exact_mut(width * 4)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            for (x, out) in out_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (r, g, b, a) = match fmt.kind {
+                    FormatKind::Rgba => (
                         sample(&planes[0], x, y),
                         sample(&planes[1], x, y),
                         sample(&planes[2], x, y),
                         sample(&planes[3], x, y),
-                    );
-                    (
-                        (1.0 - c) * (1.0 - k),
-                        (1.0 - m) * (1.0 - k),
-                        (1.0 - yl) * (1.0 - k),
-                        sample(&planes[4], x, y),
-                    )
-                }
-                FormatKind::Lab => {
-                    let l = sample(&planes[0], x, y) * 100.0;
-                    let a_c = sample(&planes[1], x, y) * 255.0 - 128.0;
-                    let b_c = sample(&planes[2], x, y) * 255.0 - 128.0;
-                    let (r, g, b) = lab_to_srgb(l, a_c, b_c);
-                    (r, g, b, sample(&planes[3], x, y))
-                }
-            };
-            out[0] = (r * 255.0 + 0.5) as u8;
-            out[1] = (g * 255.0 + 0.5) as u8;
-            out[2] = (b * 255.0 + 0.5) as u8;
-            out[3] = (a * 255.0 + 0.5) as u8;
-        }
-    }
+                    ),
+                    FormatKind::Gray => {
+                        let g = sample(&planes[0], x, y);
+                        (g, g, g, sample(&planes[1], x, y))
+                    }
+                    FormatKind::Mask => {
+                        let v = sample(&planes[0], x, y);
+                        (v, v, v, 1.0)
+                    }
+                    FormatKind::Cmyk => {
+                        let (c, m, yl, k) = (
+                            sample(&planes[0], x, y),
+                            sample(&planes[1], x, y),
+                            sample(&planes[2], x, y),
+                            sample(&planes[3], x, y),
+                        );
+                        (
+                            (1.0 - c) * (1.0 - k),
+                            (1.0 - m) * (1.0 - k),
+                            (1.0 - yl) * (1.0 - k),
+                            sample(&planes[4], x, y),
+                        )
+                    }
+                    FormatKind::Lab => {
+                        let l = sample(&planes[0], x, y) * 100.0;
+                        let a_c = sample(&planes[1], x, y) * 255.0 - 128.0;
+                        let b_c = sample(&planes[2], x, y) * 255.0 - 128.0;
+                        let (r, g, b) = lab_to_srgb(l, a_c, b_c);
+                        (r, g, b, sample(&planes[3], x, y))
+                    }
+                };
+                out[0] = (r * 255.0 + 0.5) as u8;
+                out[1] = (g * 255.0 + 0.5) as u8;
+                out[2] = (b * 255.0 + 0.5) as u8;
+                out[3] = (a * 255.0 + 0.5) as u8;
+            }
+        });
     Ok(RgbaImage {
         width: width as u32,
         height: height as u32,
@@ -1703,6 +1861,10 @@ fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
 
     let mut plane = vec![0u8; job.pitch * job.rows];
     let places = tile_offsets(job.grid_width, job.height);
+    // Pair each stored tile with its destination first; decompressing
+    // and CRC-checking the payloads is the bulk of the work and every
+    // tile is independent, so that part fans out across cores.
+    let mut stored: Vec<(usize, usize, [i32; 4], &str)> = Vec::new();
     for (&status, (x, y)) in statuses.iter().zip(places) {
         match status {
             0 | 1 => {}
@@ -1722,29 +1884,7 @@ fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
                     Some(Value::Embedded { name, .. }) => name,
                     _ => return Err(malformed("block has no data reference")),
                 };
-                let entry = job
-                    .archive
-                    .head(name)
-                    .ok_or_else(|| malformed(format!("missing tile entry {name:?}")))?;
-                let tile = tile_payload(job.archive.extract(entry)?)
-                    .ok_or_else(|| malformed(format!("tile {name:?} has no 64 KiB payload")))?;
-                let (x0, y0) = (
-                    rect[0].clamp(0, 256) as usize,
-                    rect[1].clamp(0, 256) as usize,
-                );
-                let (x1, y1) = (
-                    rect[2].clamp(0, 256) as usize,
-                    rect[3].clamp(0, 256) as usize,
-                );
-                for ty in y0..y1 {
-                    if y + ty >= job.rows {
-                        break;
-                    }
-                    let dst = (y + ty) * job.pitch + x + x0;
-                    let src = ty * 256 + x0;
-                    let n = x1.saturating_sub(x0).min(job.pitch - (x + x0));
-                    plane[dst..dst + n].copy_from_slice(&tile[src..src + n]);
-                }
+                stored.push((x, y, rect, name));
             }
             // Source-backed: the pixels live in the bitmap's original
             // file (Bckg), not in tile entries.
@@ -1755,6 +1895,36 @@ fn load_plane(job: PlaneJob) -> Result<Vec<u8>, AffinityError> {
                 copy_source_tile(&mut plane, &job, source, channel, x, y)?;
             }
             other => return Err(malformed(format!("unknown tile status {other}"))),
+        }
+    }
+    let tiles = stored
+        .par_iter()
+        .map(|&(_, _, _, name)| {
+            let entry = job
+                .archive
+                .head(name)
+                .ok_or_else(|| malformed(format!("missing tile entry {name:?}")))?;
+            tile_payload(job.archive.extract(entry)?)
+                .ok_or_else(|| malformed(format!("tile {name:?} has no 64 KiB payload")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for ((x, y, rect, _), tile) in stored.iter().zip(&tiles) {
+        let (x0, y0) = (
+            rect[0].clamp(0, 256) as usize,
+            rect[1].clamp(0, 256) as usize,
+        );
+        let (x1, y1) = (
+            rect[2].clamp(0, 256) as usize,
+            rect[3].clamp(0, 256) as usize,
+        );
+        for ty in y0..y1 {
+            if y + ty >= job.rows {
+                break;
+            }
+            let dst = (y + ty) * job.pitch + x + x0;
+            let src = ty * 256 + x0;
+            let n = x1.saturating_sub(x0).min(job.pitch - (x + x0));
+            plane[dst..dst + n].copy_from_slice(&tile[src..src + n]);
         }
     }
     Ok(plane)
@@ -2542,29 +2712,40 @@ fn resample_to(img: RgbaImage, dw: u32, dh: u32) -> RgbaImage {
         return img;
     }
     let (sw, sh) = (img.width as usize, img.height as usize);
-    let mut pixels = vec![0u8; dw as usize * dh as usize * 4];
-    for y in 0..dh as usize {
-        let fy = (y as f32 + 0.5) * sh as f32 / dh as f32 - 0.5;
-        let y0 = (fy.floor().max(0.0) as usize).min(sh - 1);
-        let y1 = (y0 + 1).min(sh - 1);
-        let wy = (fy - y0 as f32).clamp(0.0, 1.0);
-        for x in 0..dw as usize {
+    let (dw, dh) = (dw as usize, dh as usize);
+    // The horizontal taps are the same for every row; compute them once
+    // as byte offsets into a source row.
+    let xtaps: Vec<(usize, usize, f32)> = (0..dw)
+        .map(|x| {
             let fx = (x as f32 + 0.5) * sw as f32 / dw as f32 - 0.5;
             let x0 = (fx.floor().max(0.0) as usize).min(sw - 1);
             let x1 = (x0 + 1).min(sw - 1);
             let wx = (fx - x0 as f32).clamp(0.0, 1.0);
-            let at = |px: usize, py: usize, c: usize| img.pixels[(py * sw + px) * 4 + c] as f32;
-            let out = &mut pixels[(y * dw as usize + x) * 4..][..4];
-            for (c, slot) in out.iter_mut().enumerate() {
-                let top = at(x0, y0, c) * (1.0 - wx) + at(x1, y0, c) * wx;
-                let bot = at(x0, y1, c) * (1.0 - wx) + at(x1, y1, c) * wx;
-                *slot = (top * (1.0 - wy) + bot * wy + 0.5) as u8;
+            (x0 * 4, x1 * 4, wx)
+        })
+        .collect();
+    let mut pixels = vec![0u8; dw * dh * 4];
+    pixels
+        .par_chunks_exact_mut(dw * 4)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            let fy = (y as f32 + 0.5) * sh as f32 / dh as f32 - 0.5;
+            let y0 = (fy.floor().max(0.0) as usize).min(sh - 1);
+            let y1 = (y0 + 1).min(sh - 1);
+            let wy = (fy - y0 as f32).clamp(0.0, 1.0);
+            let row0 = &img.pixels[y0 * sw * 4..][..sw * 4];
+            let row1 = &img.pixels[y1 * sw * 4..][..sw * 4];
+            for (out, &(x0, x1, wx)) in out_row.as_chunks_mut::<4>().0.iter_mut().zip(&xtaps) {
+                for c in 0..4 {
+                    let top = row0[x0 + c] as f32 * (1.0 - wx) + row0[x1 + c] as f32 * wx;
+                    let bot = row1[x0 + c] as f32 * (1.0 - wx) + row1[x1 + c] as f32 * wx;
+                    out[c] = (top * (1.0 - wy) + bot * wy + 0.5) as u8;
+                }
             }
-        }
-    }
+        });
     RgbaImage {
-        width: dw,
-        height: dh,
+        width: dw as u32,
+        height: dh as u32,
         pixels,
     }
 }

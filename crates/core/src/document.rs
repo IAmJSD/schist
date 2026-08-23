@@ -1023,6 +1023,18 @@ pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8])
             continue;
         }
         let buf = tiles.get_mut_or_insert(coord, depth);
+        if let crate::tile::TileBuf::U8(d) = buf {
+            // 8-bit tiles share the source's layout; the f32 round-trip
+            // below is the identity on them, so copy whole rows.
+            let n = (clip.right - clip.left) as usize * 4;
+            for y in clip.top..clip.bottom {
+                let s = ((y - rect.top) as usize * w + (clip.left - rect.left) as usize) * 4;
+                let l = (y - trect.top) as usize * TILE_SIZE as usize
+                    + (clip.left - trect.left) as usize;
+                d[l * 4..l * 4 + n].copy_from_slice(&rgba[s..s + n]);
+            }
+            continue;
+        }
         for y in clip.top..clip.bottom {
             let sy = (y - rect.top) as usize;
             let ly = (y - trect.top) as usize;

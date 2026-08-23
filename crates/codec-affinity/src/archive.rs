@@ -126,8 +126,14 @@ pub struct Archive<'a> {
     pub creation_date: u64,
     thumb_offset: u64,
     /// Name → id, as introduced by flag-0 entries.
-    names: Vec<(String, u32)>,
+    names: rustc_hash::FxHashMap<String, u32>,
     entries: Vec<Entry>,
+    /// First-appearance order of names, for `names()`.
+    name_order: Vec<String>,
+    /// Id → index in `entries` of its newest revision. Documents hold a
+    /// tile entry per 64 KiB of pixels, and each is looked up by name;
+    /// scanning the entry table per lookup is quadratic in file size.
+    heads: rustc_hash::FxHashMap<u32, usize>,
 }
 
 pub fn is_affinity(bytes: &[u8]) -> bool {
@@ -173,10 +179,26 @@ impl<'a> Archive<'a> {
             class_tag,
             creation_date,
             thumb_offset,
-            names: Vec::new(),
+            names: Default::default(),
             entries: Vec::new(),
+            name_order: Vec::new(),
+            heads: Default::default(),
         };
         archive.parse_fats(&mut c, fat_offset)?;
+        for (at, entry) in archive.entries.iter().enumerate() {
+            match archive.heads.entry(entry.id) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    // `>=` so that of two revisions in equally-dated
+                    // savepoints, the later-listed one wins.
+                    if entry.savepoint >= archive.entries[*o.get()].savepoint {
+                        o.insert(at);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(at);
+                }
+            }
+        }
         Ok(archive)
     }
 
@@ -249,12 +271,15 @@ impl<'a> Archive<'a> {
                 if flag == 0 {
                     let len = c.u16()? as usize;
                     let name = String::from_utf8_lossy(c.take(len)?).into_owned();
-                    match self.names.iter().find(|(n, _)| *n == name) {
-                        Some((_, existing)) if *existing != id => {
+                    match self.names.get(&name) {
+                        Some(existing) if *existing != id => {
                             return Err(malformed(format!("name {name:?} maps to two ids")));
                         }
                         Some(_) => {}
-                        None => self.names.push((name, id)),
+                        None => {
+                            self.name_order.push(name.clone());
+                            self.names.insert(name, id);
+                        }
                     }
                 }
                 self.entries.push(entry);
@@ -303,17 +328,14 @@ impl<'a> Archive<'a> {
 
     /// Names of every entry ever stored, in first-appearance order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.names.iter().map(|(n, _)| n.as_str())
+        self.name_order.iter().map(|n| n.as_str())
     }
 
     /// The newest revision of `name`, if it exists and is not deleted.
     pub fn head(&self, name: &str) -> Option<&Entry> {
-        let id = self.names.iter().find(|(n, _)| n == name)?.1;
-        self.entries
-            .iter()
-            .filter(|e| e.id == id)
-            .max_by_key(|e| e.savepoint)
-            .filter(|e| e.flag != 2)
+        let id = self.names.get(name)?;
+        let entry = &self.entries[*self.heads.get(id)?];
+        (entry.flag != 2).then_some(entry)
     }
 
     /// Decode one entry: decompress, undo prediction, verify the CRC.
@@ -428,18 +450,10 @@ fn undo_deinterleave_16(data: &mut [u8]) {
     data.copy_from_slice(&out);
 }
 
-/// Standard IEEE CRC-32 (the zlib polynomial), bitwise; entries are small
-/// enough that a table isn't worth the cache.
+/// Standard IEEE CRC-32 (the zlib polynomial). Every tile of every
+/// raster layer is checksummed, so this sits on the import hot path.
 pub(crate) fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]

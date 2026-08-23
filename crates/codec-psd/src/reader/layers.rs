@@ -3,10 +3,11 @@
 
 use super::cursor::Cursor;
 use super::header::Header;
-use super::pixels::{fill_mask_tiles, fill_tiles, plane_to_f32, ColorPlanes};
+use super::pixels::{fill_mask_tiles, fill_tiles, fill_tiles_u8, plane_to_f32, ColorPlanes};
 use super::rle::unpack_channel;
 use crate::error::PsdError;
-use schist_color::ColorMode;
+use rayon::prelude::*;
+use schist_color::{ColorMode, Depth};
 use schist_core::{
     AdjustmentData, AdjustmentKind, BlendMode, GroupLayer, IntRect, Layer, LayerId, LayerKind,
     LayerMask, MaskTileMap, RasterLayer, RawBlock, TileMap,
@@ -146,11 +147,28 @@ fn parse_layer_info(cur: &mut Cursor, header: &Header) -> Result<(Vec<Layer>, bo
     }
 
     // Channel image data follows all records, per layer in record order.
-    let mut parsed = Vec::with_capacity(recs.len());
-    for rec in recs {
-        let (tiles, mask_tiles) = decode_layer_channels(cur, &rec, header)?;
-        parsed.push((rec, tiles, mask_tiles));
+    // Each layer's share is the sum of its declared channel lengths, so
+    // the layers can be sliced up front and decoded in parallel —
+    // decompressing channel data is the bulk of opening a PSD.
+    let mut slices = Vec::with_capacity(recs.len());
+    for rec in &recs {
+        let total: u64 = rec
+            .channels
+            .iter()
+            .try_fold(0u64, |acc, &(_, len)| acc.checked_add(len))
+            .ok_or_else(|| PsdError::Corrupt("channel lengths overflow".into()))?;
+        let total = cur.checked_len(total)?;
+        slices.push(cur.take(total)?);
     }
+    let parsed = recs
+        .into_par_iter()
+        .zip(slices)
+        .map(|(rec, slice)| {
+            let mut ch_cur = Cursor::new(slice);
+            let (tiles, mask_tiles) = decode_layer_channels(&mut ch_cur, &rec, header)?;
+            Ok((rec, tiles, mask_tiles))
+        })
+        .collect::<Result<Vec<_>, PsdError>>()?;
 
     Ok((fold_groups(parsed, header), merged_alpha))
 }
@@ -361,10 +379,14 @@ fn decode_layer_channels(
     rec: &Rec,
     header: &Header,
 ) -> Result<(TileMap, Option<MaskTileMap>), PsdError> {
-    let mut planes = ColorPlanes::default();
+    // Channels are collected as the raw decompressed planes; conversion
+    // to f32 happens only on the paths that need it (16/32-bit depth,
+    // CMYK/Lab modes). 8-bit RGB/Gray — the overwhelmingly common case —
+    // interleaves the bytes directly.
+    let mut raw: [Option<Vec<u8>>; 4] = Default::default();
     let mut mask_bytes: Option<Vec<u8>> = None;
     // CMYK's black plane, which has no slot in `ColorPlanes`.
-    let mut key: Option<Vec<f32>> = None;
+    let mut key_bytes: Option<Vec<u8>> = None;
 
     for &(id, declared_len) in &rec.channels {
         let declared_len = cur.checked_len(declared_len)?;
@@ -440,28 +462,54 @@ fn decode_layer_channels(
 
         match target {
             Target::Mask => mask_bytes = Some(bytes),
-            Target::Alpha => planes.a = Some(plane_to_f32(&bytes, header.depth)),
-            Target::Color(0) => planes.r = Some(plane_to_f32(&bytes, header.depth)),
-            Target::Color(1) => planes.g = Some(plane_to_f32(&bytes, header.depth)),
-            Target::Color(2) => planes.b = Some(plane_to_f32(&bytes, header.depth)),
-            Target::Color(_) => key = Some(plane_to_f32(&bytes, header.depth)),
+            Target::Alpha => raw[3] = Some(bytes),
+            Target::Color(c @ 0..=2) => raw[c as usize] = Some(bytes),
+            Target::Color(_) => key_bytes = Some(bytes),
         }
-    }
-
-    // Convert whatever the file's mode stores into the RGBA everything
-    // downstream works in.
-    match header.mode {
-        ColorMode::Grayscale | ColorMode::Indexed => {
-            planes.g.clone_from(&planes.r);
-            planes.b.clone_from(&planes.r);
-        }
-        ColorMode::Cmyk => convert_cmyk_planes(&mut planes, key.as_deref()),
-        ColorMode::Lab => convert_lab_planes(&mut planes),
-        ColorMode::Rgb => {}
     }
 
     let mut tiles = TileMap::new();
-    fill_tiles(&mut tiles, header.depth, rec.rect, &planes);
+    if header.depth == Depth::Eight
+        && matches!(
+            header.mode,
+            ColorMode::Rgb | ColorMode::Grayscale | ColorMode::Indexed
+        )
+    {
+        let gray = !matches!(header.mode, ColorMode::Rgb);
+        let (g, b) = if gray {
+            (raw[0].as_deref(), raw[0].as_deref())
+        } else {
+            (raw[1].as_deref(), raw[2].as_deref())
+        };
+        fill_tiles_u8(
+            &mut tiles,
+            rec.rect,
+            [raw[0].as_deref(), g, b, raw[3].as_deref()],
+        );
+    } else {
+        let to_f32 = |p: &Option<Vec<u8>>| p.as_deref().map(|b| plane_to_f32(b, header.depth));
+        let mut planes = ColorPlanes {
+            r: to_f32(&raw[0]),
+            g: to_f32(&raw[1]),
+            b: to_f32(&raw[2]),
+            a: to_f32(&raw[3]),
+        };
+        let key = to_f32(&key_bytes);
+
+        // Convert whatever the file's mode stores into the RGBA everything
+        // downstream works in.
+        match header.mode {
+            ColorMode::Grayscale | ColorMode::Indexed => {
+                planes.g.clone_from(&planes.r);
+                planes.b.clone_from(&planes.r);
+            }
+            ColorMode::Cmyk => convert_cmyk_planes(&mut planes, key.as_deref()),
+            ColorMode::Lab => convert_lab_planes(&mut planes),
+            ColorMode::Rgb => {}
+        }
+
+        fill_tiles(&mut tiles, header.depth, rec.rect, &planes);
+    }
 
     let mask_tiles = match (&rec.mask, mask_bytes) {
         (Some(m), Some(bytes)) => {

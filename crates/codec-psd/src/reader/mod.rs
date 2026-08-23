@@ -93,6 +93,32 @@ fn background_from_composite(
     merged_alpha: bool,
 ) -> Layer {
     let base = header.base_channels() as usize;
+
+    // 8-bit RGB/Gray flattened files — the common bulk export — skip the
+    // f32 round-trip and interleave the raw planes directly.
+    if header.depth == schist_color::Depth::Eight
+        && matches!(
+            header.mode,
+            ColorMode::Rgb | ColorMode::Grayscale | ColorMode::Indexed
+        )
+    {
+        let plane = |i: usize| composite.planes.get(i).map(|p| p.as_slice());
+        let (g, b) = if matches!(header.mode, ColorMode::Rgb) {
+            (plane(1), plane(2))
+        } else {
+            (plane(0), plane(0))
+        };
+        let alpha = (merged_alpha && header.channels as usize > base)
+            .then(|| plane(base))
+            .flatten();
+        let mut layer = Layer::new_raster("Background");
+        let rect = IntRect::from_size(header.width, header.height);
+        if let schist_core::LayerKind::Raster(RasterLayer { tiles }) = &mut layer.kind {
+            pixels::fill_tiles_u8(tiles, rect, [plane(0), g, b, alpha]);
+        }
+        return layer;
+    }
+
     let to_f32 = |i: usize| {
         composite
             .planes

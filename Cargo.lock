@@ -5626,9 +5626,12 @@ dependencies = [
 name = "schist-codec-affinity"
 version = "0.3.0"
 dependencies = [
+ "crc32fast",
  "image",
  "log",
  "miniz_oxide",
+ "rayon",
+ "rustc-hash 2.1.3",
  "ruzstd",
  "schist-adjustments",
  "schist-color",
@@ -5650,6 +5653,8 @@ dependencies = [
  "byteorder",
  "log",
  "miniz_oxide",
+ "rayon",
+ "schist-codec-affinity",
  "schist-color",
  "schist-compositor",
  "schist-core",

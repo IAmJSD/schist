@@ -960,25 +960,41 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Open `path` without blocking the window: the read and decode run
+    /// on a background thread and the document is installed when ready.
     pub fn load_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let result = (|| -> anyhow::Result<Document> {
-            let bytes = std::fs::read(&path)?;
-            let ext = path.extension().and_then(|e| e.to_str());
-            let codec = self
-                .registry
-                .codec_for(&bytes, ext)
-                .ok_or_else(|| anyhow::anyhow!("no codec for {}", path.display()))?;
-            let mut doc = codec.import(&bytes)?;
-            doc.title = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled".into());
-            doc.path = Some(path.clone());
-            Ok(doc)
-        })();
+        self.status = format!("Opening {}\u{2026}", path.display()).into();
+        cx.notify();
+        let codecs = self.registry.shared_codecs();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { decode_file(&codecs, &path) })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.finish_load(result, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The synchronous version of [`Self::load_file`], for the recovery
+    /// path, which fixes up the document as soon as it is installed.
+    fn load_file_sync(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let result = decode_file(&self.registry.shared_codecs(), &path);
+        self.finish_load(result, cx);
+        cx.notify();
+    }
+
+    fn finish_load(&mut self, result: anyhow::Result<Document>, cx: &mut Context<Self>) {
         match result {
             Ok(doc) => {
-                self.status = format!("Opened {}", path.display()).into();
+                self.status = match &doc.path {
+                    Some(p) => format!("Opened {}", p.display()).into(),
+                    None => format!("Opened {}", doc.title).into(),
+                };
                 self.install_document(doc);
                 self.offer_missing_fonts(cx);
             }
@@ -987,7 +1003,6 @@ impl Workspace {
                 self.status = format!("Open failed: {err}").into();
             }
         }
-        cx.notify();
     }
 
     /// Serialize the document to `path`, choosing the codec by extension.
@@ -1142,7 +1157,7 @@ impl Workspace {
 
     /// Load a recovery snapshot and mark it dirty (it has no real path).
     pub fn recover_from(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.load_file(path.clone(), cx);
+        self.load_file_sync(path.clone(), cx);
         if let Some(doc) = &mut self.doc {
             doc.path = None;
             doc.dirty = true;
@@ -3853,18 +3868,49 @@ impl Workspace {
             ((doc.width as f32 / scale) as u32).clamp(1, MAX),
             ((doc.height as f32 / scale) as u32).clamp(1, 84),
         );
-        let rgba = schist_compositor::composite_region_rgba8(doc, doc.canvas_rect());
+        // Point-sample through the shared tile cache rather than
+        // compositing the whole canvas at full resolution: tiles the
+        // viewport has already composited are reused, an edit
+        // recomposites only the tiles it damaged, and no canvas-sized
+        // full-resolution buffer ever exists.
+        let sxs: Vec<u32> = (0..w)
+            .map(|tx| (((tx as f32 + 0.5) * scale) as u32).min(doc.width - 1))
+            .collect();
+        let sys: Vec<u32> = (0..h)
+            .map(|ty| (((ty as f32 + 0.5) * scale) as u32).min(doc.height - 1))
+            .collect();
+        let dedup = |v: &[u32]| {
+            let mut t: Vec<i32> = v
+                .iter()
+                .map(|&s| (s as i32).div_euclid(TILE_SIZE))
+                .collect();
+            t.dedup();
+            t
+        };
+        let (tcols, trows) = (dedup(&sxs), dedup(&sys));
+        let coords: Vec<TileCoord> = trows
+            .iter()
+            .flat_map(|&ty| tcols.iter().map(move |&tx| TileCoord { tx, ty }))
+            .collect();
+        self.cache.prewarm(doc, &coords);
         let mut bgra = vec![0u8; (w * h * 4) as usize];
         for ty in 0..h {
             for tx in 0..w {
-                let sx = ((tx as f32 + 0.5) * scale) as u32;
-                let sy = ((ty as f32 + 0.5) * scale) as u32;
-                let s = ((sy.min(doc.height - 1) * doc.width + sx.min(doc.width - 1)) * 4) as usize;
+                let (sx, sy) = (sxs[tx as usize] as i32, sys[ty as usize] as i32);
+                let tile = self.cache.get(
+                    doc,
+                    TileCoord {
+                        tx: sx.div_euclid(TILE_SIZE),
+                        ty: sy.div_euclid(TILE_SIZE),
+                    },
+                );
+                let s = ((sy.rem_euclid(TILE_SIZE) * TILE_SIZE + sx.rem_euclid(TILE_SIZE)) * 4)
+                    as usize;
                 let (r, g, b, a) = (
-                    rgba[s] as u32,
-                    rgba[s + 1] as u32,
-                    rgba[s + 2] as u32,
-                    rgba[s + 3] as u32,
+                    tile[s] as u32,
+                    tile[s + 1] as u32,
+                    tile[s + 2] as u32,
+                    tile[s + 3] as u32,
                 );
                 let bg = if ((tx >> 2) + (ty >> 2)) & 1 == 0 {
                     0xE0
@@ -5941,6 +5987,33 @@ fn install_faces(faces: &[crate::fonts::Face]) -> Result<usize, String> {
         installed += 1;
     }
     Ok(installed)
+}
+
+/// Read and decode a document file. Blocking and potentially seconds of
+/// work for a large layered file, so it runs on a background thread.
+fn decode_file(
+    codecs: &[Arc<dyn schist_plugin_api::CodecPlugin>],
+    path: &std::path::Path,
+) -> anyhow::Result<Document> {
+    let bytes = std::fs::read(path)?;
+    let ext = path.extension().and_then(|e| e.to_str());
+    let codec = codecs
+        .iter()
+        .find(|c| c.probe(&bytes))
+        .or_else(|| {
+            let ext = ext?.to_ascii_lowercase();
+            codecs
+                .iter()
+                .find(|c| c.extensions().contains(&ext.as_str()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("no codec for {}", path.display()))?;
+    let mut doc = codec.import(&bytes)?;
+    doc.title = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled".into());
+    doc.path = Some(path.to_path_buf());
+    Ok(doc)
 }
 
 /// Fetch a model over HTTP. Blocking, so it runs on a background thread.
