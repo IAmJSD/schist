@@ -19,6 +19,10 @@ const BUDGET_BYTES: usize = 256 << 20;
 const MAX_CHUNK_TILES: usize = 128;
 
 pub struct GpuContext {
+    /// One batch at a time: error scopes are a per-device stack, so
+    /// concurrent submissions would pop each other's scopes and attribute
+    /// failures to the wrong caller.
+    work: parking_lot::Mutex<()>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     composite: wgpu::ComputePipeline,
@@ -34,7 +38,20 @@ pub enum BatchOut {
 
 impl GpuContext {
     pub fn new() -> Result<GpuContext, String> {
-        let instance = wgpu::Instance::default();
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut instance_desc = wgpu::InstanceDescriptor::from_env_or_default();
+        // FXC, the default DX12 shader compiler, miscompiles the
+        // switch-heavy op interpreter (Color Burn came back as noise on
+        // WARP); the statically linked DXC does not. Respect an explicit
+        // WGPU_DX12_COMPILER override.
+        #[cfg(windows)]
+        if matches!(
+            instance_desc.backend_options.dx12.shader_compiler,
+            wgpu::Dx12Compiler::Fxc
+        ) {
+            instance_desc.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::StaticDxc;
+        }
+        let instance = wgpu::Instance::new(&instance_desc);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
@@ -92,6 +109,7 @@ impl GpuContext {
             })
         };
         let ctx = GpuContext {
+            work: parking_lot::Mutex::new(()),
             composite: make(&composite_module, "composite"),
             pack: make(&pack_module, "pack_rgba8"),
             viewport: make(&viewport_module, "viewport"),
@@ -121,6 +139,7 @@ impl GpuContext {
         if out_bytes > BUDGET_BYTES || present * TILE_PIXELS * 4 > BUDGET_BYTES {
             return None;
         }
+        let _work = self.work.lock();
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut tile_bytes: Vec<u8> = Vec::with_capacity(present * TILE_PIXELS * 4);
         let mut index = Vec::with_capacity(grid.len());
@@ -318,6 +337,7 @@ impl GpuContext {
     }
 
     fn run_chunk(&self, plan: &Plan<'_>, coords: &[TileCoord], rgba8: bool) -> Option<BatchOut> {
+        let _work = self.work.lock();
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let n_tiles = coords.len();
         let n_rows = plan.sources.len();

@@ -22,3 +22,9 @@ pollster.workspace = true
 
 [dev-dependencies]
 schist-pixel-ops.workspace = true
+
+# FXC (the default DX12 shader compiler) miscompiles this crate's switch-
+# heavy compute shaders; DXC handles them. Statically linked so nothing
+# extra ships beside the binary.
+[target.'cfg(windows)'.dependencies]
+wgpu = { workspace = true, features = ["static-dxc"] }
