@@ -505,16 +505,19 @@ impl GpuContext {
         let data = slice.get_mapped_range();
         let out = if rgba8 {
             BatchOut::Rgba8(
-                data.chunks_exact(TILE_PIXELS * 4)
-                    .map(|c| c.to_vec())
+                (0..n_tiles)
+                    .map(|t| data[t * TILE_PIXELS * 4..(t + 1) * TILE_PIXELS * 4].to_vec())
                     .collect(),
             )
         } else {
             BatchOut::F32(
-                data.chunks_exact(TILE_PIXELS * 16)
-                    .map(|c| {
-                        c.chunks_exact(4)
-                            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                (0..n_tiles)
+                    .map(|t| {
+                        data[t * TILE_PIXELS * 16..(t + 1) * TILE_PIXELS * 16]
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|b| f32::from_le_bytes(*b))
                             .collect()
                     })
                     .collect(),
@@ -546,14 +549,16 @@ fn cast_i32s(words: &[i32]) -> &[u32] {
 fn pack_pixels(out: &mut Vec<u32>, buf: &TileBuf, fmt: u32) {
     match (buf, fmt) {
         (TileBuf::U8(d), 0) => {
-            out.extend(d.chunks_exact(4).map(|p| {
+            out.extend(d.as_chunks::<4>().0.iter().map(|p| {
                 p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | (p[3] as u32) << 24
             }));
         }
         (TileBuf::U8(d), 1) => {
             // v/255 == (v*257)/65535, exactly.
             out.extend(
-                d.chunks_exact(2)
+                d.as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|p| (p[0] as u32 * 257) | (p[1] as u32 * 257) << 16),
             );
         }
@@ -561,7 +566,12 @@ fn pack_pixels(out: &mut Vec<u32>, buf: &TileBuf, fmt: u32) {
             out.extend(d.iter().map(|&v| (v as f32 / 255.0).to_bits()));
         }
         (TileBuf::U16(d), 1) => {
-            out.extend(d.chunks_exact(2).map(|p| p[0] as u32 | (p[1] as u32) << 16));
+            out.extend(
+                d.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|p| p[0] as u32 | (p[1] as u32) << 16),
+            );
         }
         (TileBuf::U16(d), _) => {
             out.extend(d.iter().map(|&v| (v as f32 / 65535.0).to_bits()));
@@ -574,7 +584,9 @@ fn pack_pixels(out: &mut Vec<u32>, buf: &TileBuf, fmt: u32) {
 
 fn pack_mask(out: &mut Vec<u32>, buf: &[u8; TILE_PIXELS]) {
     out.extend(
-        buf.chunks_exact(4)
+        buf.as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | (p[3] as u32) << 24),
     );
 }
