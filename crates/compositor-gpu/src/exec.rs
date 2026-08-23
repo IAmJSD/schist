@@ -23,11 +23,18 @@ pub struct GpuContext {
     /// concurrent submissions would pop each other's scopes and attribute
     /// failures to the wrong caller.
     work: parking_lot::Mutex<()>,
+    /// The largest storage buffer this device will bind, and what fx jobs
+    /// band themselves to fit. Overridable so tests can force the banded
+    /// path on hardware roomy enough to skip it.
+    binding_limit: std::sync::atomic::AtomicUsize,
     device: wgpu::Device,
     queue: wgpu::Queue,
     composite: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
     viewport: wgpu::ComputePipeline,
+    fx_blur: wgpu::ComputePipeline,
+    fx_lens: wgpu::ComputePipeline,
+    fx_warp: wgpu::ComputePipeline,
     info: wgpu::AdapterInfo,
 }
 
@@ -68,6 +75,11 @@ impl GpuContext {
             .max_buffer_size
             .min(1 << 30)
             .max(limits.max_buffer_size);
+        // What fx jobs band themselves to: the smaller of what one
+        // binding takes and what one buffer may be.
+        let binding_limit = (limits.max_storage_buffer_binding_size as u64)
+            .min(limits.max_buffer_size)
+            .min(usize::MAX as u64) as usize;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("schist-compositor-gpu"),
             required_features: wgpu::Features::empty(),
@@ -98,6 +110,12 @@ impl GpuContext {
         let composite_module = make_module("composite.wgsl", include_str!("composite.wgsl"));
         let pack_module = make_module("pack.wgsl", include_str!("pack.wgsl"));
         let viewport_module = make_module("viewport.wgsl", include_str!("viewport.wgsl"));
+        // One module per kernel: naga's HLSL backend rejects entry points
+        // that share a bind group with different layouts, and on DX12 that
+        // shows up as a dispatch that silently does nothing.
+        let fx_blur_module = make_module("fx_blur.wgsl", include_str!("fx_blur.wgsl"));
+        let fx_lens_module = make_module("fx_lens.wgsl", include_str!("fx_lens.wgsl"));
+        let fx_warp_module = make_module("fx_warp.wgsl", include_str!("fx_warp.wgsl"));
         let make = |module: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -110,9 +128,13 @@ impl GpuContext {
         };
         let ctx = GpuContext {
             work: parking_lot::Mutex::new(()),
+            binding_limit: std::sync::atomic::AtomicUsize::new(binding_limit),
             composite: make(&composite_module, "composite"),
             pack: make(&pack_module, "pack_rgba8"),
             viewport: make(&viewport_module, "viewport"),
+            fx_blur: make(&fx_blur_module, "box_pass"),
+            fx_lens: make(&fx_lens_module, "lens_blur"),
+            fx_warp: make(&fx_warp_module, "mesh_warp"),
             info: adapter.get_info(),
             device,
             queue,
@@ -264,6 +286,390 @@ impl GpuContext {
         Some(out)
     }
 
+    /// The largest storage buffer this device will bind.
+    pub fn binding_limit(&self) -> usize {
+        self.binding_limit
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Pretend the device binds no more than `bytes` at once, so a test or
+    /// a bench can exercise the banded path anywhere.
+    pub fn set_binding_limit(&self, bytes: usize) {
+        self.binding_limit
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many rows of `width` fit in one binding, and the overlap a band
+    /// needs for its kept rows to come out identical to the whole-image
+    /// result.
+    ///
+    /// A vertical pass spreads information by `radius` rows, so after
+    /// `passes` of them a row is correct as long as `passes * radius` real
+    /// rows sit either side of it. Horizontal passes move nothing
+    /// vertically, and a band that reaches the top or bottom of the image
+    /// clamps against the real edge, which is what the reference does too.
+    fn band_plan(&self, width: usize, height: usize, halo: usize) -> Option<(usize, usize)> {
+        let row_bytes = width.checked_mul(16)?;
+        if row_bytes == 0 {
+            return None;
+        }
+        let rows = self.binding_limit() / row_bytes;
+        let needed = halo.checked_mul(2)?.checked_add(1)?;
+        if rows < needed {
+            return None; // not even one useful band fits
+        }
+        Some(((rows - halo * 2).min(height).max(1), halo))
+    }
+
+    /// Run `schist_fx`'s separable box blur: one upload, `2 × passes`
+    /// dispatches ping-ponging between two buffers, one readback. The
+    /// premultiply and unpremultiply the reference does as separate sweeps
+    /// fold into the first read and the last write.
+    ///
+    /// A plane too big for one binding is split into horizontal bands with
+    /// an overlap wide enough that the rows each band keeps are the ones
+    /// the whole-image pass would have produced.
+    pub fn run_blur(&self, job: &schist_fx::BlurJob<'_>) -> Option<Vec<f32>> {
+        let halo = job.passes.checked_mul(job.radius)?;
+        let (band_rows, halo) = self.band_plan(job.width, job.height, halo)?;
+        if band_rows >= job.height {
+            return self.blur_plane(job.px, job.width, job.height, job.radius, job.passes);
+        }
+        let mut out = vec![0.0f32; job.px.len()];
+        let mut top = 0usize;
+        while top < job.height {
+            let bottom = (top + band_rows).min(job.height);
+            let a = top.saturating_sub(halo);
+            let b = (bottom + halo).min(job.height);
+            let banded = self.blur_plane(
+                &job.px[a * job.width * 4..b * job.width * 4],
+                job.width,
+                b - a,
+                job.radius,
+                job.passes,
+            )?;
+            let keep = (top - a) * job.width * 4..(bottom - a) * job.width * 4;
+            out[top * job.width * 4..bottom * job.width * 4].copy_from_slice(&banded[keep]);
+            top = bottom;
+        }
+        Some(out)
+    }
+
+    fn blur_plane(
+        &self,
+        px: &[f32],
+        width: usize,
+        height: usize,
+        radius: usize,
+        passes: usize,
+    ) -> Option<Vec<f32>> {
+        let _work = self.work.lock();
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let bytes = std::mem::size_of_val(px) as u64;
+        let front = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-blur-a"),
+                contents: crate::fx::cast_f32s(px),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
+        let back = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx-blur-b"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        // One uniform per dispatch: the axis flips each step, and the
+        // premultiply/unpremultiply flags only fire on the first and last.
+        let steps = passes * 2;
+        let params: Vec<wgpu::Buffer> = (0..steps)
+            .map(|step| {
+                let vertical = step % 2 == 1;
+                let mut flags = 0u32;
+                if step == 0 {
+                    flags |= 1; // premultiply on read
+                }
+                if step == steps - 1 {
+                    flags |= 2; // unpremultiply on write
+                }
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("fx-blur-params"),
+                        contents: cast_u32s(&[
+                            width as u32,
+                            height as u32,
+                            radius as u32,
+                            flags,
+                            vertical as u32,
+                            0,
+                            0,
+                            0,
+                        ]),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    })
+            })
+            .collect();
+        let binds: Vec<wgpu::BindGroup> = params
+            .iter()
+            .enumerate()
+            .map(|(step, params)| {
+                let (src, dst) = if step % 2 == 1 {
+                    (&back, &front)
+                } else {
+                    (&front, &back)
+                };
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("fx-blur"),
+                    layout: &self.fx_blur.get_bind_group_layout(0),
+                    entries: &[
+                        bind_entry(0, params),
+                        bind_entry(1, src),
+                        bind_entry(2, dst),
+                    ],
+                })
+            })
+            .collect();
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-blur"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.fx_blur);
+            for bind in &binds {
+                pass.set_bind_group(0, bind, &[]);
+                pass.dispatch_workgroups(
+                    (width as u32).div_ceil(16),
+                    (height as u32).div_ceil(16),
+                    1,
+                );
+            }
+        }
+        self.finish_fx(encoder, &front, bytes, "blur")
+    }
+
+    /// Lens blur, banded on the same rule as [`run_blur`](Self::run_blur):
+    /// one dispatch reaches `radius` rows, so that is the overlap.
+    pub fn run_lens_blur(&self, job: &schist_fx::LensJob<'_>) -> Option<Vec<f32>> {
+        let halo = job.radius.max(0) as usize;
+        let (band_rows, halo) = self.band_plan(job.width, job.height, halo)?;
+        if band_rows >= job.height {
+            return self.lens_plane(job.px, job.width, job.height, job.radius, job.boost);
+        }
+        let mut out = vec![0.0f32; job.px.len()];
+        let mut top = 0usize;
+        while top < job.height {
+            let bottom = (top + band_rows).min(job.height);
+            let a = top.saturating_sub(halo);
+            let b = (bottom + halo).min(job.height);
+            let banded = self.lens_plane(
+                &job.px[a * job.width * 4..b * job.width * 4],
+                job.width,
+                b - a,
+                job.radius,
+                job.boost,
+            )?;
+            let keep = (top - a) * job.width * 4..(bottom - a) * job.width * 4;
+            out[top * job.width * 4..bottom * job.width * 4].copy_from_slice(&banded[keep]);
+            top = bottom;
+        }
+        Some(out)
+    }
+
+    fn lens_plane(
+        &self,
+        px: &[f32],
+        width: usize,
+        height: usize,
+        radius: i32,
+        boost: f32,
+    ) -> Option<Vec<f32>> {
+        let _work = self.work.lock();
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let bytes = std::mem::size_of_val(px) as u64;
+        let src = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-lens-src"),
+                contents: crate::fx::cast_f32s(px),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let dst = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx-lens-dst"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let params = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-lens-params"),
+                contents: cast_u32s(&[width as u32, height as u32, radius as u32, boost.to_bits()]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx-lens"),
+            layout: &self.fx_lens.get_bind_group_layout(0),
+            entries: &[
+                bind_entry(0, &params),
+                bind_entry(1, &src),
+                bind_entry(2, &dst),
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-lens"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.fx_lens);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups((width as u32).div_ceil(16), (height as u32).div_ceil(16), 1);
+        }
+        self.finish_fx(encoder, &dst, bytes, "lens blur")
+    }
+
+    /// Upload a warp source plane. Callers hold the buffer for as long as
+    /// the pixels behind it are unchanged — a whole Liquify drag — so the
+    /// per-move cost is one dispatch and one readback.
+    pub fn upload_warp_source(&self, src: &[f32]) -> Option<wgpu::Buffer> {
+        let contents = crate::fx::cast_f32s(src);
+        if contents.is_empty() {
+            return None;
+        }
+        Some(
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx-warp-source"),
+                    contents,
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+        )
+    }
+
+    /// Warp through `src`, which the caller keeps resident across a drag.
+    pub fn run_warp(
+        &self,
+        job: &schist_fx::WarpParams<'_>,
+        src: &wgpu::Buffer,
+    ) -> Option<Vec<f32>> {
+        let _work = self.work.lock();
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let bytes = (job.dst_width * job.dst_height * 16) as u64;
+        let dst = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx-warp-dst"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let params = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-warp-params"),
+                contents: cast_u32s(&[
+                    job.src_width as u32,
+                    job.src_height as u32,
+                    job.src_origin.0 as u32,
+                    job.src_origin.1 as u32,
+                    job.dst_width as u32,
+                    job.dst_height as u32,
+                    job.dst_origin.0 as u32,
+                    job.dst_origin.1 as u32,
+                    job.mesh_cols as u32,
+                    job.mesh_rows as u32,
+                    job.mesh_origin.0 as u32,
+                    job.mesh_origin.1 as u32,
+                    job.cell.to_bits(),
+                    0,
+                    0,
+                    0,
+                ]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let mesh = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-warp-mesh"),
+                contents: if job.mesh.is_empty() {
+                    &[0; 8]
+                } else {
+                    crate::fx::cast_f32s(job.mesh)
+                },
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx-warp"),
+            layout: &self.fx_warp.get_bind_group_layout(0),
+            entries: &[
+                bind_entry(0, &params),
+                bind_entry(1, src),
+                bind_entry(2, &dst),
+                bind_entry(3, &mesh),
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-warp"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.fx_warp);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(
+                (job.dst_width as u32).div_ceil(16),
+                (job.dst_height as u32).div_ceil(16),
+                1,
+            );
+        }
+        self.finish_fx(encoder, &dst, bytes, "warp")
+    }
+
+    /// Submit, read `bytes` back out of `out`, and turn any validation
+    /// failure into `None` so the caller runs the CPU reference.
+    fn finish_fx(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        out: &wgpu::Buffer,
+        bytes: u64,
+        what: &str,
+    ) -> Option<Vec<f32>> {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx-staging"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(out, 0, &staging, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range();
+        let floats: Vec<f32> = data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        drop(data);
+        staging.unmap();
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            log::warn!("gpu {what} failed, falling back to the CPU: {err}");
+            return None;
+        }
+        Some(floats)
+    }
+
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.info
     }
@@ -409,8 +815,8 @@ impl GpuContext {
                 op.fill[2].to_bits(),
                 op.fill[3].to_bits(),
                 op.mask.default_value.to_bits(),
-                0,
-                0,
+                op.direct,
+                op.dparams as u32,
                 0,
             ]);
         }
@@ -447,6 +853,14 @@ impl GpuContext {
             "luts",
             &plan.luts.iter().map(|f| f.to_bits()).collect::<Vec<u32>>(),
         );
+        let directs_buf = storage(
+            "direct-params",
+            &plan
+                .directs
+                .iter()
+                .map(|f| f.to_bits())
+                .collect::<Vec<u32>>(),
+        );
         let out_f32 = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("out-f32"),
             size: (n_tiles * TILE_PIXELS * 16) as u64,
@@ -466,6 +880,7 @@ impl GpuContext {
                 bind_entry(5, &slots_buf),
                 bind_entry(6, &luts_buf),
                 bind_entry(7, &out_f32),
+                bind_entry(8, &directs_buf),
             ],
         });
 

@@ -111,6 +111,9 @@ pub fn mesh_from_pins(rect: IntRect, pins: &[Pin], stiffness: f32) -> Mesh {
 struct Session {
     layer: LayerId,
     original: TileMap,
+    /// Names `original` for a backend that can keep it resident: the pins
+    /// move, the snapshot behind them does not.
+    token: u64,
     rect: IntRect,
 }
 
@@ -156,6 +159,7 @@ impl PuppetWarpTool {
         self.session = Some(Session {
             layer: id,
             original: raster.tiles.clone(),
+            token: crate::mesh::next_source_token(),
             rect,
         });
     }
@@ -176,7 +180,13 @@ impl PuppetWarpTool {
         }
         let depth = doc.depth;
         let mesh = mesh_from_pins(session.rect, &self.pins, self.stiffness);
-        let warped = warp_tiles(&session.original, &mesh, depth, doc.canvas_rect());
+        let warped = warp_tiles(
+            &session.original,
+            &mesh,
+            depth,
+            doc.canvas_rect(),
+            session.token,
+        );
         let mut tiles = session.original.clone();
         for (coord, buf) in warped.iter() {
             *tiles.get_mut_or_insert(*coord, depth) = (**buf).clone();
@@ -202,7 +212,13 @@ impl PuppetWarpTool {
         }
         let depth = ctx.doc.depth;
         let mesh = mesh_from_pins(session.rect, &self.pins, self.stiffness);
-        let warped = warp_tiles(&session.original, &mesh, depth, ctx.doc.canvas_rect());
+        let warped = warp_tiles(
+            &session.original,
+            &mesh,
+            depth,
+            ctx.doc.canvas_rect(),
+            session.token,
+        );
         let mut tiles = session.original.clone();
         for (coord, buf) in warped.iter() {
             *tiles.get_mut_or_insert(*coord, depth) = (**buf).clone();

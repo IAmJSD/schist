@@ -5601,6 +5601,7 @@ dependencies = [
  "schist-compositor-gpu",
  "schist-core",
  "schist-filters-core",
+ "schist-fx",
  "schist-layer-fx",
  "schist-neural",
  "schist-plugin-api",
@@ -5734,7 +5735,11 @@ dependencies = [
  "schist-color",
  "schist-compositor",
  "schist-core",
+ "schist-filters-core",
+ "schist-fx",
  "schist-pixel-ops",
+ "schist-plugin-api",
+ "schist-tools-warp",
  "serde_json",
  "wgpu",
 ]
@@ -5758,9 +5763,14 @@ name = "schist-filters-core"
 version = "0.3.0"
 dependencies = [
  "schist-color",
+ "schist-fx",
  "schist-neural",
  "schist-plugin-api",
 ]
+
+[[package]]
+name = "schist-fx"
+version = "0.3.0"
 
 [[package]]
 name = "schist-layer-fx"
@@ -5965,6 +5975,7 @@ version = "0.3.0"
 dependencies = [
  "schist-color",
  "schist-core",
+ "schist-fx",
  "schist-plugin-api",
 ]
 

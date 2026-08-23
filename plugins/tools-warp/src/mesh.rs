@@ -8,6 +8,7 @@
 
 use schist_color::{Depth, Rgba};
 use schist_core::{IntRect, TileCoord, TileMap, TILE_SIZE};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Grid spacing in pixels. Small enough that a brush of any usable size
 /// covers several cells, large enough to keep the mesh cheap.
@@ -125,42 +126,62 @@ impl Mesh {
     }
 }
 
+/// Identify one warp source for the life of a drag.
+///
+/// Liquify and Puppet Warp both re-render from a snapshot taken when the
+/// gesture started, so the pixels never change while the mesh does — which
+/// is exactly what lets an accelerated backend keep the source plane
+/// resident and pay only for the result coming back. Anything that hands
+/// out a token is promising the pixels behind it are frozen.
+pub fn next_source_token() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Resample `src` through `mesh`, writing into a fresh tile map.
 ///
 /// Sampling is bilinear on premultiplied alpha, so warping something with
-/// a soft edge does not fringe it.
-pub fn warp_tiles(src: &TileMap, mesh: &Mesh, depth: Depth, clip: IntRect) -> TileMap {
+/// a soft edge does not fringe it. `src_token` names the snapshot for a
+/// backend that can cache it (see [`next_source_token`]); 0 disables that.
+pub fn warp_tiles(
+    src: &TileMap,
+    mesh: &Mesh,
+    depth: Depth,
+    clip: IntRect,
+    src_token: u64,
+) -> TileMap {
     let mut out = TileMap::new();
     let region = mesh.rect.intersect(&clip);
     if region.is_empty() {
         return out;
     }
-    let fetch = |fx: f32, fy: f32| -> Rgba {
-        let (x0, y0) = (fx.floor(), fy.floor());
-        let (tx, ty) = (fx - x0, fy - y0);
-        let (x0, y0) = (x0 as i32, y0 as i32);
-        let mut acc = [0.0f32; 4];
-        for (dx, dy, w) in [
-            (0, 0, (1.0 - tx) * (1.0 - ty)),
-            (1, 0, tx * (1.0 - ty)),
-            (0, 1, (1.0 - tx) * ty),
-            (1, 1, tx * ty),
-        ] {
-            if w <= 0.0 {
-                continue;
-            }
-            let p = src.pixel(x0 + dx, y0 + dy);
-            acc[0] += p.r * p.a * w;
-            acc[1] += p.g * p.a * w;
-            acc[2] += p.b * p.a * w;
-            acc[3] += p.a * w;
-        }
-        if acc[3] <= 1e-6 {
-            return Rgba::TRANSPARENT;
-        }
-        Rgba::new(acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3], acc[3])
+    // The source plane is the whole snapshot, not just what this mesh
+    // reaches: it has to stay the same across a drag for the token to mean
+    // anything, and outside the stored tiles the map reads as transparent
+    // anyway.
+    let plane = src.tile_bounds();
+    let offsets: Vec<f32> = mesh
+        .offsets
+        .iter()
+        .flat_map(|(dx, dy)| [*dx, *dy])
+        .collect();
+    let params = schist_fx::WarpParams {
+        src_width: plane.width().max(0) as usize,
+        src_height: plane.height().max(0) as usize,
+        src_origin: (plane.left, plane.top),
+        dst_origin: (region.left, region.top),
+        dst_width: region.width().max(0) as usize,
+        dst_height: region.height().max(0) as usize,
+        mesh: &offsets,
+        mesh_cols: mesh.cols,
+        mesh_rows: mesh.rows,
+        cell: CELL,
+        mesh_origin: (mesh.rect.left, mesh.rect.top),
+        src_token,
     };
+    let warped = schist_fx::warp(&params, || flatten(src, plane));
 
+    let stride = params.dst_width;
     for coord in TileCoord::covering(&region) {
         let trect = coord.rect();
         let cliprect = trect.intersect(&region);
@@ -170,12 +191,27 @@ pub fn warp_tiles(src: &TileMap, mesh: &Mesh, depth: Depth, clip: IntRect) -> Ti
         let buf = out.get_mut_or_insert(coord, depth);
         for y in cliprect.top..cliprect.bottom {
             for x in cliprect.left..cliprect.right {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                let (dx, dy) = mesh.sample(fx, fy);
-                let px = fetch(fx + dx - 0.5, fy + dy - 0.5);
+                let i = ((y - region.top) as usize * stride + (x - region.left) as usize) * 4;
                 let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
-                buf.set(ix, px);
+                buf.set(
+                    ix,
+                    Rgba::new(warped[i], warped[i + 1], warped[i + 2], warped[i + 3]),
+                );
             }
+        }
+    }
+    out
+}
+
+/// Copy a tile map's stored region out into one flat straight-alpha plane.
+fn flatten(src: &TileMap, rect: IntRect) -> Vec<f32> {
+    let (w, h) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
+    let mut out = vec![0.0f32; w * h * 4];
+    for row in 0..h {
+        for col in 0..w {
+            let p = src.pixel(rect.left + col as i32, rect.top + row as i32);
+            let i = (row * w + col) * 4;
+            out[i..i + 4].copy_from_slice(&[p.r, p.g, p.b, p.a]);
         }
     }
     out

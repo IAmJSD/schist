@@ -26,6 +26,7 @@ schist-color.workspace = true
 schist-plugin-api.workspace = true
 schist-compositor.workspace = true
 schist-compositor-gpu.workspace = true
+schist-fx.workspace = true
 schist-layer-fx.workspace = true
 schist-neural.workspace = true
 schist-codec-psd.workspace = true

@@ -11,6 +11,7 @@ crates/app              GPUI shell: window, canvas, panels, dialogs, keymap
 ├── crates/pixel-ops    CPU reference blend modes (the semantic contract)
 ├── crates/compositor   tile compositor, viewport resampling, damage cache
 ├── crates/compositor-gpu  wgpu compute backend, parity-tested against the CPU
+├── crates/fx           blur/warp kernels with the same CPU-reference seam
 ├── crates/adjustments  adjustment parameters, PSD payloads, LUT compilation
 ├── crates/vector       path building, Bézier flattening, AA rasterization
 ├── crates/text-engine  font discovery, layout, glyph rasterization
@@ -90,10 +91,29 @@ crisp/bilinear/box zoom logic the canvas uses) has the same dual
 implementation. GPUI doesn't expose its render device, so this is a
 second wgpu instance and results come back over the bus — which batching
 amortizes, and which is why the damage-driven single-tile path stays
-cheap either way. Documents using the four non-LUT adjustment kinds
-(hue/saturation, black & white, threshold, posterize) as layers, layers
-mid-drag, or nesting deeper than the shader's fixed stack fall back to
-the CPU reference per call, bit-identically.
+cheap either way. Adjustment layers arrive as a per-channel LUT where one
+exists and as an explicit shader branch where none does — hue/saturation,
+black & white, threshold and posterize mix channels or step, so the plan
+sends their coefficients instead of a table. Layers mid-drag and nesting
+deeper than the shader's fixed stack fall back to the CPU reference per
+call, bit-identically.
+
+A **second seam** (`crates/fx`) covers the pixel work that is not
+compositing: the separable box passes behind every Gaussian, the lens
+blur's disc, and the mesh resample Liquify and Puppet Warp re-run on every
+pointer move. Same shape as the compositor's — a `FxBackend` trait,
+`set_backend`, a CPU reference that is the contract — with two additions
+the compositor doesn't need. Jobs declare their arithmetic intensity and
+small ones stay home (`worth_offloading`), because a round trip costs the
+same bytes whatever happens in between. And a plane too big for one
+storage binding is blurred in horizontal bands overlapping by
+`passes * radius` rows, which is exactly the distance a vertical pass
+spreads information, so the rows a band keeps are the ones the whole-image
+pass would have produced. The warp can't do that — an arbitrary
+displacement may read anywhere in its source — so it declines instead, and
+in exchange keeps its source plane resident on the device for the length
+of a drag, since only the mesh changes between pointer moves.
+`compositor-gpu/examples/fxbench` measures both sides.
 
 Tools declare a `group()`, so related tools share one toolbar slot with a
 flyout and a shared shortcut letter — third-party tools can join an existing

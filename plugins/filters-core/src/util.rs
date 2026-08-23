@@ -3,29 +3,10 @@
 //! Everything here works on the same straight-alpha f32 RGBA buffer the
 //! `FilterPlugin` trait hands out: `width * height * 4` floats, row major.
 
-/// Premultiply alpha, so blurs and resamples do not pull colour out of
-/// transparent pixels.
-pub fn premultiply(px: &mut [f32]) {
-    for p in px.as_chunks_mut::<4>().0.iter_mut() {
-        p[0] *= p[3];
-        p[1] *= p[3];
-        p[2] *= p[3];
-    }
-}
-
-pub fn unpremultiply(px: &mut [f32]) {
-    for p in px.as_chunks_mut::<4>().0.iter_mut() {
-        if p[3] > 1e-6 {
-            p[0] /= p[3];
-            p[1] /= p[3];
-            p[2] /= p[3];
-        } else {
-            p[0] = 0.0;
-            p[1] = 0.0;
-            p[2] = 0.0;
-        }
-    }
-}
+/// Premultiplied-alpha conversion and the separable blur live in
+/// `schist_fx`, which is where the GPU seam is; re-exported so the filter
+/// modules keep a single import.
+pub use schist_fx::{gaussian_rgba, premultiply, unpremultiply};
 
 #[inline]
 pub fn luma(p: &[f32]) -> f32 {
@@ -164,43 +145,4 @@ pub fn fbm(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
         freq *= 2.0;
     }
     sum / norm.max(1e-6)
-}
-
-/// Separable box blur on premultiplied RGBA, three passes for a Gaussian.
-pub fn gaussian_rgba(px: &mut [f32], w: usize, h: usize, radius: f32) {
-    if radius < 0.5 || w == 0 || h == 0 {
-        return;
-    }
-    let r = ((radius / 3.0f32.sqrt()).round() as usize).max(1);
-    premultiply(px);
-    let mut tmp = vec![0.0f32; px.len()];
-    for _ in 0..3 {
-        box_pass(px, &mut tmp, w, h, r, false);
-        box_pass(&tmp, px, w, h, r, true);
-    }
-    unpremultiply(px);
-}
-
-fn box_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, vertical: bool) {
-    let (outer, inner) = if vertical { (w, h) } else { (h, w) };
-    let stride = if vertical { w * 4 } else { 4 };
-    let step = if vertical { 4 } else { w * 4 };
-    let window = (r * 2 + 1) as f32;
-    for o in 0..outer {
-        let base = o * step;
-        for i in 0..inner {
-            let mut acc = [0.0f32; 4];
-            for k in 0..=(r * 2) {
-                let s = (i + k).saturating_sub(r).min(inner - 1);
-                let at = base + s * stride;
-                for c in 0..4 {
-                    acc[c] += src[at + c];
-                }
-            }
-            let at = base + i * stride;
-            for c in 0..4 {
-                dst[at + c] = acc[c] / window;
-            }
-        }
-    }
 }

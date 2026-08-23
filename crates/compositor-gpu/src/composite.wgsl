@@ -56,6 +56,14 @@ const M_LUMINOSITY: u32 = 27u;
 const F_CONFINE: u32 = 1u;
 const F_FILL: u32 = 2u;
 
+// Full-colour adjustment kinds (plan::D_*).
+const D_NONE: u32 = 0u;
+const D_HUE_SATURATION: u32 = 1u;
+const D_BLACK_WHITE: u32 = 2u;
+const D_THRESHOLD: u32 = 3u;
+const D_POSTERIZE: u32 = 4u;
+const DIRECT_STRIDE: u32 = 6u;
+
 // Source formats (matches TileBuf variants).
 const FMT_U8: u32 = 0u;
 const FMT_U16: u32 = 1u;
@@ -73,9 +81,9 @@ struct Op {
     mask_bounds: vec4<i32>, // left, top, right, bottom
     fill: vec4<f32>,
     mask_default: f32,
-    _p0: f32,
-    _p1: f32,
-    _p2: f32,
+    direct: u32,
+    dparams: i32,
+    _p0: u32,
 }
 
 struct Globals {
@@ -93,6 +101,7 @@ struct Globals {
 @group(0) @binding(5) var<storage, read> slots: array<i32>;
 @group(0) @binding(6) var<storage, read> luts: array<f32>;
 @group(0) @binding(7) var<storage, read_write> out_f32: array<f32>;
+@group(0) @binding(8) var<storage, read> dparams: array<f32>;
 
 // ---- pixel-ops mirror ----
 
@@ -386,6 +395,177 @@ fn apply_lut(lut: i32, c: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// ---- full-colour adjustments ----
+//
+// A mirror of `Params::apply` for the four kinds no per-channel LUT can
+// express. The coefficients arrive pre-scaled (the /100 divisions and
+// posterize's `levels - 1` happen on the CPU), so what is left here is
+// the same arithmetic in the same order the reference runs.
+
+fn rem_euclid_f(a: f32, b: f32) -> f32 {
+    let r = a % b;
+    if (r < 0.0) {
+        return r + b;
+    }
+    return r;
+}
+
+// f32::round is half-away-from-zero; WGSL's round() is half-to-even, and
+// posterize lands exactly on halves whenever the level count divides the
+// input range.
+fn round_half_away(x: f32) -> f32 {
+    return sign(x) * floor(abs(x) + 0.5);
+}
+
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let l = (mx + mn) / 2.0;
+    if (abs(mx - mn) < 1e-6) {
+        return vec3(0.0, 0.0, l);
+    }
+    let d = mx - mn;
+    var s: f32;
+    if (l > 0.5) {
+        s = d / (2.0 - mx - mn);
+    } else {
+        s = d / (mx + mn);
+    }
+    var h: f32;
+    if (mx == c.r) {
+        h = 60.0 * (((c.g - c.b) / d) % 6.0);
+    } else if (mx == c.g) {
+        h = 60.0 * ((c.b - c.r) / d + 2.0);
+    } else {
+        h = 60.0 * ((c.r - c.g) / d + 4.0);
+    }
+    return vec3(rem_euclid_f(h, 360.0), s, l);
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
+    if (s <= 1e-6) {
+        return vec3(l, l, l);
+    }
+    let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+    let hp = rem_euclid_f(h, 360.0) / 60.0;
+    let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+    var rgb: vec3<f32>;
+    switch u32(hp) {
+        case 0u: { rgb = vec3(c, x, 0.0); }
+        case 1u: { rgb = vec3(x, c, 0.0); }
+        case 2u: { rgb = vec3(0.0, c, x); }
+        case 3u: { rgb = vec3(0.0, x, c); }
+        case 4u: { rgb = vec3(x, 0.0, c); }
+        default: { rgb = vec3(c, 0.0, x); }
+    }
+    return clamp(rgb + vec3(l - c / 2.0), vec3(0.0), vec3(1.0));
+}
+
+// `amount` is already the /100 fraction.
+fn adjust_lightness(l: f32, amount: f32) -> f32 {
+    var v: f32;
+    if (amount >= 0.0) {
+        v = l + (1.0 - l) * amount;
+    } else {
+        v = l * (1.0 + amount);
+    }
+    return clamp(v, 0.0, 1.0);
+}
+
+// Photoshop's six-slider mono mix: weight the two colour regions the
+// pixel's channel ordering places it between.
+fn black_white(base: u32, c: vec3<f32>) -> vec3<f32> {
+    let reds = dparams[base];
+    let yellows = dparams[base + 1u];
+    let greens = dparams[base + 2u];
+    let cyans = dparams[base + 3u];
+    let blues = dparams[base + 4u];
+    let magentas = dparams[base + 5u];
+    let r = c.r;
+    let g = c.g;
+    let b = c.b;
+    let mx = max(r, max(g, b));
+    let mn = min(r, min(g, b));
+    let mid = r + g + b - mx - mn;
+    var gray: f32;
+    if (mx <= mn + 1e-6) {
+        gray = mx;
+    } else {
+        let t = (mid - mn) / (mx - mn);
+        var lo: f32;
+        var hi: f32;
+        if (r >= g && g >= b) {
+            lo = reds;
+            hi = yellows;
+        } else if (g >= r && r >= b) {
+            lo = greens;
+            hi = yellows;
+        } else if (g >= b && b >= r) {
+            lo = greens;
+            hi = cyans;
+        } else if (b >= g && g >= r) {
+            lo = blues;
+            hi = cyans;
+        } else if (b >= r && r >= g) {
+            lo = blues;
+            hi = magentas;
+        } else {
+            lo = reds;
+            hi = magentas;
+        }
+        gray = mn + (mx - mn) * (lo * (1.0 - t) + hi * t);
+    }
+    let v = clamp(gray, 0.0, 1.0);
+    return vec3(v, v, v);
+}
+
+fn apply_direct(kind: u32, base: u32, c: vec3<f32>) -> vec3<f32> {
+    switch kind {
+        case D_HUE_SATURATION: {
+            let hue = dparams[base];
+            let saturation = dparams[base + 1u];
+            let lightness = dparams[base + 2u];
+            let colorize = dparams[base + 3u] != 0.0;
+            let hsl = rgb_to_hsl(c);
+            var nh: f32;
+            var ns: f32;
+            if (colorize) {
+                nh = rem_euclid_f(hue, 360.0);
+                ns = clamp(saturation, 0.0, 1.0);
+            } else {
+                nh = rem_euclid_f(hsl.x + hue, 360.0);
+                ns = clamp(hsl.y * (1.0 + saturation), 0.0, 1.0);
+            }
+            return hsl_to_rgb(nh, ns, adjust_lightness(hsl.z, lightness));
+        }
+        case D_BLACK_WHITE: {
+            return black_white(base, c);
+        }
+        case D_THRESHOLD: {
+            let lum = 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+            if (lum >= dparams[base]) {
+                return vec3(1.0);
+            }
+            return vec3(0.0);
+        }
+        case D_POSTERIZE: {
+            let steps = dparams[base];
+            return clamp(
+                vec3(
+                    round_half_away(c.r * steps) / steps,
+                    round_half_away(c.g * steps) / steps,
+                    round_half_away(c.b * steps) / steps,
+                ),
+                vec3(0.0),
+                vec3(1.0),
+            );
+        }
+        default: {
+            return c;
+        }
+    }
+}
+
 // ---- the program interpreter ----
 
 @compute @workgroup_size(16, 16, 1)
@@ -441,7 +621,7 @@ fn composite(@builtin(global_invocation_id) gid: vec3<u32>) {
             case 4u: { // SnapshotAlpha
                 snap[sp - 1u] = stack[sp - 1u].a;
             }
-            case 5u: { // Adjust: LUT re-colour or fill, weighted
+            case 5u: { // Adjust: LUT, full-colour branch or fill, weighted
                 let d = stack[sp - 1u];
                 var weight = op.opacity * mask_value(i, tile, x, y, px);
                 if ((op.flags & F_CONFINE) != 0u) {
@@ -453,7 +633,16 @@ fn composite(@builtin(global_invocation_id) gid: vec3<u32>) {
                         // transforming the backdrop.
                         stack[sp - 1u] = blend_px(op.mode, vec4(op.fill.rgb, weight), d, x, y);
                     } else if (d.a > 0.0) {
-                        let adjusted = apply_lut(op.lut, d.rgb);
+                        var adjusted: vec3<f32>;
+                        if (op.direct == D_NONE) {
+                            adjusted = apply_lut(op.lut, d.rgb);
+                        } else {
+                            adjusted = apply_direct(
+                                op.direct,
+                                u32(op.dparams) * DIRECT_STRIDE,
+                                d.rgb,
+                            );
+                        }
                         stack[sp - 1u] = vec4(d.rgb + (adjusted - d.rgb) * weight, d.a);
                     }
                 }

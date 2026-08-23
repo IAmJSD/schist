@@ -3,6 +3,11 @@
 //! Every filter works on a straight-alpha f32 RGBA buffer. Blurs run in
 //! premultiplied space (otherwise transparent pixels bleed their colour
 //! into the result) and convert back afterwards.
+//!
+//! The large-kernel sweeps — the box passes behind every Gaussian, and the
+//! lens blur's disc — go through `schist_fx`, which runs them on the GPU
+//! when one is installed and on its own CPU reference otherwise. Anything
+//! whose cost is a couple of taps per pixel stays here.
 
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry};
 
@@ -93,79 +98,7 @@ macro_rules! simple_filter {
     };
 }
 
-fn premultiply(pixels: &mut [f32]) {
-    for px in pixels.as_chunks_mut::<4>().0.iter_mut() {
-        px[0] *= px[3];
-        px[1] *= px[3];
-        px[2] *= px[3];
-    }
-}
-
-fn unpremultiply(pixels: &mut [f32]) {
-    for px in pixels.as_chunks_mut::<4>().0.iter_mut() {
-        if px[3] > 1e-6 {
-            px[0] /= px[3];
-            px[1] /= px[3];
-            px[2] /= px[3];
-        } else {
-            px[0] = 0.0;
-            px[1] = 0.0;
-            px[2] = 0.0;
-        }
-    }
-}
-
-/// One separable box pass, clamping at the edges.
-fn box_pass(
-    src: &[f32],
-    dst: &mut [f32],
-    width: usize,
-    height: usize,
-    radius: usize,
-    vertical: bool,
-) {
-    let (outer, inner) = if vertical {
-        (width, height)
-    } else {
-        (height, width)
-    };
-    let stride = if vertical { width * 4 } else { 4 };
-    let step = if vertical { 4 } else { width * 4 };
-    let window = (radius * 2 + 1) as f32;
-    for o in 0..outer {
-        let base = o * step;
-        for i in 0..inner {
-            let mut acc = [0.0f32; 4];
-            for k in 0..=(radius * 2) {
-                let s = (i + k).saturating_sub(radius).min(inner - 1);
-                let at = base + s * stride;
-                for c in 0..4 {
-                    acc[c] += src[at + c];
-                }
-            }
-            let at = base + i * stride;
-            for c in 0..4 {
-                dst[at + c] = acc[c] / window;
-            }
-        }
-    }
-}
-
-/// Three box passes approximate a Gaussian closely enough that the
-/// difference is invisible, at a fraction of the cost.
-fn gaussian_blur(pixels: &mut [f32], width: usize, height: usize, radius: f32) {
-    if radius < 0.5 || width == 0 || height == 0 {
-        return;
-    }
-    let r = ((radius / 3.0f32.sqrt()).round() as usize).max(1);
-    premultiply(pixels);
-    let mut tmp = vec![0.0f32; pixels.len()];
-    for _ in 0..3 {
-        box_pass(pixels, &mut tmp, width, height, r, false);
-        box_pass(&tmp, pixels, width, height, r, true);
-    }
-    unpremultiply(pixels);
-}
+use schist_fx::{gaussian_rgba as gaussian_blur, premultiply, unpremultiply};
 
 pub struct GaussianBlur;
 
@@ -219,15 +152,7 @@ impl FilterPlugin for BoxBlur {
         }]
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {
-        let r = values.get("radius").round() as usize;
-        if r == 0 || width == 0 || height == 0 {
-            return;
-        }
-        premultiply(pixels);
-        let mut tmp = vec![0.0f32; pixels.len()];
-        box_pass(pixels, &mut tmp, width, height, r, false);
-        box_pass(&tmp, pixels, width, height, r, true);
-        unpremultiply(pixels);
+        schist_fx::box_blur_rgba(pixels, width, height, values.get("radius").round() as usize);
     }
 }
 
@@ -412,11 +337,7 @@ fn unsharp_mask(
         gaussian_blur(&mut blurred, width, height, radius);
     } else {
         // Sub-pixel radius: a 3x3 box stands in for the blurred reference.
-        premultiply(&mut blurred);
-        let mut tmp = vec![0.0f32; blurred.len()];
-        box_pass(&blurred, &mut tmp, width, height, 1, false);
-        box_pass(&tmp, &mut blurred, width, height, 1, true);
-        unpremultiply(&mut blurred);
+        schist_fx::box_blur_rgba(&mut blurred, width, height, 1);
     }
     for (px, bl) in pixels
         .as_chunks_mut::<4>()

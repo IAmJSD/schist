@@ -12,6 +12,7 @@ members = [
     "crates/pixel-ops",
     "crates/compositor",
     "crates/compositor-gpu",
+    "crates/fx",
     "crates/color",
     "crates/codec-psd",
     "crates/codec-affinity",
@@ -49,6 +50,7 @@ schist-plugin-api = { path = "crates/plugin-api" }
 schist-pixel-ops = { path = "crates/pixel-ops" }
 schist-compositor = { path = "crates/compositor" }
 schist-compositor-gpu = { path = "crates/compositor-gpu" }
+schist-fx = { path = "crates/fx" }
 schist-color = { path = "crates/color" }
 schist-codec-psd = { path = "crates/codec-psd" }
 schist-codec-affinity = { path = "crates/codec-affinity" }

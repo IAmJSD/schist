@@ -1,7 +1,7 @@
 //! Filter ▸ Other, plus the extra Blur, Sharpen and Noise entries that did
 //! not exist yet.
 
-use crate::util::{at, gaussian_rgba, luma, premultiply, put, unpremultiply, value_noise};
+use crate::util::{at, gaussian_rgba, premultiply, put, unpremultiply, value_noise};
 use crate::{param, simple_filter};
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
@@ -247,39 +247,16 @@ simple_filter!(
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // A disc-shaped kernel rather than a Gaussian, which is what makes
-        // out-of-focus highlights come out as bokeh circles.
-        let r = v.get("radius").round().max(1.0) as i32;
-        let boost = v.get("brightness") / 100.0;
-        premultiply(px);
-        let src = px.to_vec();
-        for y in 0..h as i32 {
-            for x in 0..w as i32 {
-                let mut acc = [0.0f32; 4];
-                let mut n = 0.0f32;
-                for dy in -r..=r {
-                    for dx in -r..=r {
-                        if dx * dx + dy * dy > r * r {
-                            continue;
-                        }
-                        let p = at(&src, w, h, x + dx, y + dy);
-                        // Weighting bright samples up spreads highlights
-                        // into discs instead of smearing them away.
-                        let k = 1.0 + luma(&p).powi(3) * boost * 8.0;
-                        for c in 0..4 {
-                            acc[c] += p[c] * k;
-                        }
-                        n += k;
-                    }
-                }
-                if n > 0.0 {
-                    for a in acc.iter_mut() {
-                        *a /= n;
-                    }
-                    put(px, w, x as usize, y as usize, acc);
-                }
-            }
-        }
-        unpremultiply(px);
+        // out-of-focus highlights come out as bokeh circles — and, at
+        // radius 60, eleven thousand taps a pixel, so this is the filter
+        // with most to gain from the GPU seam.
+        schist_fx::lens_blur_rgba(
+            px,
+            w,
+            h,
+            v.get("radius").round().max(1.0) as i32,
+            v.get("brightness") / 100.0,
+        );
     }
 );
 

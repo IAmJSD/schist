@@ -359,18 +359,169 @@ fn sixteen_and_thirty_two_bit_documents() {
     }
 }
 
+/// The four full-colour adjustments, each alone over a random backdrop so
+/// nothing else can mask a mismatch. Threshold and posterize are step
+/// functions, and the test data deliberately includes exact 0/0.5/1
+/// channels: a pixel sitting precisely on a step flips whole under any
+/// legal fma contraction, so those get a wider allowance (observed on
+/// lavapipe: zero) than the continuous kinds.
 #[test]
-fn direct_adjustments_fall_back_to_identical_cpu_output() {
+fn direct_adjustments_match() {
+    let cases: Vec<(&str, AdjustmentKind, Params, usize)> = vec![
+        (
+            "hue/sat",
+            AdjustmentKind::HueSaturation,
+            Params::HueSaturation {
+                hue: 47.0,
+                saturation: 35.0,
+                lightness: -20.0,
+                colorize: false,
+            },
+            0,
+        ),
+        (
+            "hue/sat colorize",
+            AdjustmentKind::HueSaturation,
+            Params::HueSaturation {
+                hue: 210.0,
+                saturation: 60.0,
+                lightness: 15.0,
+                colorize: true,
+            },
+            0,
+        ),
+        (
+            "hue/sat wrap",
+            AdjustmentKind::HueSaturation,
+            Params::HueSaturation {
+                hue: -175.0,
+                saturation: -100.0,
+                lightness: 0.0,
+                colorize: false,
+            },
+            0,
+        ),
+        (
+            "black & white",
+            AdjustmentKind::BlackWhite,
+            Params::BlackWhite {
+                reds: 40.0,
+                yellows: 60.0,
+                greens: 40.0,
+                cyans: 60.0,
+                blues: 20.0,
+                magentas: 80.0,
+            },
+            0,
+        ),
+        (
+            "threshold",
+            AdjustmentKind::Threshold,
+            Params::Threshold { level: 0.5 },
+            600,
+        ),
+        (
+            "posterize",
+            AdjustmentKind::Posterize,
+            Params::Posterize { levels: 4 },
+            600,
+        ),
+        (
+            "posterize max",
+            AdjustmentKind::Posterize,
+            Params::Posterize { levels: 255 },
+            600,
+        ),
+    ];
+    for (name, kind, params, allowed) in cases {
+        let mut doc = base_doc(Depth::Eight);
+        doc.push_layer(adjustment(kind, params));
+        assert_parity(&doc, true, allowed, name);
+    }
+}
+
+/// Masked, partially opaque, and clipped to the layer below: the three
+/// weightings `apply_adjustment` folds in before the result is mixed.
+#[test]
+fn direct_adjustments_with_masks_opacity_and_clipping() {
     let mut doc = base_doc(Depth::Eight);
-    doc.push_layer(adjustment(
-        AdjustmentKind::Threshold,
-        Params::Threshold { level: 0.5 },
+    let mut hue = adjustment(
+        AdjustmentKind::HueSaturation,
+        Params::HueSaturation {
+            hue: 90.0,
+            saturation: 25.0,
+            lightness: 10.0,
+            colorize: false,
+        },
+    );
+    hue.opacity = 0.65;
+    hue.mask = Some(random_mask(IntRect::from_xywh(20, 40, 200, 180), 0, 71));
+    doc.push_layer(hue);
+
+    doc.push_layer(random_layer(
+        "clip base",
+        IntRect::from_xywh(40, 40, 200, 200),
+        Depth::Eight,
+        72,
     ));
+    let mut bw = adjustment(
+        AdjustmentKind::BlackWhite,
+        Params::BlackWhite {
+            reds: 90.0,
+            yellows: 10.0,
+            greens: 55.0,
+            cyans: 5.0,
+            blues: 70.0,
+            magentas: 30.0,
+        },
+    );
+    bw.clipping = true;
+    bw.opacity = 0.8;
+    doc.push_layer(bw);
+    assert_parity(&doc, true, 0, "direct adjustments weighted");
+}
+
+/// An adjustment kind the plan has no branch for still has to be caught
+/// and handed to the CPU rather than silently rendered wrong.
+#[test]
+fn an_unknown_direct_adjustment_falls_back() {
+    use schist_adjustments::Prepared;
+    // Guard the assumption the plan relies on: only these four kinds
+    // prepare to `Direct`, and each has a GPU branch.
+    for params in [
+        Params::HueSaturation {
+            hue: 1.0,
+            saturation: 1.0,
+            lightness: 1.0,
+            colorize: false,
+        },
+        Params::BlackWhite {
+            reds: 1.0,
+            yellows: 1.0,
+            greens: 1.0,
+            cyans: 1.0,
+            blues: 1.0,
+            magentas: 1.0,
+        },
+        Params::Threshold { level: 0.5 },
+        Params::Posterize { levels: 4 },
+    ] {
+        assert!(matches!(params.prepare(), Prepared::Direct(_)));
+    }
+    let mut doc = base_doc(Depth::Eight);
+    let mut layer = random_layer(
+        "dragged",
+        IntRect::from_xywh(0, 0, 300, 300),
+        Depth::Eight,
+        8,
+    );
+    layer.render_offset = (3, 4);
+    doc.push_layer(layer);
     assert!(
         plan::build(&doc).is_err(),
-        "threshold must be unsupported on the GPU"
+        "a mid-drag layer must stay on the CPU"
     );
-    assert_parity(&doc, false, 0, "threshold fallback");
+    assert_parity(&doc, false, 0, "render offset fallback");
 }
 
 #[test]

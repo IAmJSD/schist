@@ -7,15 +7,17 @@
 //! bus. Batched workloads — zoom-outs, exports, multi-tile damage on
 //! big documents — are where that trade wins; the semantics are the CPU
 //! compositor's, enforced by parity tests, and anything the shader can't
-//! express (a handful of adjustment kinds, mid-drag offsets) falls back
-//! to the CPU reference per call.
+//! express (mid-drag offsets, nesting past the fixed stack) falls back to
+//! the CPU reference per call.
 //!
 //! Install with `schist_compositor::set_backend(Arc::new(GpuCompositor::new()?))`.
 
 mod exec;
+mod fx;
 pub mod plan;
 
 pub use exec::GpuContext;
+pub use fx::GpuFx;
 
 use exec::BatchOut;
 use schist_compositor::viewport::ViewportParams;
@@ -27,14 +29,14 @@ use schist_core::{Document, IntRect, TileCoord, TILE_SIZE};
 use std::sync::Arc;
 
 pub struct GpuCompositor {
-    ctx: GpuContext,
+    ctx: Arc<GpuContext>,
 }
 
 impl GpuCompositor {
     /// Set up the GPU backend. Fails cleanly (with a reason for the log)
     /// when no adapter exists — headless CI, missing drivers.
     pub fn new() -> Result<GpuCompositor, String> {
-        let ctx = GpuContext::new()?;
+        let ctx = Arc::new(GpuContext::new()?);
         Ok(GpuCompositor { ctx })
     }
 
@@ -44,8 +46,14 @@ impl GpuCompositor {
         format!("{:?} · {}", info.backend, info.name).to_lowercase()
     }
 
-    pub fn context(&self) -> &GpuContext {
+    pub fn context(&self) -> &Arc<GpuContext> {
         &self.ctx
+    }
+
+    /// The filter and warp backend sharing this device — install it with
+    /// `schist_fx::set_backend` so blurs and mesh warps run here too.
+    pub fn fx(&self) -> GpuFx {
+        GpuFx::new(self.ctx.clone())
     }
 
     /// Composite a batch on the GPU; `None` falls back to the CPU.

@@ -10,7 +10,7 @@ menu command is a plugin, including the built-in ones.
 
 **Status: v1 feature-complete,
 plus two Photoshop-parity passes — 55 tools, 57 filters, 16 adjustments,
-all nine layer effects, and live vector shapes.** 513 tests,
+all nine layer effects, and live vector shapes.** 535 tests,
 clippy-clean, verified end-to-end under a real window. [What is still
 missing](#not-there-yet) is a short list now.
 
@@ -111,12 +111,16 @@ operations, a document→display transform, soft proofing, and ordered
 dithering when exporting to 8-bit.
 
 **GPU.** Compositing runs on the GPU when an adapter exists: the layer
-tree — blend modes, masks, clipping, group isolation, adjustment layers —
-compiles to a compute-shader program (wgpu), and zooming, rotating and
-panning resample on the GPU too, which is what keeps large documents
-responsive. The CPU compositor remains the semantic reference: the GPU
-backend is held to it by parity tests, anything it can't express (a few
-adjustment kinds, layers mid-drag) falls back to the CPU for that frame,
+tree — blend modes, masks, clipping, group isolation, all sixteen
+adjustment kinds — compiles to a compute-shader program (wgpu), and
+zooming, rotating and panning resample on the GPU too, which is what keeps
+large documents responsive. The big filter sweeps go the same way: the box
+passes behind every Gaussian, the lens blur's disc, and the displacement
+resample Liquify and Puppet Warp re-run on every pointer move — the
+operations that cross the whole selection per keystroke of a dialog, where
+a lens blur at radius 60 is eleven thousand taps a pixel. The CPU is the
+semantic reference throughout: parity tests hold the GPU to it, anything
+it can't express (layers mid-drag) or can't fit falls back for that call,
 and machines with no usable adapter just run the CPU path. Toggle it in
 Preferences, or override with `SCHIST_GPU=0` / `SCHIST_GPU=1`.
 
@@ -203,21 +207,23 @@ Remap anything in `~/.config/schist/keymap.json`:
   individual ink channels are not separately editable.
 - **Text is not on a path**, and the type engine has no OpenType
   feature controls.
-- **Four adjustment kinds composite on the CPU** even with GPU
-  compositing on: hue/saturation, black & white, threshold and posterize
-  need per-pixel full-colour math the shader doesn't express yet, so
-  documents using them as adjustment *layers* fall back for the affected
-  frames. Applied destructively they cost nothing ongoing.
-- **Tool and filter math is CPU-only.** The GPU accelerates what happens
-  *around* an edit — recompositing the layer stack and resampling the
-  viewport — not the edit itself. For brush-footprint tools (smudge,
-  clone, healing) that's the right call: a GPU round trip per dab would
-  add latency to the most latency-sensitive path for a few thousand
-  pixels of work. Where a second GPU seam *would* pay off is the
-  large-kernel, whole-selection operations — Gaussian and lens blurs,
-  the Filter Gallery previews, Liquify's mesh resample, Content-Aware
-  Scale's energy pass — which sweep the full canvas per keystroke of a
-  dialog. Not built yet.
+- **Most tool and filter math is still CPU-only**, deliberately. The GPU
+  takes the large-kernel sweeps — the blurs, and the warp tools' mesh
+  resample — and leaves everything whose cost is a few taps per pixel
+  where it is. For brush-footprint tools (smudge, clone, healing) that's
+  the right call: a round trip per dab would add latency to the most
+  latency-sensitive path for a few thousand pixels of work. The one
+  candidate left unbuilt is **Content-Aware Scale**, whose energy pass
+  would be trivial on the GPU but sits inside a seam-finding dynamic
+  program that is sequential by nature and re-runs per carved seam:
+  shipping the image over for four taps a pixel, hundreds of times, is
+  not a win. Moving the whole carve — energy, the scan and the removal —
+  onto the GPU would be, and is a bigger piece of work than this seam.
+- **The mesh warp needs the whole layer to fit one storage binding.** An
+  arbitrary displacement may read anywhere in the source, so unlike the
+  blurs it cannot be split into bands; on adapters at the 128 MB baseline
+  a large layer warps on the CPU instead. The blurs band themselves and
+  have no such ceiling.
 
 ## Plugins
 

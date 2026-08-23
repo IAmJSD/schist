@@ -9,6 +9,7 @@ schist-core.workspace = true
 schist-adjustments.workspace = true
 schist-color.workspace = true
 schist-compositor.workspace = true
+schist-fx.workspace = true
 serde_json.workspace = true
 log.workspace = true
 parking_lot.workspace = true
@@ -22,6 +23,10 @@ pollster.workspace = true
 
 [dev-dependencies]
 schist-pixel-ops.workspace = true
+# The wiring tests drive real filters and warp tools through the seam.
+schist-filters-core.workspace = true
+schist-tools-warp.workspace = true
+schist-plugin-api.workspace = true
 
 # FXC (the default DX12 shader compiler) miscompiles this crate's switch-
 # heavy compute shaders; DXC handles them. Statically linked so nothing

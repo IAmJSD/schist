@@ -65,6 +65,9 @@ struct Session {
     /// The layer as it was before any warping. Every render goes from
     /// here, so the mesh is applied once rather than compounding.
     original: TileMap,
+    /// Names `original` for a backend that can keep it resident: the
+    /// snapshot is fixed for the whole drag, only the mesh moves.
+    token: u64,
     mesh: Mesh,
     last: Option<(f32, f32)>,
 }
@@ -114,6 +117,7 @@ impl LiquifyTool {
         self.session = Some(Session {
             layer: id,
             original: raster.tiles.clone(),
+            token: crate::mesh::next_source_token(),
             mesh: Mesh::new(rect),
             last: None,
         });
@@ -124,7 +128,7 @@ impl LiquifyTool {
         let Some(session) = &self.session else { return };
         let depth = doc.depth;
         let clip = doc.canvas_rect();
-        let warped = warp_tiles(&session.original, &session.mesh, depth, clip);
+        let warped = warp_tiles(&session.original, &session.mesh, depth, clip, session.token);
         // Anything the mesh does not cover keeps its original pixels.
         let mut tiles = session.original.clone();
         for (coord, buf) in warped.iter() {
@@ -210,7 +214,7 @@ impl LiquifyTool {
         // then write the warped result as one entry.
         let depth = ctx.doc.depth;
         let clip = ctx.doc.canvas_rect();
-        let warped = warp_tiles(&session.original, &session.mesh, depth, clip);
+        let warped = warp_tiles(&session.original, &session.mesh, depth, clip, session.token);
         let mut tiles = session.original.clone();
         for (coord, buf) in warped.iter() {
             *tiles.get_mut_or_insert(*coord, depth) = (**buf).clone();
@@ -355,5 +359,5 @@ pub fn liquify_region(
     mesh: &Mesh,
     depth: schist_color::Depth,
 ) -> TileMap {
-    warp_tiles(src, mesh, depth, rect)
+    warp_tiles(src, mesh, depth, rect, 0)
 }

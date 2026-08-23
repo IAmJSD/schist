@@ -3,9 +3,9 @@
 //! The walk mirrors `schist_compositor::composite_layers` exactly — same
 //! clip-run detection, same pass-through rules, same opacity products —
 //! because the plan *is* the CPU compositor's control flow, flattened.
-//! Anything the shader cannot express faithfully (per-pixel-context
-//! adjustments, mid-drag render offsets, absurd nesting) returns
-//! [`Unsupported`] and the caller composites on the CPU instead.
+//! Anything the shader cannot express faithfully (mid-drag render
+//! offsets, absurd nesting) returns [`Unsupported`] and the caller
+//! composites on the CPU instead.
 
 use schist_adjustments::{Params, Prepared};
 use schist_core::{AdjustmentData, BlendMode, Document, Layer, LayerKind, MaskTileMap, TileMap};
@@ -18,8 +18,7 @@ pub const MAX_DEPTH: usize = 12;
 /// handles these; the variants exist so logs can say which feature bailed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {
-    /// An adjustment that needs full-colour math per pixel
-    /// (hue/saturation, black & white, threshold, posterize).
+    /// An adjustment kind the shader has no code path for.
     DirectAdjustment,
     /// A layer is mid-drag (`render_offset != 0`) and samples across tile
     /// boundaries.
@@ -62,6 +61,11 @@ pub struct PlanOp {
     pub mask: MaskRef,
     pub lut: i32,
     pub fill: [f32; 4],
+    /// Which full-colour adjustment this op runs (`D_*`), or [`D_NONE`]
+    /// when it is a LUT or a fill.
+    pub direct: u32,
+    /// Row into [`Plan::directs`] holding that adjustment's coefficients.
+    pub dparams: i32,
 }
 
 pub const OP_PUSH_LAYER: u32 = 0;
@@ -75,11 +79,26 @@ pub const OP_MASK_TOP: u32 = 6;
 pub const F_CONFINE: u32 = 1;
 pub const F_FILL: u32 = 2;
 
+// Full-colour adjustments: the ones that mix channels or step, so a
+// per-channel LUT cannot express them.
+pub const D_NONE: u32 = 0;
+pub const D_HUE_SATURATION: u32 = 1;
+pub const D_BLACK_WHITE: u32 = 2;
+pub const D_THRESHOLD: u32 = 3;
+pub const D_POSTERIZE: u32 = 4;
+
+/// Floats per row of [`Plan::directs`] — six, the widest kind
+/// (black & white's channel weights).
+pub const DIRECT_STRIDE: usize = 6;
+
 pub struct Plan<'a> {
     pub ops: Vec<PlanOp>,
     pub sources: Vec<PlanSource<'a>>,
     /// Concatenated 3×256 LUTs, 768 floats each.
     pub luts: Vec<f32>,
+    /// Coefficients for the [`D_HUE_SATURATION`]-and-friends ops,
+    /// [`DIRECT_STRIDE`] floats each.
+    pub directs: Vec<f32>,
 }
 
 impl<'a> Plan<'a> {
@@ -93,6 +112,8 @@ impl<'a> Plan<'a> {
             mask: MaskRef::NONE,
             lut: -1,
             fill: [0.0; 4],
+            direct: D_NONE,
+            dparams: -1,
         });
         self.ops.last_mut().unwrap()
     }
@@ -100,6 +121,11 @@ impl<'a> Plan<'a> {
     fn pixel_row(&mut self, tiles: &'a TileMap) -> i32 {
         self.sources.push(PlanSource::Pixels(tiles));
         (self.sources.len() - 1) as i32
+    }
+
+    fn direct_row(&mut self, coeffs: [f32; DIRECT_STRIDE]) -> i32 {
+        self.directs.extend_from_slice(&coeffs);
+        (self.directs.len() / DIRECT_STRIDE - 1) as i32
     }
 
     fn mask_ref(&mut self, layer: &'a Layer) -> MaskRef {
@@ -180,6 +206,7 @@ pub fn build(doc: &Document) -> Result<Plan<'_>, Unsupported> {
         ops: Vec::new(),
         sources: Vec::new(),
         luts: Vec::new(),
+        directs: Vec::new(),
     };
     // Depth 1 = the root destination the shader starts with.
     emit_layers(&doc.tree.layers, &mut plan, 1)?;
@@ -336,20 +363,31 @@ fn emit_adjust<'a>(
     if opacity <= 0.0 {
         return Ok(());
     }
-    let (lut, flags, fill) = match &params {
+    let mut lut = -1;
+    let mut flags = 0;
+    let mut fill = [0.0f32; 4];
+    let mut direct = D_NONE;
+    let mut dparams = -1;
+    match &params {
         Prepared::Identity => return Ok(()),
-        Prepared::Fill(c) => (-1, F_FILL, [c.r, c.g, c.b, c.a]),
-        Prepared::Lut(lut) => {
-            let index = (plan.luts.len() / 768) as i32;
-            for channel in lut.iter() {
+        Prepared::Fill(c) => {
+            flags = F_FILL;
+            fill = [c.r, c.g, c.b, c.a];
+        }
+        Prepared::Lut(table) => {
+            lut = (plan.luts.len() / 768) as i32;
+            for channel in table.iter() {
                 plan.luts.extend_from_slice(channel);
             }
-            (index, 0, [0.0; 4])
         }
-        // Hue/saturation, black & white, threshold, posterize evaluate
-        // full-colour math per pixel; keep those on the CPU reference.
-        Prepared::Direct(_) => return Err(Unsupported::DirectAdjustment),
-    };
+        // Full-colour math: the shader has an explicit branch per kind,
+        // fed the same coefficients `Params::apply` would compute.
+        Prepared::Direct(p) => {
+            let (kind, coeffs) = direct_coeffs(p).ok_or(Unsupported::DirectAdjustment)?;
+            direct = kind;
+            dparams = plan.direct_row(coeffs);
+        }
+    }
     let mask = plan.mask_ref(layer);
     let op = plan.op(OP_ADJUST);
     op.mode = mode_id(layer.blend);
@@ -358,7 +396,67 @@ fn emit_adjust<'a>(
     op.lut = lut;
     op.fill = fill;
     op.mask = mask;
+    op.direct = direct;
+    op.dparams = dparams;
     Ok(())
+}
+
+/// The shader op and coefficient row for a full-colour adjustment.
+///
+/// Everything that can be folded on the CPU is folded here — the /100
+/// scalings, posterize's `levels - 1` — so the shader does the same
+/// arithmetic on the same numbers `Params::apply` does, in the same
+/// order. `None` for a kind the shader has no branch for.
+fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
+    match params {
+        Params::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+            colorize,
+        } => Some((
+            D_HUE_SATURATION,
+            [
+                *hue,
+                saturation / 100.0,
+                lightness / 100.0,
+                if *colorize { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
+        )),
+        Params::BlackWhite {
+            reds,
+            yellows,
+            greens,
+            cyans,
+            blues,
+            magentas,
+        } => Some((
+            D_BLACK_WHITE,
+            [
+                reds / 100.0,
+                yellows / 100.0,
+                greens / 100.0,
+                cyans / 100.0,
+                blues / 100.0,
+                magentas / 100.0,
+            ],
+        )),
+        Params::Threshold { level } => Some((D_THRESHOLD, [*level, 0.0, 0.0, 0.0, 0.0, 0.0])),
+        Params::Posterize { levels } => Some((
+            D_POSTERIZE,
+            [
+                ((*levels).clamp(2, 255) - 1) as f32,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+        )),
+        _ => None,
+    }
 }
 
 fn need_depth(depth: usize) -> Result<(), Unsupported> {

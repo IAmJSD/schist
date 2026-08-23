@@ -439,9 +439,11 @@ impl Default for ViewOptions {
     }
 }
 
-/// Install the compositing backend the preference (or `SCHIST_GPU=0|1`,
-/// which wins) asks for. Safe to call again when the preference flips;
-/// falls back to the CPU with a log line when no adapter exists.
+/// Install the GPU backends the preference (or `SCHIST_GPU=0|1`, which
+/// wins) asks for: the compositor and the filter/warp kernels behind
+/// `schist_fx`, which share one device. Safe to call again when the
+/// preference flips; falls back to the CPU with a log line when no adapter
+/// exists.
 pub fn init_compositor_backend(prefer_gpu: bool) {
     let enabled = match std::env::var("SCHIST_GPU").ok().as_deref() {
         Some("0") => false,
@@ -450,6 +452,7 @@ pub fn init_compositor_backend(prefer_gpu: bool) {
     };
     if !enabled {
         schist_compositor::set_backend(Arc::new(schist_compositor::CpuCompositor));
+        schist_fx::set_backend(Arc::new(schist_fx::CpuFx));
         return;
     }
     if schist_compositor::backend().name() == "gpu" {
@@ -457,7 +460,8 @@ pub fn init_compositor_backend(prefer_gpu: bool) {
     }
     match schist_compositor_gpu::GpuCompositor::new() {
         Ok(gpu) => {
-            log::info!("GPU compositing on ({})", gpu.describe());
+            log::info!("GPU compositing and filter kernels on ({})", gpu.describe());
+            schist_fx::set_backend(Arc::new(gpu.fx()));
             schist_compositor::set_backend(Arc::new(gpu));
         }
         Err(err) => log::warn!("GPU compositing unavailable, staying on the CPU: {err}"),

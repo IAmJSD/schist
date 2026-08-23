@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 schist-core.workspace = true
 schist-color.workspace = true
+schist-fx.workspace = true
 schist-plugin-api.workspace = true
