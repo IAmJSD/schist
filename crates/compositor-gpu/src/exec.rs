@@ -66,14 +66,21 @@ impl GpuContext {
             log::error!("gpu compositor error: {e}");
         }));
 
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("composite.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
-        });
-        let viewport_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viewport.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("viewport.wgsl").into()),
-        });
+        // Shader translation differs per backend (SPIR-V, MSL, HLSL); a
+        // module that validates on one can still fail another's pipeline
+        // creation. Catch that here and report "no GPU" so the caller
+        // stays on the CPU, instead of dispatching a dead pipeline and
+        // reading back zeroes.
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let make_module = |name: &str, source: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let composite_module = make_module("composite.wgsl", include_str!("composite.wgsl"));
+        let pack_module = make_module("pack.wgsl", include_str!("pack.wgsl"));
+        let viewport_module = make_module("viewport.wgsl", include_str!("viewport.wgsl"));
         let make = |module: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -84,14 +91,18 @@ impl GpuContext {
                 cache: None,
             })
         };
-        Ok(GpuContext {
-            composite: make(&module, "composite"),
-            pack: make(&module, "pack_rgba8"),
+        let ctx = GpuContext {
+            composite: make(&composite_module, "composite"),
+            pack: make(&pack_module, "pack_rgba8"),
             viewport: make(&viewport_module, "viewport"),
             info: adapter.get_info(),
             device,
             queue,
-        })
+        };
+        if let Some(err) = pollster::block_on(ctx.device.pop_error_scope()) {
+            return Err(format!("pipeline creation: {err}"));
+        }
+        Ok(ctx)
     }
 
     /// GPU version of `schist_compositor::viewport::render_viewport_cpu`.
@@ -110,6 +121,7 @@ impl GpuContext {
         if out_bytes > BUDGET_BYTES || present * TILE_PIXELS * 4 > BUDGET_BYTES {
             return None;
         }
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut tile_bytes: Vec<u8> = Vec::with_capacity(present * TILE_PIXELS * 4);
         let mut index = Vec::with_capacity(grid.len());
         for slot in grid {
@@ -226,6 +238,10 @@ impl GpuContext {
         let out = data.to_vec();
         drop(data);
         staging.unmap();
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            log::warn!("gpu viewport failed, falling back to the CPU: {err}");
+            return None;
+        }
         Some(out)
     }
 
@@ -302,6 +318,7 @@ impl GpuContext {
     }
 
     fn run_chunk(&self, plan: &Plan<'_>, coords: &[TileCoord], rgba8: bool) -> Option<BatchOut> {
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let n_tiles = coords.len();
         let n_rows = plan.sources.len();
         let mut slots = vec![-1i32; n_rows.max(1) * n_tiles];
@@ -525,6 +542,10 @@ impl GpuContext {
         };
         drop(data);
         staging.unmap();
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            log::warn!("gpu composite failed, falling back to the CPU: {err}");
+            return None;
+        }
         Some(out)
     }
 }
