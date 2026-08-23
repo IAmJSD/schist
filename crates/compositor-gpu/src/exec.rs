@@ -301,12 +301,7 @@ impl GpuContext {
         bytes
     }
 
-    fn run_chunk(
-        &self,
-        plan: &Plan<'_>,
-        coords: &[TileCoord],
-        rgba8: bool,
-    ) -> Option<BatchOut> {
+    fn run_chunk(&self, plan: &Plan<'_>, coords: &[TileCoord], rgba8: bool) -> Option<BatchOut> {
         let n_tiles = coords.len();
         let n_rows = plan.sources.len();
         let mut slots = vec![-1i32; n_rows.max(1) * n_tiles];
@@ -557,9 +552,10 @@ fn pack_pixels(out: &mut Vec<u32>, buf: &TileBuf, fmt: u32) {
         }
         (TileBuf::U8(d), 1) => {
             // v/255 == (v*257)/65535, exactly.
-            out.extend(d.chunks_exact(2).map(|p| {
-                (p[0] as u32 * 257) | (p[1] as u32 * 257) << 16
-            }));
+            out.extend(
+                d.chunks_exact(2)
+                    .map(|p| (p[0] as u32 * 257) | (p[1] as u32 * 257) << 16),
+            );
         }
         (TileBuf::U8(d), _) => {
             out.extend(d.iter().map(|&v| (v as f32 / 255.0).to_bits()));
@@ -577,7 +573,8 @@ fn pack_pixels(out: &mut Vec<u32>, buf: &TileBuf, fmt: u32) {
 }
 
 fn pack_mask(out: &mut Vec<u32>, buf: &[u8; TILE_PIXELS]) {
-    out.extend(buf.chunks_exact(4).map(|p| {
-        p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | (p[3] as u32) << 24
-    }));
+    out.extend(
+        buf.chunks_exact(4)
+            .map(|p| p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | (p[3] as u32) << 24),
+    );
 }

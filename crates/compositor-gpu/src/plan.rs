@@ -278,11 +278,7 @@ fn emit_layers<'a>(
 
 /// Mirror of `render_single_layer`: push the layer's own (masked, but not
 /// yet opacity-scaled) pixels as a new stack entry.
-fn emit_single<'a>(
-    layer: &'a Layer,
-    plan: &mut Plan<'a>,
-    depth: usize,
-) -> Result<(), Unsupported> {
+fn emit_single<'a>(layer: &'a Layer, plan: &mut Plan<'a>, depth: usize) -> Result<(), Unsupported> {
     need_depth(depth + 1)?;
     if layer.render_offset != (0, 0) {
         return Err(Unsupported::RenderOffset);

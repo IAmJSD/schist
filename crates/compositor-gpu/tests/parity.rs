@@ -6,11 +6,11 @@
 use schist_adjustments::{Curve, Curves, Levels, LevelsChannel, Params};
 use schist_compositor::{composite_region_rgba8_cpu, Compositor, CpuCompositor};
 use schist_compositor_gpu::{plan, GpuCompositor};
+use schist_core::color::{Depth, Rgba};
 use schist_core::{
     AdjustmentData, AdjustmentKind, BlendMode, Document, IntRect, Layer, LayerKind, LayerMask,
     TileCoord, TILE_SIZE,
 };
-use schist_core::color::{Depth, Rgba};
 use std::sync::{Arc, OnceLock};
 
 fn gpu() -> Option<&'static GpuCompositor> {
@@ -30,7 +30,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) as u32
     }
 
@@ -54,7 +57,10 @@ fn random_layer(name: &str, rect: IntRect, depth: Depth, seed: u64) -> Layer {
             let coord = TileCoord::containing(x, y);
             let buf = tiles.get_mut_or_insert(coord, depth);
             let ix = (y.rem_euclid(TILE_SIZE) * TILE_SIZE + x.rem_euclid(TILE_SIZE)) as usize;
-            buf.set(ix, Rgba::new(rng.unit(), rng.unit(), rng.unit(), rng.unit()));
+            buf.set(
+                ix,
+                Rgba::new(rng.unit(), rng.unit(), rng.unit(), rng.unit()),
+            );
         }
     }
     layer
@@ -131,7 +137,12 @@ fn base_doc(depth: Depth) -> Document {
 fn every_blend_mode_matches() {
     for &mode in BlendMode::layer_modes() {
         let mut doc = base_doc(Depth::Eight);
-        let mut top = random_layer("top", IntRect::from_xywh(20, 10, 250, 260), Depth::Eight, 99);
+        let mut top = random_layer(
+            "top",
+            IntRect::from_xywh(20, 10, 250, 260),
+            Depth::Eight,
+            99,
+        );
         top.blend = mode;
         top.opacity = 0.8;
         doc.push_layer(top);

@@ -4985,9 +4985,7 @@ impl Workspace {
         };
         let bgra = schist_compositor::backend()
             .viewport(&params, &grid)
-            .unwrap_or_else(|| {
-                schist_compositor::viewport::render_viewport_cpu(&params, &grid)
-            });
+            .unwrap_or_else(|| schist_compositor::viewport::render_viewport_cpu(&params, &grid));
 
         let buffer = image::RgbaImage::from_raw(width as u32, height as u32, bgra)?;
         let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));

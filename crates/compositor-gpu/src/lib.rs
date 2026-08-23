@@ -108,11 +108,7 @@ impl Compositor for GpuCompositor {
         }
     }
 
-    fn viewport(
-        &self,
-        params: &ViewportParams,
-        grid: &[Option<Arc<Vec<u8>>>],
-    ) -> Option<Vec<u8>> {
+    fn viewport(&self, params: &ViewportParams, grid: &[Option<Arc<Vec<u8>>>]) -> Option<Vec<u8>> {
         self.ctx.render_viewport(params, grid)
     }
 }

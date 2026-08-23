@@ -213,8 +213,5 @@ pub fn render_viewport_cpu(p: &ViewportParams, grid: &[Option<Arc<Vec<u8>>>]) ->
 /// Sanity check the grid a caller hands to a renderer.
 pub fn grid_len_ok(p: &ViewportParams, grid: &[Option<Arc<Vec<u8>>>]) -> bool {
     grid.len() == p.grid_cols * p.grid_rows
-        && grid
-            .iter()
-            .flatten()
-            .all(|t| t.len() == TILE_PIXELS * 4)
+        && grid.iter().flatten().all(|t| t.len() == TILE_PIXELS * 4)
 }
