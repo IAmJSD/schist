@@ -1,0 +1,40 @@
+[package]
+name = "schist-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model Context Protocol server exposing Schist editing sessions over stdio"
+
+[[bin]]
+name = "schist-mcp"
+path = "src/main.rs"
+
+[dependencies]
+schist-core.workspace = true
+schist-plugin-api.workspace = true
+schist-compositor.workspace = true
+schist-layer-fx.workspace = true
+schist-adjustments.workspace = true
+schist-codec-psd.workspace = true
+schist-plugin-host-wasm.workspace = true
+schist-codecs-common.workspace = true
+schist-tools-basic.workspace = true
+schist-tools-paint.workspace = true
+schist-tools-retouch.workspace = true
+schist-tools-warp.workspace = true
+schist-tools-doc.workspace = true
+schist-tools-select.workspace = true
+schist-tools-transform.workspace = true
+schist-tools-vector.workspace = true
+schist-tools-type.workspace = true
+schist-filters-core.workspace = true
+schist-commands-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustc-hash.workspace = true
+image.workspace = true
+log.workspace = true
+env_logger.workspace = true
+base64 = "0.22"

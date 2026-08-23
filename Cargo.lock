@@ -5772,6 +5772,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "schist-mcp"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "env_logger",
+ "image",
+ "log",
+ "rustc-hash 2.1.3",
+ "schist-adjustments",
+ "schist-codec-psd",
+ "schist-codecs-common",
+ "schist-commands-core",
+ "schist-compositor",
+ "schist-core",
+ "schist-filters-core",
+ "schist-layer-fx",
+ "schist-plugin-api",
+ "schist-plugin-host-wasm",
+ "schist-tools-basic",
+ "schist-tools-doc",
+ "schist-tools-paint",
+ "schist-tools-retouch",
+ "schist-tools-select",
+ "schist-tools-transform",
+ "schist-tools-type",
+ "schist-tools-vector",
+ "schist-tools-warp",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "schist-neural"
 version = "0.3.0"
 dependencies = [

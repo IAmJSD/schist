@@ -21,6 +21,7 @@ members = [
     "crates/plugin-host-wasm",
     "crates/plugin-sdk",
     "crates/colormgmt",
+    "crates/mcp",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",

@@ -239,8 +239,17 @@ Drop the `.wasm` in `~/.config/schist/plugins/` — or use **File ▸
 Plugins…**, which also shows why anything failed to load. Full instructions
 and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 
+## MCP
+
+`cargo build --release -p schist-mcp` builds a [Model Context
+Protocol](https://modelcontextprotocol.io) server that drives Schist
+headless — sessions instead of windows, with every tool, command, filter
+and codec reachable through the same registry the app uses, plus inline
+PNG rendering. See [docs/mcp.md](docs/mcp.md).
+
 ## Documentation
 
 * [docs/architecture.md](docs/architecture.md) — how the pieces fit
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
+* [docs/mcp.md](docs/mcp.md) — the MCP server
 * [docs/versioning.md](docs/versioning.md) — compatibility and releases
