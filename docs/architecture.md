@@ -9,7 +9,8 @@ crates/app              GPUI shell: window, canvas, panels, dialogs, keymap
 ├── crates/core         kernel: document, COW tiles, layers, history, selection
 ├── crates/color        pixel/colour primitives, depth conversion
 ├── crates/pixel-ops    CPU reference blend modes (the semantic contract)
-├── crates/compositor   tile compositor, adjustment rendering, damage cache
+├── crates/compositor   tile compositor, viewport resampling, damage cache
+├── crates/compositor-gpu  wgpu compute backend, parity-tested against the CPU
 ├── crates/adjustments  adjustment parameters, PSD payloads, LUT compilation
 ├── crates/vector       path building, Bézier flattening, AA rasterization
 ├── crates/text-engine  font discovery, layout, glyph rasterization
@@ -69,12 +70,30 @@ image — resampled (nearest when zoomed in, so pixels stay crisp; bilinear
 when zoomed out, to damp aliasing) and checkered — and paints that. Colour
 management stays cached per tile, since converting is the expensive part.
 
-Interactivity comes from doing less, not from a GPU: only damaged, visible
-tiles recomposite. On a 100 MP document with three full-canvas blend layers
-plus a curves adjustment, a 1920×1080 viewport recomposites in ~16 ms and a
-single dirty tile — what a brush stroke actually costs — in ~3 ms
-(`cargo run --release -p schist-compositor --example bench`). A `Compositor`
-trait marks where a GPU backend would slot in.
+Interactivity comes first from doing less: only damaged, visible tiles
+recomposite. On a 100 MP document with three full-canvas blend layers
+plus a curves adjustment, a 1920×1080 viewport recomposites on the CPU in
+~16 ms and a single dirty tile — what a brush stroke actually costs — in
+~3 ms (`cargo run --release -p schist-compositor --example bench`).
+
+On top of that sits a **GPU backend** (`crates/compositor-gpu`). The
+`Compositor` trait is the seam; `set_backend` routes every
+`composite_*` call — canvas cache, tools, exports — through whichever
+backend is active. The GPU implementation compiles the layer tree once
+per composite into a flat op program (a per-pixel stack machine: push
+layer, blend, clip-blend, adjust, mask), uploads the referenced tiles
+and masks as storage buffers, and executes the whole batch in one
+compute dispatch; `composite.wgsl` mirrors `pixel-ops` formula for
+formula and parity tests in `compositor-gpu/tests` hold it to ±1 RGBA8
+step. Viewport resampling (`compositor/src/viewport.rs` — the
+crisp/bilinear/box zoom logic the canvas uses) has the same dual
+implementation. GPUI doesn't expose its render device, so this is a
+second wgpu instance and results come back over the bus — which batching
+amortizes, and which is why the damage-driven single-tile path stays
+cheap either way. Documents using the four non-LUT adjustment kinds
+(hue/saturation, black & white, threshold, posterize) as layers, layers
+mid-drag, or nesting deeper than the shader's fixed stack fall back to
+the CPU reference per call, bit-identically.
 
 Tools declare a `group()`, so related tools share one toolbar slot with a
 flyout and a shared shortcut letter — third-party tools can join an existing

@@ -13,7 +13,6 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use schist_color::{Depth, Rgba};
 use schist_compositor::TileCache;
@@ -57,7 +56,7 @@ fn prefs_path() -> Option<PathBuf> {
     Some(base.join("schist/preferences.json"))
 }
 
-fn load_view_options() -> ViewOptions {
+pub(crate) fn load_view_options() -> ViewOptions {
     prefs_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -412,6 +411,15 @@ pub struct ViewOptions {
     /// nothing is ever transmitted.
     #[serde(default)]
     pub crash_reports: bool,
+    /// Composite and resample on the GPU when an adapter exists. On by
+    /// default; the CPU reference takes over per-frame for anything the
+    /// GPU path can't express, and entirely when this is off.
+    #[serde(default = "default_true")]
+    pub gpu_compositing: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ViewOptions {
@@ -426,7 +434,33 @@ impl Default for ViewOptions {
             theme: Theme::Dark,
             zoom_with_scroll: false,
             crash_reports: false,
+            gpu_compositing: true,
         }
+    }
+}
+
+/// Install the compositing backend the preference (or `SCHIST_GPU=0|1`,
+/// which wins) asks for. Safe to call again when the preference flips;
+/// falls back to the CPU with a log line when no adapter exists.
+pub fn init_compositor_backend(prefer_gpu: bool) {
+    let enabled = match std::env::var("SCHIST_GPU").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => prefer_gpu,
+    };
+    if !enabled {
+        schist_compositor::set_backend(Arc::new(schist_compositor::CpuCompositor));
+        return;
+    }
+    if schist_compositor::backend().name() == "gpu" {
+        return;
+    }
+    match schist_compositor_gpu::GpuCompositor::new() {
+        Ok(gpu) => {
+            log::info!("GPU compositing on ({})", gpu.describe());
+            schist_compositor::set_backend(Arc::new(gpu));
+        }
+        Err(err) => log::warn!("GPU compositing unavailable, staying on the CPU: {err}"),
     }
 }
 
@@ -3876,6 +3910,16 @@ impl Workspace {
         }
     }
 
+    /// Drop everything composited by the previous backend and repaint.
+    pub fn rebuild_after_backend_change(&mut self, cx: &mut Context<Self>) {
+        self.cache.invalidate_all();
+        self.display_tiles.clear();
+        if let Some((_, old)) = self.viewport_image.take() {
+            self.retired_images.push(old);
+        }
+        cx.notify();
+    }
+
     pub fn toggle_rulers(&mut self, cx: &mut Context<Self>) {
         self.view.rulers = !self.view.rulers;
         self.status = format!("Rulers {}", if self.view.rulers { "on" } else { "off" }).into();
@@ -4922,143 +4966,27 @@ impl Workspace {
             }
         }
 
-        let sample = |x: i32, y: i32| -> [u8; 4] {
-            if !canvas_rect.contains(x, y) {
-                return [0, 0, 0, 0];
-            }
-            let tx = x.div_euclid(TILE_SIZE) - tx0;
-            let ty = y.div_euclid(TILE_SIZE) - ty0;
-            if tx < 0 || ty < 0 || tx as usize >= cols || ty as usize >= rows {
-                return [0, 0, 0, 0];
-            }
-            match &grid[ty as usize * cols + tx as usize] {
-                Some(tile) => {
-                    let lx = x.rem_euclid(TILE_SIZE) as usize;
-                    let ly = y.rem_euclid(TILE_SIZE) as usize;
-                    let at = (ly * TILE_SIZE as usize + lx) * 4;
-                    [tile[at], tile[at + 1], tile[at + 2], tile[at + 3]]
-                }
-                None => [0, 0, 0, 0],
-            }
+        // Resample on the active backend (GPU when installed and the grid
+        // fits its buffers), with the CPU reference as the always-correct
+        // fallback. Both implement the same contract — see
+        // `schist_compositor::viewport`.
+        let params = schist_compositor::viewport::ViewportParams {
+            width,
+            height,
+            origin,
+            zoom,
+            scale_factor: sf,
+            rotation: self.rotation,
+            canvas: canvas_rect,
+            grid_origin: (tx0, ty0),
+            grid_cols: cols,
+            grid_rows: rows,
+            surround: key.surround,
         };
-
-        // How a screen pixel samples the document:
-        //  - Integer zoom, unrotated: nearest. One document pixel maps to
-        //    an exact block, so this is crisp and alias-free.
-        //  - Other magnification (fractional zoom, or any rotation):
-        //    bilinear. Nearest here duplicates rows and columns unevenly
-        //    and staircases every antialiased edge.
-        //  - Minification: several document pixels land inside each screen
-        //    pixel, so average an n x n grid spanning the pixel's whole
-        //    footprint. Bilinear reads only the four nearest and skips
-        //    pixels outright below 50% zoom, which is where the shimmer
-        //    and jagged edges came from.
-        //
-        // The rows below are *device* pixels, so the decision is made in
-        // device pixels too: on a 2x display `zoom` reads as minification
-        // all the way to 100% when the screen is really magnifying, and
-        // filtering over a footprint twice the true one threw away half
-        // the resolution the display could show.
-        let dev_zoom = zoom * sf;
-        let footprint = 1.0 / dev_zoom; // document pixels per device pixel
-        let crisp = self.rotation == 0.0 && dev_zoom >= 1.0 && dev_zoom.fract() == 0.0;
-        let box_taps = if dev_zoom < 1.0 {
-            // Tap spacing stays under one document pixel up to 8x
-            // minification; past that the cost stops being worth it.
-            (footprint.ceil() as usize).clamp(2, 8)
-        } else {
-            0
-        };
-        // Straight-alpha result from a premultiplied accumulator, so
-        // averaging across an edge doesn't fringe.
-        let resolve = |acc: [f32; 4]| -> [u8; 4] {
-            if acc[3] <= 1e-6 {
-                [0, 0, 0, 0]
-            } else {
-                [
-                    (acc[0] / acc[3]).round().clamp(0.0, 255.0) as u8,
-                    (acc[1] / acc[3]).round().clamp(0.0, 255.0) as u8,
-                    (acc[2] / acc[3]).round().clamp(0.0, 255.0) as u8,
-                    (acc[3] * 255.0).round().clamp(0.0, 255.0) as u8,
-                ]
-            }
-        };
-        let surround = key.surround & 0xFF;
-        let mut bgra = vec![0u8; width * height * 4];
-        bgra.par_chunks_mut(width * 4)
-            .enumerate()
-            .for_each(|(row, line)| {
-                let dy = row as f32 + 0.5;
-                for col in 0..width {
-                    let dx = col as f32 + 0.5;
-                    let (fx, fy) = doc_at(dx, dy);
-                    let px = if crisp {
-                        sample(fx.floor() as i32, fy.floor() as i32)
-                    } else if box_taps == 0 {
-                        // Bilinear over the four neighbours.
-                        let (sx, sy) = (fx - 0.5, fy - 0.5);
-                        let (ix, iy) = (sx.floor(), sy.floor());
-                        let (tx, ty) = (sx - ix, sy - iy);
-                        let mut acc = [0.0f32; 4];
-                        for (dxi, wx) in [(0, 1.0 - tx), (1, tx)] {
-                            for (dyi, wy) in [(0, 1.0 - ty), (1, ty)] {
-                                let w = wx * wy;
-                                if w <= 0.0 {
-                                    continue;
-                                }
-                                let s = sample(ix as i32 + dxi, iy as i32 + dyi);
-                                let a = s[3] as f32 / 255.0 * w;
-                                acc[0] += s[0] as f32 * a;
-                                acc[1] += s[1] as f32 * a;
-                                acc[2] += s[2] as f32 * a;
-                                acc[3] += a;
-                            }
-                        }
-                        resolve(acc)
-                    } else {
-                        // Box average over the footprint. The box is kept
-                        // axis-aligned even for rotated views: a square is
-                        // near enough rotation-invariant at this size.
-                        let n = box_taps;
-                        let mut acc = [0.0f32; 4];
-                        for sy in 0..n {
-                            let oy = ((sy as f32 + 0.5) / n as f32 - 0.5) * footprint;
-                            for sx in 0..n {
-                                let ox = ((sx as f32 + 0.5) / n as f32 - 0.5) * footprint;
-                                let s = sample((fx + ox).floor() as i32, (fy + oy).floor() as i32);
-                                let a = s[3] as f32 / 255.0;
-                                acc[0] += s[0] as f32 * a;
-                                acc[1] += s[1] as f32 * a;
-                                acc[2] += s[2] as f32 * a;
-                                acc[3] += a;
-                            }
-                        }
-                        resolve(acc)
-                    };
-
-                    // Transparency shows the checkerboard inside the canvas
-                    // and the app background outside it.
-                    let inside = {
-                        let (fx, fy) = (fx.floor() as i32, fy.floor() as i32);
-                        canvas_rect.contains(fx, fy)
-                    };
-                    let bg = if inside {
-                        if ((col >> 3) + (row >> 3)) & 1 == 0 {
-                            0xFFu32
-                        } else {
-                            0xCCu32
-                        }
-                    } else {
-                        surround
-                    };
-                    let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
-                    let inv = 255 - a;
-                    let at = col * 4;
-                    line[at] = ((b * a + bg * inv) / 255) as u8;
-                    line[at + 1] = ((g * a + bg * inv) / 255) as u8;
-                    line[at + 2] = ((r * a + bg * inv) / 255) as u8;
-                    line[at + 3] = 255;
-                }
+        let bgra = schist_compositor::backend()
+            .viewport(&params, &grid)
+            .unwrap_or_else(|| {
+                schist_compositor::viewport::render_viewport_cpu(&params, &grid)
             });
 
         let buffer = image::RgbaImage::from_raw(width as u32, height as u32, bgra)?;

@@ -1,6 +1,7 @@
 //! CPU reference implementation of pixel math: PSD blend modes and
-//! compositing. This is the semantic contract — the future GPU path must
-//! match it tile-for-tile.
+//! compositing. This is the semantic contract — the GPU path
+//! (`schist-compositor-gpu/src/composite.wgsl` mirrors these formulas)
+//! must match it tile-for-tile, and its parity tests hold it to that.
 //!
 //! Separable modes follow the W3C compositing spec formulas, which match
 //! Photoshop for 8/16-bit documents. Non-separable modes (Hue/Saturation/
