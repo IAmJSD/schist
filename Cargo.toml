@@ -58,6 +58,8 @@ schist-psd-descriptor = { path = "crates/psd-descriptor" }
 miniz_oxide = "0.8"
 # zstd for Affinity 2 files; also pure Rust.
 ruzstd = "0.9"
+# SIMD CRC-32 (pure Rust with std-detected SSE4.2/PCLMUL paths).
+crc32fast = "1.5"
 schist-text-engine = { path = "crates/text-engine" }
 schist-adjustments = { path = "crates/adjustments" }
 schist-plugin-host-wasm = { path = "crates/plugin-host-wasm" }

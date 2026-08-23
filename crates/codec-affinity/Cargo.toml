@@ -21,6 +21,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
+# Tile decompression, channel interleave, and placement resampling are
+# all embarrassingly parallel; large documents decode minutes faster.
+rayon.workspace = true
+rustc-hash.workspace = true
+# SIMD CRC-32; every decompressed entry is checksummed, which adds up
+# to hundreds of megabytes on a large document.
+crc32fast.workspace = true
 
 [dev-dependencies]
 # Geometry tests decode the embedded thumbnail — Affinity's own render

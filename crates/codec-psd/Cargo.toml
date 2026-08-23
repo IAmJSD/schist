@@ -11,6 +11,14 @@ schist-color.workspace = true
 schist-psd-descriptor.workspace = true
 miniz_oxide.workspace = true
 anyhow.workspace = true
+# Layers' channel data decompresses independently; large documents
+# decode in parallel.
+rayon.workspace = true
 byteorder.workspace = true
 thiserror.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+# The psdbench example converts corpus Affinity files to PSD to get
+# realistically large inputs for timing the reader and writer.
+schist-codec-affinity.workspace = true
