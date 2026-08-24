@@ -170,6 +170,10 @@ pub struct Workspace {
     pub context_menu: Option<ContextMenu>,
     /// The open modal dialog, if any.
     pub modal: Option<Modal>,
+    /// Dialogs suspended underneath `modal`, innermost last. Only the
+    /// Color Picker stacks: it opens on top of a dialog that owns a colour
+    /// swatch, and closing it puts that dialog back exactly as it was.
+    modal_stack: Vec<Modal>,
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
@@ -611,11 +615,18 @@ pub enum Modal {
     },
 }
 
-/// Which of the two editor colours a picker is editing.
+/// What a picker is editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorTarget {
     Foreground,
     Background,
+    /// A colour belonging to one Layer Style effect, keyed as in
+    /// `style_dialog::EFFECTS`. That dialog stays open underneath the
+    /// picker and receives the colour on OK.
+    StyleEffect(&'static str),
+    /// The colour Select ▸ Color Range matches against, with that
+    /// dialog left open underneath the picker.
+    ColorRange,
 }
 
 /// A press on a layer row that may become a drag-reorder.
@@ -717,6 +728,7 @@ impl Workspace {
             tool_press: None,
             context_menu: None,
             modal: None,
+            modal_stack: Vec::new(),
             focused_field: None,
             field_buffer: String::new(),
             plugins,
@@ -3333,6 +3345,9 @@ impl Workspace {
     // ----- modals and numeric fields -----
 
     pub fn open_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
+        // A dialog opened from the menus replaces whatever was up,
+        // suspended parents included; only `open_color_picker_on` stacks.
+        self.modal_stack.clear();
         self.modal = Some(modal);
         self.context_menu = None;
         self.focused_field = None;
@@ -3346,8 +3361,25 @@ impl Workspace {
         let original = match target {
             ColorTarget::Foreground => self.editor.foreground,
             ColorTarget::Background => self.editor.background,
+            // Not reachable from the editor colour wells: these belong to
+            // a dialog, which opens the picker through
+            // `open_color_picker_on` and supplies the colour itself.
+            ColorTarget::StyleEffect(_) | ColorTarget::ColorRange => return,
         };
+        self.open_color_picker_on(target, original, cx);
+    }
+
+    /// Open the picker over the dialog that is already up, which is
+    /// suspended rather than closed: `close_modal` brings it back whether
+    /// the picker is OK'd or cancelled.
+    pub fn open_color_picker_on(
+        &mut self,
+        target: ColorTarget,
+        original: Rgba,
+        cx: &mut Context<Self>,
+    ) {
         let hsv = crate::color_picker::rgb_to_hsv(original.r, original.g, original.b);
+        let parent = self.modal.take();
         self.open_modal(
             Modal::ColorPicker {
                 target,
@@ -3356,6 +3388,10 @@ impl Workspace {
             },
             cx,
         );
+        // After `open_modal`, which clears the stack.
+        if let Some(parent) = parent {
+            self.modal_stack.push(parent);
+        }
     }
 
     /// Take the picker's colour and close it. Cancel does nothing, because
@@ -3370,8 +3406,34 @@ impl Workspace {
         match target {
             ColorTarget::Foreground => self.editor.foreground = colour,
             ColorTarget::Background => self.editor.background = colour,
+            // Written below, once `close_modal` has put the dialog the
+            // picker was opened from back in `self.modal`.
+            ColorTarget::StyleEffect(_) | ColorTarget::ColorRange => {}
         }
         self.close_modal(cx);
+        match target {
+            ColorTarget::StyleEffect(effect) => {
+                let mut next = None;
+                self.update_modal(|m| {
+                    if let Modal::LayerStyle { style, layer, .. } = m {
+                        crate::style_dialog::set_color(style, effect, colour);
+                        next = Some((*layer, **style));
+                    }
+                });
+                if let Some((layer, style)) = next {
+                    self.preview_layer_style(layer, style, cx);
+                }
+            }
+            ColorTarget::ColorRange => {
+                self.update_modal(|m| {
+                    if let Modal::ColorRange { target, .. } = m {
+                        *target = colour;
+                    }
+                });
+                cx.notify();
+            }
+            ColorTarget::Foreground | ColorTarget::Background => {}
+        }
     }
 
     /// The ± buttons beside a picker component.
@@ -3391,7 +3453,8 @@ impl Workspace {
         // Same for a cancelled Layer Style session: OK clears the modal
         // itself before it gets here, so reaching this means Cancel.
         self.revert_layer_style();
-        self.modal = None;
+        // Closing the picker uncovers the dialog it was opened from.
+        self.modal = self.modal_stack.pop();
         self.focused_field = None;
         self.field_buffer.clear();
         self.open_popup = None;

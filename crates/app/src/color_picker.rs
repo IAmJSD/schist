@@ -276,8 +276,13 @@ pub fn render(
 
     ui::modal_frame(
         match target {
-            ColorTarget::Foreground => "Color Picker (Foreground Color)",
-            ColorTarget::Background => "Color Picker (Background Color)",
+            ColorTarget::Foreground => SharedString::from("Color Picker (Foreground Color)"),
+            ColorTarget::Background => SharedString::from("Color Picker (Background Color)"),
+            ColorTarget::StyleEffect(effect) => SharedString::from(format!(
+                "Color Picker ({} Color)",
+                crate::style_dialog::effect_label(effect)
+            )),
+            ColorTarget::ColorRange => SharedString::from("Color Picker (Color Range)"),
         },
         620.0,
         body,
