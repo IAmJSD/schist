@@ -56,6 +56,11 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
+          # The release profile compiles with debug = 1 for readable local
+          # backtraces, and ELF is the one format that embeds that info in the
+          # executable itself -- strip it here so neither the AppImage payload
+          # nor the loose binaries ship it. Symbols stay; only DWARF goes.
+          strip --strip-debug target/release/schist target/release/schist-mcp
           sudo apt-get install -y libfuse2 || true
           curl -sSL -o /tmp/appimagetool \
             https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
