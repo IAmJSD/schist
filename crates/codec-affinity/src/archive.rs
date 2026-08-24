@@ -101,6 +101,15 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Hard ceiling on one entry's decompressed size. Affinity stores pixels
+/// as 64 KiB tiles and the object graph as a handful of blocks, so real
+/// entries sit far below this. The cap exists because `Entry::size` is a
+/// raw u64 from the entry table: without it a lying field is a request to
+/// allocate arbitrary memory. Deliberately a flat size rather than a ratio
+/// to the compressed bytes, because a blank tile legitimately compresses
+/// by several thousand times.
+const MAX_ENTRY_SIZE: u64 = 1 << 30;
+
 /// One revision of one named entry.
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -376,6 +385,12 @@ impl<'a> Archive<'a> {
             }
         };
 
+        if entry.size > MAX_ENTRY_SIZE {
+            return Err(malformed(format!(
+                "entry declares {} bytes, over the {MAX_ENTRY_SIZE} byte limit",
+                entry.size
+            )));
+        }
         let mut plain = match algorithm {
             1 => {
                 let raw = c.take(entry.compressed_size as usize)?;
@@ -387,11 +402,21 @@ impl<'a> Archive<'a> {
             }
             2 => {
                 let raw = c.take(entry.compressed_size as usize)?;
-                let mut decoder = ruzstd::decoding::StreamingDecoder::new(raw)
+                let decoder = ruzstd::decoding::StreamingDecoder::new(raw)
                     .map_err(|e| malformed(format!("zstd: {e}")))?;
-                let mut out = Vec::with_capacity(entry.size as usize);
-                std::io::Read::read_to_end(&mut decoder, &mut out)
-                    .map_err(|e| malformed(format!("zstd: {e}")))?;
+                // Bound the output the way the zlib branch above does.
+                // `size` is a raw u64 from the entry table, so reserving
+                // from it trusted the file, and `read_to_end` on the bare
+                // decoder had no ceiling at all: a small frame declaring a
+                // huge size could stream until memory ran out. Reading one
+                // byte past the declaration is enough for the size check
+                // below to reject a mismatch.
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(decoder, entry.size.saturating_add(1)),
+                    &mut out,
+                )
+                .map_err(|e| malformed(format!("zstd: {e}")))?;
                 out
             }
             _ => c.take(entry.size as usize)?.to_vec(),
@@ -471,6 +496,77 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal container holding one stored entry whose table declares
+    /// `declared_size` bytes for a `payload`-sized body.
+    fn one_entry_archive(declared_size: u64, payload: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&MAGIC);
+        b.extend_from_slice(&8u16.to_le_bytes()); // version (>7 so Prot follows)
+        b.extend_from_slice(&0u16.to_le_bytes()); // flags
+        b.extend_from_slice(&tag(b"Prsn").to_le_bytes());
+        b.extend_from_slice(&TAG_INF.to_le_bytes());
+        let fat_at = b.len();
+        b.extend_from_slice(&0u64.to_le_bytes()); // fat offset, patched below
+        b.extend_from_slice(&0u64.to_le_bytes()); // thumb offset
+        b.extend_from_slice(&0u64.to_le_bytes()); // length
+        b.extend_from_slice(&0u64.to_le_bytes()); // unknown
+        b.extend_from_slice(&0u64.to_le_bytes()); // creation date
+        b.extend_from_slice(&0u32.to_le_bytes()); // revision
+        b.extend_from_slice(&0u32.to_le_bytes()); // num
+        b.extend_from_slice(&TAG_PROT.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes()); // protocol
+
+        let data_at = b.len() as u64;
+        b.extend_from_slice(&TAG_FIL.to_le_bytes());
+        b.extend_from_slice(payload);
+
+        let fat_off = b.len() as u64;
+        b[fat_at..fat_at + 8].copy_from_slice(&fat_off.to_le_bytes());
+        b.extend_from_slice(&TAG_FAT.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes()); // next fat: end of chain
+        b.extend_from_slice(&0u64.to_le_bytes()); // savepoint
+        b.extend_from_slice(&0u64.to_le_bytes()); // some offset
+        b.extend_from_slice(&0u64.to_le_bytes()); // some length
+        b.extend_from_slice(&0u64.to_le_bytes()); // unknown5
+        b.extend_from_slice(&1u32.to_le_bytes()); // files count
+        b.extend_from_slice(&0u32.to_le_bytes()); // unknown7
+        b.extend_from_slice(&0u32.to_le_bytes()); // unknown8
+        b.extend_from_slice(&0u16.to_le_bytes()); // dirs count
+        b.push(0); // unknown10
+
+        b.extend_from_slice(&1u32.to_le_bytes()); // id
+        b.push(0); // flag 0: named
+        b.extend_from_slice(&data_at.to_le_bytes());
+        b.extend_from_slice(&declared_size.to_le_bytes());
+        b.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        b.extend_from_slice(&crc32(payload).to_le_bytes());
+        b.push(0); // compression: stored
+        b.extend_from_slice(&2u16.to_le_bytes()); // name length
+        b.extend_from_slice(b"ab");
+        b
+    }
+
+    #[test]
+    fn an_entry_declaring_an_absurd_size_is_rejected() {
+        // `size` is a raw u64 from the entry table. Four bytes of payload
+        // claiming to expand to 16 exabytes used to reach the allocation.
+        let bytes = one_entry_archive(u64::MAX, b"tiny");
+        let archive = Archive::parse(&bytes).expect("container should parse");
+        let err = archive.extract(&archive.entries[0]).unwrap_err();
+        assert!(
+            matches!(err, AffinityError::Malformed(_)),
+            "expected a clean rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_entry_within_the_limit_still_decodes() {
+        // The guard must not turn away an ordinary entry.
+        let bytes = one_entry_archive(4, b"tiny");
+        let archive = Archive::parse(&bytes).expect("container should parse");
+        assert_eq!(archive.extract(&archive.entries[0]).unwrap(), b"tiny");
+    }
 
     #[test]
     fn crc32_matches_zlib() {
