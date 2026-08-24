@@ -21,6 +21,15 @@ pub mod vector;
 mod writer;
 pub mod zip;
 
+/// Additional-layer-info keys whose length field widens to u64 in PSB files
+/// (per the spec's "Photoshop Big" notes). All other keys stay u32 even in
+/// PSB. Shared by the reader and the writer so the two cannot disagree
+/// about which keys are widened.
+pub(crate) const PSB_U64_KEYS: [[u8; 4]; 13] = [
+    *b"LMsk", *b"Lr16", *b"Lr32", *b"Layr", *b"Mt16", *b"Mt32", *b"Mtrn", *b"Alph", *b"FMsk",
+    *b"lnk2", *b"FEid", *b"FXid", *b"PxSD",
+];
+
 pub use error::PsdError;
 pub use reader::read_psd;
 pub use writer::{write_psd, write_psd_with, PSB_MAX_DIM, PSD_MAX_DIM};

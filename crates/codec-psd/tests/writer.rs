@@ -217,6 +217,66 @@ fn preserves_unknown_layer_blocks_verbatim() {
 }
 
 #[test]
+fn psb_widened_keys_round_trip() {
+    // In PSB these keys carry a u64 length. The writer emitted u32 for all
+    // of them, so the reader consumed four bytes of payload as part of the
+    // length and the file became unreadable by Schist and Photoshop alike.
+    for key in [*b"LMsk", *b"lnk2", *b"PxSD", *b"Layr"] {
+        let mut doc = base_doc();
+        let mut layer = solid_layer(
+            "psb extras",
+            IntRect::from_xywh(0, 0, 8, 8),
+            [7, 8, 9, 255],
+            Depth::Eight,
+        );
+        layer.extras.push(RawBlock {
+            key,
+            data: b"preserved payload".to_vec(),
+        });
+        doc.push_layer(layer);
+
+        let bytes = write_psd_with(&doc, true).expect("psb write");
+        let back = read_psd(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "psb with {:?} failed to read back: {e}",
+                std::str::from_utf8(&key)
+            )
+        });
+        let block = back.tree.layers[0]
+            .extras
+            .iter()
+            .find(|b| b.key == key)
+            .unwrap_or_else(|| panic!("{:?} kept", std::str::from_utf8(&key)));
+        assert_eq!(block.data, b"preserved payload");
+    }
+}
+
+#[test]
+fn psd_keeps_u32_lengths_for_the_same_keys() {
+    // The widening is PSB-only; a plain PSD must be unaffected.
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "psd extras",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [7, 8, 9, 255],
+        Depth::Eight,
+    );
+    layer.extras.push(RawBlock {
+        key: *b"LMsk",
+        data: b"preserved payload".to_vec(),
+    });
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let block = back.tree.layers[0]
+        .extras
+        .iter()
+        .find(|b| &b.key == b"LMsk")
+        .expect("LMsk kept");
+    assert_eq!(block.data, b"preserved payload");
+}
+
+#[test]
 fn preserves_image_resources_and_resolution() {
     let mut doc = base_doc();
     doc.resolution_dpi = 144.0;

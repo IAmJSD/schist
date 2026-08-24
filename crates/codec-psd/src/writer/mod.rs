@@ -297,8 +297,15 @@ fn write_layer_record(b: &mut Buf, p: &Prepared, psb: bool) {
     for (key, payload) in &p.extras {
         b.bytes(b"8BIM");
         b.bytes(key);
-        // Only the PSB-widened keys use u64 lengths; ours never do.
-        b.u32(payload.len() as u32);
+        // In PSB these keys carry a u64 length. `p.extras` includes blocks
+        // preserved from the source file, so they really can appear here;
+        // emitting u32 for one produced a file the reader (and Photoshop)
+        // then read four bytes short.
+        if psb && crate::PSB_U64_KEYS.contains(key) {
+            b.u64(payload.len() as u64);
+        } else {
+            b.u32(payload.len() as u32);
+        }
         b.bytes(payload);
         if payload.len() % 2 == 1 {
             b.u8(0);
