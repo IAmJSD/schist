@@ -731,6 +731,11 @@ impl TileCache {
         arc
     }
 
+    /// Whether a tile is already composited, without compositing it.
+    pub fn contains(&self, coord: TileCoord) -> bool {
+        self.tiles.contains_key(&coord)
+    }
+
     /// Composite several tiles in one batch ahead of `get` calls.
     pub fn prewarm(&mut self, doc: &Document, coords: &[TileCoord]) {
         let missing: Vec<TileCoord> = coords
