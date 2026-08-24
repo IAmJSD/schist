@@ -2,18 +2,21 @@
 //!
 //! These are the filter and warp kernels that sweep an entire selection
 //! per keystroke of a dialog — blurs with a large kernel, and the
-//! displacement resample Liquify and Puppet Warp re-run on every pointer
-//! move — plus Content-Aware Scale, which sweeps it once per carved seam
-//! and so does hundreds of passes for one command. They are the only
-//! pixel work in the editor where a round trip to a second wgpu device
-//! can pay for itself; brush-footprint tools do a few thousand pixels per
-//! dab and stay on the CPU, where the latency is.
+//! displacement resample Puppet Warp re-runs on every pointer move —
+//! plus Content-Aware Scale, which sweeps it once per carved seam and so
+//! does hundreds of passes for one command. They are the only pixel work
+//! in the editor where a round trip to a second wgpu device can pay for
+//! itself; brush-footprint tools do a few thousand pixels per dab and stay
+//! on the CPU, where the latency is. Liquify is the one that goes both
+//! ways: a dab resamples only the footprint of the brush and stays here,
+//! but the warp it runs is the same one.
 //!
 //! The functions here are the entry points callers use. Each dispatches to
 //! the installed [`FxBackend`] and falls back to the `*_cpu` reference —
 //! which is the semantic contract, exactly as `schist-compositor`'s CPU
 //! compositor is for compositing.
 
+use rayon::prelude::*;
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// A separable box blur: `passes` rounds of one horizontal and one
@@ -66,9 +69,10 @@ pub struct WarpParams<'a> {
     /// Document position of mesh vertex (0, 0).
     pub mesh_origin: (i32, i32),
     /// Identifies the source plane across calls so a backend can keep it
-    /// resident between them — a Liquify drag re-warps the same snapshot
-    /// on every pointer move. Any change to the source pixels must change
-    /// the token; 0 means "do not cache".
+    /// resident between them — a Puppet Warp drag re-warps the same
+    /// snapshot on every pointer move. Any change to the source pixels must
+    /// change the token; 0 means "do not cache", and is also how a caller
+    /// says this plane is a one-off it cropped for a single call.
     pub src_token: u64,
 }
 
@@ -349,17 +353,26 @@ pub fn warp(params: &WarpParams<'_>, src: impl FnOnce() -> Vec<f32>) -> Vec<f32>
 
 pub fn warp_cpu(job: &WarpParams<'_>, src: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; job.dst_width * job.dst_height * 4];
-    for row in 0..job.dst_height {
-        for col in 0..job.dst_width {
-            let x = job.dst_origin.0 + col as i32;
-            let y = job.dst_origin.1 + row as i32;
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let (dx, dy) = mesh_sample(job, fx, fy);
-            let px = fetch(job, src, fx + dx - 0.5, fy + dy - 0.5);
-            let i = (row * job.dst_width + col) * 4;
-            out[i..i + 4].copy_from_slice(&px);
-        }
+    if job.dst_width == 0 {
+        return out;
     }
+    // A row of the result depends on nothing but the source and the grid,
+    // so they go out across the cores. This is the one kernel here that a
+    // gesture waits on directly — a Liquify dab re-renders the footprint of
+    // the brush between one pointer move and the next — and the offload
+    // threshold keeps a footprint-sized job on this path.
+    out.par_chunks_mut(job.dst_width * 4)
+        .enumerate()
+        .for_each(|(row, dst)| {
+            for col in 0..job.dst_width {
+                let x = job.dst_origin.0 + col as i32;
+                let y = job.dst_origin.1 + row as i32;
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let (dx, dy) = mesh_sample(job, fx, fy);
+                let px = fetch(job, src, fx + dx - 0.5, fy + dy - 0.5);
+                dst[col * 4..col * 4 + 4].copy_from_slice(&px);
+            }
+        });
     out
 }
 

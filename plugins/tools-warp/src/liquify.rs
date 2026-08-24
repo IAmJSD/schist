@@ -10,7 +10,7 @@ use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PointerInput, ToolCtx, ToolOption, ToolPlugin,
 };
 
-use crate::mesh::{warp_tiles, Mesh};
+use crate::mesh::{warp_into, Mesh};
 
 /// Photoshop's Liquify brushes.
 const MODES: &[&str] = &[
@@ -65,9 +65,6 @@ struct Session {
     /// The layer as it was before any warping. Every render goes from
     /// here, so the mesh is applied once rather than compounding.
     original: TileMap,
-    /// Names `original` for a backend that can keep it resident: the
-    /// snapshot is fixed for the whole drag, only the mesh moves.
-    token: u64,
     mesh: Mesh,
     last: Option<(f32, f32)>,
 }
@@ -105,10 +102,14 @@ impl LiquifyTool {
             return;
         };
         // Warp over the artwork grown by one brush, so pixels can be
-        // pushed outwards past the original edge.
+        // pushed outwards past the original edge. Tile-granular bounds
+        // rather than pixel-tight ones: this runs when the tool is picked
+        // up and after every Enter, and scanning twelve megapixels for
+        // their alpha to save a fringe of mesh nobody warps is not a trade
+        // worth making.
         let rect = raster
             .tiles
-            .content_bounds()
+            .tile_bounds()
             .inflated(self.size.ceil() as i32)
             .intersect(&ctx.doc.canvas_rect());
         if rect.is_empty() {
@@ -117,39 +118,52 @@ impl LiquifyTool {
         self.session = Some(Session {
             layer: id,
             original: raster.tiles.clone(),
-            token: crate::mesh::next_source_token(),
             mesh: Mesh::new(rect),
             last: None,
         });
     }
 
-    /// Re-render the layer from the snapshot through the current mesh.
-    fn render(&self, doc: &mut Document) {
+    /// Re-render `region` of the layer from the snapshot through the
+    /// current mesh.
+    ///
+    /// Only the pixels a dab could have changed are redone. Everywhere else
+    /// the layer already holds the right answer: a render always goes from
+    /// the frozen snapshot through the mesh, and a dab only moves the
+    /// vertices under the brush, so the rest of the layer was warped
+    /// through offsets that still stand.
+    fn render(&self, doc: &mut Document, region: IntRect) {
         let Some(session) = &self.session else { return };
-        let depth = doc.depth;
-        let clip = doc.canvas_rect();
-        let warped = warp_tiles(&session.original, &session.mesh, depth, clip, session.token);
-        // Anything the mesh does not cover keeps its original pixels.
-        let mut tiles = session.original.clone();
-        for (coord, buf) in warped.iter() {
-            *tiles.get_mut_or_insert(*coord, depth) = (**buf).clone();
+        let region = region.intersect(&doc.canvas_rect());
+        if region.is_empty() {
+            return;
         }
-        if let Some(raster) = doc
+        let depth = doc.depth;
+        let Some(raster) = doc
             .tree
             .find_mut(session.layer)
             .and_then(|l| l.as_raster_mut())
-        {
-            raster.tiles = tiles;
-        }
-        doc.add_damage(session.mesh.rect);
-    }
-
-    /// Apply one dab of the current brush to the mesh.
-    fn dab(&mut self, x: f32, y: f32, dx: f32, dy: f32) {
-        let Some(session) = &mut self.session else {
+        else {
             return;
         };
+        warp_into(
+            &mut raster.tiles,
+            &session.original,
+            &session.mesh,
+            depth,
+            region,
+            0,
+        );
+        doc.add_damage(region);
+    }
+
+    /// Apply one dab of the current brush to the mesh, returning the
+    /// destination pixels it changed.
+    fn dab(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> IntRect {
+        let Some(session) = &mut self.session else {
+            return IntRect::EMPTY;
+        };
         let radius = self.size / 2.0;
+        let dirty = session.mesh.dab_rect(x, y, radius);
         let strength = (self.pressure / 100.0).clamp(0.0, 1.0);
         match self.mode {
             Mode::Forward => {
@@ -163,7 +177,7 @@ impl LiquifyTool {
                 // Perpendicular to the drag: pixels slide to its left.
                 let len = dx.hypot(dy);
                 if len < 1e-4 {
-                    return;
+                    return IntRect::EMPTY;
                 }
                 let (px, py) = (dy / len, -dx / len);
                 let push = len * strength;
@@ -200,6 +214,7 @@ impl LiquifyTool {
                 });
             }
         }
+        dirty
     }
 
     fn commit(&mut self, ctx: &mut ToolCtx) {
@@ -210,25 +225,24 @@ impl LiquifyTool {
         if session.mesh.is_identity() {
             return;
         }
-        // Put the original back so the recorded edit has the right before,
-        // then write the warped result as one entry.
-        let depth = ctx.doc.depth;
-        let clip = ctx.doc.canvas_rect();
-        let warped = warp_tiles(&session.original, &session.mesh, depth, clip, session.token);
-        let mut tiles = session.original.clone();
-        for (coord, buf) in warped.iter() {
-            *tiles.get_mut_or_insert(*coord, depth) = (**buf).clone();
-        }
-        if let Some(raster) = ctx
+        // The layer already holds the finished warp: every dab re-rendered
+        // the pixels it touched, from the snapshot, through the mesh. So
+        // this is not another sweep of the artwork — it is taking the
+        // result out, putting the snapshot back so the recorded edit has
+        // the right before, and writing the result as one entry. Tiles no
+        // dab reached are still shared with the snapshot, and the edit
+        // compares by pointer, so history only carries what moved.
+        let Some(raster) = ctx
             .doc
             .tree
             .find_mut(session.layer)
             .and_then(|l| l.as_raster_mut())
-        {
-            raster.tiles = session.original.clone();
-        }
+        else {
+            return;
+        };
+        let warped = std::mem::replace(&mut raster.tiles, session.original);
         let mut edit = ctx.doc.begin_edit("Liquify");
-        edit.replace_layer_tiles(session.layer, tiles);
+        edit.replace_layer_tiles(session.layer, warped);
         edit.commit();
     }
 }
@@ -289,8 +303,8 @@ impl ToolPlugin for LiquifyTool {
             session.last = Some((input.x, input.y));
         }
         // A click with no drag still applies the radial brushes.
-        self.dab(input.x, input.y, 0.0, 0.0);
-        self.render(ctx.doc);
+        let dirty = self.dab(input.x, input.y, 0.0, 0.0);
+        self.render(ctx.doc, dirty);
     }
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
@@ -302,11 +316,11 @@ impl ToolPlugin for LiquifyTool {
         if dx.hypot(dy) < 1.0 {
             return;
         }
-        self.dab(input.x, input.y, dx, dy);
+        let dirty = self.dab(input.x, input.y, dx, dy);
         if let Some(session) = &mut self.session {
             session.last = Some((input.x, input.y));
         }
-        self.render(ctx.doc);
+        self.render(ctx.doc, dirty);
     }
 
     fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {
@@ -359,5 +373,5 @@ pub fn liquify_region(
     mesh: &Mesh,
     depth: schist_color::Depth,
 ) -> TileMap {
-    warp_tiles(src, mesh, depth, rect, 0)
+    crate::mesh::warp_tiles(src, mesh, depth, rect, 0)
 }

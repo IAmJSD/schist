@@ -6,6 +6,7 @@
 //! grid and interpolated, because storing it per pixel would cost
 //! 96 MB on a 12-megapixel layer for no visible gain.
 
+use rayon::prelude::*;
 use schist_color::{Depth, Rgba};
 use schist_core::{IntRect, TileCoord, TileMap, TILE_SIZE};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +25,16 @@ pub struct Mesh {
     /// `(dx, dy)` per vertex: where this point's colour is fetched *from*,
     /// relative to itself. Zero everywhere means the identity.
     pub offsets: Vec<(f32, f32)>,
+}
+
+/// A rectangular slice of a [`Mesh`], in the flat form the kernel takes.
+pub struct Subgrid {
+    /// `(dx, dy)` per vertex, interleaved, row major.
+    pub offsets: Vec<f32>,
+    pub cols: usize,
+    pub rows: usize,
+    /// Document position of this slice's vertex (0, 0).
+    pub origin: (i32, i32),
 }
 
 impl Mesh {
@@ -95,6 +106,73 @@ impl Mesh {
         }
     }
 
+    /// The destination pixels a dab at `(cx, cy)` can change.
+    ///
+    /// A dab only moves vertices inside its radius, and a destination
+    /// pixel interpolates the four vertices around it, so the influence
+    /// stops one cell past the outermost vertex the brush reached. This is
+    /// what lets a stroke re-render its own footprint instead of the whole
+    /// layer.
+    pub fn dab_rect(&self, cx: f32, cy: f32, radius: f32) -> IntRect {
+        let reach = radius + CELL;
+        IntRect::new(
+            (cx - reach).floor() as i32,
+            (cy - reach).floor() as i32,
+            (cx + reach).ceil() as i32 + 1,
+            (cy + reach).ceil() as i32 + 1,
+        )
+        .intersect(&self.rect)
+    }
+
+    /// The vertices `rect` samples, interleaved `(dx, dy)`, with the grid
+    /// shape and origin that go with them.
+    ///
+    /// A dab re-renders a disc, and handing the kernel the whole grid for
+    /// it would copy far more offsets than the disc reads — a megabyte and
+    /// a half per pointer move on a 12-megapixel layer. The slice keeps a
+    /// cell of margin on every side, so a pixel inside `rect` interpolates
+    /// the same four vertices it would have in the full grid, and where the
+    /// margin runs out it is because the full grid ends there too, which
+    /// makes clamping agree as well.
+    pub fn subgrid(&self, rect: IntRect) -> Subgrid {
+        if self.cols < 2 || self.rows < 2 || rect.is_empty() {
+            return Subgrid {
+                offsets: self.offsets.iter().flat_map(|(x, y)| [*x, *y]).collect(),
+                cols: self.cols,
+                rows: self.rows,
+                origin: (self.rect.left, self.rect.top),
+            };
+        }
+        let lo = |v: i32, origin: i32| {
+            (((v - origin) as f32 / CELL).floor() as i64 - 1).clamp(0, i64::MAX) as usize
+        };
+        let hi = |v: i32, origin: i32, n: usize| {
+            (((v - origin) as f32 / CELL).ceil() as i64 + 1).clamp(0, n as i64 - 1) as usize
+        };
+        let lo_c = lo(rect.left, self.rect.left).min(self.cols - 1);
+        let lo_r = lo(rect.top, self.rect.top).min(self.rows - 1);
+        let hi_c = hi(rect.right, self.rect.left, self.cols).max(lo_c);
+        let hi_r = hi(rect.bottom, self.rect.top, self.rows).max(lo_r);
+        let (cols, rows) = (hi_c - lo_c + 1, hi_r - lo_r + 1);
+        let mut offsets = Vec::with_capacity(cols * rows * 2);
+        for row in lo_r..=hi_r {
+            let base = row * self.cols;
+            for &(dx, dy) in &self.offsets[base + lo_c..=base + hi_c] {
+                offsets.push(dx);
+                offsets.push(dy);
+            }
+        }
+        Subgrid {
+            offsets,
+            cols,
+            rows,
+            origin: (
+                self.rect.left + (lo_c as f32 * CELL) as i32,
+                self.rect.top + (lo_r as f32 * CELL) as i32,
+            ),
+        }
+    }
+
     /// Bilinear displacement at a document position.
     pub fn sample(&self, x: f32, y: f32) -> (f32, f32) {
         if self.cols < 2 || self.rows < 2 {
@@ -128,11 +206,13 @@ impl Mesh {
 
 /// Identify one warp source for the life of a drag.
 ///
-/// Liquify and Puppet Warp both re-render from a snapshot taken when the
-/// gesture started, so the pixels never change while the mesh does — which
-/// is exactly what lets an accelerated backend keep the source plane
-/// resident and pay only for the result coming back. Anything that hands
-/// out a token is promising the pixels behind it are frozen.
+/// Puppet Warp re-renders everything its mesh covers from a snapshot taken
+/// when the gesture started, so the pixels never change while the mesh
+/// does — which is exactly what lets an accelerated backend keep the source
+/// plane resident and pay only for the result coming back. Anything that
+/// hands out a token is promising the pixels behind it are frozen. (Liquify
+/// wants no token: a dab redoes its own footprint, which is small enough
+/// that the transfer would cost more than the work.)
 pub fn next_source_token() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -151,20 +231,46 @@ pub fn warp_tiles(
     src_token: u64,
 ) -> TileMap {
     let mut out = TileMap::new();
+    warp_into(&mut out, src, mesh, depth, clip, src_token);
+    out
+}
+
+/// Resample `src` through `mesh` into `dst`, touching only pixels inside
+/// `clip`.
+///
+/// Splitting this out is what lets a Liquify stroke re-render just the
+/// footprint of the dab it has applied: everything outside `clip` in `dst`
+/// was warped through the same mesh values by an earlier call and is still
+/// current, because a dab only moves the vertices under the brush.
+pub fn warp_into(
+    dst: &mut TileMap,
+    src: &TileMap,
+    mesh: &Mesh,
+    depth: Depth,
+    clip: IntRect,
+    src_token: u64,
+) {
     let region = mesh.rect.intersect(&clip);
     if region.is_empty() {
-        return out;
+        return;
     }
-    // The source plane is the whole snapshot, not just what this mesh
-    // reaches: it has to stay the same across a drag for the token to mean
-    // anything, and outside the stored tiles the map reads as transparent
-    // anyway.
-    let plane = src.tile_bounds();
-    let offsets: Vec<f32> = mesh
-        .offsets
-        .iter()
-        .flat_map(|(dx, dy)| [*dx, *dy])
-        .collect();
+    let stored = src.tile_bounds();
+    let grid = mesh.subgrid(region);
+    // Which source pixels to put in front of the kernel, and it follows
+    // from the token. A token promises a fixed plane across a drag, so a
+    // backend can keep it resident and a sweep of the whole layer pays for
+    // the transfer once; the plane is then the entire snapshot, because
+    // cropping it would make the token name different pixels on different
+    // calls. No token means a one-off — in practice the footprint of a
+    // single dab — and flattening megabytes of layer to resample a disc of
+    // it costs far more than the resample, so the plane shrinks to what the
+    // displacement over this region can actually reach.
+    let plane = if src_token != 0 {
+        stored
+    } else {
+        let reach = grid.offsets.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        region.inflated(reach.ceil() as i32 + 2).intersect(&stored)
+    };
     let params = schist_fx::WarpParams {
         src_width: plane.width().max(0) as usize,
         src_height: plane.height().max(0) as usize,
@@ -172,11 +278,11 @@ pub fn warp_tiles(
         dst_origin: (region.left, region.top),
         dst_width: region.width().max(0) as usize,
         dst_height: region.height().max(0) as usize,
-        mesh: &offsets,
-        mesh_cols: mesh.cols,
-        mesh_rows: mesh.rows,
+        mesh: &grid.offsets,
+        mesh_cols: grid.cols,
+        mesh_rows: grid.rows,
         cell: CELL,
-        mesh_origin: (mesh.rect.left, mesh.rect.top),
+        mesh_origin: grid.origin,
         src_token,
     };
     let warped = schist_fx::warp(&params, || flatten(src, plane));
@@ -188,7 +294,7 @@ pub fn warp_tiles(
         if cliprect.is_empty() {
             continue;
         }
-        let buf = out.get_mut_or_insert(coord, depth);
+        let buf = dst.get_mut_or_insert(coord, depth);
         for y in cliprect.top..cliprect.bottom {
             for x in cliprect.left..cliprect.right {
                 let i = ((y - region.top) as usize * stride + (x - region.left) as usize) * 4;
@@ -200,20 +306,40 @@ pub fn warp_tiles(
             }
         }
     }
-    out
 }
 
 /// Copy a tile map's stored region out into one flat straight-alpha plane.
+///
+/// A row at a time across the cores, and within a row a tile at a time: a
+/// map lookup per pixel costs about as much as the resample this is
+/// feeding. A tile the map does not store is transparent, which the buffer
+/// already is.
 fn flatten(src: &TileMap, rect: IntRect) -> Vec<f32> {
     let (w, h) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
     let mut out = vec![0.0f32; w * h * 4];
-    for row in 0..h {
-        for col in 0..w {
-            let p = src.pixel(rect.left + col as i32, rect.top + row as i32);
-            let i = (row * w + col) * 4;
-            out[i..i + 4].copy_from_slice(&[p.r, p.g, p.b, p.a]);
-        }
+    if w == 0 || h == 0 {
+        return out;
     }
+    out.par_chunks_mut(w * 4)
+        .enumerate()
+        .for_each(|(row, dst)| {
+            let y = rect.top + row as i32;
+            let ty = y.div_euclid(TILE_SIZE);
+            let ly = y.rem_euclid(TILE_SIZE) * TILE_SIZE;
+            let mut x = rect.left;
+            while x < rect.right {
+                let tx = x.div_euclid(TILE_SIZE);
+                let end = ((tx + 1) * TILE_SIZE).min(rect.right);
+                if let Some(tile) = src.get(TileCoord { tx, ty }) {
+                    for x in x..end {
+                        let p = tile.get((ly + x.rem_euclid(TILE_SIZE)) as usize);
+                        let i = (x - rect.left) as usize * 4;
+                        dst[i..i + 4].copy_from_slice(&[p.r, p.g, p.b, p.a]);
+                    }
+                }
+                x = end;
+            }
+        });
     out
 }
 

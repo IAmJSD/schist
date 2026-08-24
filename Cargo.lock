@@ -5771,6 +5771,9 @@ dependencies = [
 [[package]]
 name = "schist-fx"
 version = "0.3.0"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "schist-layer-fx"
@@ -5973,6 +5976,7 @@ dependencies = [
 name = "schist-tools-warp"
 version = "0.3.0"
 dependencies = [
+ "rayon",
  "schist-color",
  "schist-core",
  "schist-fx",

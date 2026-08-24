@@ -4,8 +4,8 @@
 //! are a per-device stack, so an fx submission running beside a composite
 //! batch would pop the other's scope. Each job is one upload, a short
 //! chain of dispatches and one readback, except the warp, whose source
-//! plane stays resident between calls (a Liquify drag re-warps the same
-//! snapshot on every pointer move).
+//! plane stays resident between calls (a Puppet Warp drag re-warps the
+//! same snapshot on every pointer move).
 
 use crate::exec::GpuContext;
 use schist_fx::{BlurJob, CarveJob, Carved, FxBackend, LensJob, WarpParams};
@@ -101,7 +101,9 @@ impl FxBackend for GpuFx {
         // Four bilinear taps plus the grid lookup: thin work per pixel, so
         // this only pays when the source stays resident across a drag and
         // a pointer move costs one dispatch and one readback rather than
-        // two transfers of the whole layer.
+        // two transfers of the whole layer. A tool that re-renders only
+        // what its brush touched declines the deal by passing no token —
+        // its jobs are too small to leave the CPU.
         let pixels = params.dst_width * params.dst_height;
         if params.src_token == 0 || !schist_fx::worth_offloading(pixels, 24) {
             return None;
