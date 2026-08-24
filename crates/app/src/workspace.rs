@@ -5949,7 +5949,7 @@ fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
             continue;
         }
         let before = layer.styled.as_ref().map(|s| s.bounds);
-        layer.styled = schist_layer_fx::render(layer).map(|mut r| {
+        layer.styled = schist_compositor::render_styled(layer).map(|mut r| {
             r.key = key;
             Arc::new(r)
         });
@@ -5973,7 +5973,37 @@ fn fx_key(layer: &Layer) -> u64 {
     if let Some(r) = layer.as_raster() {
         r.tiles.fingerprint().hash(&mut h);
     }
+    // A group's styled raster is rendered from its flattened children,
+    // so anything that moves their pixels must change the key. Children
+    // restyle before their parent, so child styled keys are fresh here.
+    if let schist_core::LayerKind::Group(g) = &layer.kind {
+        fx_key_children(&g.children, &mut h);
+    }
     h.finish()
+}
+
+fn fx_key_children(layers: &[Layer], h: &mut rustc_hash::FxHasher) {
+    use std::hash::Hash;
+    for l in layers {
+        l.visible.hash(h);
+        l.opacity.to_bits().hash(h);
+        l.fill_opacity.to_bits().hash(h);
+        format!("{:?}", l.blend).hash(h);
+        l.render_offset.hash(h);
+        l.clipping.hash(h);
+        if let Some(r) = l.as_raster() {
+            r.tiles.fingerprint().hash(h);
+        }
+        if let Some(s) = l.styled.as_ref() {
+            s.key.hash(h);
+        }
+        if let Some(m) = &l.mask {
+            m.enabled.hash(h);
+        }
+        if let schist_core::LayerKind::Group(g) = &l.kind {
+            fx_key_children(&g.children, h);
+        }
+    }
 }
 
 /// Whether one named effect is switched on, for the dialog's initial tab.

@@ -237,6 +237,77 @@ pub fn composite_region_rgba8_cpu(doc: &Document, region: IntRect) -> Vec<u8> {
     out
 }
 
+/// The styled raster for a layer that carries effects — any layer kind.
+///
+/// Rasters feed the fx renderer their own pixels. Groups are flattened
+/// here first — `schist_layer_fx` cannot composite, which is why every
+/// restyle pass routes through this function instead of calling it
+/// directly. Restyle bottom-up: a styled group's children must already
+/// carry their own styled rasters when the group is flattened.
+pub fn render_styled(layer: &Layer) -> Option<schist_core::StyledRaster> {
+    if layer.style.is_empty() {
+        return None;
+    }
+    let LayerKind::Group(g) = &layer.kind else {
+        return schist_layer_fx::render(layer);
+    };
+    // Content bounds from the children (not `tight_bounds`, which would
+    // read a stale styled raster from a previous restyle).
+    let mut region = IntRect::EMPTY;
+    for child in &g.children {
+        if child.visible {
+            region = region.union(&child.tight_bounds());
+        }
+    }
+    if region.is_empty() {
+        return None;
+    }
+    // Flatten the children alone — the group's own mask, opacity and
+    // blend stay with the compositor, which applies them when it blends
+    // the styled raster.
+    let dummy = Document::new("", 1, 1, schist_color::Depth::Eight);
+    let w = region.width() as usize;
+    let h = region.height() as usize;
+    let mut flat = vec![0.0f32; w * h * 4];
+    let coords: Vec<TileCoord> = TileCoord::covering(&region).collect();
+    let tiles: Vec<(TileCoord, TileF32)> = coords
+        .into_par_iter()
+        .map(|c| {
+            let mut scratch = Scratch::default();
+            let mut dst = blank_tile();
+            composite_layers(&dummy, &g.children, c, &mut dst, &mut scratch);
+            (c, dst)
+        })
+        .collect();
+    for (coord, tile) in tiles {
+        let trect = coord.rect();
+        let clip = trect.intersect(&region);
+        for y in clip.top..clip.bottom {
+            let ly = (y - trect.top) as usize;
+            let oy = (y - region.top) as usize;
+            for x in clip.left..clip.right {
+                let lx = (x - trect.left) as usize;
+                let ox = (x - region.left) as usize;
+                let s = (ly * TILE_SIZE as usize + lx) * 4;
+                let d = (oy * w + ox) * 4;
+                flat[d..d + 4].copy_from_slice(&tile[s..s + 4]);
+            }
+        }
+    }
+    schist_layer_fx::render_content(
+        region,
+        |x, y| {
+            if x < region.left || x >= region.right || y < region.top || y >= region.bottom {
+                return Rgba::TRANSPARENT;
+            }
+            let i = ((y - region.top) as usize * w + (x - region.left) as usize) * 4;
+            Rgba::new(flat[i], flat[i + 1], flat[i + 2], flat[i + 3])
+        },
+        &layer.style,
+        layer.fill_opacity,
+    )
+}
+
 /// Composite a run of sibling layers (bottom-to-top) onto `dst` for `coord`.
 fn composite_layers(
     doc: &Document,
@@ -313,6 +384,29 @@ fn composite_layers(
             scratch.give(group_buf);
         } else {
             match &layer.kind {
+                // A group with effects has been flattened and styled by
+                // `render_styled`; composite the styled raster like a
+                // raster layer (effects force isolation, so PassThrough
+                // does not apply).
+                LayerKind::Group(_) if layer.styled.is_some() => {
+                    let mut src = scratch.take();
+                    render_single_layer(doc, layer, coord, &mut src, 1.0, scratch);
+                    let mode = if layer.blend == BlendMode::PassThrough {
+                        BlendMode::Normal
+                    } else {
+                        layer.blend
+                    };
+                    blend_buf_onto(
+                        mode,
+                        &src,
+                        dst,
+                        coord,
+                        layer.opacity * content_alpha(layer),
+                        layer,
+                        doc,
+                    );
+                    scratch.give(src);
+                }
                 LayerKind::Group(g) => {
                     let pass_through = layer.blend == BlendMode::PassThrough
                         && layer.opacity >= 1.0
@@ -541,8 +635,10 @@ fn blend_buf_onto(
     _doc: &Document,
 ) {
     let trect = coord.rect();
+    // A styled group went through `render_single_layer`, which already
+    // applied the mask; re-applying it here would double it.
     let group_mask = match (&layer.kind, layer.mask.as_ref().filter(|m| m.enabled)) {
-        (LayerKind::Group(_), Some(m)) => Some(m),
+        (LayerKind::Group(_), Some(m)) if layer.styled.is_none() => Some(m),
         _ => None,
     };
     // With no mask, separable blend modes run through a span loop that

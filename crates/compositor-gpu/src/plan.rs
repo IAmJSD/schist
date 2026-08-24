@@ -251,8 +251,10 @@ fn emit_layers<'a>(
             }
             // `blend_buf_onto` re-applies the mask for group layers (on
             // top of `render_single_layer` having applied it); mirror
-            // that, double application and all.
-            let mask = if matches!(layer.kind, LayerKind::Group(_)) {
+            // that, double application and all. Styled groups are the
+            // exception on both sides: their mask is applied once, by
+            // the styled-raster path.
+            let mask = if matches!(layer.kind, LayerKind::Group(_)) && layer.styled.is_none() {
                 plan.mask_ref(layer)
             } else {
                 MaskRef::NONE
@@ -263,6 +265,20 @@ fn emit_layers<'a>(
             op.mask = mask;
         } else {
             match &layer.kind {
+                // A styled group composites its flattened styled raster
+                // (mask already applied by `emit_single`, mirroring the
+                // CPU's `render_single_layer`).
+                LayerKind::Group(_) if layer.styled.is_some() => {
+                    emit_single(layer, plan, depth)?;
+                    let mode = if layer.blend == BlendMode::PassThrough {
+                        BlendMode::Normal
+                    } else {
+                        layer.blend
+                    };
+                    let op = plan.op(OP_BLEND);
+                    op.mode = mode_id(mode);
+                    op.opacity = layer.opacity * content_alpha(layer);
+                }
                 LayerKind::Group(g) => {
                     let pass_through = layer.blend == BlendMode::PassThrough
                         && layer.opacity >= 1.0

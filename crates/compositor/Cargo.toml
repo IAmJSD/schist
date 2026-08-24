@@ -13,6 +13,4 @@ schist-pixel-ops.workspace = true
 schist-color.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
-
-[dev-dependencies]
 schist-layer-fx.workspace = true

@@ -615,7 +615,7 @@ fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
             continue;
         }
         let before = layer.styled.as_ref().map(|s| s.bounds);
-        layer.styled = schist_layer_fx::render(layer).map(|mut r| {
+        layer.styled = schist_compositor::render_styled(layer).map(|mut r| {
             r.key = key;
             std::sync::Arc::new(r)
         });
@@ -637,7 +637,36 @@ fn fx_key(layer: &Layer) -> u64 {
     if let Some(r) = layer.as_raster() {
         r.tiles.fingerprint().hash(&mut h);
     }
+    // A group's styled raster renders from its flattened children;
+    // children restyle first, so their styled keys are fresh here.
+    if let LayerKind::Group(g) = &layer.kind {
+        fx_key_children(&g.children, &mut h);
+    }
     h.finish()
+}
+
+fn fx_key_children(layers: &[Layer], h: &mut rustc_hash::FxHasher) {
+    use std::hash::Hash;
+    for l in layers {
+        l.visible.hash(h);
+        l.opacity.to_bits().hash(h);
+        l.fill_opacity.to_bits().hash(h);
+        format!("{:?}", l.blend).hash(h);
+        l.render_offset.hash(h);
+        l.clipping.hash(h);
+        if let Some(r) = l.as_raster() {
+            r.tiles.fingerprint().hash(h);
+        }
+        if let Some(s) = l.styled.as_ref() {
+            s.key.hash(h);
+        }
+        if let Some(m) = &l.mask {
+            m.enabled.hash(h);
+        }
+        if let LayerKind::Group(g) = &l.kind {
+            fx_key_children(&g.children, h);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -104,10 +104,31 @@ pub fn render(layer: &Layer) -> Option<StyledRaster> {
     }
     let raster = layer.as_raster()?;
     let content = raster.tiles.content_bounds();
-    if content.is_empty() {
+    render_content(
+        content,
+        |x, y| raster.tiles.pixel(x, y),
+        &layer.style,
+        layer.fill_opacity,
+    )
+}
+
+/// Rasterize a style around arbitrary content pixels.
+///
+/// This is the path group layers take: this crate cannot composite, so
+/// the compositor flattens a styled group's children and hands the
+/// result here. `pixel` is sampled over `content` grown by the style's
+/// reach and must return straight-alpha values (transparent outside the
+/// content).
+pub fn render_content(
+    content: IntRect,
+    pixel: impl Fn(i32, i32) -> Rgba,
+    style: &LayerStyle,
+    fill_opacity: f32,
+) -> Option<StyledRaster> {
+    if style.is_empty() || content.is_empty() {
         return None;
     }
-    let pad = layer.style.outset();
+    let pad = style.outset();
     let rect = IntRect::new(
         content.left - pad,
         content.top - pad,
@@ -122,19 +143,16 @@ pub fn render(layer: &Layer) -> Option<StyledRaster> {
     let mut alpha = vec![0.0f32; w * h];
     for y in 0..h {
         for x in 0..w {
-            let px = raster
-                .tiles
-                .pixel(rect.left + x as i32, rect.top + y as i32);
+            let px = pixel(rect.left + x as i32, rect.top + y as i32);
             let i = y * w + x;
             alpha[i] = px.a;
             base.px[i * 4] = px.r;
             base.px[i * 4 + 1] = px.g;
             base.px[i * 4 + 2] = px.b;
-            base.px[i * 4 + 3] = px.a * layer.fill_opacity;
+            base.px[i * 4 + 3] = px.a * fill_opacity;
         }
     }
 
-    let style = &layer.style;
     let mut out = Plane::blank(rect);
 
     // Bottom of the stack: effects that sit behind the layer.
