@@ -10,7 +10,7 @@ fn restyle(layers: &mut [schist_core::Layer]) {
             restyle(&mut g.children);
         }
         if !l.style.is_empty() {
-            l.styled = schist_layer_fx::render(l).map(std::sync::Arc::new);
+            l.styled = schist_compositor::render_styled(l).map(std::sync::Arc::new);
         }
     }
 }

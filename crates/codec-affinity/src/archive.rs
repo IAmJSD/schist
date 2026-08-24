@@ -331,6 +331,18 @@ impl<'a> Archive<'a> {
         self.name_order.iter().map(|n| n.as_str())
     }
 
+    /// Every revision of `name` across every savepoint, in FAT-chain
+    /// order (the order the blocks are linked in the file). Dev tooling
+    /// for head-selection questions; the codec itself uses [`head`].
+    ///
+    /// [`head`]: Archive::head
+    pub fn revisions(&self, name: &str) -> Vec<&Entry> {
+        let Some(id) = self.names.get(name) else {
+            return Vec::new();
+        };
+        self.entries.iter().filter(|e| e.id == *id).collect()
+    }
+
     /// The newest revision of `name`, if it exists and is not deleted.
     pub fn head(&self, name: &str) -> Option<&Entry> {
         let id = self.names.get(name)?;

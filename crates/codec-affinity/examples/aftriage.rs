@@ -11,8 +11,12 @@ fn main() {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.extension()
-                .is_some_and(|x| x.to_string_lossy().starts_with("af"))
+            p.extension().is_some_and(|x| {
+                matches!(
+                    x.to_string_lossy().as_ref(),
+                    "af" | "afphoto" | "afdesign" | "afpub"
+                )
+            })
         })
         .collect();
     paths.sort();

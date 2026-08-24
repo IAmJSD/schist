@@ -32,9 +32,15 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
             entries
                 .flatten()
                 .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|x| x.to_string_lossy().starts_with("af"))
+                    // A document open in Affinity leaves a sibling
+                    // "name.afphoto~lock~" behind; its extension also
+                    // starts with "af", so match real extensions only.
+                    e.path().extension().is_some_and(|x| {
+                        matches!(
+                            x.to_string_lossy().as_ref(),
+                            "af" | "afphoto" | "afdesign" | "afpub"
+                        )
+                    })
                 })
                 .map(|e| {
                     (
