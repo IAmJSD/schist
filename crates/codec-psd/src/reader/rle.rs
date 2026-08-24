@@ -59,6 +59,16 @@ pub fn unpack_channel(
     for _ in 0..rows {
         counts.push(cur.len_rle_row(psb)? as usize);
     }
+    // Guard corrupt layer rects: PackBits expands at most 64x, so a
+    // channel claiming more than the remaining payload can produce is
+    // corrupt. Without this a bogus rect (`check_rect` allows each
+    // dimension up to 400_000 independently) asks for tens of gigabytes
+    // before a single row is read. The composite path has the same check.
+    if total > cur.remaining().saturating_mul(64) {
+        return Err(PsdError::Corrupt(
+            "RLE channel data too short for its declared size".into(),
+        ));
+    }
     let mut out = vec![0u8; total];
     for (row, &count) in counts.iter().enumerate() {
         // Sub-cursor per row: a corrupt row can't consume its neighbors.
@@ -124,6 +134,46 @@ mod tests {
             unpack_row(&mut cur, &mut out),
             Err(PsdError::Truncated { .. })
         ));
+    }
+
+    #[test]
+    fn an_oversized_channel_is_rejected_before_allocating() {
+        // The count table has to be present and well formed to reach the
+        // allocation, which is why the real proof-of-concept file is
+        // ~600 KB of counts for a 300000x300000 rect. Same shape, smaller:
+        // 1000 rows of 100_000 bytes is 100 MB of output from 4 bytes of
+        // payload, far past PackBits' 64x ceiling.
+        let rows = 1000usize;
+        let row_bytes = 100_000usize;
+        let mut src = Vec::new();
+        for _ in 0..rows {
+            src.extend_from_slice(&2u16.to_be_bytes());
+        }
+        src.extend_from_slice(&[0xFD, 0xAA, 0xFD, 0xBB]);
+        let mut cur = Cursor::new(&src);
+        assert!(matches!(
+            unpack_channel(&mut cur, rows, row_bytes, false),
+            Err(PsdError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_legitimately_compressible_channel_still_decodes() {
+        // Worst-case PackBits expansion is 64x (two bytes -> 128), so a
+        // channel right at that ratio must still be accepted.
+        let rows = 4usize;
+        let row_bytes = 128usize;
+        let mut src = Vec::new();
+        for _ in 0..rows {
+            src.extend_from_slice(&2u16.to_be_bytes());
+        }
+        for _ in 0..rows {
+            src.extend_from_slice(&[0x81, 0x7A]); // repeat 'z' 128 times
+        }
+        let mut cur = Cursor::new(&src);
+        let out = unpack_channel(&mut cur, rows, row_bytes, false).unwrap();
+        assert_eq!(out.len(), rows * row_bytes);
+        assert!(out.iter().all(|&b| b == 0x7A));
     }
 
     #[test]
