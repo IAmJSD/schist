@@ -479,6 +479,12 @@ impl CommandPlugin for CoreCommandsPlugin {
                 "Select Inverse",
                 Some("cmd-shift-i"),
                 |ctx| {
+                    // Nothing selected means nothing to invert; without
+                    // this the command records a history entry that
+                    // changed nothing.
+                    if ctx.doc.selection.is_empty() {
+                        return;
+                    }
                     let mut edit = ctx.doc.begin_edit("Select Inverse");
                     edit.change_selection(|sel, canvas| sel.invert(canvas));
                     edit.commit();
