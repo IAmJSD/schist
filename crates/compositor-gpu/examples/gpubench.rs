@@ -1,6 +1,6 @@
 //! CPU vs GPU compositor throughput on the same document the CPU bench
 //! uses (`schist-compositor --example bench`). Run with
-//! `cargo run --release -p schist-compositor-gpu --example bench`.
+//! `cargo run --release -p schist-compositor-gpu --example gpubench`.
 
 use schist_adjustments::{Curve, Curves, Params};
 use schist_compositor::{Compositor, CpuCompositor};

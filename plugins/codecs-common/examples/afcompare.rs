@@ -6,8 +6,8 @@ use schist_plugin_api::CodecPlugin;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: afrender <file> <out-prefix>");
-    let out = args.next().expect("usage: afrender <file> <out-prefix>");
+    let path = args.next().expect("usage: afcompare <file> <out-prefix>");
+    let out = args.next().expect("usage: afcompare <file> <out-prefix>");
     let bytes = std::fs::read(&path).expect("read");
 
     let (doc, report) = schist_codec_affinity::read_affinity(&bytes).expect("structured read");
