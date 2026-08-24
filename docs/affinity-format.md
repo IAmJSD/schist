@@ -208,15 +208,23 @@ by the derived value — `ShSt` carries `IRad` 0.5 then 0.382); the
 *last* occurrence is the one that renders. Kinds with rebuilt geometry,
 all verified against the files' own thumbnails:
 
-- "ShNR"/"ShRR" rectangles: `ShCR` per-corner radii (fractions of half
-  the shorter side unless `AbSz`), but a radius only applies where the
-  `CTyp` corner-type array says rounded (enum 0) — Designer's plain
-  rectangle keeps default radii in `ShCR` with no `CTyp` and renders
-  sharp.
-- "ShpE"/"ShCE" ellipse.
+- "ShNR"/"ShRR" rectangles: `ShCR` per-corner radii, but a radius only
+  applies where the `CTyp` corner-type array says so — one enum per
+  corner: 0 rounded · 1 straight chamfer · 2 concave (the arc bends
+  inward, centred on the corner) · 3 cutout (a square bite), each
+  probed with its own fixture. `Lock` ("single radius") locks every
+  corner to the first one's radius and treatment. Radii are fractions
+  of the shorter side when the writer also writes `CTyp` (the unified
+  app: 25% chamfers 33px off a 132px rect), of *half* the shorter side
+  in Designer 1.x files without it, and absolute under `AbSz`.
+  Designer's plain rectangle keeps default radii in `ShCR` with no
+  `CTyp` and renders sharp.
+- "ShpE" ellipse.
 - "ShSt" star: `Pnts` points alternating between the inscribed ellipse
-  and `IRad` of it, first point up; `CrvL`/`CrvR` bend the edges (only
-  straight-edged stars are rebuilt).
+  and `IRad` of it, first point up; `CrvL`/`CrvR` bow each spike's
+  left (notch→tip) and right (tip→notch) edges sideways — positive
+  bows outward; the sagitta is a fitted ~0.22 of the edge length per
+  unit of curve.
 - "ShSS" square star: `Side` rectangular arms, the first pointing
   down. Arms are the middle `COut` of each edge of the regular
   `Side`-gon inscribed in the ellipse — flat tips at the polygon's
@@ -226,8 +234,44 @@ all verified against the files' own thumbnails:
   ellipse, meeting at `IRad` of the radius.
 - "ShHt" heart: two lobes over a point; `Sprd` deepens the notch
   (proportions traced from the thumbnail at the default 0.2).
+- "ShpT" triangle: apex `Pos` of the way along the top edge.
+- "ShpD" diamond: widest at `Pos` of the height.
+- "ShTz" trapezoid: top edge from `PosL` to `PosR`.
+- "ShPy" polygon: `Side` vertices on the inscribed ellipse, first up
+  (`Curv` bends edges — unmapped, straight only).
+- "ShDS" double star: `Pnts` major tips with minor tips (`PRad`)
+  between them and notches (`IRad`) between every tip.
+- "ShPi" pie *and* donut: a ring sector from `AngS` to `AngE` (visual
+  angles anticlockwise from +x; equal = the full ring) with inner
+  radius `IRad` — zero for a wedge, a second even-odd subpath for a
+  ring.
+- "ShSg" segment: the inscribed ellipse above a chord `Pos0` of the
+  way up (`Pos1` cuts a second chord; only the first is rebuilt).
+- "ShCr" crescent: tips at top and bottom centre; both boundary arcs
+  are circular (in unit space) bowing sideways by `ArcL`/`ArcR` of
+  the half-width, negative left.
+- "ShDA" arrow: a `Thck`-of-the-height shaft, head at an end when its
+  `LSty`/`RSty` enum is nonzero, head length `LPr1`/`RPr1` of the
+  height.
+- "ShCg" cog: `Teth` teeth from `IRad` to the rim, tooth top `TtSz`
+  and root gap `NtSz` of the period, plus a `Hole` bore (even-odd
+  subpath). `Curv` bends flanks — straight only.
+- "ShCR" callout (rounded rectangle): the balloon over the top
+  1 − `TlHg`, radii in its own `ShCR` field (full-shorter-side
+  scale), tail `TlWd` wide rooted at `TlRP`, tip at `TlEP` on the
+  bottom edge.
+- "ShCE" callout (ellipse) — *not* an ellipse variant: balloon over
+  the top 1 − `TlHg`, tail rooted where the centre-to-tip direction
+  meets the ellipse, `TlAn` of parametric angle wide, tip at `TlEP`.
+- "ShTr" tear: apex over a bulb; the default (Ball 0.25, Curv 0.3,
+  Tail 0.5) is reproduced from a numeric fit of Affinity's render —
+  convex sides, widest at 51.5% height, elliptical bulb — and `Tail`
+  scales the cone; other parameters warn.
 
-Anything else (polygons, cogs, callouts…) is reported, not guessed.
+Spirals (`ShSp` — stroke-only, not normalised into `ShpB`) and QR
+codes are reported, not guessed. Every imported shape also keeps its
+native `Shpe` subtree in a layer extras block (see
+[Round-tripping](#round-tripping)).
 
 Two paint conventions coexist. Photo 2 hangs *descriptors* off the
 layer — `BFFl` fill, `LIFl` line fill, `LILn` line style, the class
@@ -264,11 +308,17 @@ then ys then tangents, in 0..1. Imported as a real curves adjustment
 layer (master + RGB channels).
 
 **HSL adjustments** (`HsRA`): `AdjP` → "HSSP": `HueA` master hue shift
-as a fraction of the full turn, `SatA`/`LumA` as fractions of full
-range, an `HSV` mode flag, and six per-hue-range tweak arrays
-(`HueC`/`SatC`/`LumC` over `RngC` boundary angles in degrees, 315–345
-= reds and so on). Imported as a real hue/saturation adjustment
-(master shifts only; per-range tweaks warn).
+as a fraction of the full turn — **sign-flipped**: the UI's +90°
+stores −0.25 — `SatA`/`LumA` as fractions of full range, an `HSV`
+mode flag, and six per-hue-range tweak arrays (`HueC`/`SatC`/`LumC`
+over `RngC` boundary angles in degrees, 315–345 = reds and so on).
+Slider semantics, decoded exactly against isolated fixtures: the
+saturation slider boosts reciprocally (s/(1−A) for positive A), and
+the lightness slider both lifts l toward white (l + (1−l)·L) *and*
+scales saturation by 1−L — Photoshop's does neither, so these are
+opt-in flags on our hue/saturation adjustment that Affinity imports
+set. All three master sliders now reproduce Affinity's render to
+under 0.3 RMS. Per-range tweaks still warn.
 
 **Parametric adjustments**, probed with one fixture file each (values
 below are fractions of the UI's percents unless noted). The class
@@ -285,16 +335,20 @@ per-type accuracy against Affinity's own renders is pinned by
   exponent `Gamm` (2.2), so `Expo/Gamm` stops of encoded-value
   multiply reproduces it exactly. *(exact)*
 - `B&CP` brightness/contrast: `Brig` fraction; `Ctrs` stores
-  1 + contrast/100. Affinity's sliders drive a gentler,
-  endpoint-preserving curve than our linear remap; imported ×0.28 /
-  ×0.24, a least-squares fit against the fixture (mid-tones exact,
-  ends ~3%).
+  1 + contrast/100. Affinity's sliders drive smooth endpoint-
+  preserving curves; the importer carries Affinity's *actual*
+  transfer curves, tabulated from isolated brightness-only and
+  contrast-only fixtures, and imports the layer as a sampled curves
+  adjustment (other amounts scale/blend against the tables).
 - `B&WP` black & white: `RedC Yell Gree Cyan Blue Mage`. *(exact)*
 - `WhBP` white balance: `WhBV` version, `WhBa` warmth as an i32
-  percent, `WBTi` tint fraction. Affinity applies flat per-channel
-  gains in linear light; imported as fitted per-channel curves
-  (r ×e^0.35w, b ×e^-1.70w, calibrated at warmth 30) — grey-exact,
-  saturated colours approximate.
+  percent, `WBTi` tint fraction. Affinity performs a **Bradford
+  chromatic adaptation in linear light** — across seven saturated
+  patches Bradford beats CAT02 (err 25 vs 61) and diagonal RGB gains
+  (339) decisively — whose grey-axis gains follow calibrated
+  exponentials (warmth log-gains quadratic, fitted at 30 and 50;
+  tint linear, fitted at 60). Imported as our own
+  `Params::WhiteBalance`, which implements exactly that.
 - `CoBP` colour balance: `Sh/Mi/Hi` × `CR/MG/YB` + `PeLu`. Affinity
   moves ~0.11× our step per percent (fitted).
 - `VibP` vibrance: `Vibr` i32 percent, `Satu` fraction. Formula
@@ -414,12 +468,33 @@ The corpus sweep tooling: `--example afdiff` composites an import
 `BitR` and clipped-children questions were settled; `--example aftree`
 prints the imported layer tree with bounds.
 
+## Round-tripping
+
+Nothing an import understands — or doesn't — is thrown away, so a
+future `.af` *exporter* can write documents back without loss:
+
+- Every adjustment layer keeps its native parameter class (`AdjP` /
+  `NAjP`) in `AdjustmentData::raw`, as typed JSON behind an `AFJ1`
+  prefix (`crates/codec-affinity/src/preserve.rs`): every field keeps
+  its tag and wire type, class hierarchies their (tag, version)
+  chains, `Class` references inlined.
+- Adjustments with no equivalent on our side (split toning, Soft
+  Proof, LUT, OCIO, Normals, tone compression/stretch…) import as
+  **no-op adjustment layers** that carry the same preserved block,
+  instead of being dropped — the user keeps the layer in the stack
+  and an export keeps its meaning.
+- Every live shape keeps its native `Shpe` subtree in a layer extras
+  block keyed `AfSh`.
+- Text layers already keep the type tool's `PsTx` block.
+
 ## Probe fixtures
 
-`fixtures/affinity-probe/` holds one tiny document per parametric
-adjustment, drawn in the unified Affinity 3.1 on a synthetic test card
-(hue ramp, grey ramp, saturated patches) with distinctive slider
-values, saved as `.af`. They serve two purposes: the field layouts
+`fixtures/affinity-probe/` holds one tiny document per probed feature
+— every parametric adjustment (plus isolated single-slider variants
+for brightness, contrast, white balance and HSL), one document per
+shape tool, per rectangle corner type, a curved-edge star, and a
+rotated text layer — drawn in the unified Affinity 3.1 on a synthetic
+test card (hue ramp, grey ramp, saturated patches), saved as `.af`. They serve two purposes: the field layouts
 above were decoded by reading the typed values back out of them with
 afdump, and their embedded thumbnails — Affinity's own renders — pin
 each importer's accuracy in
@@ -431,22 +506,18 @@ per-channel behaviour from channel-mixing behaviour at a glance.
 
 ## What's still unknown / to do
 
-- The HSL `HueA`/`SatA`/`LumA` unit scaling (fraction of turn / full
-  range) is inferred from the UI's slider ranges, not yet verified
-  colorimetrically; per-range HSL tweaks are unmapped.
-- Split toning (`STPa`), Soft Proof, LUT, OCIO, Normals and Tone
-  Compression/Stretch adjustments are parsed and reported, not
-  imported — no equivalent adjustment on our side yet.
-- White balance and vibrance on *saturated* colour: both are
-  calibrated against the grey ramp; Affinity's behaviour off the grey
-  axis needs more fixtures (vary one slider per file).
-- Brightness/contrast is a fitted linear approximation of Affinity's
-  gentler endpoint-preserving curve; brightness-only and
-  contrast-only fixtures would let the real curve be modelled.
+- Per-range HSL tweaks (`HueC`/`SatC`/`LumC`) are unmapped, and the
+  negative directions of the HSL/white-balance sliders are assumed to
+  mirror the measured positive ones (all fixtures so far are
+  positive; the minus key was swallowed by the panel fields when
+  probing).
+- Vibrance on *saturated* colour and the lens filter's density curve
+  differ from ours (both grey-exact); more single-slider fixtures
+  would pin them.
 - Non-identity `FlRN` filter warps (every corpus sighting is inert).
-- Shapes beyond the kinds above (polygons, cogs, callouts, curved-edge
-  stars…) are parsed but not turned into geometry; a fixture drawn
-  with each tool (plus its thumbnail) is all it takes to add one.
+- Spirals (`ShSp` — stroke-only, not normalised into `ShpB`) and QR
+  codes are reported, not rebuilt; the curved-star bow and the tear
+  profile are single-fixture fits.
 - Text: single style per layer (first run wins), no per-run styling.
 - Layer effect gaps: `Gaus` blur has no layer-style home; glow
   contour range (`Comp`) and shadow spread are unmapped; the `BevE`
@@ -454,11 +525,6 @@ per-channel behaviour from channel-mixing behaviour at a glance.
   (every corpus bevel is disabled).
 - ICC profiles: `ICCP` nodes carry the profile name and blob; every
   corpus sighting is sRGB, so no conversion has been needed yet.
-- Rotated/sheared *text* still imports axis-aligned (the text engine
-  lays out horizontally); vectors and rasters carry full affine.
-- The `CTyp` corner-type enum: 0 is rounded; the other values
-  (straight/concave/cutout in the UI) haven't been observed and
-  import as sharp.
 - One corpus file (a thought-bubble collage) still renders its
   rotated/mirrored clipped children a few percent off where live
   Affinity places them, while matching the file's own thumbnail —

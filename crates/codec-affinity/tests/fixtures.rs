@@ -374,21 +374,52 @@ fn probed_adjustments_match_affinitys_render() {
     // (file, max RMS over white, vs. Affinity's embedded render)
     let bounds = [
         ("blackwhite.af", 1.0),
-        ("brightcontrast.af", 11.0), // fitted approximation of a gentler curve
+        ("bright_only.af", 2.0),    // sampled from Affinity's own curve
+        ("brightcontrast.af", 4.0), // sampled curves, composed
         ("channelmixer.af", 1.0),
         ("colourbalance.af", 3.0),
+        ("contrast_neg.af", 4.0),
+        ("contrast_pos.af", 1.0),
         ("exposure.af", 1.0),
         ("gradientmap.af", 0.5),
+        ("hsl_hue.af", 1.0),
+        ("hsl_lum.af", 0.5),
+        ("hsl_probe.af", 0.5),
+        ("hsl_sat.af", 0.5),
         ("invert.af", 0.5),
         ("lensfilter.af", 8.0), // fitted density scale
         ("levels.af", 2.0),
         ("posterise.af", 1.0),
         ("recolour.af", 1.0),
         ("selectivecolour.af", 4.0),
-        ("splittoning.af", 8.0),  // parses, reported as unsupported
-        ("threshold.af", 8.0),    // saturated-colour boundary differs
-        ("vibrance.af", 12.0),    // formula differs on saturated colour
-        ("whitebalance.af", 16.0), // grey-ramp-calibrated gain model
+        ("splittoning.af", 8.0), // no-op layer keeping its native data
+        ("threshold.af", 8.0),   // saturated-colour boundary differs
+        ("vibrance.af", 12.0),   // formula differs on saturated colour
+        ("wb_tint.af", 1.0),
+        ("wb_warm.af", 3.5),
+        ("wb_warm30.af", 2.5),
+        ("whitebalance.af", 2.5), // Bradford + calibrated grey gains
+        // Shapes — each drawn once with its tool; the embedded
+        // thumbnail is Affinity's own render of it.
+        ("shp_arrow.af", 1.0),
+        ("shp_callout_ellipse.af", 1.0),
+        ("shp_callout_rrect.af", 1.0),
+        ("shp_cog.af", 2.0),
+        ("shp_corner_concave.af", 1.0),
+        ("shp_corner_cutout.af", 0.5),
+        ("shp_corner_straight.af", 0.5),
+        ("shp_crescent.af", 1.0),
+        ("shp_diamond.af", 0.5),
+        ("shp_donut.af", 1.0),
+        ("shp_doublestar.af", 0.5),
+        ("shp_pie.af", 1.0),
+        ("shp_polygon.af", 0.5),
+        ("shp_segment.af", 1.0),
+        ("shp_star_curved.af", 6.0), // fitted bow model
+        ("shp_tear.af", 3.0),        // fitted profile
+        ("shp_trapezoid.af", 0.5),
+        ("shp_triangle.af", 0.5),
+        ("text_rotated.af", 4.0), // resampled through the rotation
     ];
     for (file, max_rms) in bounds {
         let path = dir.join(file);
@@ -425,9 +456,6 @@ fn probed_adjustments_match_affinitys_render() {
         }
         let rms = (sum / n as f64).sqrt();
         println!("{file}: rms {rms:.2} (bound {max_rms})");
-        assert!(
-            rms <= max_rms,
-            "{file}: rms {rms:.2} above bound {max_rms}"
-        );
+        assert!(rms <= max_rms, "{file}: rms {rms:.2} above bound {max_rms}");
     }
 }

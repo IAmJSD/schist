@@ -114,12 +114,22 @@ impl VectorPath {
     pub fn bounds(&self) -> crate::geom::IntRect {
         let mut out = crate::geom::IntRect::EMPTY;
         for (_, _, a) in self.anchors() {
-            out = out.union(&crate::geom::IntRect::new(
-                a.point.0.floor() as i32,
-                a.point.1.floor() as i32,
-                a.point.0.ceil() as i32 + 1,
-                a.point.1.ceil() as i32 + 1,
-            ));
+            // A cubic segment stays inside the convex hull of its control
+            // points, so folding the handle positions in bounds every
+            // curve — anchors alone would clip a bulge between them (an
+            // arc whose apex falls mid-segment).
+            for (x, y) in [
+                a.point,
+                (a.point.0 + a.handle_in.0, a.point.1 + a.handle_in.1),
+                (a.point.0 + a.handle_out.0, a.point.1 + a.handle_out.1),
+            ] {
+                out = out.union(&crate::geom::IntRect::new(
+                    x.floor() as i32,
+                    y.floor() as i32,
+                    x.ceil() as i32 + 1,
+                    y.ceil() as i32 + 1,
+                ));
+            }
         }
         out
     }

@@ -21,6 +21,7 @@ pub mod archive;
 pub mod error;
 pub mod graph;
 pub mod import;
+pub mod preserve;
 
 pub use archive::{is_affinity, Archive};
 pub use error::AffinityError;

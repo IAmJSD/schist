@@ -283,6 +283,17 @@ pub enum Params {
         /// -100..100.
         lightness: f32,
         colorize: bool,
+        /// Affinity's lightness slider also scales saturation by
+        /// 1 − |lightness| (a lift toward white flattens colour);
+        /// Photoshop's does not. Imports from Affinity set this.
+        #[serde(default)]
+        lightness_desaturates: bool,
+        /// Affinity's saturation slider boosts reciprocally
+        /// (s / (1 − A) for positive amounts — +40 is a ×1.67 boost,
+        /// measured across the probe fixture); ours scales by 1 + A.
+        /// Imports from Affinity set this too.
+        #[serde(default)]
+        reciprocal_saturation: bool,
     },
     BrightnessContrast {
         /// -100..100.
@@ -370,6 +381,15 @@ pub enum Params {
         constant: [f32; 3],
         monochrome: bool,
     },
+    /// Photographic white balance: a Bradford chromatic adaptation in
+    /// linear light, warmth and tint in -100..=100. The per-channel
+    /// grey gains are calibrated against Affinity's renders; matching
+    /// them under Bradford also reproduces its saturated colours to
+    /// about 1/255 (measured across seven colour patches).
+    WhiteBalance {
+        warmth: f32,
+        tint: f32,
+    },
 }
 
 impl Params {
@@ -383,6 +403,8 @@ impl Params {
                 saturation: 0.0,
                 lightness: 0.0,
                 colorize: false,
+                lightness_desaturates: false,
+                reciprocal_saturation: false,
             },
             AdjustmentKind::BrightnessContrast => Params::BrightnessContrast {
                 brightness: 0.0,
@@ -462,6 +484,7 @@ impl Params {
             Params::GradientMap { .. } => AdjustmentKind::GradientMap,
             Params::SelectiveColor { .. } => AdjustmentKind::SelectiveColor,
             Params::ChannelMixer { .. } => AdjustmentKind::ChannelMixer,
+            Params::WhiteBalance { .. } => AdjustmentKind::Other(*b"WhBl"),
             Params::Unsupported => AdjustmentKind::Other(*b"____"),
         }
     }
@@ -494,8 +517,20 @@ impl Params {
                 saturation,
                 lightness,
                 colorize,
+                lightness_desaturates,
+                reciprocal_saturation,
             } => {
                 let (h, s, l) = rgb_to_hsl(px.r, px.g, px.b);
+                let desat = if *lightness_desaturates {
+                    (1.0 - lightness.abs() / 100.0).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let shifted = if *reciprocal_saturation && *saturation > 0.0 {
+                    s / (1.0 - saturation / 100.0).max(0.02)
+                } else {
+                    s * (1.0 + saturation / 100.0)
+                };
                 let (nh, ns, nl) = if *colorize {
                     (
                         hue.rem_euclid(360.0),
@@ -505,7 +540,7 @@ impl Params {
                 } else {
                     (
                         (h + hue).rem_euclid(360.0),
-                        (s * (1.0 + saturation / 100.0)).clamp(0.0, 1.0),
+                        (shifted * desat).clamp(0.0, 1.0),
                         adjust_lightness(l, *lightness),
                     )
                 };
@@ -737,6 +772,7 @@ impl Params {
                 }
             }
             Params::SelectiveColor { ranges, relative } => selective_color(px, ranges, *relative),
+            Params::WhiteBalance { warmth, tint } => white_balance(px, *warmth, *tint),
             Params::ChannelMixer {
                 red,
                 green,
@@ -928,6 +964,8 @@ fn parse_hue_sat(raw: &[u8]) -> Params {
             saturation: s as f32,
             lightness: l as f32,
             colorize,
+            lightness_desaturates: false,
+            reciprocal_saturation: false,
         },
         _ => Params::Unsupported,
     }
@@ -1094,6 +1132,8 @@ mod tests {
             saturation: 0.0,
             lightness: 0.0,
             colorize: false,
+            lightness_desaturates: false,
+            reciprocal_saturation: false,
         };
         let out = params.apply(px(1.0, 0.0, 0.0));
         assert!(out.g > 0.9 && out.r < 0.1, "{out:?}");
@@ -1106,6 +1146,8 @@ mod tests {
             saturation: -100.0,
             lightness: 0.0,
             colorize: false,
+            lightness_desaturates: false,
+            reciprocal_saturation: false,
         };
         let out = params.apply(px(0.8, 0.2, 0.4));
         assert!(
@@ -1434,6 +1476,10 @@ impl Params {
                 vec![spec("density", "Density", 0.0, 100.0, *density, "%")]
             }
             Params::GradientMap { .. } => Vec::new(),
+            Params::WhiteBalance { warmth, tint } => vec![
+                spec("warmth", "Warmth", -100.0, 100.0, *warmth, ""),
+                spec("tint", "Tint", -100.0, 100.0, *tint, ""),
+            ],
             Params::SelectiveColor { ranges, .. } => {
                 let mut out = Vec::new();
                 for (i, r) in SelectiveRange::ALL.iter().enumerate() {
@@ -1583,6 +1629,11 @@ impl Params {
                     *density = value.clamp(0.0, 100.0);
                 }
             }
+            Params::WhiteBalance { warmth, tint } => match key {
+                "warmth" => *warmth = value.clamp(-100.0, 100.0),
+                "tint" => *tint = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
             Params::SelectiveColor { ranges, .. } => {
                 for (r, range) in ranges.iter_mut().enumerate() {
                     for (c, slot) in range.iter_mut().enumerate() {
@@ -1733,7 +1784,8 @@ impl Params {
             | Params::PhotoFilter { .. }
             | Params::GradientMap { .. }
             | Params::SelectiveColor { .. }
-            | Params::ChannelMixer { .. } => Prepared::Direct(self.clone()),
+            | Params::ChannelMixer { .. }
+            | Params::WhiteBalance { .. } => Prepared::Direct(self.clone()),
             _ => {
                 let mut lut = Box::new([[0.0f32; LUT_SIZE]; 3]);
                 for i in 0..LUT_SIZE {
@@ -1862,6 +1914,8 @@ mod prepared_tests {
             saturation: 10.0,
             lightness: 0.0,
             colorize: false,
+            lightness_desaturates: false,
+            reciprocal_saturation: false,
         };
         assert!(matches!(hue.prepare(), Prepared::Direct(_)));
         let px = Rgba::new(0.8, 0.2, 0.4, 1.0);
@@ -1885,6 +1939,103 @@ mod prepared_tests {
 }
 
 /// Rec. 601 luminance, which is what Photoshop's adjustments weight by.
+/// Bradford chromatic adaptation for [`Params::WhiteBalance`]. The
+/// diagonal cone gains are chosen so the grey axis moves by the
+/// calibrated per-channel linear gains for this warmth/tint.
+fn white_balance(px: Rgba, warmth: f32, tint: f32) -> Rgba {
+    let (w, t) = (warmth / 100.0, tint / 100.0);
+    // Calibrated linear-light grey gains: warmth log-gains are
+    // quadratic (fitted at warmth 30 and 50, extended oddly so cooling
+    // mirrors warming), tint linear (fitted at tint 60).
+    let ww = w * w.abs();
+    let g = [
+        (1.0095 * w - 0.975 * ww - 0.245 * t).exp(),
+        (-0.1845 * w + 0.2307 * ww + 0.100 * t).exp(),
+        (-2.1415 * w + 1.645 * ww - 0.306 * t).exp(),
+    ];
+    // Bradford cone matrix times sRGB->XYZ (D65), and its inverse.
+    const B: [[f32; 3]; 3] = [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ];
+    const R2X: [[f32; 3]; 3] = [
+        [0.412_456, 0.357_576, 0.180_437],
+        [0.212_673, 0.715_152, 0.072_175],
+        [0.019_334, 0.119_192, 0.950_304],
+    ];
+    fn matmul(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+        let mut out = [[0.0f32; 3]; 3];
+        for (i, row) in out.iter_mut().enumerate() {
+            for (j, v) in row.iter_mut().enumerate() {
+                *v = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+            }
+        }
+        out
+    }
+    fn matvec(a: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+        [
+            a[0][0] * v[0] + a[0][1] * v[1] + a[0][2] * v[2],
+            a[1][0] * v[0] + a[1][1] * v[1] + a[1][2] * v[2],
+            a[2][0] * v[0] + a[2][1] * v[1] + a[2][2] * v[2],
+        ]
+    }
+    fn inv3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+        let c = |r: usize, cc: usize| m[r][cc];
+        let det = c(0, 0) * (c(1, 1) * c(2, 2) - c(1, 2) * c(2, 1))
+            - c(0, 1) * (c(1, 0) * c(2, 2) - c(1, 2) * c(2, 0))
+            + c(0, 2) * (c(1, 0) * c(2, 1) - c(1, 1) * c(2, 0));
+        let d = 1.0 / det;
+        [
+            [
+                (c(1, 1) * c(2, 2) - c(1, 2) * c(2, 1)) * d,
+                (c(0, 2) * c(2, 1) - c(0, 1) * c(2, 2)) * d,
+                (c(0, 1) * c(1, 2) - c(0, 2) * c(1, 1)) * d,
+            ],
+            [
+                (c(1, 2) * c(2, 0) - c(1, 0) * c(2, 2)) * d,
+                (c(0, 0) * c(2, 2) - c(0, 2) * c(2, 0)) * d,
+                (c(0, 2) * c(1, 0) - c(0, 0) * c(1, 2)) * d,
+            ],
+            [
+                (c(1, 0) * c(2, 1) - c(1, 1) * c(2, 0)) * d,
+                (c(0, 1) * c(2, 0) - c(0, 0) * c(2, 1)) * d,
+                (c(0, 0) * c(1, 1) - c(0, 1) * c(1, 0)) * d,
+            ],
+        ]
+    }
+    let bm = matmul(&B, &R2X);
+    let u = matvec(&bm, [1.0, 1.0, 1.0]);
+    let bg = matvec(&bm, g);
+    let d = [bg[0] / u[0], bg[1] / u[1], bg[2] / u[2]];
+    let dec = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let enc = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let lin = [dec(px.r), dec(px.g), dec(px.b)];
+    let lms = matvec(&bm, lin);
+    let adapted = [lms[0] * d[0], lms[1] * d[1], lms[2] * d[2]];
+    let out = matvec(&inv3(&bm), adapted);
+    Rgba {
+        r: enc(out[0]),
+        g: enc(out[1]),
+        b: enc(out[2]),
+        a: px.a,
+    }
+}
+
 fn luma(px: Rgba) -> f32 {
     0.299 * px.r + 0.587 * px.g + 0.114 * px.b
 }

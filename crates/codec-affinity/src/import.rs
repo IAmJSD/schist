@@ -418,7 +418,9 @@ impl Walker<'_> {
                 b"HsRA" => "HSL Adjustment".to_string(),
                 // Parametric adjustments name themselves on import.
                 b"LeRA" | b"ExRA" | b"BCRA" | b"BWRA" | b"CBRA" | b"VbRA" | b"InRA" | b"PoRA"
-                | b"ThRA" | b"CMRA" | b"SCRA" | b"GrRA" | b"PfRA" | b"RcRA" | b"WBRA" => String::new(),
+                | b"ThRA" | b"CMRA" | b"SCRA" | b"GrRA" | b"PfRA" | b"RcRA" | b"WBRA" => {
+                    String::new()
+                }
                 b"ShpN" => String::new(), // named from the shape kind below
                 _ => tag_name(kind),
             }
@@ -520,6 +522,30 @@ impl Walker<'_> {
             // quads. When source and destination coincide the filter is
             // configured but inert — absence, not content.
             b"FlRN" if self.filter_is_identity(node) => return None,
+            // Any other adjustment (split toning, soft proof, LUT,
+            // OCIO…) has no equivalent on our side: import it as a
+            // no-op adjustment layer that keeps the native parameters,
+            // instead of dropping it — a future .af export can then
+            // round-trip it, and the user keeps the layer in the stack.
+            _ if node.types.iter().any(|(t, _)| t.to_be_bytes() == *b"AdjR") => {
+                log::warn!(
+                    "affinity: adjustment {} has no equivalent; keeping it as a no-op",
+                    tag_name(kind)
+                );
+                let mut l = Layer::new_raster(if display.is_empty() {
+                    format!("{} Adjustment", tag_name(kind))
+                } else {
+                    display.clone()
+                });
+                l.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
+                    kind: schist_core::AdjustmentKind::Other(kind.to_be_bytes()),
+                    raw: Vec::new(),
+                    params_json: serde_json::to_string(&schist_adjustments::Params::Unsupported)
+                        .ok(),
+                });
+                self.report.adjustments += 1;
+                l
+            }
             _ => {
                 // No pixels exist in the file for other live layer
                 // kinds — only their parameters. Record the gap.
@@ -527,6 +553,17 @@ impl Walker<'_> {
                 return None;
             }
         };
+
+        // Whatever kind of adjustment this was, keep its native
+        // parameter block so nothing is lost on a future .af export.
+        if let schist_core::LayerKind::Adjustment(data) = &mut layer.kind {
+            for key in [b"AdjP", b"NAjP"] {
+                if let Some(adj) = self.graph.child(node, key) {
+                    data.raw = crate::preserve::preserved_block(self.graph, kind, key, adj);
+                    break;
+                }
+            }
+        }
 
         self.apply_mask(node, &mut layer);
         self.apply_effects(node, &mut layer);
@@ -576,15 +613,23 @@ impl Walker<'_> {
             return None;
         }
 
-        let (kind_name, anchors) = shape_geometry(shpe, x0, y0, x1, y1)?;
+        let (kind_name, subpaths) = shape_geometry(shpe, x0, y0, x1, y1)?;
         let name = if name.is_empty() { kind_name } else { name };
         let mut path = schist_core::VectorPath::new(name);
-        path.subpaths.push(schist_core::SubPath {
-            anchors,
-            closed: true,
-        });
+        let preserved = crate::preserve::preserved_block(graph, node.type_tag(), b"Shpe", shpe);
+        // Holes (a donut's ring, a cog's bore) are extra subpaths under
+        // even-odd fill; single outlines fill identically either way.
+        let even_odd = subpaths.len() > 1;
+        for (anchors, closed) in subpaths {
+            path.subpaths.push(schist_core::SubPath { anchors, closed });
+        }
         transform_path(&mut path, &ctm);
-        self.vector_layer(node, name, path, false, &ctm)
+        let mut layer = self.vector_layer(node, name, path, even_odd, &ctm)?;
+        layer.extras.push(schist_core::RawBlock {
+            key: *b"AfSh",
+            data: preserved,
+        });
+        Some(layer)
     }
 
     /// Rebuild a free path layer ("PCrv") from its curve data.
@@ -840,6 +885,8 @@ impl Walker<'_> {
             saturation: (f(b"SatA") * 100.0).clamp(-100.0, 100.0),
             lightness: (f(b"LumA") * 100.0).clamp(-100.0, 100.0),
             colorize: false,
+            lightness_desaturates: true,
+            reciprocal_saturation: true,
         };
 
         let mut layer = Layer::new_raster(if name.is_empty() { "HSL" } else { name });
@@ -914,22 +961,57 @@ impl Walker<'_> {
                 "Exposure",
             ),
             // B&CP: Brig is the percentage as a fraction; Ctrs stores
-            // 1 + contrast/100 (a -35% contrast reads back as 0.65).
-            // Affinity's sliders drive a gentler, endpoint-preserving
-            // curve than our linear remap; the scales below are a
-            // least-squares fit of our model to the probe fixture's own
-            // thumbnail, exact in the midtones and within ~3% at the
-            // ends.
+            // 1 + contrast/100. Affinity's sliders drive smooth
+            // endpoint-preserving curves, not a linear remap; the
+            // tables below are its actual transfer curves, read off
+            // isolated probe fixtures (brightness +40%, contrast −50%
+            // and +60%), and other amounts scale/blend against them.
+            // The import is therefore a sampled curves adjustment.
             b"BCRA" => {
+                const BRIGHT40: [f32; 17] = [
+                    0.0118, 0.1015, 0.1956, 0.2887, 0.3755, 0.4576, 0.5358, 0.61, 0.6765, 0.739,
+                    0.7975, 0.851, 0.8951, 0.9341, 0.9652, 0.9882, 1.0,
+                ];
+                const CONTRAST_N50: [f32; 17] = [
+                    0.0314, 0.1252, 0.1995, 0.262, 0.3167, 0.3674, 0.4142, 0.4571, 0.5, 0.5429,
+                    0.5858, 0.6326, 0.6833, 0.738, 0.8005, 0.8748, 1.0,
+                ];
+                const CONTRAST_P60: [f32; 17] = [
+                    0.0, 0.0194, 0.0544, 0.1051, 0.1637, 0.2341, 0.3147, 0.4022, 0.498, 0.5978,
+                    0.6853, 0.7659, 0.8363, 0.8949, 0.9456, 0.9806, 1.0,
+                ];
+                let interp = |table: &[f32; 17], v: f32| -> f32 {
+                    let x = v.clamp(0.0, 1.0) * 16.0;
+                    let i = (x.floor() as usize).min(15);
+                    let t = x - i as f32;
+                    table[i] + (table[i + 1] - table[i]) * t
+                };
                 if matches!(adj.field(b"Linr"), Some(Value::Bool(true))) {
                     log::warn!("affinity: brightness/contrast {name:?} is linear; applying gamma");
                 }
+                let bright = f(b"Brig");
+                let contrast = fd(b"Ctrs", 1.0) - 1.0;
+                let rgb = schist_adjustments::Curve {
+                    points: (0..=16)
+                        .map(|k| {
+                            let v = k as f32 / 16.0;
+                            let vb = v + (bright / 0.4) * (BRIGHT40[k] - v);
+                            let vc = if contrast < 0.0 {
+                                vb + (-contrast / 0.5) * (interp(&CONTRAST_N50, vb) - vb)
+                            } else {
+                                vb + (contrast / 0.6) * (interp(&CONTRAST_P60, vb) - vb)
+                            };
+                            (v, vc.clamp(0.0, 1.0))
+                        })
+                        .collect(),
+                };
+                let params = Params::Curves(schist_adjustments::Curves {
+                    rgb,
+                    ..Default::default()
+                });
                 (
-                    schist_core::AdjustmentKind::BrightnessContrast,
-                    Params::BrightnessContrast {
-                        brightness: (f(b"Brig") * 100.0 * 0.28).clamp(-100.0, 100.0),
-                        contrast: ((fd(b"Ctrs", 1.0) - 1.0) * 100.0 * 0.24).clamp(-100.0, 100.0),
-                    },
+                    schist_core::AdjustmentKind::Curves,
+                    params,
                     "Brightness/Contrast",
                 )
             }
@@ -1123,52 +1205,18 @@ impl Walker<'_> {
                     "Lens Filter",
                 )
             }
-            // WhBP: WhBa is warmth in -100..100 (an i32), WBTi tint as a
-            // fraction. Affinity applies constant per-channel gains in
-            // linear light (the probe fixture's own render shows flat
-            // linear gains along the whole grey ramp), which a gamma-
-            // space curve per channel reproduces exactly. The gain model
-            // is calibrated from that fixture (warmth 30, tint 40 →
-            // r ×1.12, g ×1.01, b ×0.60) and extrapolates exponentially.
-            b"WBRA" => {
-                let warmth = i32_of(adj, b"WhBa").unwrap_or(0) as f32 / 100.0;
-                let tint = f(b"WBTi");
-                let gains = [
-                    (0.35 * warmth).exp(),
-                    1.0 + 0.025 * tint,
-                    (-1.70 * warmth).exp(),
-                ];
-                let dec = |v: f32| {
-                    if v <= 0.04045 {
-                        v / 12.92
-                    } else {
-                        ((v + 0.055) / 1.055).powf(2.4)
-                    }
-                };
-                let enc = |v: f32| {
-                    let v = v.clamp(0.0, 1.0);
-                    if v <= 0.0031308 {
-                        12.92 * v
-                    } else {
-                        1.055 * v.powf(1.0 / 2.4) - 0.055
-                    }
-                };
-                let curve_for = |k: f32| schist_adjustments::Curve {
-                    points: (0..=8)
-                        .map(|i| {
-                            let v = i as f32 / 8.0;
-                            (v, enc(dec(v) * k))
-                        })
-                        .collect(),
-                };
-                let params = Params::Curves(schist_adjustments::Curves {
-                    rgb: schist_adjustments::Curve::default(),
-                    red: curve_for(gains[0]),
-                    green: curve_for(gains[1]),
-                    blue: curve_for(gains[2]),
-                });
-                (schist_core::AdjustmentKind::Curves, params, "White Balance")
-            }
+            // WhBP: WhBa is warmth in -100..100 (an i32), WBTi tint as
+            // a fraction. A real white-balance adjustment on our side —
+            // a Bradford chromatic adaptation whose grey-axis gains are
+            // calibrated against warmth-only and tint-only fixtures.
+            b"WBRA" => (
+                schist_core::AdjustmentKind::Other(*b"WhBl"),
+                Params::WhiteBalance {
+                    warmth: i32_of(adj, b"WhBa").unwrap_or(0) as f32,
+                    tint: f(b"WBTi") * 100.0,
+                },
+                "White Balance",
+            ),
             // RecP: hue as a fraction of the turn, saturation and
             // lightness as fractions — a colorize in our model, whose
             // lightness is an offset about the 50% midpoint.
@@ -1183,6 +1231,8 @@ impl Walker<'_> {
                     saturation: (f(b"RecS") * 100.0).clamp(0.0, 100.0),
                     lightness: (f(b"RecL") * 100.0).clamp(0.0, 100.0),
                     colorize: true,
+                    lightness_desaturates: false,
+                    reciprocal_saturation: false,
                 },
                 "Recolour",
             ),
@@ -1576,24 +1626,39 @@ impl Walker<'_> {
         let frame = graph.child(node, b"TxtH")?;
         let frmb = f64s(frame, b"FrmB").filter(|b| b.len() == 4)?;
         let ctm = self.node_ctm(node);
-        if !ctm.axis_aligned() {
-            log::warn!("affinity: text {name:?} is rotated/sheared; importing axis-aligned");
-        }
-        // The frame box's bounding box through the transform; under the
-        // usual axis-aligned case this is the box itself.
-        let corners = [
-            ctm.apply(frmb[0], frmb[1]),
-            ctm.apply(frmb[2], frmb[1]),
-            ctm.apply(frmb[0], frmb[3]),
-            ctm.apply(frmb[2], frmb[3]),
-        ];
-        let min = |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::INFINITY, f64::min);
-        let max =
-            |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
-        let frame_left = min(|c| c.0).round() as i32;
-        let frame_top = min(|c| c.1).round() as i32;
-        let frame_width = (max(|c| c.0) - min(|c| c.0)).round() as i32;
-        let frame_height = (max(|c| c.1) - min(|c| c.1)).round() as i32;
+        // Rotated or sheared text lays out in a de-rotated frame space
+        // — the local frame box at document scale, origin at its top
+        // left — and the finished raster is pushed through the rotation
+        // at the end. Axis-aligned text keeps the direct path.
+        let rotated = !ctm.axis_aligned();
+        let doc_scale = ctm.scale_y().abs().max(1e-6);
+        let (frame_left, frame_top, frame_width, frame_height) = if rotated {
+            (
+                0,
+                0,
+                ((frmb[2] - frmb[0]).abs() * doc_scale).round() as i32,
+                ((frmb[3] - frmb[1]).abs() * doc_scale).round() as i32,
+            )
+        } else {
+            // The frame box's bounding box through the transform; in
+            // the axis-aligned case this is the box itself.
+            let corners = [
+                ctm.apply(frmb[0], frmb[1]),
+                ctm.apply(frmb[2], frmb[1]),
+                ctm.apply(frmb[0], frmb[3]),
+                ctm.apply(frmb[2], frmb[3]),
+            ];
+            let min =
+                |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::INFINITY, f64::min);
+            let max =
+                |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
+            (
+                min(|c| c.0).round() as i32,
+                min(|c| c.1).round() as i32,
+                (max(|c| c.0) - min(|c| c.0)).round() as i32,
+                (max(|c| c.1) - min(|c| c.1)).round() as i32,
+            )
+        };
         let eff_size = (size * ctm.scale_y()) as f32;
         if !(0.5..=10_000.0).contains(&eff_size) {
             return None;
@@ -1729,12 +1794,47 @@ impl Walker<'_> {
             px[2] = color[2];
             px[3] = (cov as u16 * color[3] as u16 / 255) as u8;
         }
-        blit_rgba8(
-            &mut layer.as_raster_mut().unwrap().tiles,
-            Depth::Eight,
-            bounds,
-            &rgba,
-        );
+        if rotated {
+            // Map layout space back through the rotation: a layout
+            // pixel p sits at ctm · (frame_local_origin + p/scale).
+            let c0 = ctm.apply(frmb[0].min(frmb[2]), frmb[1].min(frmb[3]));
+            let lin = Mat([
+                ctm.0[0] / doc_scale,
+                ctm.0[1] / doc_scale,
+                0.0,
+                ctm.0[3] / doc_scale,
+                ctm.0[4] / doc_scale,
+                0.0,
+            ]);
+            let o = lin.apply(bounds.left as f64, bounds.top as f64);
+            let map = Mat([
+                lin.0[0],
+                lin.0[1],
+                o.0 + c0.0,
+                lin.0[3],
+                lin.0[4],
+                o.1 + c0.1,
+            ]);
+            let img = RgbaImage {
+                width: raster.bounds.width() as u32,
+                height: raster.bounds.height() as u32,
+                pixels: rgba,
+            };
+            let (rect, out) = affine_resample(&img, &map)?;
+            blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                Depth::Eight,
+                rect,
+                &out.pixels,
+            );
+        } else {
+            blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                Depth::Eight,
+                bounds,
+                &rgba,
+            );
+        }
 
         // The type tool's persistence block, so double-clicking with T
         // reopens this text for editing.
@@ -2672,14 +2772,21 @@ const KAPPA: f32 = 0.552_284_8;
 /// parameters. Returns the display name Affinity's own panel would show
 /// and the anchors of one closed subpath — or `None` for kinds whose
 /// geometry we can't rebuild (those are reported, not guessed).
+type ShapeSubPaths = Vec<(Vec<schist_core::Anchor>, bool)>;
+
 fn shape_geometry(
     shpe: &Node,
     x0: f32,
     y0: f32,
     x1: f32,
     y1: f32,
-) -> Option<(&'static str, Vec<schist_core::Anchor>)> {
+) -> Option<(&'static str, ShapeSubPaths)> {
+    use schist_core::Anchor;
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let (w, h) = (x1 - x0, y1 - y0);
+    let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    let closed = |a: Vec<Anchor>| vec![(a, true)];
+    let f = |t: &[u8; 4], d: f32| f32_last(shpe, t).unwrap_or(d);
     let tag_bytes = shpe.type_tag().to_be_bytes();
     match &tag_bytes {
         b"ShNR" | b"ShRR" => {
@@ -2689,14 +2796,20 @@ fn shape_geometry(
                 _ => [0.0; 4],
             };
             // Designer's rectangle tool keeps default radii in ShCR but
-            // only rounds corners whose type (`CTyp`) says rounded
-            // (enum 0) — a CTyp-less ShNR renders sharp in Affinity's
-            // own thumbnail, radii notwithstanding.
+            // only shapes corners whose type (`CTyp`, one enum per
+            // corner) says so: 0 rounded · 1 straight (chamfer) ·
+            // 2 concave · 3 cutout, probed with one fixture per type.
+            // A CTyp-less ShNR renders sharp in Affinity's own
+            // thumbnail, radii notwithstanding.
+            let mut corner_types = [0u16; 4];
+            let has_ctyp = matches!(shpe.field(b"CTyp"), Some(Value::Array(_)));
             match shpe.field(b"CTyp") {
                 Some(Value::Array(types)) => {
                     for (i, r) in radii.iter_mut().enumerate() {
                         match types.get(i) {
-                            Some(Value::Enum { id: 0, .. }) => {}
+                            Some(Value::Enum { id, .. }) if *id <= 3 => {
+                                corner_types[i] = *id;
+                            }
                             _ => *r = 0.0,
                         }
                     }
@@ -2704,8 +2817,20 @@ fn shape_geometry(
                 _ if &tag_bytes == b"ShNR" => radii = [0.0; 4],
                 _ => {}
             }
+            // "Single radius" locks every corner to the first one's
+            // radius and treatment.
+            if matches!(shpe.field(b"Lock"), Some(Value::Bool(true))) {
+                radii = [radii[0]; 4];
+                corner_types = [corner_types[0]; 4];
+            }
             let scale = if matches!(shpe.field(b"AbSz"), Some(Value::Bool(true))) {
                 1.0 // absolute: already in local units
+            } else if has_ctyp {
+                // The unified app's writer (which also writes CTyp)
+                // scales radii by the full shorter side — a 25% radius
+                // chamfers 33px off a 132px-tall rect — where Designer
+                // 1.x scaled by half of it.
+                w.min(h)
             } else {
                 w.min(h) * 0.5 // fraction of half the shorter side
             };
@@ -2715,38 +2840,444 @@ fn shape_geometry(
             } else {
                 "Rounded Rectangle"
             };
-            Some((kind, rounded_rect_anchors(x0, y0, x1, y1, radii)))
+            Some((
+                kind,
+                closed(cornered_rect_anchors(x0, y0, x1, y1, radii, corner_types)),
+            ))
         }
-        b"ShCE" | b"ShpE" => Some(("Ellipse", ellipse_anchors(x0, y0, x1, y1))),
+        b"ShpE" => Some(("Ellipse", closed(ellipse_anchors(x0, y0, x1, y1)))),
         b"ShSt" => {
             // Star: `Pnts` points alternating between the ellipse
             // inscribed in the box and `IRad` of it; the first point is
-            // up. Curved edges (`CrvL`/`CrvR`) aren't mapped.
-            let bend = f32_last(shpe, b"CrvL").unwrap_or(0.0).abs()
-                + f32_last(shpe, b"CrvR").unwrap_or(0.0).abs();
-            if bend > 0.01 {
-                return None;
-            }
+            // up. `CrvL`/`CrvR` bow each spike's left (notch→tip) and
+            // right (tip→notch) edges sideways — positive bows to the
+            // left of the direction of travel, i.e. outward.
+            let cl = f32_last(shpe, b"CrvL").unwrap_or(0.0).clamp(-1.0, 1.0);
+            let cr = f32_last(shpe, b"CrvR").unwrap_or(0.0).clamp(-1.0, 1.0);
             let points = u16_of(shpe, b"Pnts").unwrap_or(5).clamp(3, 100) as usize;
             let inner = f32_last(shpe, b"IRad").unwrap_or(0.5).clamp(0.0, 1.0);
-            let anchors = (0..points * 2)
+            let mut anchors: Vec<Anchor> = (0..points * 2)
                 .map(|i| {
                     let r = if i % 2 == 0 { 1.0 } else { inner };
-                    let ang = -std::f32::consts::FRAC_PI_2
-                        + std::f32::consts::PI * i as f32 / points as f32;
+                    let ang = -FRAC_PI_2 + PI * i as f32 / points as f32;
                     unit_anchor(ang.cos() * r, ang.sin() * r, x0, y0, x1, y1)
                 })
                 .collect();
-            Some(("Star", anchors))
+            let n = anchors.len();
+            for i in 0..n {
+                // Edge i runs anchors[i] → anchors[i+1]: tips sit at
+                // even indices, so even i is tip→notch (right edge).
+                let c = if i % 2 == 0 { cr } else { cl };
+                if c.abs() < 0.005 {
+                    continue;
+                }
+                let (a, b) = (anchors[i].point, anchors[(i + 1) % n].point);
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                // Left of travel in screen space (y down).
+                let (nx, ny) = (dy, -dx);
+                let len = (nx * nx + ny * ny).sqrt().max(1e-6);
+                let sag = c * (dx * dx + dy * dy).sqrt() * 0.22;
+                let (mx, my) = (
+                    (a.0 + b.0) * 0.5 + nx / len * 2.0 * sag,
+                    (a.1 + b.1) * 0.5 + ny / len * 2.0 * sag,
+                );
+                // The quadratic through that sagitta, as a cubic.
+                anchors[i].handle_out = ((mx - a.0) * (2.0 / 3.0), (my - a.1) * (2.0 / 3.0));
+                anchors[(i + 1) % n].handle_in =
+                    ((mx - b.0) * (2.0 / 3.0), (my - b.1) * (2.0 / 3.0));
+            }
+            Some(("Star", closed(anchors)))
         }
-        b"ShSS" => Some(("Square Star", square_star_anchors(shpe, x0, y0, x1, y1))),
-        b"ShCl" => Some(("Cloud", cloud_anchors(shpe, x0, y0, x1, y1))),
+        b"ShSS" => Some((
+            "Square Star",
+            closed(square_star_anchors(shpe, x0, y0, x1, y1)),
+        )),
+        b"ShCl" => Some(("Cloud", closed(cloud_anchors(shpe, x0, y0, x1, y1)))),
         b"ShHt" => {
             let spread = f32_last(shpe, b"Sprd").unwrap_or(0.2).clamp(0.0, 1.0);
-            Some(("Heart", heart_anchors(x0, y0, x1, y1, spread)))
+            Some(("Heart", closed(heart_anchors(x0, y0, x1, y1, spread))))
+        }
+        // The kinds below were each drawn once in Affinity itself
+        // (fixtures/affinity-probe/shp_*.af) and their geometry verified
+        // against those files' embedded thumbnails.
+        // Triangle: apex `Pos` of the way along the top edge.
+        b"ShpT" => {
+            let pos = f(b"Pos ", 0.5).clamp(0.0, 1.0);
+            Some((
+                "Triangle",
+                closed(vec![
+                    Anchor::corner(x0 + pos * w, y0),
+                    Anchor::corner(x1, y1),
+                    Anchor::corner(x0, y1),
+                ]),
+            ))
+        }
+        // Diamond: widest at `Pos` of the height.
+        b"ShpD" => {
+            let pos = f(b"Pos ", 0.5).clamp(0.0, 1.0);
+            let ym = y0 + pos * h;
+            Some((
+                "Diamond",
+                closed(vec![
+                    Anchor::corner(cx, y0),
+                    Anchor::corner(x1, ym),
+                    Anchor::corner(cx, y1),
+                    Anchor::corner(x0, ym),
+                ]),
+            ))
+        }
+        // Trapezoid: the top edge runs from `PosL` to `PosR`.
+        b"ShTz" => {
+            let l = f(b"PosL", 0.25).clamp(0.0, 1.0);
+            let r = f(b"PosR", 0.75).clamp(0.0, 1.0);
+            Some((
+                "Trapezoid",
+                closed(vec![
+                    Anchor::corner(x0 + l * w, y0),
+                    Anchor::corner(x0 + r * w, y0),
+                    Anchor::corner(x1, y1),
+                    Anchor::corner(x0, y1),
+                ]),
+            ))
+        }
+        // Polygon: `Side` vertices on the inscribed ellipse, first up.
+        // `Curv` bends the edges — unmapped, so only straight rebuilds.
+        b"ShPy" => {
+            if f(b"Curv", 0.0).abs() > 0.01 {
+                return None;
+            }
+            let sides = u16_of(shpe, b"Side").unwrap_or(5).clamp(3, 100) as usize;
+            let anchors = (0..sides)
+                .map(|i| {
+                    let ang = -FRAC_PI_2 + TAU * i as f32 / sides as f32;
+                    unit_anchor(ang.cos(), ang.sin(), x0, y0, x1, y1)
+                })
+                .collect();
+            Some(("Polygon", closed(anchors)))
+        }
+        // Double star: `Pnts` major tips at the rim with minor tips
+        // (`PRad`) between them and notches (`IRad`) between every tip.
+        b"ShDS" => {
+            let points = u16_of(shpe, b"Pnts").unwrap_or(5).clamp(2, 100) as usize;
+            let inner = f(b"IRad", 0.5).clamp(0.0, 1.0);
+            let mid = f(b"PRad", 0.8).clamp(0.0, 1.0);
+            let radii = [1.0, inner, mid, inner];
+            let anchors = (0..points * 4)
+                .map(|i| {
+                    let r = radii[i % 4];
+                    let ang = -FRAC_PI_2 + TAU * i as f32 / (points * 4) as f32;
+                    unit_anchor(ang.cos() * r, ang.sin() * r, x0, y0, x1, y1)
+                })
+                .collect();
+            Some(("Double Star", closed(anchors)))
+        }
+        // Pie and donut share a class: a ring sector from `AngS` to
+        // `AngE` (visual angles, anticlockwise from +x) with an inner
+        // radius. Equal angles mean the full ring; zero `IRad` a wedge.
+        b"ShPi" => {
+            let ang_s = f(b"AngS", 0.0);
+            let ang_e = f(b"AngE", 0.0);
+            let inner = f(b"IRad", 0.0).clamp(0.0, 0.999);
+            let (rx, ry) = (w * 0.5, h * 0.5);
+            let full = (ang_s - ang_e).abs() < 1e-4;
+            if full {
+                let mut subs = vec![(ellipse_anchors(x0, y0, x1, y1), true)];
+                if inner > 0.001 {
+                    subs.push((
+                        ellipse_anchors(
+                            cx - rx * inner,
+                            cy - ry * inner,
+                            cx + rx * inner,
+                            cy + ry * inner,
+                        ),
+                        true,
+                    ));
+                }
+                return Some((if inner > 0.001 { "Donut" } else { "Ellipse" }, subs));
+            }
+            // Screen space runs y-down, so a visual angle t is -t here.
+            let t0 = -ang_s;
+            let t1 = -(ang_e + if ang_e <= ang_s { TAU } else { 0.0 });
+            let mut anchors = arc_anchors(cx, cy, rx, ry, t0, t1);
+            if inner > 0.001 {
+                anchors.extend(arc_anchors(cx, cy, rx * inner, ry * inner, t1, t0));
+            } else {
+                anchors.push(Anchor::corner(cx, cy));
+            }
+            Some(("Pie", closed(anchors)))
+        }
+        // Segment: the inscribed ellipse above a chord `Pos0` of the way
+        // up (and below one at `Pos1`, when it cuts).
+        b"ShSg" => {
+            let pos0 = f(b"Pos0", 0.25).clamp(0.0, 1.0);
+            let pos1 = f(b"Pos1", 1.0).clamp(0.0, 1.0);
+            if pos1 < 0.999 {
+                log::warn!("affinity: segment with a second chord; importing the first only");
+            }
+            let uy = (1.0 - 2.0 * pos0).clamp(-1.0, 1.0);
+            let a = uy.asin();
+            let (rx, ry) = (w * 0.5, h * 0.5);
+            // From the left intersection, over the top, to the right.
+            let anchors = arc_anchors(cx, cy, rx, ry, PI - a, TAU + a);
+            Some(("Segment", closed(anchors)))
+        }
+        // Crescent: tips at the top and bottom centre; each boundary is
+        // a circular arc (in the box's unit space) bowing sideways with
+        // a sagitta of half the `ArcL`/`ArcR` value — negative bows
+        // left, so the default −1 outer arc is the inscribed ellipse's
+        // own left half.
+        b"ShCr" => {
+            let mut unit = bow_arc_unit(f(b"ArcL", -1.0), true);
+            let up = bow_arc_unit(f(b"ArcR", -0.3), false);
+            unit.extend(up);
+            let anchors = unit
+                .into_iter()
+                .map(|mut a| {
+                    a.point = (x0 + a.point.0 * w, y0 + a.point.1 * h);
+                    a.handle_in = (a.handle_in.0 * w, a.handle_in.1 * h);
+                    a.handle_out = (a.handle_out.0 * w, a.handle_out.1 * h);
+                    a
+                })
+                .collect();
+            Some(("Crescent", closed(anchors)))
+        }
+        // Arrow: a `Thck`-of-the-height shaft with a head at either end
+        // when its style enum says so; head length is `LPr1`/`RPr1` of
+        // the height.
+        b"ShDA" => {
+            let sh = f(b"Thck", 0.35).clamp(0.0, 1.0) * h * 0.5;
+            let head = |style: Option<&Value>| match style {
+                Some(Value::Enum { id, .. }) => *id != 0,
+                _ => true,
+            };
+            let l_head = head(shpe.field(b"LSty"));
+            let r_head = head(shpe.field(b"RSty"));
+            let lw = if l_head {
+                (f(b"LPr1", 0.5) * h).min(w * 0.45)
+            } else {
+                0.0
+            };
+            let rw = if r_head {
+                (f(b"RPr1", 0.5) * h).min(w * 0.45)
+            } else {
+                0.0
+            };
+            let mut a = Vec::new();
+            if l_head {
+                a.push(Anchor::corner(x0, cy));
+                a.push(Anchor::corner(x0 + lw, y0));
+                a.push(Anchor::corner(x0 + lw, cy - sh));
+            } else {
+                a.push(Anchor::corner(x0, cy - sh));
+            }
+            if r_head {
+                a.push(Anchor::corner(x1 - rw, cy - sh));
+                a.push(Anchor::corner(x1 - rw, y0));
+                a.push(Anchor::corner(x1, cy));
+                a.push(Anchor::corner(x1 - rw, y1));
+                a.push(Anchor::corner(x1 - rw, cy + sh));
+            } else {
+                a.push(Anchor::corner(x1, cy - sh));
+                a.push(Anchor::corner(x1, cy + sh));
+            }
+            if l_head {
+                a.push(Anchor::corner(x0 + lw, cy + sh));
+                a.push(Anchor::corner(x0 + lw, y1));
+            } else {
+                a.push(Anchor::corner(x0, cy + sh));
+            }
+            Some(("Arrow", closed(a)))
+        }
+        // Cog: `Teth` teeth from `IRad` out to the rim — each tooth's
+        // top spans `TtSz` of its period, the root gap `NtSz` — plus a
+        // `Hole` bore. `Curv` bends the flanks; only straight rebuilds.
+        b"ShCg" => {
+            if f(b"Curv", 0.0).abs() > 0.01 {
+                return None;
+            }
+            let teeth = u16_of(shpe, b"Teth").unwrap_or(12).clamp(3, 200) as usize;
+            let root = f(b"IRad", 0.85).clamp(0.0, 1.0);
+            let hole = f(b"Hole", 0.2).clamp(0.0, 0.999);
+            let ts = f(b"TtSz", 0.37).clamp(0.0, 1.0);
+            let ns = f(b"NtSz", 0.42).clamp(0.0, 1.0);
+            let step = TAU / teeth as f32;
+            let mut a = Vec::with_capacity(teeth * 4);
+            for k in 0..teeth {
+                let c = -FRAC_PI_2 + step * k as f32;
+                let g = c + step * 0.5; // the gap between this tooth and the next
+                for (r, ang) in [
+                    (1.0, c - ts * step * 0.5),
+                    (1.0, c + ts * step * 0.5),
+                    (root, g - ns * step * 0.5),
+                    (root, g + ns * step * 0.5),
+                ] {
+                    a.push(unit_anchor(ang.cos() * r, ang.sin() * r, x0, y0, x1, y1));
+                }
+            }
+            let mut subs = vec![(a, true)];
+            if hole > 0.001 {
+                let (rx, ry) = (w * 0.5 * hole, h * 0.5 * hole);
+                subs.push((ellipse_anchors(cx - rx, cy - ry, cx + rx, cy + ry), true));
+            }
+            Some(("Cog", subs))
+        }
+        // Callout (rounded rectangle): the balloon over the top
+        // 1 − `TlHg` of the box, its corner radii in `ShCR`, with a tail
+        // `TlWd` wide rooted at `TlRP` of the width pointing to its tip
+        // at `TlEP` on the bottom edge.
+        b"ShCR" => {
+            let tail_h = f(b"TlHg", 0.3).clamp(0.0, 0.95);
+            let tail_w = f(b"TlWd", 0.15).clamp(0.0, 1.0);
+            let root = f(b"TlRP", 0.4).clamp(0.0, 1.0);
+            let tip = f(b"TlEP", 0.2).clamp(0.0, 1.0);
+            let yr = y1 - tail_h * h;
+            let radii = match shpe.field(b"ShCR") {
+                Some(Value::VecF(r)) if r.len() >= 4 => [r[0], r[1], r[2], r[3]],
+                _ => [0.25; 4],
+            };
+            // Unlike the plain rounded rectangle, the callout's radii
+            // scale by the full shorter side of the balloon (measured
+            // off the fixture's own render: 0.25 → 23.9px on a 92px
+            // balloon), not half of it.
+            let scale = if matches!(shpe.field(b"AbSz"), Some(Value::Bool(true))) {
+                1.0
+            } else {
+                w.min(yr - y0)
+            };
+            let radii = radii.map(|r| (r * scale).clamp(0.0, w.min(yr - y0) * 0.5));
+            let mut a = rounded_rect_anchors(x0, y0, x1, yr, radii);
+            // The bottom edge runs right-to-left; splice the tail in
+            // after the bottom-right corner's anchors.
+            let after_br = a
+                .iter()
+                .position(|an| an.point.1 >= yr - 0.01 && an.point.0 > cx)
+                .map(|i| i + 1)
+                .unwrap_or(a.len());
+            let half = tail_w * w * 0.5;
+            let rc = x0 + root * w;
+            a.splice(
+                after_br..after_br,
+                [
+                    Anchor::corner((rc + half).min(x1), yr),
+                    Anchor::corner(x0 + tip * w, y1),
+                    Anchor::corner((rc - half).max(x0), yr),
+                ],
+            );
+            Some(("Callout", closed(a)))
+        }
+        // Callout (ellipse): the balloon over the top 1 − `TlHg`, its
+        // tail rooted where the centre-to-tip direction meets the
+        // ellipse, `TlAn` of parametric angle wide, tip at `TlEP` on
+        // the bottom edge.
+        b"ShCE" => {
+            let tail_h = f(b"TlHg", 0.2).clamp(0.0, 0.95);
+            let tip_x = x0 + f(b"TlEP", 0.15).clamp(0.0, 1.0) * w;
+            let half_ang = (f(b"TlAn", 0.35) * 0.5).clamp(0.02, 1.5);
+            let yr = y1 - tail_h * h;
+            let (rx, ry) = (w * 0.5, (yr - y0) * 0.5);
+            let cey = (y0 + yr) * 0.5;
+            let t_dir = ((y1 - cey) / ry).atan2((tip_x - cx) / rx);
+            let mut a = arc_anchors(cx, cey, rx, ry, t_dir + half_ang, t_dir - half_ang + TAU);
+            a.push(Anchor::corner(tip_x, y1));
+            Some(("Callout", closed(a)))
+        }
+        // Tear: an apex over a bulb. The geometry below reproduces the
+        // default (Ball 0.25, Curv 0.3, Bend 0, Tail 0.5) exactly —
+        // convex sides fitted numerically to Affinity's own render,
+        // widest at 51.5% of the height, an elliptical bulb below —
+        // and scales the cone with `Tail`; the other parameters warn.
+        b"ShTr" => {
+            let tail = f(b"Tail", 0.5).clamp(0.05, 0.95);
+            if (f(b"Ball", 0.25) - 0.25).abs() > 0.02
+                || (f(b"Curv", 0.3) - 0.3).abs() > 0.02
+                || f(b"Bend", 0.0).abs() > 0.02
+            {
+                log::warn!("affinity: tear with non-default ball/curve/bend; shape approximate");
+            }
+            let ym = y0 + (tail * 1.03).min(0.9) * h;
+            let hw = w * 0.5;
+            let (dx, dy) = (0.410 * hw, 0.159 * h);
+            let v = 0.161 * h;
+            let mut a = vec![Anchor {
+                point: (cx, y0),
+                handle_in: (dx, dy),
+                handle_out: (-dx, dy),
+            }];
+            let mut bottom = arc_anchors(cx, ym, hw, y1 - ym, PI, 0.0);
+            if let Some(first) = bottom.first_mut() {
+                first.handle_in = (0.0, -v);
+            }
+            if let Some(last) = bottom.last_mut() {
+                last.handle_out = (0.0, -v);
+            }
+            a.extend(bottom);
+            Some(("Tear", closed(a)))
         }
         _ => None,
     }
+}
+
+/// A circular arc in unit space from the top tip (0.5, 0) to the
+/// bottom tip (0.5, 1) — reversed when `downward` is false — bowing
+/// sideways with sagitta `bow`/2 (negative bows left). Nearly-zero bows
+/// degenerate to the straight chord.
+fn bow_arc_unit(bow: f32, downward: bool) -> Vec<schist_core::Anchor> {
+    use schist_core::Anchor;
+    use std::f32::consts::PI;
+    let s = (bow.abs() * 0.5).min(0.5);
+    if s < 0.005 {
+        let mut pts = vec![Anchor::corner(0.5, 0.0), Anchor::corner(0.5, 1.0)];
+        if !downward {
+            pts.reverse();
+        }
+        return pts;
+    }
+    let r = (s * s + 0.25) / (2.0 * s);
+    // Bulge left: the circle's centre sits right of the chord.
+    let cxu = 0.5 + (r - s);
+    let phi = (0.5f32).atan2(r - s);
+    let (t0, t1) = if downward {
+        (PI + phi, PI - phi)
+    } else {
+        (PI - phi, PI + phi)
+    };
+    let mut a = arc_anchors(cxu, 0.5, r, r, t0, t1);
+    if bow > 0.0 {
+        for an in &mut a {
+            an.point.0 = 1.0 - an.point.0;
+            an.handle_in.0 = -an.handle_in.0;
+            an.handle_out.0 = -an.handle_out.0;
+        }
+    }
+    a
+}
+
+/// Anchors tracing the elliptical arc `t0`→`t1` (radians in screen
+/// space, so y grows downward: point = centre + (rx·cos t, ry·sin t)),
+/// split into ≤90° cubic segments. The endpoints carry only their
+/// arc-side handle, so a straight edge can follow either end.
+fn arc_anchors(cx: f32, cy: f32, rx: f32, ry: f32, t0: f32, t1: f32) -> Vec<schist_core::Anchor> {
+    use schist_core::Anchor;
+    let n = ((t1 - t0).abs() / std::f32::consts::FRAC_PI_2)
+        .ceil()
+        .max(1.0) as usize;
+    let dt = (t1 - t0) / n as f32;
+    let k = 4.0 / 3.0 * (dt / 4.0).tan();
+    (0..=n)
+        .map(|i| {
+            let t = t0 + dt * i as f32;
+            let (px, py) = (cx + rx * t.cos(), cy + ry * t.sin());
+            let (dx, dy) = (-rx * t.sin() * k, ry * t.cos() * k);
+            let mut a = Anchor::corner(px, py);
+            if i > 0 {
+                a.handle_in = (-dx, -dy);
+            }
+            if i < n {
+                a.handle_out = (dx, dy);
+            }
+            a
+        })
+        .collect()
 }
 
 /// A corner anchor at unit-circle coordinates (centre 0, radius 1)
@@ -2921,6 +3452,20 @@ fn rounded_rect_anchors(
     y1: f32,
     r: [f32; 4],
 ) -> Vec<schist_core::Anchor> {
+    cornered_rect_anchors(x0, y0, x1, y1, r, [0; 4])
+}
+
+/// Rectangle anchors with per-corner treatments (`CTyp`): 0 rounded ·
+/// 1 straight chamfer · 2 concave (the arc bends inward, centred on
+/// the corner) · 3 cutout (a square bite through the inner point).
+fn cornered_rect_anchors(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    r: [f32; 4],
+    types: [u16; 4],
+) -> Vec<schist_core::Anchor> {
     use schist_core::Anchor;
     let [tl, tr, br, bl] = r.map(|v| if v < 0.25 { 0.0 } else { v });
     let a = |px, py, ix, iy, ox, oy| Anchor {
@@ -2931,15 +3476,49 @@ fn rounded_rect_anchors(
     let mut out = Vec::with_capacity(8);
     // Each corner contributes its arc's entry and exit anchors — or,
     // when square, the corner point itself.
-    for (radius, corner, entry, exit) in [
+    for (ci, (radius, corner, entry, exit)) in [
         (tl, (x0, y0), (0.0f32, 1.0f32), (1.0f32, 0.0f32)),
         (tr, (x1, y0), (-1.0, 0.0), (0.0, 1.0)),
         (br, (x1, y1), (0.0, -1.0), (-1.0, 0.0)),
         (bl, (x0, y1), (1.0, 0.0), (0.0, -1.0)),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if radius == 0.0 {
             out.push(Anchor::corner(corner.0, corner.1));
             continue;
+        }
+        let ctype = types[ci];
+        let (en, ex) = (
+            (corner.0 + entry.0 * radius, corner.1 + entry.1 * radius),
+            (corner.0 + exit.0 * radius, corner.1 + exit.1 * radius),
+        );
+        match ctype {
+            1 => {
+                // Straight: chamfer between the two radius points.
+                out.push(Anchor::corner(en.0, en.1));
+                out.push(Anchor::corner(ex.0, ex.1));
+                continue;
+            }
+            2 => {
+                // Concave: the arc's centre is the corner itself.
+                let k = KAPPA * radius;
+                out.push(a(en.0, en.1, 0.0, 0.0, exit.0 * k, exit.1 * k));
+                out.push(a(ex.0, ex.1, entry.0 * k, entry.1 * k, 0.0, 0.0));
+                continue;
+            }
+            3 => {
+                // Cutout: a square bite via the inner point.
+                out.push(Anchor::corner(en.0, en.1));
+                out.push(Anchor::corner(
+                    corner.0 + (entry.0 + exit.0) * radius,
+                    corner.1 + (entry.1 + exit.1) * radius,
+                ));
+                out.push(Anchor::corner(ex.0, ex.1));
+                continue;
+            }
+            _ => {}
         }
         // The straight edges either side keep zero handles; the arc
         // between the two anchors bends toward the corner point.
