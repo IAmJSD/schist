@@ -252,11 +252,12 @@ and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 
 ## MCP
 
-`cargo build --release -p schist-mcp` builds a [Model Context
+`schist-mcp` is a [Model Context
 Protocol](https://modelcontextprotocol.io) server that drives Schist
 headless — sessions instead of windows, with every tool, command, filter
 and codec reachable through the same registry the app uses, plus inline
-PNG rendering. See [docs/mcp.md](docs/mcp.md).
+PNG rendering. It ships with every release; `cargo build --release -p
+schist-mcp` builds it from source. See [docs/mcp.md](docs/mcp.md).
 
 ## Documentation
 

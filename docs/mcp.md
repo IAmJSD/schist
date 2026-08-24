@@ -9,6 +9,24 @@ undo history and compositor the GUI uses.
 
 [Model Context Protocol]: https://modelcontextprotocol.io
 
+## Getting the binary
+
+Every release ships `schist-mcp` alongside the app, built from the same
+commit:
+
+| platform | where it lands |
+|---|---|
+| Linux | `schist-mcp` on the release page, next to the AppImage |
+| macOS | `schist-mcp-macos.zip` on the release page — unzip it anywhere |
+| Windows | `schist-mcp.exe`, installed beside `schist.exe` and also on the release page |
+
+The macOS binary is signed and notarized in its own right, so it runs
+without a Gatekeeper prompt; it does not need the app installed. Because
+a flat binary cannot carry a stapled ticket, the first run does an online
+notarization check.
+
+Building it yourself works too, and needs no display:
+
 ```sh
 cargo build --release -p schist-mcp
 ```
@@ -16,7 +34,7 @@ cargo build --release -p schist-mcp
 Register the binary with your client, e.g. for Claude Code:
 
 ```sh
-claude mcp add schist -- /path/to/target/release/schist-mcp
+claude mcp add schist -- /usr/local/bin/schist-mcp
 ```
 
 ## Sessions

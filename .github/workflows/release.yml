@@ -49,7 +49,9 @@ jobs:
             clang mold
 
       - name: Build
-        run: cargo build --release -p schist-app
+        # The MCP server ships next to the app, so it is built in the same
+        # invocation -- the two share nearly every dependency.
+        run: cargo build --release -p schist-app -p schist-mcp
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -64,6 +66,9 @@ jobs:
           mkdir -p dist
           APPIMAGETOOL=/tmp/appimagetool ./packaging/linux/appimage.sh
           cp target/release/schist dist/
+          # The MCP server is headless and needs none of the AppImage's
+          # runtime, so it ships as a plain binary rather than inside it.
+          cp target/release/schist-mcp dist/
 
       - name: Set up the signing keychain (macOS)
         if: runner.os == 'macOS'
@@ -142,6 +147,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/schist.exe dist/
+          # Shipped loose as well as inside the installer, for anyone
+          # registering the MCP server without installing the app.
+          Copy-Item target/release/schist-mcp.exe dist/
           # NSIS is not on the runner image. This step used to assume it was
           # and skip the installer in silence, so no release ever had one.
           choco install nsis --no-progress -y

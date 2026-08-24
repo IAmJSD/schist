@@ -34,7 +34,10 @@ they will not break the plugin ABI or saved files.
 3. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 4. The release workflow builds a Linux AppImage, a macOS `Schist.zip`
    (signed and notarized when the secrets below exist), and a Windows
-   installer, then drafts the release.
+   installer, then drafts the release. Each platform also ships the
+   `schist-mcp` server from the same build: a loose binary on Linux and
+   Windows, and on macOS `schist-mcp-macos.zip`, signed and notarized on
+   its own. See [mcp.md](mcp.md).
 
 Unsigned builds are still produced when signing credentials are absent, so
 forks and local builds work without secrets.

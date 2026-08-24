@@ -38,6 +38,9 @@ UninstPage instfiles
 Section "Schist"
   SetOutPath "$INSTDIR"
   File "..\..\target\release\schist.exe"
+  ; The MCP server. No shortcut and no association: it is a stdio server that
+  ; an MCP client spawns by path, not something anyone double-clicks.
+  File "..\..\target\release\schist-mcp.exe"
   File "schist.ico"
 
   WriteRegStr HKLM "Software\Schist" "InstallDir" "$INSTDIR"
@@ -70,6 +73,7 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\schist.exe"
+  Delete "$INSTDIR\schist-mcp.exe"
   Delete "$INSTDIR\schist.ico"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$SMPROGRAMS\Schist.lnk"
