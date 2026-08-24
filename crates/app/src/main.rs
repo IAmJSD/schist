@@ -203,7 +203,6 @@ fn main() {
         cx.bind_keys(keymap::build_bindings(&registry));
         // The macOS application menu, which is reachable with no window
         // open, so these are global rather than on the workspace.
-        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
         cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
@@ -235,6 +234,36 @@ fn main() {
                 },
             )
             .expect("failed to open window");
+
+        // Quit routes through the workspace so unsaved documents get a
+        // prompt. Registered here rather than before `open_window` because
+        // it needs the window to ask. With no window there is nothing to
+        // lose, so quitting outright is correct.
+        cx.on_action(move |_: &Quit, cx: &mut App| {
+            if window
+                .update(cx, |ws, _window, cx| ws.request_quit(cx))
+                .is_err()
+            {
+                cx.quit();
+            }
+        });
+        // The platform close button and the window manager come through
+        // here. The hook is synchronous, so a dirty workspace vetoes the
+        // close and `request_quit` drives the prompts.
+        let _ = window.update(cx, |_ws, win, cx| {
+            win.on_window_should_close(cx, move |_win, cx| {
+                window
+                    .update(cx, |ws, _window, cx| {
+                        if ws.first_dirty_tab().is_some() {
+                            ws.request_quit(cx);
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .unwrap_or(true)
+            });
+        });
 
         let queued = {
             let mut requests = requests.borrow_mut();

@@ -141,13 +141,17 @@ fn confirm_close_tab(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl In
                     ws.close_modal(cx);
                     let index = ws.active_tab();
                     ws.close_tab(index, cx);
+                    ws.resume_quit(cx);
                 },
                 cx,
             ))
             .child(ui::button(
                 "Cancel",
                 false,
-                |ws, _window, cx| ws.close_modal(cx),
+                |ws, _window, cx| {
+                    ws.cancel_quit();
+                    ws.close_modal(cx);
+                },
                 cx,
             ))
             .child(ui::button(
@@ -161,6 +165,11 @@ fn confirm_close_tab(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl In
                     if ws.doc.as_ref().is_some_and(|d| !d.dirty) {
                         let index = ws.active_tab();
                         ws.close_tab(index, cx);
+                        ws.resume_quit(cx);
+                    } else {
+                        // Save As is asynchronous; do not hold a quit open
+                        // across a file prompt.
+                        ws.cancel_quit();
                     }
                 },
                 cx,

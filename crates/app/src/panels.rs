@@ -493,7 +493,7 @@ pub(crate) fn run_app_item(
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),
         AppItem::Save => ws.save_current(window, cx),
         AppItem::SaveAs => crate::keymap::save_file_dialog(ws, window, cx),
-        AppItem::Quit => cx.quit(),
+        AppItem::Quit => ws.request_quit(cx),
         AppItem::ZoomIn => ws.zoom_by(1.25, None),
         AppItem::ZoomOut => ws.zoom_by(0.8, None),
         AppItem::ZoomFit => ws.fit_to_view(),
