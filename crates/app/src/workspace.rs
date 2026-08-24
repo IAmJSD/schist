@@ -52,8 +52,10 @@ const VIEW_GESTURE_SETTLE_MS: u64 = 120;
 ///
 /// Ticks run on the UI thread between frames (the compositor and both tile
 /// caches live on the workspace), so the batch is small enough that one
-/// step stays well under a frame, and ticks stand down entirely while a
-/// gesture or stroke is in flight.
+/// step stays well under a frame. Ticks stand down while a stroke is in
+/// flight, but keep running through zoom/pan gestures — each gesture frame
+/// re-aims the queue at the current view, on-screen tiles first, so the
+/// settle rebuild lands on warm caches.
 const PREFETCH_BATCH_TILES: usize = 8;
 /// Gap between prefetch steps, long enough for input and paint to slot in.
 const PREFETCH_TICK_MS: u64 = 30;
@@ -5009,7 +5011,12 @@ impl Workspace {
     /// Rebuild the idle-prefetch queue: every canvas tile not yet in both
     /// tile caches, ordered so the ones nearest the viewport composite
     /// first -- that is where a scroll will land next.
-    fn rebuild_prefetch_queue(&mut self, canvas: IntRect, visible: IntRect) {
+    ///
+    /// `include_visible` queues the on-screen tiles too (ahead of every
+    /// ring). The full-quality rebuild renders those itself, so it passes
+    /// false; mid-gesture nothing else composites them, and warming them
+    /// here is what lets the settle frame land instantly.
+    fn rebuild_prefetch_queue(&mut self, canvas: IntRect, visible: IntRect, include_visible: bool) {
         let Some(doc) = self.doc.as_ref() else {
             self.prefetch_queue.clear();
             return;
@@ -5031,7 +5038,7 @@ impl Workspace {
             // Distance outside the visible tile range, in whole tiles.
             let dx = (vx0 - coord.tx).max(coord.tx - vx1).max(0) as i64;
             let dy = (vy0 - coord.ty).max(coord.ty - vy1).max(0) as i64;
-            if dx == 0 && dy == 0 {
+            if dx == 0 && dy == 0 && !include_visible {
                 continue; // visible; the frame itself renders these
             }
             // Ring first, so coverage grows squarely outward from the
@@ -5076,9 +5083,11 @@ impl Workspace {
 
     /// One idle-prefetch step. Returns whether the ticker should live on.
     fn prefetch_tick(&mut self) -> bool {
-        // Never compete with an interactive gesture or stroke for the
-        // compositor; stay armed until the hand stops.
-        if self.view_gesture_active || self.pointer_down {
+        // Never compete with an in-flight stroke for the compositor; stay
+        // armed until the hand stops. View gestures keep ticking: zoom and
+        // pan leave the document-space caches valid, and warming tiles as
+        // the view moves is exactly when the prefetch pays off.
+        if self.pointer_down {
             return true;
         }
         let stale = match self.doc.as_ref() {
@@ -5103,6 +5112,51 @@ impl Workspace {
             self.display_tile(coord);
         }
         !self.prefetch_queue.is_empty()
+    }
+
+    /// Which document pixels can land on screen at the current zoom, pan
+    /// and rotation, clipped to the canvas. `width`/`height` are the
+    /// canvas element's size in device pixels.
+    fn visible_doc_rect(
+        &self,
+        width: usize,
+        height: usize,
+        scale_factor: f32,
+        canvas_rect: IntRect,
+    ) -> IntRect {
+        let sf = scale_factor.max(0.01);
+        let inv_zoom = 1.0 / self.zoom;
+        let origin = (f32::from(self.offset.x) * sf, f32::from(self.offset.y) * sf);
+        // Rotation is about the middle of the viewport, which is what
+        // makes spinning the view feel like turning a sheet of paper.
+        let centre = (width as f32 / 2.0, height as f32 / 2.0);
+        let (rs, rc) = (-self.rotation).sin_cos();
+        let doc_at = |dx: f32, dy: f32| -> (f32, f32) {
+            let (ox, oy) = (dx - centre.0, dy - centre.1);
+            let (rx, ry) = (ox * rc - oy * rs + centre.0, ox * rs + oy * rc + centre.1);
+            (
+                (rx - origin.0) * inv_zoom / sf,
+                (ry - origin.1) * inv_zoom / sf,
+            )
+        };
+        // With rotation, the visible region is the union of all four
+        // corners rather than the span between two of them.
+        let mut span = IntRect::EMPTY;
+        for (cx, cy) in [
+            (0.0, 0.0),
+            (width as f32, 0.0),
+            (width as f32, height as f32),
+            (0.0, height as f32),
+        ] {
+            let (x, y) = doc_at(cx, cy);
+            span = span.union(&IntRect::new(
+                x.floor() as i32 - 1,
+                y.floor() as i32 - 1,
+                x.ceil() as i32 + 1,
+                y.ceil() as i32 + 1,
+            ));
+        }
+        span.intersect(&canvas_rect)
     }
 
     /// Assemble everything visible into one BGRA image the size of the
@@ -5147,38 +5201,8 @@ impl Workspace {
 
         // Which document pixels can land on screen?
         let zoom = self.zoom;
-        let inv_zoom = 1.0 / zoom;
         let origin = (f32::from(self.offset.x) * sf, f32::from(self.offset.y) * sf);
-        // Rotation is about the middle of the viewport, which is what
-        // makes spinning the view feel like turning a sheet of paper.
-        let centre = (width as f32 / 2.0, height as f32 / 2.0);
-        let (rs, rc) = (-self.rotation).sin_cos();
-        let doc_at = |dx: f32, dy: f32| -> (f32, f32) {
-            let (ox, oy) = (dx - centre.0, dy - centre.1);
-            let (rx, ry) = (ox * rc - oy * rs + centre.0, ox * rs + oy * rc + centre.1);
-            (
-                (rx - origin.0) * inv_zoom / sf,
-                (ry - origin.1) * inv_zoom / sf,
-            )
-        };
-        // With rotation, the visible region is the union of all four
-        // corners rather than the span between two of them.
-        let mut span = IntRect::EMPTY;
-        for (cx, cy) in [
-            (0.0, 0.0),
-            (width as f32, 0.0),
-            (width as f32, height as f32),
-            (0.0, height as f32),
-        ] {
-            let (x, y) = doc_at(cx, cy);
-            span = span.union(&IntRect::new(
-                x.floor() as i32 - 1,
-                y.floor() as i32 - 1,
-                x.ceil() as i32 + 1,
-                y.ceil() as i32 + 1,
-            ));
-        }
-        let visible = span.intersect(&canvas_rect);
+        let visible = self.visible_doc_rect(width, height, sf, canvas_rect);
         if visible.is_empty() {
             // Nothing but background: a 1x1 image keeps the paint path simple.
             let s = (key.surround & 0xFF) as u8;
@@ -5210,7 +5234,7 @@ impl Workspace {
 
         // The rest of the document renders during idle time, nearest tiles
         // first, so scrolling lands on warm caches instead of popping in.
-        self.rebuild_prefetch_queue(canvas_rect, visible);
+        self.rebuild_prefetch_queue(canvas_rect, visible, false);
 
         // Resample on the active backend (GPU when installed and the grid
         // fits its buffers), with the CPU reference as the always-correct
@@ -5465,6 +5489,15 @@ impl Workspace {
             let surround = crate::ui::palette().canvas_bg;
             job.backdrop = Some((bounds, gpui::rgb(surround).into()));
             job.tiles.push(quad);
+            // Re-aim the prefetch queue at wherever the view is right
+            // now, on-screen tiles first: mid-gesture nothing else
+            // composites them, and a queue left pointing at where the
+            // gesture started would warm the wrong neighbourhood.
+            let sf = scale_factor.max(0.01);
+            let w = (f32::from(bounds.size.width) * sf).round().max(1.0) as usize;
+            let h = (f32::from(bounds.size.height) * sf).round().max(1.0) as usize;
+            let visible = self.visible_doc_rect(w, h, sf, canvas_rect);
+            self.rebuild_prefetch_queue(canvas_rect, visible, true);
         } else if let Some(img) = self.assemble_viewport(bounds, scale_factor) {
             // One image covering the whole canvas element, already
             // resampled and checkered, so there are no tile edges to seam.
