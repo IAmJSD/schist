@@ -430,6 +430,8 @@ fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
             saturation,
             lightness,
             colorize,
+            lightness_desaturates,
+            reciprocal_saturation,
         } => Some((
             D_HUE_SATURATION,
             [
@@ -437,8 +439,10 @@ fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
                 saturation / 100.0,
                 lightness / 100.0,
                 if *colorize { 1.0 } else { 0.0 },
-                0.0,
-                0.0,
+                // The two Affinity slider conventions; the shader
+                // branches on them the way `Params::apply` does.
+                if *lightness_desaturates { 1.0 } else { 0.0 },
+                if *reciprocal_saturation { 1.0 } else { 0.0 },
             ],
         )),
         Params::BlackWhite {

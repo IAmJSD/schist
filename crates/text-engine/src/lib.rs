@@ -207,8 +207,8 @@ struct LoadedFace {
     cap_ratio: Option<f32>,
 }
 
-fn font_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<FaceKey, Option<LoadedFace>>> {
+fn font_cache() -> &'static std::sync::Mutex<std::collections::HashMap<FaceKey, Option<LoadedFace>>>
+{
     static CACHE: OnceLock<
         std::sync::Mutex<std::collections::HashMap<FaceKey, Option<LoadedFace>>>,
     > = OnceLock::new();
@@ -463,9 +463,10 @@ impl<'a> GposKern<'a> {
                 continue;
             };
             for j in 0..lookup.subtables.len() {
-                if let Some(ttf_parser::gpos::PositioningSubtable::Pair(pair)) = lookup
-                    .subtables
-                    .get::<ttf_parser::gpos::PositioningSubtable>(j)
+                if let Some(ttf_parser::gpos::PositioningSubtable::Pair(pair)) =
+                    lookup
+                        .subtables
+                        .get::<ttf_parser::gpos::PositioningSubtable>(j)
                 {
                     subtables.push(pair);
                 }

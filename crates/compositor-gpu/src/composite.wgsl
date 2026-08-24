@@ -519,7 +519,20 @@ fn apply_direct(kind: u32, base: u32, c: vec3<f32>) -> vec3<f32> {
             let saturation = dparams[base + 1u];
             let lightness = dparams[base + 2u];
             let colorize = dparams[base + 3u] != 0.0;
+            let lightness_desaturates = dparams[base + 4u] != 0.0;
+            let reciprocal_saturation = dparams[base + 5u] != 0.0;
             let hsl = rgb_to_hsl(c);
+            // Affinity's lightness slider flattens colour as it lifts,
+            // and its saturation slider boosts reciprocally. Both are
+            // off for our own (Photoshop-style) sliders.
+            var desat = 1.0;
+            if (lightness_desaturates) {
+                desat = clamp(1.0 - abs(lightness), 0.0, 1.0);
+            }
+            var shifted = hsl.y * (1.0 + saturation);
+            if (reciprocal_saturation && saturation > 0.0) {
+                shifted = hsl.y / max(1.0 - saturation, 0.02);
+            }
             var nh: f32;
             var ns: f32;
             if (colorize) {
@@ -527,7 +540,7 @@ fn apply_direct(kind: u32, base: u32, c: vec3<f32>) -> vec3<f32> {
                 ns = clamp(saturation, 0.0, 1.0);
             } else {
                 nh = rem_euclid_f(hsl.x + hue, 360.0);
-                ns = clamp(hsl.y * (1.0 + saturation), 0.0, 1.0);
+                ns = clamp(shifted * desat, 0.0, 1.0);
             }
             return hsl_to_rgb(nh, ns, adjust_lightness(hsl.z, lightness));
         }

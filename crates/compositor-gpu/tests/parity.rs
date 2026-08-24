@@ -376,6 +376,8 @@ fn direct_adjustments_match() {
                 saturation: 35.0,
                 lightness: -20.0,
                 colorize: false,
+                lightness_desaturates: false,
+                reciprocal_saturation: false,
             },
             0,
         ),
@@ -387,6 +389,8 @@ fn direct_adjustments_match() {
                 saturation: 60.0,
                 lightness: 15.0,
                 colorize: true,
+                lightness_desaturates: false,
+                reciprocal_saturation: false,
             },
             0,
         ),
@@ -398,6 +402,38 @@ fn direct_adjustments_match() {
                 saturation: -100.0,
                 lightness: 0.0,
                 colorize: false,
+                lightness_desaturates: false,
+                reciprocal_saturation: false,
+            },
+            0,
+        ),
+        // The Affinity slider conventions: a lightness lift that also
+        // flattens colour, and a reciprocal saturation boost.
+        (
+            "hue/sat affinity",
+            AdjustmentKind::HueSaturation,
+            Params::HueSaturation {
+                hue: 12.0,
+                saturation: 40.0,
+                lightness: 30.0,
+                colorize: false,
+                lightness_desaturates: true,
+                reciprocal_saturation: true,
+            },
+            0,
+        ),
+        // Negative saturation takes the ordinary 1 + A path even with
+        // the reciprocal flag set, and lightness desaturates on |l|.
+        (
+            "hue/sat affinity negative",
+            AdjustmentKind::HueSaturation,
+            Params::HueSaturation {
+                hue: -60.0,
+                saturation: -35.0,
+                lightness: -45.0,
+                colorize: false,
+                lightness_desaturates: true,
+                reciprocal_saturation: true,
             },
             0,
         ),
@@ -452,6 +488,8 @@ fn direct_adjustments_with_masks_opacity_and_clipping() {
             saturation: 25.0,
             lightness: 10.0,
             colorize: false,
+            lightness_desaturates: false,
+            reciprocal_saturation: false,
         },
     );
     hue.opacity = 0.65;
@@ -494,6 +532,8 @@ fn an_unknown_direct_adjustment_falls_back() {
             saturation: 1.0,
             lightness: 1.0,
             colorize: false,
+            lightness_desaturates: false,
+            reciprocal_saturation: false,
         },
         Params::BlackWhite {
             reds: 1.0,
