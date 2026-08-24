@@ -86,6 +86,15 @@ pub struct TextRaster {
     /// Baseline-to-baseline distance actually used, so a caller that
     /// must hit a recorded block height can solve for `line_height`.
     pub line_advance: f32,
+    /// The widest line's advance (pen) width — sum of advances rather
+    /// than ink extent, so it includes both side bearings. Layout boxes
+    /// recorded by other apps measure this, not the ink. The pen box
+    /// spans `0..layout_width` in the same space as `bounds`.
+    pub layout_width: f32,
+    /// The face's capital height at the requested size, when the face
+    /// declares one — the distance a flat-topped capital rises above the
+    /// baseline, which is less than the ink top of an ascender.
+    pub cap_height: Option<f32>,
 }
 
 impl TextRaster {
@@ -186,10 +195,22 @@ pub fn install_face(file_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
 /// is a different file from its regular one.
 type FaceKey = (String, bool, bool);
 
+/// A loaded face: the parsed font plus its raw file bytes, kept because
+/// fontdue reads only the legacy `kern` table and modern faces store
+/// their kerning as GPOS pair adjustments, which layout reads itself.
+#[derive(Clone)]
+struct LoadedFace {
+    font: Arc<fontdue::Font>,
+    data: Arc<Vec<u8>>,
+    index: u32,
+    /// OS/2 `sCapHeight` as a fraction of the em, when declared.
+    cap_ratio: Option<f32>,
+}
+
 fn font_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<FaceKey, Option<Arc<fontdue::Font>>>> {
+) -> &'static std::sync::Mutex<std::collections::HashMap<FaceKey, Option<LoadedFace>>> {
     static CACHE: OnceLock<
-        std::sync::Mutex<std::collections::HashMap<FaceKey, Option<Arc<fontdue::Font>>>>,
+        std::sync::Mutex<std::collections::HashMap<FaceKey, Option<LoadedFace>>>,
     > = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -354,7 +375,7 @@ pub fn nearest_substitute(family: &str) -> Option<&'static str> {
 }
 
 /// Load and cache a parsed font by family name.
-fn load_font(family: &str, bold: bool, italic: bool) -> Option<Arc<fontdue::Font>> {
+fn load_font(family: &str, bold: bool, italic: bool) -> Option<LoadedFace> {
     let cache = font_cache();
     let key = (family.to_string(), bold, italic);
     if let Some(hit) = cache.lock().ok()?.get(&key) {
@@ -390,7 +411,15 @@ fn load_font(family: &str, bold: bool, italic: bool) -> Option<Arc<fontdue::Font
                 },
             )
             .ok()
-            .map(Arc::new)
+            .map(|font| LoadedFace {
+                font: Arc::new(font),
+                data: Arc::new(data.to_vec()),
+                index,
+                cap_ratio: ttf_parser::Face::parse(data, index).ok().and_then(|f| {
+                    let cap = f.capital_height().filter(|&c| c > 0)? as f32;
+                    Some(cap / f.units_per_em() as f32)
+                }),
+            })
         })
         .flatten()
     });
@@ -401,6 +430,89 @@ fn load_font(family: &str, bold: bool, italic: bool) -> Option<Arc<fontdue::Font
         c.insert(key, font.clone());
     }
     font
+}
+
+/// The GPOS `kern`-feature pair adjustments of a face, resolved once per
+/// layout. fontdue reads only the legacy `kern` table; most modern faces
+/// keep their kerning here instead, and Affinity applies it, so matching
+/// its line widths requires it.
+struct GposKern<'a> {
+    face: ttf_parser::Face<'a>,
+    subtables: Vec<ttf_parser::gpos::PairAdjustment<'a>>,
+    /// Pixels per font unit at the requested size.
+    scale: f32,
+}
+
+impl<'a> GposKern<'a> {
+    fn new(data: &'a [u8], index: u32, size: f32) -> Option<Self> {
+        let face = ttf_parser::Face::parse(data, index).ok()?;
+        let gpos = face.tables().gpos?;
+        let mut lookup_indices: Vec<u16> = Vec::new();
+        for feature in gpos.features {
+            if feature.tag == ttf_parser::Tag::from_bytes(b"kern") {
+                for i in feature.lookup_indices {
+                    if !lookup_indices.contains(&i) {
+                        lookup_indices.push(i);
+                    }
+                }
+            }
+        }
+        let mut subtables = Vec::new();
+        for i in lookup_indices {
+            let Some(lookup) = gpos.lookups.get(i) else {
+                continue;
+            };
+            for j in 0..lookup.subtables.len() {
+                if let Some(ttf_parser::gpos::PositioningSubtable::Pair(pair)) = lookup
+                    .subtables
+                    .get::<ttf_parser::gpos::PositioningSubtable>(j)
+                {
+                    subtables.push(pair);
+                }
+            }
+        }
+        if subtables.is_empty() {
+            return None;
+        }
+        let upem = face.units_per_em();
+        Some(Self {
+            scale: size / upem as f32,
+            face,
+            subtables,
+        })
+    }
+
+    /// Advance adjustment for the adjacent pair `(prev, next)`, in px.
+    /// The first subtable that covers the pair speaks for the face.
+    fn kern(&self, prev: char, next: char) -> Option<f32> {
+        use ttf_parser::gpos::PairAdjustment;
+        let a = self.face.glyph_index(prev)?;
+        let b = self.face.glyph_index(next)?;
+        for st in &self.subtables {
+            match st {
+                PairAdjustment::Format1 { coverage, sets } => {
+                    if let Some(idx) = coverage.get(a) {
+                        if let Some((first, _)) = sets.get(idx).and_then(|s| s.get(b)) {
+                            return Some(first.x_advance as f32 * self.scale);
+                        }
+                    }
+                }
+                PairAdjustment::Format2 {
+                    coverage,
+                    classes,
+                    matrix,
+                } => {
+                    if coverage.contains(a) {
+                        let pair = (classes.0.get(a), classes.1.get(b));
+                        if let Some((first, _)) = matrix.get(pair) {
+                            return Some(first.x_advance as f32 * self.scale);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// One laid-out glyph, positioned relative to the layout origin.
@@ -419,19 +531,27 @@ struct Layout {
     glyphs: Vec<PlacedGlyph>,
     first_baseline: f32,
     line_advance: f32,
+    layout_width: f32,
 }
 
-fn layout(spec: &TextSpec, font: &fontdue::Font) -> Layout {
+fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
+    let font = &face.font;
     let metrics = font.horizontal_line_metrics(spec.size);
     let (ascent, line_gap) = metrics
         .map(|m| (m.ascent, m.new_line_size))
         .unwrap_or((spec.size * 0.8, spec.size * 1.2));
     let line_advance = line_gap * spec.line_height.max(0.1);
 
+    // A face with GPOS kerning speaks through it alone; the legacy
+    // `kern` table is only consulted when there is no GPOS to read.
+    let gpos = GposKern::new(&face.data, face.index, spec.size);
     let advance = |ch: char, prev: Option<char>| -> f32 {
         let m = font.metrics(ch, spec.size);
         let kern = prev
-            .and_then(|p| font.horizontal_kern(p, ch, spec.size))
+            .and_then(|p| match &gpos {
+                Some(g) => g.kern(p, ch),
+                None => font.horizontal_kern(p, ch, spec.size),
+            })
             .unwrap_or(0.0);
         m.advance_width + kern + spec.tracking
     };
@@ -495,6 +615,7 @@ fn layout(spec: &TextSpec, font: &fontdue::Font) -> Layout {
         glyphs: placed,
         first_baseline: ascent,
         line_advance,
+        layout_width: max_width,
     }
 }
 
@@ -503,27 +624,32 @@ fn layout(spec: &TextSpec, font: &fontdue::Font) -> Layout {
 /// Returns `None` when no font could be loaded; an empty string yields an
 /// empty raster rather than an error.
 pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
-    let font = load_font(&spec.family, spec.bold, spec.italic)?;
+    let face = load_font(&spec.family, spec.bold, spec.italic)?;
     if spec.text.is_empty() || spec.size <= 0.0 {
         return Some(TextRaster {
             bounds: IntRect::EMPTY,
             coverage: Vec::new(),
             first_baseline: 0.0,
             line_advance: 0.0,
+            layout_width: 0.0,
+            cap_height: face.cap_ratio.map(|r| r * spec.size),
         });
     }
+    let font = &face.font;
     let Layout {
         glyphs: placed,
         first_baseline,
         line_advance,
-        ..
-    } = layout(spec, &font);
+        layout_width,
+    } = layout(spec, &face);
     if placed.is_empty() {
         return Some(TextRaster {
             bounds: IntRect::EMPTY,
             coverage: Vec::new(),
             first_baseline: 0.0,
             line_advance: 0.0,
+            layout_width: 0.0,
+            cap_height: face.cap_ratio.map(|r| r * spec.size),
         });
     }
 
@@ -547,6 +673,8 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
             coverage: Vec::new(),
             first_baseline: 0.0,
             line_advance: 0.0,
+            layout_width: 0.0,
+            cap_height: face.cap_ratio.map(|r| r * spec.size),
         });
     }
 
@@ -573,6 +701,8 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
         coverage,
         first_baseline,
         line_advance,
+        layout_width,
+        cap_height: face.cap_ratio.map(|r| r * spec.size),
     })
 }
 

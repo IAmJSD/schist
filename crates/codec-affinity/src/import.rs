@@ -1158,21 +1158,48 @@ impl Walker<'_> {
             },
             _ => return None,
         };
-        // The resolved font (RFnt) beats the document font (DFnt) — but
-        // an unresolved RFnt is present with empty names, so pick the
-        // first that actually names a family.
-        let font = [b"RFnt", b"DFnt"]
+        // Two descriptors name the font: `DFnt` is what the document was
+        // designed with, `RFnt` what the *writing* machine resolved it
+        // to — stale advice on any other machine (real corpus files
+        // carry RFnt = Helvetica for a document set in Geist). Affinity
+        // re-resolves on open, preferring the document font whenever it
+        // — or its family stripped of a trailing parenthetical, since
+        // "Geist (Beta)" installs as "Geist" — is present; only a
+        // document font this machine lacks falls back to RFnt's advice.
+        let installed_name = |f: &&Node| -> Option<String> {
+            let fam = str_of(f, b"Famy").filter(|s| !s.is_empty())?;
+            if schist_text_engine::has_family(fam) {
+                return Some(fam.to_string());
+            }
+            let head = fam.rsplit_once(" (").map(|(head, _)| head.trim())?;
+            (!head.is_empty() && schist_text_engine::has_family(head)).then(|| head.to_string())
+        };
+        let dfnt = graph.child(run_item, b"DFnt");
+        let rfnt = graph.child(run_item, b"RFnt");
+        let (font, family, family_installed) = match [dfnt, rfnt]
             .into_iter()
-            .filter_map(|t| graph.child(run_item, t))
-            .find(|f| str_of(f, b"Famy").is_some_and(|s| !s.is_empty()));
-        let (family, post) = font
-            .map(|f| {
-                (
-                    str_of(f, b"Famy").unwrap_or_default().to_string(),
-                    str_of(f, b"Post").unwrap_or_default().to_string(),
-                )
-            })
-            .unwrap_or_default();
+            .flatten()
+            .find_map(|f| installed_name(&f).map(|fam| (f, fam)))
+        {
+            Some((f, fam)) => (Some(f), fam, true),
+            // Neither is installed: keep the writing app's resolution if
+            // it names anything, and let the engine substitute from there.
+            None => {
+                let f = [rfnt, dfnt]
+                    .into_iter()
+                    .flatten()
+                    .find(|f| str_of(f, b"Famy").is_some_and(|s| !s.is_empty()));
+                let fam = f
+                    .and_then(|f| str_of(f, b"Famy"))
+                    .unwrap_or_default()
+                    .to_string();
+                (f, fam, false)
+            }
+        };
+        let post = font
+            .and_then(|f| str_of(f, b"Post"))
+            .unwrap_or_default()
+            .to_string();
         let weight = font.and_then(|f| i32_of(f, b"Wegt")).unwrap_or(400);
         let italic = font.and_then(|f| bool_of(f, b"Ital")).unwrap_or(false);
         let color = run_color(graph, run_item).unwrap_or([0, 0, 0, 255]);
@@ -1237,12 +1264,17 @@ impl Walker<'_> {
         if raster.is_empty() {
             return None;
         }
-        // An artistic-text frame box records exactly how wide Affinity
-        // set this text. When our face's metrics disagree (usually a
-        // substituted font), scale the size so the ink still fills its
+        // An artistic-text frame box records exactly how wide the
+        // *writing* machine set this text — as a pen (advance) box, side
+        // bearings and all, not an ink box (corpus files' own exports
+        // adjudicated this: their ink starts one left side bearing
+        // inside the frame). With the real family installed the natural
+        // layout is already right and the frame may reflect someone
+        // else's substitute, so leave it alone; when we substitute,
+        // scale the size so our advance width still fills the recorded
         // box. Frame text keeps its size and reflows instead.
-        if !frame_text && frame_width > 8 {
-            let ratio = frame_width as f32 / raster.bounds.width() as f32;
+        if !frame_text && !family_installed && frame_width > 8 && raster.layout_width > 1.0 {
+            let ratio = frame_width as f32 / raster.layout_width;
             if (ratio - 1.0).abs() > 0.002 {
                 spec.size *= ratio;
                 raster = schist_text_engine::rasterize(&spec)?;
@@ -1260,7 +1292,12 @@ impl Walker<'_> {
         // document was set with — so solve for it.
         let lines = spec.text.lines().count();
         if !frame_text && lines > 1 && raster.line_advance > 0.0 {
-            let cap = raster.first_baseline - raster.bounds.top as f32;
+            // The face's declared capital height, not the first line's
+            // ink top: ascenders overshoot the cap, and the frame box is
+            // measured from the cap.
+            let cap = raster
+                .cap_height
+                .unwrap_or(raster.first_baseline - raster.bounds.top as f32);
             let wanted = (frame_height as f32 - cap) / (lines - 1) as f32;
             let scale = wanted / raster.line_advance;
             // A box that implies a collapsed or wildly stretched leading
@@ -1274,19 +1311,36 @@ impl Walker<'_> {
             }
         }
 
-        // Anchor our ink box to the frame box per the paragraph
-        // alignment: ink-to-ink placement is immune to differing ascent
-        // conventions between engines.
-        let origin_x = match spec.align {
-            schist_text_engine::Align::Center if frame_width > 8 => {
-                frame_left + (frame_width - raster.bounds.width()) / 2 - raster.bounds.left
+        // Anchor our pen box to the frame box: the layout already put
+        // the widest line's pen at 0 and aligned the rest, so the frame
+        // left is the origin for every alignment, and the ink lands one
+        // side bearing inside it exactly as Affinity draws it. (When the
+        // engine measured no advances, fall back to ink anchoring.)
+        let origin_x = if raster.layout_width > 1.0 {
+            match spec.align {
+                schist_text_engine::Align::Center if frame_width > 8 => {
+                    frame_left + (frame_width - raster.layout_width.round() as i32) / 2
+                }
+                schist_text_engine::Align::Right if frame_width > 8 => {
+                    frame_left + frame_width - raster.layout_width.round() as i32
+                }
+                _ => frame_left,
             }
-            schist_text_engine::Align::Right if frame_width > 8 => {
-                frame_left + frame_width - raster.bounds.width() - raster.bounds.left
-            }
-            _ => frame_left - raster.bounds.left,
+        } else {
+            frame_left - raster.bounds.left
         };
-        let origin = (origin_x, frame_top - raster.bounds.top);
+        // Vertically, artistic text anchors by baseline: the frame's
+        // bottom edge is the last line's baseline (the first line's, for
+        // one line), which no ascender-vs-cap disagreement can move.
+        // Frame text keeps ink-top anchoring to its frame.
+        let origin_y = if !frame_text && raster.first_baseline > 0.0 {
+            let last_baseline =
+                raster.first_baseline + (lines.max(1) - 1) as f32 * raster.line_advance;
+            frame_top + frame_height - last_baseline.round() as i32
+        } else {
+            frame_top - raster.bounds.top
+        };
+        let origin = (origin_x, origin_y);
         // Affinity's panel names text layers after their content.
         let display_name = if name.is_empty() {
             let first_line = spec.text.lines().next().unwrap_or("Text").trim();
