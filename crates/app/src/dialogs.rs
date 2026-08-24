@@ -9,6 +9,15 @@ use gpui::{
 };
 use schist_core::Filter;
 
+/// Apply a stepper delta to a pixel dimension.
+///
+/// `ui::num_field` hands its callback `+step` or `-step`, never an absolute
+/// value, so every dimension stepper adds rather than assigns. Dimensions
+/// never go below one pixel.
+fn step_dim(current: u32, delta: f32) -> u32 {
+    ((current as f32 + delta).max(1.0)) as u32
+}
+
 /// Workspace state the dialog widgets read while rendering.
 #[derive(Clone)]
 struct DialogState {
@@ -205,7 +214,7 @@ fn image_size(
                             ..
                         } = m
                         {
-                            *width = ((*width as f32 + delta).max(1.0)) as u32;
+                            *width = step_dim(*width, delta);
                             if *link {
                                 *height = ((*width as f32 / aspect).round().max(1.0)) as u32;
                             }
@@ -235,7 +244,7 @@ fn image_size(
                             ..
                         } = m
                         {
-                            *height = ((*height as f32 + delta).max(1.0)) as u32;
+                            *height = step_dim(*height, delta);
                             if *link {
                                 *width = ((*height as f32 * aspect).round().max(1.0)) as u32;
                             }
@@ -384,7 +393,7 @@ fn canvas_size(
                 |ws, delta| {
                     ws.update_modal(|m| {
                         if let Modal::CanvasSize { width, .. } = m {
-                            *width = ((*width as f32 + delta).max(1.0)) as u32;
+                            *width = step_dim(*width, delta);
                         }
                     });
                 },
@@ -405,7 +414,7 @@ fn canvas_size(
                 |ws, delta| {
                     ws.update_modal(|m| {
                         if let Modal::CanvasSize { height, .. } = m {
-                            *height = ((*height as f32 + delta).max(1.0)) as u32;
+                            *height = step_dim(*height, delta);
                         }
                     });
                 },
@@ -1016,7 +1025,8 @@ fn content_aware_scale_dialog(
                 |ws, v| {
                     ws.update_modal(|m| {
                         if let Modal::ContentAwareScale { width, .. } = m {
-                            *width = v.max(1.0) as u32;
+                            // `v` is the step delta, as in Image Size.
+                            *width = step_dim(*width, v);
                         }
                     });
                 },
@@ -1037,7 +1047,8 @@ fn content_aware_scale_dialog(
                 |ws, v| {
                     ws.update_modal(|m| {
                         if let Modal::ContentAwareScale { height, .. } = m {
-                            *height = v.max(1.0) as u32;
+                            // `v` is the step delta, as in Image Size.
+                            *height = step_dim(*height, v);
                         }
                     });
                 },
@@ -2037,4 +2048,23 @@ fn layer_properties(
             cx,
         ));
     ui::modal_frame("Layer Properties", 340.0, body, actions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_dim;
+
+    #[test]
+    fn steppers_add_the_delta_rather_than_assigning_it() {
+        // `num_field` passes +step / -step, so a 10 px step on a 1200 px
+        // dimension must land on 1210, never on 10.
+        assert_eq!(step_dim(1200, 10.0), 1210);
+        assert_eq!(step_dim(1200, -10.0), 1190);
+    }
+
+    #[test]
+    fn dimensions_never_drop_below_one_pixel() {
+        assert_eq!(step_dim(5, -10.0), 1);
+        assert_eq!(step_dim(1, -1.0), 1);
+    }
 }
