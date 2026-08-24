@@ -8,7 +8,7 @@
 
 use crate::dialogs::{param_slider, SliderSpec};
 use crate::ui;
-use crate::workspace::{Modal, Popup, Workspace};
+use crate::workspace::{ColorTarget, Modal, Popup, Workspace};
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled,
@@ -266,7 +266,21 @@ fn color_of(style: &LayerStyle, effect: &str) -> Option<Rgba> {
     })
 }
 
-fn set_color(style: &mut LayerStyle, effect: &str, c: Rgba) {
+/// The display name of a colour this dialog owns, for the Color Picker's
+/// title bar.
+pub fn effect_label(effect: &str) -> &'static str {
+    match effect {
+        "gradient_overlay.from" => "Gradient Overlay From",
+        "gradient_overlay.to" => "Gradient Overlay To",
+        _ => EFFECTS
+            .iter()
+            .find(|(key, _)| *key == effect)
+            .map(|(_, label)| *label)
+            .unwrap_or("Layer Style"),
+    }
+}
+
+pub fn set_color(style: &mut LayerStyle, effect: &str, c: Rgba) {
     match effect {
         "drop_shadow" => style.drop_shadow.settings.color = c,
         "inner_shadow" => style.inner_shadow.settings.color = c,
@@ -275,8 +289,38 @@ fn set_color(style: &mut LayerStyle, effect: &str, c: Rgba) {
         "stroke" => style.stroke.settings.color = c,
         "color_overlay" => style.color_overlay.settings.color = c,
         "satin" => style.satin.settings.color = c,
+        // The gradient's two ends are not "the effect's colour", so they
+        // get their own keys rather than a slot in `color_of`.
+        "gradient_overlay.from" => style.gradient_overlay.settings.from = c,
+        "gradient_overlay.to" => style.gradient_overlay.settings.to = c,
         _ => {}
     }
+}
+
+/// A colour swatch that opens the Color Picker on `key`. The Layer Style
+/// dialog stays open underneath it and takes the colour on OK.
+fn color_swatch(
+    id: &'static str,
+    key: &'static str,
+    c: Rgba,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(18.0))
+        .flex_none()
+        .rounded_sm()
+        .border_1()
+        .border_color(gpui::rgb(ui::palette().edge))
+        .bg(gpui::rgb(rgb_of(c)))
+        .cursor_pointer()
+        .hover(|s| s.border_color(gpui::rgb(ui::palette().text)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                ws.open_color_picker_on(ColorTarget::StyleEffect(key), c, cx);
+            }),
+        )
 }
 
 fn blend_of(style: &LayerStyle, effect: &str) -> Option<BlendMode> {
@@ -423,14 +467,7 @@ pub fn render(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(
-                    div()
-                        .size(px(18.0))
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(gpui::rgb(ui::palette().edge))
-                        .bg(gpui::rgb(rgb_of(c))),
-                )
+                .child(color_swatch("style-color-swatch", active, c, cx))
                 .child(ui::button(
                     "Use Foreground",
                     false,
@@ -585,7 +622,14 @@ pub fn render(
                     div()
                         .flex()
                         .flex_row()
+                        .items_center()
                         .gap_2()
+                        .child(color_swatch(
+                            "style-gradient-from",
+                            "gradient_overlay.from",
+                            style.gradient_overlay.settings.from,
+                            cx,
+                        ))
                         .child(ui::button(
                             "From = FG",
                             false,
@@ -593,6 +637,12 @@ pub fn render(
                                 let fg = ws.editor.foreground;
                                 edit(ws, cx, |s| s.gradient_overlay.settings.from = fg);
                             },
+                            cx,
+                        ))
+                        .child(color_swatch(
+                            "style-gradient-to",
+                            "gradient_overlay.to",
+                            style.gradient_overlay.settings.to,
                             cx,
                         ))
                         .child(ui::button(
