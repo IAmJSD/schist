@@ -301,7 +301,7 @@ fn decode_value(
                     let bits = parts.get(1)?.as_u64()?;
                     Value::Flags {
                         version: parts.first()?.as_u64()? as u16,
-                        count: (((64 - bits.leading_zeros() as usize) + 7) / 8).max(1) as u8,
+                        count: (64 - bits.leading_zeros() as usize).div_ceil(8).max(1) as u8,
                         bits,
                     }
                 }
