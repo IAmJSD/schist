@@ -13,16 +13,24 @@
 //!    layer hierarchy into a [`schist_core::Document`], loading
 //!    raster layers' pixel tiles from the container.
 //!
-//! Verified against Affinity 1 files. Affinity 2 files (zstd entries)
-//! parse the container but not yet the payloads; callers should fall
-//! back to preview extraction on any error.
+//! Verified against every generation: Affinity 1 (zlib entries),
+//! Affinity 2 / Canva-era (zstd entries), and the unified ".af"
+//! container version 12.
+//!
+//! The write direction mirrors the same stages: [`emit`] re-serializes
+//! object graphs byte-exactly, [`container`] writes archives, and
+//! [`export`] builds a whole document from a [`schist_core::Document`].
 
 pub mod archive;
+pub mod container;
+pub mod emit;
 pub mod error;
+pub mod export;
 pub mod graph;
 pub mod import;
 pub mod preserve;
 
 pub use archive::{is_affinity, Archive};
 pub use error::AffinityError;
+pub use export::write_affinity;
 pub use import::read_affinity;

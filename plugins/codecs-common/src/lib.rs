@@ -1,7 +1,7 @@
 //! Common raster format codecs (PNG, JPEG, WebP, TIFF) via the `image`
-//! crate, wrapped as `CodecPlugin`s, plus import-only Affinity support.
-//! Import produces a single "Background" layer; export flattens through
-//! the compositor.
+//! crate, wrapped as `CodecPlugin`s, plus layered Affinity
+//! import/export. For the simple formats, import produces a single
+//! "Background" layer and export flattens through the compositor.
 
 pub use affinity::AffinityCodec;
 use anyhow::Context as _;

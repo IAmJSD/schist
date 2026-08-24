@@ -1,4 +1,4 @@
-//! Affinity (.afphoto / .afdesign / .afpub) import.
+//! Affinity (.afphoto / .afdesign / .afpub / .af) import and export.
 //!
 //! Two readers, best first:
 //!
@@ -7,13 +7,16 @@
 //!    raster tiles. When it recovers every layer's pixels, the document
 //!    opens layered, with names, opacity, visibility and blend modes.
 //! 2. **Flattened preview** — layers Affinity would re-render live
-//!    (shapes, text, adjustments) have no pixels in the file, and
-//!    Affinity 2's zstd payloads aren't parsed yet. Whenever the
-//!    structured read can't show the complete picture, fall back to the
-//!    flattened PNG/JPEG preview the apps embed in the clear, carved
-//!    straight out of the raw bytes.
+//!    (shapes, text, adjustments) have no pixels in the file. Whenever
+//!    the structured read can't show the complete picture, fall back to
+//!    the flattened PNG/JPEG preview the apps embed in the clear,
+//!    carved straight out of the raw bytes.
 //!
-//! Import-only: there is no way to write a file Affinity would accept.
+//! Export writes a layered version-12 (unified ".af") container:
+//! rasters as native tiles, groups, masks, clipping, blend modes, and
+//! adjustment layers that carry preserved native parameters. Text and
+//! vector layers export their rasterized pixels. The file embeds a
+//! composited preview thumbnail, like Affinity's own saves.
 
 use schist_color::Depth;
 use schist_core::{blit_rgba8, Document, IntRect, Layer};
@@ -42,7 +45,7 @@ impl CodecPlugin for AffinityCodec {
         "codec.affinity"
     }
     fn name(&self) -> &'static str {
-        "Affinity (flattened)"
+        "Affinity"
     }
     fn extensions(&self) -> &'static [&'static str] {
         // ".af" is the unified extension of Canva-era Affinity; the
@@ -90,9 +93,51 @@ impl CodecPlugin for AffinityCodec {
         }
         self.import_preview(bytes)
     }
+
+    fn can_export(&self) -> bool {
+        true
+    }
+
+    fn export(&self, doc: &Document) -> anyhow::Result<Vec<u8>> {
+        let thumbnail = self.render_thumbnail(doc);
+        let (bytes, report) = schist_codec_affinity::write_affinity(doc, thumbnail.as_deref())?;
+        for (layer, why) in &report.skipped {
+            log::warn!("affinity export: {layer:?}: {why}");
+        }
+        Ok(bytes)
+    }
 }
 
 impl AffinityCodec {
+    /// The embedded preview written on export: the composited document,
+    /// scaled to Affinity's usual 512-pixel thumbnail box, as PNG.
+    fn render_thumbnail(&self, doc: &Document) -> Option<Vec<u8>> {
+        let region = doc.canvas_rect();
+        if region.is_empty() {
+            return None;
+        }
+        let pixels = schist_compositor::composite_region_f32(doc, region);
+        let rgba: Vec<u8> = pixels
+            .iter()
+            .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+            .collect();
+        let img: image::RgbaImage = image::ImageBuffer::from_raw(doc.width, doc.height, rgba)?;
+        let scale = 512.0 / doc.width.max(doc.height).max(1) as f32;
+        let img = if scale < 1.0 {
+            image::imageops::resize(
+                &img,
+                ((doc.width as f32 * scale).round() as u32).max(1),
+                ((doc.height as f32 * scale).round() as u32).max(1),
+                image::imageops::Triangle,
+            )
+        } else {
+            img
+        };
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+        Some(out.into_inner())
+    }
+
     /// The largest embedded PNG/JPEG preview that actually decodes.
     fn best_preview(&self, bytes: &[u8]) -> Option<image::RgbaImage> {
         let mut candidates = scan_pngs(bytes);

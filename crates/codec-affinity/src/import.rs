@@ -559,7 +559,7 @@ impl Walker<'_> {
         if let schist_core::LayerKind::Adjustment(data) = &mut layer.kind {
             for key in [b"AdjP", b"NAjP"] {
                 if let Some(adj) = self.graph.child(node, key) {
-                    data.raw = crate::preserve::preserved_block(self.graph, kind, key, adj);
+                    data.raw = crate::preserve::preserved_block(self.graph, &node.types, key, adj);
                     break;
                 }
             }
@@ -616,7 +616,7 @@ impl Walker<'_> {
         let (kind_name, subpaths) = shape_geometry(shpe, x0, y0, x1, y1)?;
         let name = if name.is_empty() { kind_name } else { name };
         let mut path = schist_core::VectorPath::new(name);
-        let preserved = crate::preserve::preserved_block(graph, node.type_tag(), b"Shpe", shpe);
+        let preserved = crate::preserve::preserved_block(graph, &node.types, b"Shpe", shpe);
         // Holes (a donut's ring, a cog's bore) are extra subpaths under
         // even-odd fill; single outlines fill identically either way.
         let even_odd = subpaths.len() > 1;

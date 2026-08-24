@@ -468,16 +468,69 @@ The corpus sweep tooling: `--example afdiff` composites an import
 `BitR` and clipped-children questions were settled; `--example aftree`
 prints the imported layer tree with bounds.
 
+## Writing
+
+Schist writes `.af` documents (`crates/codec-affinity/src/{emit,
+container,export}.rs`). The write path is built on two rules:
+
+**Byte-exact re-serialization.** The graph parser records every
+wire-level detail semantics alone wouldn't need — each field's type
+byte, class framing (0x30/0x31/0x32), 0x31 section boundaries and
+chain terminators, and the array headers empty arrays can't rederive
+(a hoisted 0x32 `(tag, id)` header, an enum array's version, a curve
+array's record size, even the non-canonical `0xFF` some writers store
+for `true`). `emit::serialize` inverts the parse exactly:
+`serialize(parse(x)) == x` for all 212 graphs across every fixture and
+corpus document, all generations (pinned by `tests/emit_roundtrip.rs`).
+
+**Never guess at boilerplate.** The exporter parses a vendored probe
+fixture (a real Affinity 3.1 document) as a template, patches the
+canvas fields (`DfSz`, spread `MiID`, base-raster dimensions), replaces
+the spread's `Chld` with freshly built layer nodes, and re-emits.
+Layer node layouts (`Rstr`, `Grup`, `MRst`, adjustment nodes, `FilE`
+effects, `DyBm`/`Blck` bitmaps) are transcribed field-for-field from
+real documents with `--example afschema`, which prints each class's
+chain versions, framing, and per-field wire types. Notably, real
+writers put **all fields in the trailing stream** of a 0x31 definition
+— the type-chain sections are field-less — and abbreviate repeated
+chains to a lone tag (Schist always writes the full chain, which every
+first instance in real files also uses).
+
+Container conventions (v12), transcribed from 3.1-written files: one
+`#FT4` savepoint; every block after the first prefixed `FF FF FF FF`;
+`#Inf.length` = Σ compressed sizes; `num` = next free entry id; the
+FAT mirrors (thumb offset, length); per-entry `#FT2+` extra = 32,
+`#FT4` extra = 0; `Prot` = 12; entries zstd-compressed (`ruzstd`,
+falling back to stored), no prediction, CRC-32 over plain bytes; a
+`Thmb` block holds the composited PNG preview. `--example afwrite`
+exports any importable file (or `--demo`) for testing against real
+Affinity.
+
+Exported today: rasters as native planar tiles (status 1/2/4, partial
+`Rect`s, mip chain), groups (pass-through vs isolated via `PasT`),
+masks as `AdCh` `MRst` nodes, clipping layers as Affinity clipped
+children, opacity / fill opacity / blend enums / visibility, shadows,
+glows, colour overlay and outline effects, and adjustment layers
+re-emitted from their preserved parameter blocks (below). Text and
+vector layers export their rasterized pixels — re-emitting native
+`TxtA`/`ShpN`/`PCrv` (the `AfSh` extras block already carries a
+shape's native `Shpe` subtree) is the natural next step.
+`tests/export_roundtrip.rs` proves every fixture and corpus document
+survives import → export → import with structure and pixels intact.
+
 ## Round-tripping
 
-Nothing an import understands — or doesn't — is thrown away, so a
-future `.af` *exporter* can write documents back without loss:
+Nothing an import understands — or doesn't — is thrown away, so the
+`.af` exporter can write documents back without loss:
 
 - Every adjustment layer keeps its native parameter class (`AdjP` /
   `NAjP`) in `AdjustmentData::raw`, as typed JSON behind an `AFJ1`
   prefix (`crates/codec-affinity/src/preserve.rs`): every field keeps
-  its tag and wire type, class hierarchies their (tag, version)
-  chains, `Class` references inlined.
+  its tag, wire type byte and framing, class hierarchies their
+  (tag, version) chains — the owning layer's chain too — `Class`
+  references inlined. `preserve::decode` turns a block back into graph
+  nodes for the exporter, inferring canonical wire types for blocks
+  saved before they were recorded.
 - Adjustments with no equivalent on our side (split toning, Soft
   Proof, LUT, OCIO, Normals, tone compression/stretch…) import as
   **no-op adjustment layers** that carry the same preserved block,
@@ -529,10 +582,24 @@ per-channel behaviour from channel-mixing behaviour at a glance.
   rotated/mirrored clipped children a few percent off where live
   Affinity places them, while matching the file's own thumbnail —
   the residual convention there is unresolved.
+- Export: text, shapes and paths write rasterized pixels; emitting
+  native `TxtA`/`ShpN`/`PCrv` nodes (the `AfSh` block already keeps a
+  shape's `Shpe` subtree) would keep them live in Affinity. Schist-
+  native adjustments without a preserved block are skipped (only
+  parameter-free Invert exports) — building `AdjP` classes from our
+  params by inverting the import tables is the fix. The `#FT4`
+  per-entry trailing u32 (random-looking in real files) is written as
+  0, and `#Inf`'s `revision` as 1 — both accepted by our reader,
+  neither yet verified against live Affinity.
+- Exports round-trip through our own reader; opening them in real
+  Affinity is the outstanding validation.
 
 `cargo run -p schist-codec-affinity --example afdump -- file.afphoto`
 prints any file's container listing and full object graph;
-`--example afrev` lists an entry's savepoint revisions.
+`--example afschema` prints wire-level class layouts (the exporter's
+transcription source); `--example afrev` lists an entry's savepoint
+revisions; `--example afwrite` re-exports any importable file as .af
+(`--demo` writes a synthetic exercise document).
 
 [afread]: https://github.com/VMDevCpp/afread
 [AFDesignLoad]: https://github.com/NickBeeuwsaert/AFDesignLoad

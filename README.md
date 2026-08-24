@@ -57,7 +57,14 @@ real layers, each verified against renders and exports from Affinity
 itself; whatever Affinity would re-render live and we can't rebuild
 yet is covered by the file's embedded flattened preview, imported as
 a hidden reference layer or, when nothing else survives, as the
-document itself.
+document itself. Export writes layered `.af` documents back (unified
+version-12 container): rasters as native tiles, groups, masks,
+clipping, blend modes, drop shadows / glows / outlines / colour
+overlays, and adjustment layers round-tripped from their preserved
+native parameters — the writer's object graphs re-serialize every
+fixture and corpus document byte-for-byte, so the on-disk shapes are
+exactly what Affinity itself writes. Text and vector layers export as
+pixels for now.
 
 **Selecting.** Rectangular and elliptical marquee; free, polygonal and
 magnetic lassos; magic wand with tolerance and contiguity; quick selection

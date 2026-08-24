@@ -59,6 +59,8 @@ pub enum Value {
     },
     Flags {
         version: u16,
+        /// Number of bytes the set was stored in (≤ 8).
+        count: u8,
         bits: u64,
     },
     VecI(Vec<i32>),
@@ -81,7 +83,26 @@ pub enum Value {
     Array(Vec<Value>),
 }
 
+/// How a 0x31 class definition's type-section chain ended on the wire:
+/// with a lone root tag (flag 1 — the tag is the last `types` entry) or
+/// with a bare end marker (flag 2).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum ChainEnd {
+    /// Not a 0x31 definition (0x30/0x32 classes, and the root).
+    #[default]
+    None,
+    /// Flag 1: the chain ends with a field-less root tag.
+    LoneTag,
+    /// Flag 2: the chain just ends.
+    Closed,
+}
+
 /// One class instance: its type chain and flattened fields.
+///
+/// Alongside the semantic view (`types`, `fields`) the node keeps
+/// enough wire-level detail — field type bytes, class framing, section
+/// boundaries — for [`crate::emit`] to re-serialize the exact bytes it
+/// was parsed from.
 #[derive(Debug, Default)]
 pub struct Node {
     /// (tag, version) sections, most-derived first. Base-class sections
@@ -91,6 +112,23 @@ pub struct Node {
     pub fields: Vec<(u32, Value)>,
     /// Shared-object id (0 when the class is anonymous).
     pub id: u32,
+    /// Wire type byte of each field (bit 7 = array), parallel to
+    /// `fields`.
+    pub wire: Vec<u8>,
+    /// Per-field auxiliary wire data, parallel to `fields` — the array
+    /// header values a field's elements cannot supply once the array is
+    /// empty: a 0x32 array's hoisted header (`tag << 16 | id`), an enum
+    /// array's version, a curve array's record size. Zero otherwise.
+    pub aux: Vec<u64>,
+    /// Class framing this node was stored with: 0x30, 0x31 or 0x32
+    /// (0 for the root pseudo-node).
+    pub framing: u8,
+    /// For 0x31 definitions: how many of `fields` each flag-0 type
+    /// section contributed, in section order. Fields beyond the sum
+    /// belong to the trailing stream after the chain terminator.
+    pub section_lens: Vec<usize>,
+    /// For 0x31 definitions: how the type-section chain terminated.
+    pub chain_end: ChainEnd,
 }
 
 impl Node {
@@ -109,6 +147,8 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     pub file_version: u16,
     pub type_version: u16,
+    /// The extra header word present when `file_version` is 2.
+    pub header_extra: u32,
 }
 
 pub const ROOT: usize = 0;
@@ -154,9 +194,7 @@ pub fn parse(bytes: &[u8]) -> Result<Graph, AffinityError> {
             "object graph version {file_version} unknown"
         )));
     }
-    if file_version == 2 {
-        let _version = c.u32()?;
-    }
+    let header_extra = if file_version == 2 { c.u32()? } else { 0 };
 
     let mut p = Parser {
         c,
@@ -166,13 +204,17 @@ pub fn parse(bytes: &[u8]) -> Result<Graph, AffinityError> {
         }],
         by_id: HashMap::new(),
         depth: 0,
+        aux: 0,
     };
-    let mut root_fields = p.fields(true)?;
+    let (mut root_fields, mut root_wire, mut root_aux) = p.fields(true)?;
     p.nodes[ROOT].fields.append(&mut root_fields);
+    p.nodes[ROOT].wire.append(&mut root_wire);
+    p.nodes[ROOT].aux.append(&mut root_aux);
     Ok(Graph {
         nodes: p.nodes,
         file_version,
         type_version,
+        header_extra,
     })
 }
 
@@ -181,17 +223,28 @@ struct Parser<'a> {
     nodes: Vec<Node>,
     by_id: HashMap<u32, usize>,
     depth: u32,
+    /// Auxiliary wire data of the value just parsed (see [`Node::aux`]);
+    /// captured by `fields` right after each `value` call.
+    aux: u64,
 }
 
 impl Parser<'_> {
-    /// Parse a field list until its 0x00 terminator.
-    fn fields(&mut self, with_tags: bool) -> Result<Vec<(u32, Value)>, AffinityError> {
+    /// Parse a field list until its 0x00 terminator. Returns the
+    /// fields and, parallel to them, each field's wire type byte and
+    /// auxiliary wire data.
+    #[allow(clippy::type_complexity)]
+    fn fields(
+        &mut self,
+        with_tags: bool,
+    ) -> Result<(Vec<(u32, Value)>, Vec<u8>, Vec<u64>), AffinityError> {
         self.depth += 1;
         // Corrupt input could otherwise recurse to a stack overflow.
         if self.depth > 200 {
             return Err(malformed("class nesting too deep"));
         }
         let mut out = Vec::new();
+        let mut wire = Vec::new();
+        let mut aux = Vec::new();
         loop {
             let pos = self.c.pos;
             let type_byte = self.c.u8()?;
@@ -199,13 +252,14 @@ impl Parser<'_> {
             let ty = type_byte & 0x7f;
             if ty == 0x00 {
                 self.depth -= 1;
-                return Ok(out);
+                return Ok((out, wire, aux));
             }
             let needs_tag = matches!(ty, 0x30..=0x33 | 0x75);
             if needs_tag && !with_tags {
                 return Err(malformed(format!("untagged class field at {pos}")));
             }
             let field_tag = if with_tags { self.c.u32()? } else { 0 };
+            self.aux = 0;
             let value = self.value(ty, array).map_err(|e| {
                 malformed(format!(
                     "in field {} (type {ty:#04x}) at {pos}: {e}",
@@ -213,6 +267,8 @@ impl Parser<'_> {
                 ))
             })?;
             out.push((field_tag, value));
+            wire.push(type_byte);
+            aux.push(self.aux);
         }
     }
 
@@ -299,6 +355,7 @@ impl Parser<'_> {
                 raw[..count].copy_from_slice(self.c.take(count)?);
                 Ok(Value::Flags {
                     version,
+                    count: count as u8,
                     bits: u64::from_le_bytes(raw),
                 })
             }
@@ -330,7 +387,11 @@ impl Parser<'_> {
 
     fn bools(&mut self, array: bool) -> Result<Value, AffinityError> {
         if !array {
-            return Ok(Value::Bool(self.c.u8()? != 0));
+            // Not always canonical: real files store 0xFF for true.
+            // Keep the raw byte in aux so a re-emit is exact.
+            let byte = self.c.u8()?;
+            self.aux = byte as u64;
+            return Ok(Value::Bool(byte != 0));
         }
         let count = self.c.u32()? as usize;
         let bytes = self.c.take(count.div_ceil(8))?;
@@ -357,6 +418,7 @@ impl Parser<'_> {
             let id = self.c.u16()?;
             items.push(Value::Enum { id, version });
         }
+        self.aux = version as u64;
         Ok(Value::Array(items))
     }
 
@@ -393,6 +455,7 @@ impl Parser<'_> {
             items.push(Value::Curve(self.c.take(size)?.to_vec()));
         }
         Ok(if array {
+            self.aux = size as u64;
             Value::Array(items)
         } else {
             items.pop().unwrap()
@@ -423,6 +486,11 @@ impl Parser<'_> {
             items.push(Value::Class(item));
         }
         Ok(if array {
+            // Nested parsing clobbers the scratch aux, so the hoisted
+            // header is recorded only now, after the elements.
+            if let Some((t, id)) = shared_header {
+                self.aux = ((t as u64) << 16) | (id as u64 & 0xFFFF);
+            }
             Value::Array(items)
         } else {
             items.pop().unwrap()
@@ -431,9 +499,12 @@ impl Parser<'_> {
 
     /// 0x30: a bare, untagged field list (known composite types).
     fn class_untagged(&mut self) -> Result<Option<usize>, AffinityError> {
-        let fields = self.fields(false)?;
+        let (fields, wire, aux) = self.fields(false)?;
         Ok(Some(self.push(Node {
             fields,
+            wire,
+            aux,
+            framing: 0x30,
             ..Node::default()
         })))
     }
@@ -449,6 +520,7 @@ impl Parser<'_> {
                 }
                 let index = self.push(Node {
                     id,
+                    framing: 0x31,
                     ..Node::default()
                 });
                 self.by_id.insert(id, index);
@@ -459,24 +531,35 @@ impl Parser<'_> {
                         0 => {
                             let t = self.c.u32()?;
                             let v = self.c.u16()? as u32;
-                            let mut fields = self.fields(true)?;
+                            let (mut fields, mut wire, mut aux) = self.fields(true)?;
                             let node = &mut self.nodes[index];
                             node.types.push((t, v));
+                            node.section_lens.push(fields.len());
                             node.fields.append(&mut fields);
+                            node.wire.append(&mut wire);
+                            node.aux.append(&mut aux);
                         }
                         1 => {
                             let t = self.c.u32()?;
-                            self.nodes[index].types.push((t, 0));
+                            let node = &mut self.nodes[index];
+                            node.types.push((t, 0));
+                            node.chain_end = ChainEnd::LoneTag;
                             break;
                         }
-                        2 => break,
+                        2 => {
+                            self.nodes[index].chain_end = ChainEnd::Closed;
+                            break;
+                        }
                         other => {
                             return Err(malformed(format!("unknown type-section flag {other}")))
                         }
                     }
                 }
-                let mut fields = self.fields(true)?;
-                self.nodes[index].fields.append(&mut fields);
+                let (mut fields, mut wire, mut aux) = self.fields(true)?;
+                let node = &mut self.nodes[index];
+                node.fields.append(&mut fields);
+                node.wire.append(&mut wire);
+                node.aux.append(&mut aux);
                 Ok(Some(index))
             }
             2 => {
@@ -503,10 +586,13 @@ impl Parser<'_> {
                         (t, v)
                     }
                 };
-                let fields = self.fields(true)?;
+                let (fields, wire, aux) = self.fields(true)?;
                 Ok(Some(self.push(Node {
                     types: vec![(t, v)],
                     fields,
+                    wire,
+                    aux,
+                    framing: 0x32,
                     ..Node::default()
                 })))
             }
