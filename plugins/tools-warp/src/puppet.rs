@@ -205,13 +205,15 @@ impl PuppetWarpTool {
         let Some(session) = self.session.take() else {
             return;
         };
-        let moved = self.pins.iter().any(|p| p.from != p.to);
-        self.pins.clear();
-        if !moved {
+        // Take the pins rather than clearing them: the mesh below is built
+        // from them, so clearing first solves an empty pin set, which is
+        // the identity, and throws the whole warp away.
+        let pins = std::mem::take(&mut self.pins);
+        if !pins.iter().any(|p| p.from != p.to) {
             return;
         }
         let depth = ctx.doc.depth;
-        let mesh = mesh_from_pins(session.rect, &self.pins, self.stiffness);
+        let mesh = mesh_from_pins(session.rect, &pins, self.stiffness);
         let warped = warp_tiles(
             &session.original,
             &mesh,
