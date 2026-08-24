@@ -126,6 +126,9 @@ fn viewport(@builtin(global_invocation_id) gid: vec3<u32>) {
                 acc += vec4(s.rgb * a, a);
             }
         }
+        // Mean, not sum: `resolve` reads acc.a as the pixel's coverage,
+        // and the rgb divide cancels the same factor.
+        acc /= f32(n * n);
         px = resolve(acc);
     }
 

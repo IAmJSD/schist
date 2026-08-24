@@ -180,6 +180,12 @@ pub fn render_viewport_cpu(p: &ViewportParams, grid: &[Option<Arc<Vec<u8>>>]) ->
                             acc[3] += a;
                         }
                     }
+                    // Mean, not sum: `resolve` reads acc[3] as the pixel's
+                    // coverage, and the RGB divide cancels the same factor.
+                    let taps = (n * n) as f32;
+                    for v in acc.iter_mut() {
+                        *v /= taps;
+                    }
                     resolve(acc)
                 };
 
