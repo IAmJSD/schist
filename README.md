@@ -185,8 +185,6 @@ Remap anything in `~/.config/schist/keymap.json`:
 
 ## Not there yet
 
-- **3D.** Never built, and not planned: Adobe deprecated it right after
-  CC 2020 and removed it in 2022.
 - **Tablet pressure on Wayland.** The pipeline carries pressure end to
   end, and macOS (`NSEvent`), X11 (the XInput2 pressure valuator) and
   Windows (pen pointer messages) all feed it; Wayland still needs
