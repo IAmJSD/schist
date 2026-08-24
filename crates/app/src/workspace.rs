@@ -5333,6 +5333,35 @@ impl Workspace {
         ))
     }
 
+    /// Can the real frame be rebuilt mid-gesture without stalling? True
+    /// when the gesture is a pure pan — zoom and rotation match the last
+    /// full frame — and every visible tile is already composited and
+    /// colour-managed, so `assemble_viewport` is just a resample. Panning
+    /// then renders crisp on every tick and fills ground the stale image
+    /// never covered, instead of flashing surround until the hand stops;
+    /// the stale-quad path remains for zooming (where every tick
+    /// invalidates the whole frame) and for scrolls that outrun the
+    /// prefetch into cold tiles.
+    fn warm_pan_frame_ready(
+        &self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+        canvas_rect: IntRect,
+    ) -> bool {
+        let Some((key, _)) = &self.viewport_image else {
+            return false;
+        };
+        if key.zoom != self.zoom.to_bits() || key.rotation != self.rotation.to_bits() {
+            return false;
+        }
+        let sf = scale_factor.max(0.01);
+        let width = (f32::from(bounds.size.width) * sf).round().max(1.0) as usize;
+        let height = (f32::from(bounds.size.height) * sf).round().max(1.0) as usize;
+        let visible = self.visible_doc_rect(width, height, sf, canvas_rect);
+        TileCoord::covering(&visible)
+            .all(|c| self.cache.contains(c) && self.display_tiles.contains_key(&c))
+    }
+
     fn refresh_preview(&mut self) -> Option<Arc<RenderImage>> {
         let doc = self.doc.as_ref()?;
         let (w, h) = (
@@ -5482,7 +5511,10 @@ impl Workspace {
             if let Some(img) = self.refresh_preview() {
                 job.tiles.push((snapped_bounds(canvas_rect), img));
             }
-        } else if let Some(quad) = self.gesture_viewport_quad(bounds, scale_factor) {
+        } else if let Some(quad) = self
+            .gesture_viewport_quad(bounds, scale_factor)
+            .filter(|_| !self.warm_pan_frame_ready(bounds, scale_factor, canvas_rect))
+        {
             // Zooming out or panning can expose ground the stale image
             // never covered; fill it with the surround so those edges
             // don't flash stale pixels or bare window.
