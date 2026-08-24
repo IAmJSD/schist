@@ -217,12 +217,17 @@ fn main() {
                 |_window, cx| {
                     let workspace = cx.new(|cx| {
                         let mut ws = Workspace::new(registry, plugin_manager, cx);
+                        // Recovery runs whatever else is happening: opening
+                        // a document from the shell or the file manager is
+                        // not a reason to leave a previous session's
+                        // unsaved work stranded on disk.
+                        let recoveries = Workspace::pending_recoveries();
+                        if !recoveries.is_empty() {
+                            log::info!("recovering {} snapshot(s)", recoveries.len());
+                            ws.recover_all(recoveries, cx);
+                        }
                         if let Some(path) = std::env::args().nth(1) {
                             ws.load_file(path.into(), cx);
-                        } else if let Some(recovery) = Workspace::pending_recovery() {
-                            // A previous session died with unsaved work.
-                            log::info!("recovering {recovery:?}");
-                            ws.recover_from(recovery, cx);
                         }
                         ws
                     });
