@@ -48,12 +48,18 @@ impl IntRect {
         }
     }
 
+    // Saturating: rects can be built from file-supplied coordinates, where
+    // the span can overflow i32. That panicked in debug and wrapped in
+    // release, turning an absurd rect into a small-looking one and slipping
+    // it past the codecs' sanity checks. Saturating leaves every valid rect
+    // untouched and reports an overflowing one as impossibly large, which
+    // is what those checks then reject.
     pub fn width(&self) -> i32 {
-        (self.right - self.left).max(0)
+        self.right.saturating_sub(self.left).max(0)
     }
 
     pub fn height(&self) -> i32 {
-        (self.bottom - self.top).max(0)
+        self.bottom.saturating_sub(self.top).max(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -115,6 +121,29 @@ impl IntRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_spans_saturate_instead_of_overflowing() {
+        // PSD stores layer rects as four raw i32s, so these are reachable
+        // from a malformed file. Previously this panicked in debug and
+        // wrapped in release.
+        let r = IntRect::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
+        assert_eq!(r.width(), i32::MAX);
+        assert_eq!(r.height(), i32::MAX);
+
+        // A wrapping subtraction here would report 1, which is exactly the
+        // failure mode: an absurd rect looking small enough to accept.
+        let r = IntRect::new(i32::MIN, 0, i32::MAX, 10);
+        assert_eq!(r.width(), i32::MAX);
+        assert_eq!(r.height(), 10);
+    }
+
+    #[test]
+    fn inverted_rects_still_measure_zero() {
+        let r = IntRect::new(50, 50, 10, 10);
+        assert_eq!(r.width(), 0);
+        assert_eq!(r.height(), 0);
+    }
 
     #[test]
     fn intersect_disjoint_is_empty() {
