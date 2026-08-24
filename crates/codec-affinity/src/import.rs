@@ -416,6 +416,9 @@ impl Walker<'_> {
                 b"TxtA" | b"TxtF" => String::new(), // named from the text below
                 b"CrRA" => "Curves Adjustment".to_string(),
                 b"HsRA" => "HSL Adjustment".to_string(),
+                // Parametric adjustments name themselves on import.
+                b"LeRA" | b"ExRA" | b"BCRA" | b"BWRA" | b"CBRA" | b"VbRA" | b"InRA" | b"PoRA"
+                | b"ThRA" | b"CMRA" | b"SCRA" | b"GrRA" | b"PfRA" | b"RcRA" | b"WBRA" => String::new(),
                 b"ShpN" => String::new(), // named from the shape kind below
                 _ => tag_name(kind),
             }
@@ -501,6 +504,18 @@ impl Walker<'_> {
                     return None;
                 }
             },
+            // The parametric adjustments probed from fixture files
+            // (fixtures/affinity-probe) — one class each behind AdjP/NAjP.
+            b"LeRA" | b"ExRA" | b"BCRA" | b"BWRA" | b"CBRA" | b"VbRA" | b"InRA" | b"PoRA"
+            | b"ThRA" | b"CMRA" | b"SCRA" | b"GrRA" | b"PfRA" | b"RcRA" | b"WBRA" => {
+                match self.parametric_adjustment(node, &display) {
+                    Some(layer) => layer,
+                    None => {
+                        self.report.skipped.push((skip_label, tag_name(kind)));
+                        return None;
+                    }
+                }
+            }
             // A live filter node warps the content below it between two
             // quads. When source and destination coincide the filter is
             // configured but inert — absence, not content.
@@ -830,6 +845,358 @@ impl Walker<'_> {
         let mut layer = Layer::new_raster(if name.is_empty() { "HSL" } else { name });
         layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
             kind: schist_core::AdjustmentKind::HueSaturation,
+            raw: Vec::new(),
+            params_json: serde_json::to_string(&params).ok(),
+        });
+        self.report.adjustments += 1;
+        Some(layer)
+    }
+
+    /// Rebuild the parametric adjustment layers whose field layouts were
+    /// probed with fixture files drawn in Affinity itself
+    /// (fixtures/affinity-probe): one document per adjustment, each with
+    /// distinctive slider values, read back through afdump. The class
+    /// behind `AdjP` (or `NAjP`, gradient map's spelling) names the type;
+    /// values are fractions of the UI's percentages unless noted.
+    fn parametric_adjustment(&mut self, node: &Node, name: &str) -> Option<Layer> {
+        use schist_adjustments::Params;
+        let graph = self.graph;
+        let tag_bytes = node.type_tag().to_be_bytes();
+        let adj = match graph
+            .child(node, b"AdjP")
+            .or_else(|| graph.child(node, b"NAjP"))
+        {
+            Some(adj) => adj,
+            // Invert has no parameters — and no params class.
+            None if &tag_bytes == b"InRA" => node,
+            None => return None,
+        };
+        let f = |t: &[u8; 4]| f32_of(adj, t).unwrap_or(0.0);
+        let fd = |t: &[u8; 4], d: f32| f32_of(adj, t).unwrap_or(d);
+        let tag = node.type_tag().to_be_bytes();
+        let (kind, params, default_name) = match &tag {
+            // LevP: Blac/Whit input levels, Gamm, OutB/OutW outputs, all
+            // 0..1 fractions of the UI's percents; the C-arrays hold
+            // per-channel variants our Levels doesn't model.
+            b"LeRA" => {
+                let per_channel = [b"BlkC", b"GamC", b"OBlC"].into_iter().any(|t| {
+                    matches!(adj.field(t), Some(Value::Array(v)) if v.iter().any(|x| !matches!(x, Value::F32(f) if *f == 0.0 || *f == 1.0)))
+                });
+                if per_channel {
+                    log::warn!(
+                        "affinity: levels {name:?} has per-channel values; keeping master only"
+                    );
+                }
+                let master = schist_adjustments::LevelsChannel {
+                    input_black: f(b"Blac"),
+                    input_white: fd(b"Whit", 1.0),
+                    gamma: fd(b"Gamm", 1.0).max(0.01),
+                    output_black: f(b"OutB"),
+                    output_white: fd(b"OutW", 1.0),
+                };
+                let params = Params::Levels(schist_adjustments::Levels {
+                    rgb: master,
+                    ..Default::default()
+                });
+                (schist_core::AdjustmentKind::Levels, params, "Levels")
+            }
+            // ExpP: Expo is in stops applied in a power-law space whose
+            // exponent is the Gamm field (2.2). Our exposure multiplies
+            // the encoded value directly, so dividing the stops by that
+            // gamma reproduces it exactly: (v^g * 2^E)^(1/g) = v*2^(E/g).
+            b"ExRA" => (
+                schist_core::AdjustmentKind::Exposure,
+                Params::Exposure {
+                    exposure: f(b"Expo") / fd(b"Gamm", 2.2).max(0.1),
+                    offset: 0.0,
+                    gamma: 1.0,
+                },
+                "Exposure",
+            ),
+            // B&CP: Brig is the percentage as a fraction; Ctrs stores
+            // 1 + contrast/100 (a -35% contrast reads back as 0.65).
+            // Affinity's sliders drive a gentler, endpoint-preserving
+            // curve than our linear remap; the scales below are a
+            // least-squares fit of our model to the probe fixture's own
+            // thumbnail, exact in the midtones and within ~3% at the
+            // ends.
+            b"BCRA" => {
+                if matches!(adj.field(b"Linr"), Some(Value::Bool(true))) {
+                    log::warn!("affinity: brightness/contrast {name:?} is linear; applying gamma");
+                }
+                (
+                    schist_core::AdjustmentKind::BrightnessContrast,
+                    Params::BrightnessContrast {
+                        brightness: (f(b"Brig") * 100.0 * 0.28).clamp(-100.0, 100.0),
+                        contrast: ((fd(b"Ctrs", 1.0) - 1.0) * 100.0 * 0.24).clamp(-100.0, 100.0),
+                    },
+                    "Brightness/Contrast",
+                )
+            }
+            b"BWRA" => (
+                schist_core::AdjustmentKind::BlackWhite,
+                Params::BlackWhite {
+                    reds: f(b"RedC") * 100.0,
+                    yellows: f(b"Yell") * 100.0,
+                    greens: f(b"Gree") * 100.0,
+                    cyans: f(b"Cyan") * 100.0,
+                    blues: f(b"Blue") * 100.0,
+                    magentas: f(b"Mage") * 100.0,
+                },
+                "Black and White",
+            ),
+            b"CBRA" => (
+                schist_core::AdjustmentKind::ColorBalance,
+                Params::ColorBalance {
+                    // Affinity's slider moves the channel about a tenth
+                    // as far as ours per percent (fit against the probe
+                    // fixture's thumbnail).
+                    shadows: [f(b"ShCR") * 11.0, f(b"ShMG") * 11.0, f(b"ShYB") * 11.0],
+                    midtones: [f(b"MiCR") * 11.0, f(b"MiMG") * 11.0, f(b"MiYB") * 11.0],
+                    highlights: [f(b"HiCR") * 11.0, f(b"HiMG") * 11.0, f(b"HiYB") * 11.0],
+                    preserve_luminosity: matches!(adj.field(b"PeLu"), Some(Value::Bool(true))),
+                },
+                "Colour Balance",
+            ),
+            // VibP: Vibr is an i32 percentage, Satu a fraction.
+            b"VbRA" => (
+                schist_core::AdjustmentKind::Vibrance,
+                Params::Vibrance {
+                    vibrance: i32_of(adj, b"Vibr").unwrap_or(0) as f32,
+                    saturation: f(b"Satu") * 100.0,
+                },
+                "Vibrance",
+            ),
+            b"InRA" => (
+                schist_core::AdjustmentKind::Invert,
+                Params::Invert,
+                "Invert",
+            ),
+            b"PoRA" => (
+                schist_core::AdjustmentKind::Posterize,
+                Params::Posterize {
+                    levels: i32_of(adj, b"Post").unwrap_or(4).clamp(2, 255) as u32,
+                },
+                "Posterise",
+            ),
+            b"ThRA" => (
+                schist_core::AdjustmentKind::Threshold,
+                Params::Threshold {
+                    level: fd(b"Thre", 0.5),
+                },
+                "Threshold",
+            ),
+            // CnMP: Weig is five rows of six — [offset, R, G, B, A, x]
+            // for the R, G, B, A and composite outputs (the probe file's
+            // typed weights landed at rows[0][1..5], identity rows carry
+            // their 1.0 on the moving diagonal).
+            b"CMRA" => {
+                let Some(Value::Array(w)) = adj.field(b"Weig") else {
+                    return None;
+                };
+                let g = |i: usize| match w.get(i) {
+                    Some(Value::F32(v)) => *v * 100.0,
+                    _ => 0.0,
+                };
+                let row = |r: usize| [g(r * 6 + 1), g(r * 6 + 2), g(r * 6 + 3)];
+                // The alpha weight contributes a flat term on opaque
+                // pixels, so it folds into the constant with the offset.
+                let constant = |r: usize| g(r * 6) + g(r * 6 + 4);
+                (
+                    schist_core::AdjustmentKind::ChannelMixer,
+                    Params::ChannelMixer {
+                        red: row(0),
+                        green: row(1),
+                        blue: row(2),
+                        constant: [constant(0), constant(1), constant(2)],
+                        monochrome: false,
+                    },
+                    "Channel Mixer",
+                )
+            }
+            // SCoP: Weig is nine ranges of [C, M, Y, K] — the six
+            // Photoshop-model ranges first, then whites/neutrals/blacks,
+            // which our adjustment doesn't have.
+            b"SCRA" => {
+                let Some(Value::Array(w)) = adj.field(b"Weig") else {
+                    return None;
+                };
+                let g = |i: usize| match w.get(i) {
+                    Some(Value::F32(v)) => *v * 100.0,
+                    _ => 0.0,
+                };
+                if (24..36).any(|i| g(i) != 0.0) {
+                    log::warn!(
+                        "affinity: selective colour {name:?} tweaks whites/neutrals/blacks; \
+                         importing the six colour ranges only"
+                    );
+                }
+                let mut ranges = [[0.0f32; 4]; 6];
+                for (r, out) in ranges.iter_mut().enumerate() {
+                    for (c, v) in out.iter_mut().enumerate() {
+                        *v = g(r * 4 + c);
+                    }
+                }
+                (
+                    schist_core::AdjustmentKind::SelectiveColor,
+                    Params::SelectiveColor {
+                        ranges,
+                        relative: matches!(adj.field(b"Rela"), Some(Value::Bool(true))),
+                    },
+                    "Selective Colour",
+                )
+            }
+            // GraP (behind NAjP): a Grad class of stops. Our gradient map
+            // is a two-colour ramp, so the first and last stops speak.
+            b"GrRA" => {
+                let grad = graph.child(adj, b"Grad")?;
+                let cols = graph.children(grad, b"Cols");
+                let rgb = |n: &&Node| -> [f32; 3] {
+                    let c = color_bytes(n).unwrap_or([0, 0, 0, 255]);
+                    [
+                        c[0] as f32 / 255.0,
+                        c[1] as f32 / 255.0,
+                        c[2] as f32 / 255.0,
+                    ]
+                };
+                // Posn pairs are (position, midpoint); the whole ramp
+                // goes into the multi-stop form.
+                let positions: Vec<f32> = match grad.field(b"Posn") {
+                    Some(Value::Array(v)) => v
+                        .iter()
+                        .filter_map(|p| match p {
+                            Value::VecD(d) => d.first().map(|x| *x as f32),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let mut stops: Vec<(f32, [f32; 3])> = positions
+                    .iter()
+                    .zip(cols.iter())
+                    .map(|(p, c)| (p.clamp(0.0, 1.0), rgb(c)))
+                    .collect();
+                stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let (first, last) = (cols.first()?, cols.last()?);
+                (
+                    schist_core::AdjustmentKind::GradientMap,
+                    Params::GradientMap {
+                        from: rgb(first),
+                        to: rgb(last),
+                        reverse: false,
+                        stops,
+                    },
+                    "Gradient Map",
+                )
+            }
+            // LeFP: the filter colour as three u16 Lab components (the
+            // first three u16 fields, in L, a, b order — their tags
+            // carry unprintable bytes), plus Dens and Pres.
+            b"PfRA" => {
+                let labs: Vec<u16> = adj
+                    .fields
+                    .iter()
+                    .filter_map(|(_, v)| match v {
+                        Value::U16(u) => Some(*u),
+                        _ => None,
+                    })
+                    .take(3)
+                    .collect();
+                let [l, a, b] = labs.as_slice() else {
+                    return None;
+                };
+                let color = lab_to_rgb(
+                    *l as f32 / 65535.0 * 100.0,
+                    *a as f32 / 65535.0 * 255.0 - 128.0,
+                    *b as f32 / 65535.0 * 255.0 - 128.0,
+                );
+                (
+                    schist_core::AdjustmentKind::PhotoFilter,
+                    Params::PhotoFilter {
+                        color,
+                        // Affinity's filter tints far more gently per
+                        // percent than our multiply-toward-the-colour
+                        // (fit against the probe fixture's thumbnail).
+                        density: (f(b"Dens") * 100.0 * 0.2).clamp(0.0, 100.0),
+                        preserve_luminosity: matches!(adj.field(b"Pres"), Some(Value::Bool(true))),
+                    },
+                    "Lens Filter",
+                )
+            }
+            // WhBP: WhBa is warmth in -100..100 (an i32), WBTi tint as a
+            // fraction. Affinity applies constant per-channel gains in
+            // linear light (the probe fixture's own render shows flat
+            // linear gains along the whole grey ramp), which a gamma-
+            // space curve per channel reproduces exactly. The gain model
+            // is calibrated from that fixture (warmth 30, tint 40 →
+            // r ×1.12, g ×1.01, b ×0.60) and extrapolates exponentially.
+            b"WBRA" => {
+                let warmth = i32_of(adj, b"WhBa").unwrap_or(0) as f32 / 100.0;
+                let tint = f(b"WBTi");
+                let gains = [
+                    (0.35 * warmth).exp(),
+                    1.0 + 0.025 * tint,
+                    (-1.70 * warmth).exp(),
+                ];
+                let dec = |v: f32| {
+                    if v <= 0.04045 {
+                        v / 12.92
+                    } else {
+                        ((v + 0.055) / 1.055).powf(2.4)
+                    }
+                };
+                let enc = |v: f32| {
+                    let v = v.clamp(0.0, 1.0);
+                    if v <= 0.0031308 {
+                        12.92 * v
+                    } else {
+                        1.055 * v.powf(1.0 / 2.4) - 0.055
+                    }
+                };
+                let curve_for = |k: f32| {
+                    let mut c = schist_adjustments::Curve::default();
+                    c.points = (0..=8)
+                        .map(|i| {
+                            let v = i as f32 / 8.0;
+                            (v, enc(dec(v) * k))
+                        })
+                        .collect();
+                    c
+                };
+                let params = Params::Curves(schist_adjustments::Curves {
+                    rgb: schist_adjustments::Curve::default(),
+                    red: curve_for(gains[0]),
+                    green: curve_for(gains[1]),
+                    blue: curve_for(gains[2]),
+                });
+                (schist_core::AdjustmentKind::Curves, params, "White Balance")
+            }
+            // RecP: hue as a fraction of the turn, saturation and
+            // lightness as fractions — a colorize in our model, whose
+            // lightness is an offset about the 50% midpoint.
+            b"RcRA" => (
+                schist_core::AdjustmentKind::HueSaturation,
+                Params::HueSaturation {
+                    // Colorize reads hue as an absolute 0..360 angle.
+                    // Affinity's lightness L lifts towards white as
+                    // l + (1 - l) * L — exactly our positive lightness
+                    // offset.
+                    hue: f(b"RecH") * 360.0,
+                    saturation: (f(b"RecS") * 100.0).clamp(0.0, 100.0),
+                    lightness: (f(b"RecL") * 100.0).clamp(0.0, 100.0),
+                    colorize: true,
+                },
+                "Recolour",
+            ),
+            _ => return None,
+        };
+        let mut layer = Layer::new_raster(if name.is_empty() {
+            format!("{default_name} Adjustment")
+        } else {
+            name.to_string()
+        });
+        layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
+            kind,
             raw: Vec::new(),
             params_json: serde_json::to_string(&params).ok(),
         });
@@ -2178,6 +2545,37 @@ fn run_color(graph: &Graph, run_item: &Node) -> Option<[u8; 4]> {
 }
 
 /// Convert a colour class (`RGBA`/`HSLA`/`GRAY`/`CMYK`) to RGBA bytes.
+/// CIELAB (D50, the ICC connection space) to sRGB, for the lens filter's
+/// stored colour. `l` 0..100, `a`/`b` about -128..127.
+fn lab_to_rgb(l: f32, a: f32, b: f32) -> [f32; 3] {
+    let fy = (l + 16.0) / 116.0;
+    let fx = fy + a / 500.0;
+    let fz = fy - b / 200.0;
+    let inv = |t: f32| {
+        if t > 6.0 / 29.0 {
+            t * t * t
+        } else {
+            3.0 * (6.0f32 / 29.0).powi(2) * (t - 4.0 / 29.0)
+        }
+    };
+    // D50 white point.
+    let (xn, yn, zn) = (0.9642, 1.0, 0.8249);
+    let (x, y, z) = (xn * inv(fx), yn * inv(fy), zn * inv(fz));
+    // XYZ(D50) -> linear sRGB (Bradford-adapted matrix).
+    let rl = 3.1338561 * x - 1.6168667 * y - 0.4906146 * z;
+    let gl = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
+    let bl = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
+    let enc = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.0031308 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    [enc(rl), enc(gl), enc(bl)]
+}
+
 fn color_bytes(colr: &Node) -> Option<[u8; 4]> {
     {
         let Value::Struct(raw) = colr.field(b"_col")? else {

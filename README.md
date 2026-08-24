@@ -49,12 +49,15 @@ their source pixels, so transforming one repeatedly costs no more quality
 than transforming it once. Also PNG, JPEG, WebP and TIFF. Affinity files
 (`.af`/`.afphoto`/`.afdesign`/`.afpub` — Affinity 1, 2 and the unified Canva-era format) open through a
 natively reverse-engineered reader
-([docs/affinity-format.md](docs/affinity-format.md)): pixel layers and
-placed images come in as real layers — names, groups, opacity,
-visibility, blend modes, placement — while layers Affinity re-renders
-live (shapes, text, fills) are covered by the file's embedded flattened
-preview, imported as a hidden reference layer or, when nothing else
-survives, as the document itself.
+([docs/affinity-format.md](docs/affinity-format.md)): pixel layers,
+placed images, groups, masks, live shapes, free paths, editable text
+(set in the document's real fonts, GPOS kerning and all), layer
+effects — on groups too — and sixteen adjustment types come in as
+real layers, each verified against renders and exports from Affinity
+itself; whatever Affinity would re-render live and we can't rebuild
+yet is covered by the file's embedded flattened preview, imported as
+a hidden reference layer or, when nothing else survives, as the
+document itself.
 
 **Selecting.** Rectangular and elliptical marquee; free, polygonal and
 magnetic lassos; magic wand with tolerance and contiguity; quick selection

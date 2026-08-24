@@ -360,3 +360,74 @@ fn documents_import() {
         );
     }
 }
+
+/// The adjustment fixtures in fixtures/affinity-probe were each drawn in
+/// Affinity itself — one document per adjustment type, distinctive
+/// slider values — and their embedded thumbnails are Affinity's own
+/// renders. Compositing our import must stay close to that ground
+/// truth; the bounds below encode how close each importer currently
+/// gets (0.5 = exact up to resampling, larger = a documented
+/// approximation).
+#[test]
+fn probed_adjustments_match_affinitys_render() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/affinity-probe");
+    // (file, max RMS over white, vs. Affinity's embedded render)
+    let bounds = [
+        ("blackwhite.af", 1.0),
+        ("brightcontrast.af", 11.0), // fitted approximation of a gentler curve
+        ("channelmixer.af", 1.0),
+        ("colourbalance.af", 3.0),
+        ("exposure.af", 1.0),
+        ("gradientmap.af", 0.5),
+        ("invert.af", 0.5),
+        ("lensfilter.af", 8.0), // fitted density scale
+        ("levels.af", 2.0),
+        ("posterise.af", 1.0),
+        ("recolour.af", 1.0),
+        ("selectivecolour.af", 4.0),
+        ("splittoning.af", 8.0),  // parses, reported as unsupported
+        ("threshold.af", 8.0),    // saturated-colour boundary differs
+        ("vibrance.af", 12.0),    // formula differs on saturated colour
+        ("whitebalance.af", 16.0), // grey-ramp-calibrated gain model
+    ];
+    for (file, max_rms) in bounds {
+        let path = dir.join(file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skipping: no {}", path.display());
+            continue;
+        };
+        let archive = schist_codec_affinity::Archive::parse(&bytes).expect("parse");
+        let thumb = image::load_from_memory(archive.thumbnail().expect("thumb"))
+            .expect("decode")
+            .to_rgba8();
+        let (doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+        let region = schist_core::IntRect::from_size(doc.width, doc.height);
+        let pixels = schist_compositor::composite_region_rgba8(&doc, region);
+        let ours = image::RgbaImage::from_raw(doc.width, doc.height, pixels).expect("buffer");
+        let ours = image::imageops::resize(
+            &ours,
+            thumb.width(),
+            thumb.height(),
+            image::imageops::Triangle,
+        );
+        let mut sum = 0.0f64;
+        let mut n = 0u64;
+        for (a, b) in ours.pixels().zip(thumb.pixels()) {
+            let over = |p: &image::Rgba<u8>, i: usize| {
+                let alpha = p.0[3] as f64 / 255.0;
+                p.0[i] as f64 * alpha + 255.0 * (1.0 - alpha)
+            };
+            for i in 0..3 {
+                let d = over(a, i) - over(b, i);
+                sum += d * d;
+                n += 1;
+            }
+        }
+        let rms = (sum / n as f64).sqrt();
+        println!("{file}: rms {rms:.2} (bound {max_rms})");
+        assert!(
+            rms <= max_rms,
+            "{file}: rms {rms:.2} above bound {max_rms}"
+        );
+    }
+}

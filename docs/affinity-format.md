@@ -4,11 +4,15 @@ What Schist knows about Serif's `.afphoto` / `.afdesign` / `.afpub`
 format, as implemented by `crates/codec-affinity`. Serif publishes no
 spec. This knowledge comes from prior art — [afread] by Vladimir Mamonov
 (MIT) and [AFDesignLoad] by Nick Beeuwsaert (MIT) — plus our own
-inspection of real files: `fixtures/affinity/` (Affinity Designer 1.x)
-plus private corpora of Affinity Photo 2.6 documents and Canva-era
-Affinity `.af` documents (not vendored — point
-`SCHIST_AFFINITY_CORPUS` at colon-separated directories of real
-files to sweep them in the codec tests). Every generation uses the
+inspection of real files: `fixtures/affinity/` (Affinity Designer 1.x),
+`fixtures/affinity-probe/` (single-feature documents drawn in the
+unified Affinity 3.1 expressly to probe field layouts — see
+[Probe fixtures](#probe-fixtures)), plus private corpora of Affinity
+Photo 2.6 documents and Canva-era Affinity `.af` documents (not
+vendored — point `SCHIST_AFFINITY_CORPUS` at colon-separated
+directories of real files to sweep them in the codec tests; a document
+open in Affinity leaves a `name.afphoto~lock~` sibling behind, which
+the sweeps skip). Every generation uses the
 same container and object graph: Affinity 2 swaps zlib for zstd, adds
 a few fields, and stores placed-image pixels by reference; the unified
 `.af` format bumps the container version to 12 with **no other
@@ -165,19 +169,32 @@ UTF-8 string — line breaks are the Unicode paragraph/line separators
 `Runs` → `Item` carries character attributes — `Doub[0]` is the font
 size, `RFnt`/`DFnt` the resolved and document fonts (`Post`
 PostScript name, `Famy` family, `Wegt` weight, `Ital`; an *unresolved*
-`RFnt` is present with empty names, so prefer whichever actually names
-a family; bold lives in the PostScript name more reliably than in
-`Wegt`), and `Objs` holds fill descriptors (`FDsc.FDeF` → `Colr` → an
-`RGBA`/`HSLA`/… `_col` struct). Paragraph attributes mirror the run
-shape: block `PAtt` → `Runs` → `Item` → `Ints[0]` is the alignment
-(0 left · 1 centre · 2 right). `TxtH` is the frame (`ArFr` for
-artistic text): `FrmB` `f64[4]` is the layout box in pre-transform
-coordinates — its transformed bottom edge is the first baseline, its
-height the visual cap height (`ArtV`). Import re-sets the text through
-the text engine — frame text reflows to the frame width, artistic text
-fits its size to the frame when a substituted font's metrics disagree —
-anchors the ink box to the transformed frame box per the alignment,
-and stores the type tool's `PsTx` block so the layer stays editable.
+`RFnt` is present with empty names; bold lives in the PostScript name
+more reliably than in `Wegt`), and `Objs` holds fill descriptors
+(`FDsc.FDeF` → `Colr` → an `RGBA`/`HSLA`/… `_col` struct). **`RFnt`
+is the writing machine's resolution and goes stale**: real corpus
+files carry `RFnt = Helvetica-Bold` for text whose `DFnt` names
+"Geist (Beta)", and Affinity opening them here re-resolves and draws
+Geist. Import does the same — prefer whichever of `DFnt`, `RFnt`
+names an *installed* family (also trying the name stripped of a
+trailing parenthetical, since "Geist (Beta)" installs as "Geist"),
+falling back to the stored resolution only when neither is installed.
+Paragraph attributes mirror the run shape: block `PAtt` → `Runs` →
+`Item` → `Ints[0]` is the alignment (0 left · 1 centre · 2 right).
+`TxtH` is the frame (`ArFr` for artistic text): `FrmB` `f64[4]` is
+the layout box in pre-transform coordinates — its transformed bottom
+edge is the last baseline, its height running down from the first
+line's cap (`ArtV`). **The box records the pen (advance) width, side
+bearings and all, not the ink** — in Affinity's own exports the ink
+starts one left side bearing inside the frame edge. Import re-sets
+the text through the text engine (which reads GPOS `kern`-feature
+pair adjustments itself; fontdue only knows the legacy `kern` table,
+and modern faces kern via GPOS) — frame text reflows to the frame
+width; artistic text keeps its natural layout when the real family is
+installed, and only rescales to fill the recorded pen box when
+substituting — anchors the pen box to the frame box per the
+alignment and the last baseline to the frame bottom, and stores the
+type tool's `PsTx` block so the layer stays editable.
 
 **Layer transforms nest**: a group's `Xfrm` defines the coordinate
 space its children's transforms live in; composing down the tree is
@@ -253,6 +270,62 @@ range, an `HSV` mode flag, and six per-hue-range tweak arrays
 = reds and so on). Imported as a real hue/saturation adjustment
 (master shifts only; per-range tweaks warn).
 
+**Parametric adjustments**, probed with one fixture file each (values
+below are fractions of the UI's percents unless noted). The class
+behind `AdjP` — `NAjP` for the gradient map — names the type; the
+layer node's own tag is the type + "RA" (`LeRA` levels, `ExRA`
+exposure…). All of these import as real adjustment layers; the
+per-type accuracy against Affinity's own renders is pinned by
+`probed_adjustments_match_affinitys_render`:
+
+- `LevP` levels: `Blac`/`Whit` input levels, `Gamm`, `OutB`/`OutW`
+  outputs; `BlkC`/`WhtC`/`GamC`/`OBlC`/`OWhC` are 5-wide per-channel
+  arrays (unmodelled; warn when non-identity). *(exact)*
+- `ExpP` exposure: `Expo` in stops — applied in a power-law space of
+  exponent `Gamm` (2.2), so `Expo/Gamm` stops of encoded-value
+  multiply reproduces it exactly. *(exact)*
+- `B&CP` brightness/contrast: `Brig` fraction; `Ctrs` stores
+  1 + contrast/100. Affinity's sliders drive a gentler,
+  endpoint-preserving curve than our linear remap; imported ×0.28 /
+  ×0.24, a least-squares fit against the fixture (mid-tones exact,
+  ends ~3%).
+- `B&WP` black & white: `RedC Yell Gree Cyan Blue Mage`. *(exact)*
+- `WhBP` white balance: `WhBV` version, `WhBa` warmth as an i32
+  percent, `WBTi` tint fraction. Affinity applies flat per-channel
+  gains in linear light; imported as fitted per-channel curves
+  (r ×e^0.35w, b ×e^-1.70w, calibrated at warmth 30) — grey-exact,
+  saturated colours approximate.
+- `CoBP` colour balance: `Sh/Mi/Hi` × `CR/MG/YB` + `PeLu`. Affinity
+  moves ~0.11× our step per percent (fitted).
+- `VibP` vibrance: `Vibr` i32 percent, `Satu` fraction. Formula
+  differs on saturated colour.
+- `InRA` invert: no parameters at all — no `AdjP`. *(exact)*
+- `PosP` posterise: `Post` i32 levels. Both apps quantize
+  floor(v·n)/(n−1) — equal input bands, outputs over the full range
+  (this fixture corrected our own rounding convention). *(exact)*
+- `ThrP` threshold: `Thre` fraction (`Fals`/`True` output levels).
+- `CnMP` channel mixer: `Weig`, five rows of six — `[offset, R, G, B,
+  A, x]` for the R, G, B, A and composite outputs. The alpha weight is
+  a flat term on opaque pixels and folds into our constant. *(exact)*
+- `SCoP` selective colour: `Weig`, nine ranges of `[C, M, Y, K]` — the
+  six Photoshop-model ranges, then whites/neutrals/blacks (warn) —
+  plus `Rela`. *(near exact)*
+- `GraP` gradient map (behind `NAjP`): a `Grad` of `Posn` (position,
+  midpoint) pairs and `Cols` colours; imported as a full multi-stop
+  ramp over Rec.601 luma. *(exact)*
+- `LeFP` lens filter: the colour as three u16 Lab components (their
+  field tags carry unprintable bytes; they are the node's first three
+  u16 fields in L, a, b order), `Dens` density, `Pres` preserve
+  luminosity. Density imported ×0.2 (fitted — Affinity tints far more
+  gently than our multiply-toward-the-colour).
+- `RecP` recolour: `RecH` hue as a fraction of the turn, `RecS`
+  saturation, `RecL` lightness — our colorize, whose positive
+  lightness offset l + (1−l)·L matches Affinity exactly. *(exact)*
+- `STPa` split toning (`HlHu`/`HlSa`/`ShHu`/`ShSa`/`Bala`): parsed but
+  reported — no equivalent adjustment yet. Soft Proof, LUT, OCIO,
+  Normals and Tone Compression/Stretch are likewise reported when
+  seen.
+
 **Layer effects** (`FiEf`, an array of `FilE`-derived classes): every
 entry shares `Enab`, `BlnM` (the layer blend table), `Opac` (0..1),
 `SclO` (scale measures with the object) and usually `Radi`
@@ -265,7 +338,11 @@ overlay; `Strk` an outline stroke (`Radi` width, `Alig` position,
 bevel (`Azim`/`Elev` light direction in radians, `Dept`, `Sftn`,
 `Beve` subtype — only seen disabled, so its mapping is a guess);
 `Gaus` a gaussian blur (no layer-style equivalent — reported).
-Enabled effects import onto our layer style.
+Enabled effects import onto our layer style — on any layer kind,
+groups included: the corpus hangs sticker outlines and drop shadows on
+whole groups, so the compositor flattens a styled group's children and
+runs the same fx pipeline over the result
+(`schist_compositor::render_styled`).
 
 **Live filter nodes** (`FlRN`): a `Filt` pipeline warping the content
 below between source and destination `Quad`s. Every corpus sighting
@@ -337,14 +414,35 @@ The corpus sweep tooling: `--example afdiff` composites an import
 `BitR` and clipped-children questions were settled; `--example aftree`
 prints the imported layer tree with bounds.
 
+## Probe fixtures
+
+`fixtures/affinity-probe/` holds one tiny document per parametric
+adjustment, drawn in the unified Affinity 3.1 on a synthetic test card
+(hue ramp, grey ramp, saturated patches) with distinctive slider
+values, saved as `.af`. They serve two purposes: the field layouts
+above were decoded by reading the typed values back out of them with
+afdump, and their embedded thumbnails — Affinity's own renders — pin
+each importer's accuracy in
+`probed_adjustments_match_affinitys_render`. The same technique
+(create → read back → compare to the file's own thumbnail) is how to
+attack anything left in the list below; the transfer-curve forensics
+work best when the document contains a grey ramp, which separates
+per-channel behaviour from channel-mixing behaviour at a glance.
+
 ## What's still unknown / to do
 
-- Adjustments beyond curves and HSL (levels, recolour, white
-  balance…): same `AdjP` pattern, field layouts unread — no corpus
-  sighting yet.
 - The HSL `HueA`/`SatA`/`LumA` unit scaling (fraction of turn / full
   range) is inferred from the UI's slider ranges, not yet verified
   colorimetrically; per-range HSL tweaks are unmapped.
+- Split toning (`STPa`), Soft Proof, LUT, OCIO, Normals and Tone
+  Compression/Stretch adjustments are parsed and reported, not
+  imported — no equivalent adjustment on our side yet.
+- White balance and vibrance on *saturated* colour: both are
+  calibrated against the grey ramp; Affinity's behaviour off the grey
+  axis needs more fixtures (vary one slider per file).
+- Brightness/contrast is a fitted linear approximation of Affinity's
+  gentler endpoint-preserving curve; brightness-only and
+  contrast-only fixtures would let the real curve be modelled.
 - Non-identity `FlRN` filter warps (every corpus sighting is inert).
 - Shapes beyond the kinds above (polygons, cogs, callouts, curved-edge
   stars…) are parsed but not turned into geometry; a fixture drawn
@@ -361,9 +459,14 @@ prints the imported layer tree with bounds.
 - The `CTyp` corner-type enum: 0 is rounded; the other values
   (straight/concave/cutout in the UI) haven't been observed and
   import as sharp.
+- One corpus file (a thought-bubble collage) still renders its
+  rotated/mirrored clipped children a few percent off where live
+  Affinity places them, while matching the file's own thumbnail —
+  the residual convention there is unresolved.
 
 `cargo run -p schist-codec-affinity --example afdump -- file.afphoto`
-prints any file's container listing and full object graph.
+prints any file's container listing and full object graph;
+`--example afrev` lists an entry's savepoint revisions.
 
 [afread]: https://github.com/VMDevCpp/afread
 [AFDesignLoad]: https://github.com/NickBeeuwsaert/AFDesignLoad

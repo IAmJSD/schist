@@ -346,6 +346,13 @@ pub enum Params {
         from: [f32; 3],
         to: [f32; 3],
         reverse: bool,
+        /// A full multi-stop ramp as (position, colour) pairs, sorted by
+        /// position. When at least two are present they replace
+        /// `from`/`to` (which stay as the ends for older documents and
+        /// the dialog). Imported Affinity gradient maps carry their
+        /// whole ramp here.
+        #[serde(default)]
+        stops: Vec<(f32, [f32; 3])>,
     },
     /// Per-colour-range CMYK tweaks. `ranges` is indexed by
     /// [`SelectiveRange`], each holding cyan/magenta/yellow/black in
@@ -420,6 +427,7 @@ impl Params {
                 from: [0.0, 0.0, 0.0],
                 to: [1.0, 1.0, 1.0],
                 reverse: false,
+                stops: Vec::new(),
             },
             AdjustmentKind::SelectiveColor => Params::SelectiveColor {
                 ranges: [[0.0; 4]; 6],
@@ -577,8 +585,12 @@ impl Params {
                 a: px.a,
             },
             Params::Posterize { levels } => {
+                // Equal input bands, outputs spread over the full range —
+                // floor into n bands, not round to n-1 lattice points,
+                // which is the convention Photoshop and Affinity share
+                // (verified against an Affinity fixture's own render).
                 let n = (*levels).clamp(2, 255) as f32;
-                let f = |v: f32| ((v * (n - 1.0)).round() / (n - 1.0)).clamp(0.0, 1.0);
+                let f = |v: f32| ((v * n).floor().min(n - 1.0) / (n - 1.0)).clamp(0.0, 1.0);
                 Rgba {
                     r: f(px.r),
                     g: f(px.g),
@@ -683,15 +695,44 @@ impl Params {
                     out
                 }
             }
-            Params::GradientMap { from, to, reverse } => {
+            Params::GradientMap {
+                from,
+                to,
+                reverse,
+                stops,
+            } => {
                 let mut t = luma(px);
                 if *reverse {
                     t = 1.0 - t;
                 }
+                let c = if stops.len() >= 2 {
+                    let mut lo = &stops[0];
+                    let mut hi = &stops[stops.len() - 1];
+                    for pair in stops.windows(2) {
+                        if t >= pair[0].0 && t <= pair[1].0 {
+                            lo = &pair[0];
+                            hi = &pair[1];
+                            break;
+                        }
+                    }
+                    let span = (hi.0 - lo.0).max(1e-6);
+                    let u = ((t - lo.0) / span).clamp(0.0, 1.0);
+                    [
+                        lo.1[0] + (hi.1[0] - lo.1[0]) * u,
+                        lo.1[1] + (hi.1[1] - lo.1[1]) * u,
+                        lo.1[2] + (hi.1[2] - lo.1[2]) * u,
+                    ]
+                } else {
+                    [
+                        from[0] + (to[0] - from[0]) * t,
+                        from[1] + (to[1] - from[1]) * t,
+                        from[2] + (to[2] - from[2]) * t,
+                    ]
+                };
                 Rgba {
-                    r: from[0] + (to[0] - from[0]) * t,
-                    g: from[1] + (to[1] - from[1]) * t,
-                    b: from[2] + (to[2] - from[2]) * t,
+                    r: c[0],
+                    g: c[1],
+                    b: c[2],
                     a: px.a,
                 }
             }
@@ -1676,13 +1717,23 @@ impl Params {
             Params::SolidColor { rgba } => {
                 Prepared::Fill(Rgba::new(rgba[0], rgba[1], rgba[2], rgba[3]))
             }
-            // Channel-mixing adjustments can't be expressed per channel;
-            // step functions (posterize, threshold) must not be
-            // interpolated, or the LUT would round their edges off.
+            // Anything that mixes channels — reads luma, hue, or one
+            // channel to write another — cannot be a per-channel LUT: a
+            // LUT built from the grey ramp is exact on grey and wrong on
+            // colour (a gradient map would send pure red to the two ends
+            // of the ramp at once). Step functions (posterize, threshold)
+            // must not be interpolated either, or the LUT rounds their
+            // edges off.
             Params::HueSaturation { .. }
             | Params::BlackWhite { .. }
             | Params::Threshold { .. }
-            | Params::Posterize { .. } => Prepared::Direct(self.clone()),
+            | Params::Posterize { .. }
+            | Params::ColorBalance { .. }
+            | Params::Vibrance { .. }
+            | Params::PhotoFilter { .. }
+            | Params::GradientMap { .. }
+            | Params::SelectiveColor { .. }
+            | Params::ChannelMixer { .. } => Prepared::Direct(self.clone()),
             _ => {
                 let mut lut = Box::new([[0.0f32; LUT_SIZE]; 3]);
                 for i in 0..LUT_SIZE {
@@ -2162,6 +2213,7 @@ mod new_adjustment_tests {
             from: [1.0, 0.0, 0.0],
             to: [0.0, 0.0, 1.0],
             reverse: false,
+            stops: Vec::new(),
         };
         let dark = p.apply(px(0.0, 0.0, 0.0));
         assert!(
