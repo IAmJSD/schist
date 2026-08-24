@@ -43,6 +43,24 @@ fn preview_zoom_cutoff(scale_factor: f32) -> f32 {
 /// quality. Long enough to outlast the gap between wheel ticks, short
 /// enough that the crisp frame lands as soon as the hand stops.
 const VIEW_GESTURE_SETTLE_MS: u64 = 120;
+
+/// Idle tile prefetch: once the visible viewport is built, the rest of the
+/// document keeps compositing in the background, nearest tiles first, so a
+/// scroll lands on caches that are already warm instead of stalling the
+/// frame on fresh compositing. The tile caches are document-space, so a
+/// warm tile pays off at every zoom.
+///
+/// Ticks run on the UI thread between frames (the compositor and both tile
+/// caches live on the workspace), so the batch is small enough that one
+/// step stays well under a frame, and ticks stand down entirely while a
+/// gesture or stroke is in flight.
+const PREFETCH_BATCH_TILES: usize = 8;
+/// Gap between prefetch steps, long enough for input and paint to slot in.
+const PREFETCH_TICK_MS: u64 = 30;
+/// Cap on queued off-screen tiles, nearest first. A composited RGBA8 tile
+/// is 256 KiB (twice that when colour-managed), so 2048 tiles bounds the
+/// prefetch at roughly 0.5-1 GiB -- a ~134 MP document end to end.
+const PREFETCH_TILE_BUDGET: usize = 2048;
 /// Where view preferences are stored.
 fn prefs_path() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -101,6 +119,14 @@ pub struct Workspace {
     /// Counts view-gesture events. Each event arms a settle timer that
     /// captures the count, so only the timer for the last event fires.
     view_gesture_seq: u64,
+    /// Off-screen tiles awaiting idle compositing, ordered farthest first
+    /// so each batch splits off the nearest tiles at the tail.
+    prefetch_queue: Vec<TileCoord>,
+    /// `(revision, color_epoch)` the queue was built against; an edit
+    /// makes the queue stale and it is dropped rather than chased.
+    prefetch_stamp: (u64, u64),
+    /// Whether a prefetch ticker task is live (only ever one at a time).
+    prefetch_ticker: bool,
     /// Colour-picker imagery. Painted pixel by pixel rather than drawn as
     /// gradient quads -- see `color_picker::field_image` for why -- so it
     /// is cached: the square by the hue it was built for, the two
@@ -694,6 +720,9 @@ impl Workspace {
             retired_images: Vec::new(),
             view_gesture_active: false,
             view_gesture_seq: 0,
+            prefetch_queue: Vec::new(),
+            prefetch_stamp: (0, 0),
+            prefetch_ticker: false,
             picker_field: None,
             picker_strip: None,
             picker_ramp: None,
@@ -893,6 +922,7 @@ impl Workspace {
         self.rebuild_color_transforms();
         self.cache.invalidate_all();
         self.display_tiles.clear();
+        self.prefetch_queue.clear();
         self.viewport_image = None;
         self.preview = Preview::default();
         self.selection_outline = None;
@@ -4976,6 +5006,102 @@ impl Workspace {
         Some(managed)
     }
 
+    /// Rebuild the idle-prefetch queue: every canvas tile not yet in both
+    /// tile caches, ordered so the ones nearest the viewport composite
+    /// first -- that is where a scroll will land next.
+    fn rebuild_prefetch_queue(&mut self, canvas: IntRect, visible: IntRect) {
+        let Some(doc) = self.doc.as_ref() else {
+            self.prefetch_queue.clear();
+            return;
+        };
+        self.prefetch_stamp = (doc.revision, self.color_epoch);
+        let (vx0, vy0) = (
+            visible.left.div_euclid(TILE_SIZE),
+            visible.top.div_euclid(TILE_SIZE),
+        );
+        let (vx1, vy1) = (
+            (visible.right - 1).div_euclid(TILE_SIZE),
+            (visible.bottom - 1).div_euclid(TILE_SIZE),
+        );
+        let mut missing: Vec<((i64, i64), TileCoord)> = Vec::new();
+        for coord in TileCoord::covering(&canvas) {
+            if self.cache.contains(coord) && self.display_tiles.contains_key(&coord) {
+                continue;
+            }
+            // Distance outside the visible tile range, in whole tiles.
+            let dx = (vx0 - coord.tx).max(coord.tx - vx1).max(0) as i64;
+            let dy = (vy0 - coord.ty).max(coord.ty - vy1).max(0) as i64;
+            if dx == 0 && dy == 0 {
+                continue; // visible; the frame itself renders these
+            }
+            // Ring first, so coverage grows squarely outward from the
+            // viewport; rounder-is-closer breaks ties within a ring.
+            missing.push(((dx.max(dy), dx * dx + dy * dy), coord));
+        }
+        missing.sort_unstable_by_key(|(k, _)| *k);
+        missing.truncate(PREFETCH_TILE_BUDGET);
+        missing.reverse();
+        self.prefetch_queue = missing.into_iter().map(|(_, c)| c).collect();
+    }
+
+    /// Start the idle prefetch ticker if there is queued work and none is
+    /// running. The task outlives any one queue: `assemble_viewport` swaps
+    /// in a fresh queue whenever the view changes and the ticker just
+    /// keeps draining whatever is nearest now.
+    fn kick_prefetch(&mut self, cx: &mut Context<Self>) {
+        if self.prefetch_queue.is_empty() || self.prefetch_ticker {
+            return;
+        }
+        self.prefetch_ticker = true;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(PREFETCH_TICK_MS))
+                .await;
+            let live = this.update(cx, |ws, _| {
+                let more = ws.prefetch_tick();
+                if !more {
+                    // Cleared in the same update that decides to stop, so
+                    // a paint can never observe a ticker that is about to
+                    // exit and fail to start a new one.
+                    ws.prefetch_ticker = false;
+                }
+                more
+            });
+            if !matches!(live, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// One idle-prefetch step. Returns whether the ticker should live on.
+    fn prefetch_tick(&mut self) -> bool {
+        // Never compete with an interactive gesture or stroke for the
+        // compositor; stay armed until the hand stops.
+        if self.view_gesture_active || self.pointer_down {
+            return true;
+        }
+        let stale = match self.doc.as_ref() {
+            Some(doc) => (doc.revision, self.color_epoch) != self.prefetch_stamp,
+            None => true,
+        };
+        if stale {
+            // An edit landed since the queue was built; the next
+            // `assemble_viewport` rebuilds it against fresh damage.
+            self.prefetch_queue.clear();
+            return false;
+        }
+        let split = self.prefetch_queue.len().saturating_sub(PREFETCH_BATCH_TILES);
+        let batch = self.prefetch_queue.split_off(split);
+        if let Some(doc) = self.doc.as_ref() {
+            self.cache.prewarm(doc, &batch);
+        }
+        for coord in batch {
+            self.display_tile(coord);
+        }
+        !self.prefetch_queue.is_empty()
+    }
+
     /// Assemble everything visible into one BGRA image the size of the
     /// canvas element, resampling on the way.
     ///
@@ -5078,6 +5204,10 @@ impl Workspace {
                 *slot = self.display_tile(coord);
             }
         }
+
+        // The rest of the document renders during idle time, nearest tiles
+        // first, so scrolling lands on warm caches instead of popping in.
+        self.rebuild_prefetch_queue(canvas_rect, visible);
 
         // Resample on the active backend (GPU when installed and the grid
         // fits its buffers), with the CPU reference as the always-correct
@@ -5533,7 +5663,14 @@ impl Workspace {
                 canvas(
                     move |bounds, window, cx| {
                         let scale = window.scale_factor();
-                        entity.update(cx, |ws, _| ws.prepare_paint(bounds, scale))
+                        entity.update(cx, |ws, cx| {
+                            let job = ws.prepare_paint(bounds, scale);
+                            // Idle prefetch rides the paint cycle:
+                            // whatever this frame left unrendered starts
+                            // warming in the background.
+                            ws.kick_prefetch(cx);
+                            job
+                        })
                     },
                     move |_bounds, job: PaintJob, window, _cx| {
                         if let Some((bounds, color)) = job.backdrop {
