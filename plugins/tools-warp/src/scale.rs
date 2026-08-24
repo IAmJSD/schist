@@ -8,6 +8,11 @@
 //! Energy is the gradient magnitude, and a protect mask (Photoshop's
 //! "Protect" channel, here the selection) adds enough energy that seams
 //! route around it.
+//!
+//! The carving itself lives in `schist_fx`, which is where the GPU seam
+//! is: one command runs the whole loop, hundreds of full-image passes, and
+//! that is the shape a second device pays for. What stays here is the tile
+//! plumbing and the transpose that turns a width carve into a height one.
 
 use schist_color::{Depth, Rgba};
 use schist_core::{IntRect, Selection, TileCoord, TileMap, TILE_SIZE};
@@ -16,7 +21,8 @@ use schist_core::{IntRect, Selection, TileCoord, TileMap, TILE_SIZE};
 pub struct Image {
     pub width: usize,
     pub height: usize,
-    pub px: Vec<Rgba>,
+    /// Straight-alpha RGBA f32, four floats per pixel, row major.
+    pub px: Vec<f32>,
     /// Extra energy per pixel, keeping seams away from protected areas.
     pub protect: Vec<f32>,
 }
@@ -25,12 +31,13 @@ impl Image {
     /// Pull a rect out of a tile map, with the selection as protection.
     pub fn from_tiles(tiles: &TileMap, rect: IntRect, protect: Option<&Selection>) -> Image {
         let (width, height) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
-        let mut px = Vec::with_capacity(width * height);
+        let mut px = Vec::with_capacity(width * height * 4);
         let mut prot = Vec::with_capacity(width * height);
         for y in 0..height {
             for x in 0..width {
                 let (dx, dy) = (rect.left + x as i32, rect.top + y as i32);
-                px.push(tiles.pixel(dx, dy));
+                let p = tiles.pixel(dx, dy);
+                px.extend_from_slice(&[p.r, p.g, p.b, p.a]);
                 let p = protect
                     .filter(|s| !s.is_empty())
                     .map(|s| s.coverage(dx, dy) as f32 / 255.0)
@@ -68,143 +75,27 @@ impl Image {
             let buf = out.get_mut_or_insert(coord, depth);
             for y in clip.top..clip.bottom {
                 for x in clip.left..clip.right {
-                    let i = (y - region.top) as usize * self.width + (x - region.left) as usize;
+                    let i =
+                        ((y - region.top) as usize * self.width + (x - region.left) as usize) * 4;
                     let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
-                    buf.set(ix, self.px[i]);
+                    buf.set(
+                        ix,
+                        Rgba::new(self.px[i], self.px[i + 1], self.px[i + 2], self.px[i + 3]),
+                    );
                 }
             }
         }
         out
-    }
-
-    #[inline]
-    fn at(&self, x: usize, y: usize) -> Rgba {
-        self.px[y * self.width + x]
-    }
-
-    /// Gradient magnitude plus protection.
-    fn energy(&self) -> Vec<f32> {
-        let (w, h) = (self.width, self.height);
-        let mut out = vec![0.0f32; w * h];
-        let lum = |p: Rgba| 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
-        for y in 0..h {
-            for x in 0..w {
-                let l = lum(self.at(x.saturating_sub(1), y));
-                let r = lum(self.at((x + 1).min(w - 1), y));
-                let u = lum(self.at(x, y.saturating_sub(1)));
-                let d = lum(self.at(x, (y + 1).min(h - 1)));
-                // Fully transparent pixels are free to remove.
-                let alpha = self.at(x, y).a;
-                out[y * w + x] = ((r - l).abs() + (d - u).abs()) * alpha + self.protect[y * w + x];
-            }
-        }
-        out
-    }
-
-    /// The lowest-energy top-to-bottom seam, as one x per row.
-    fn vertical_seam(&self) -> Vec<usize> {
-        let (w, h) = (self.width, self.height);
-        if w == 0 || h == 0 {
-            return Vec::new();
-        }
-        let energy = self.energy();
-        // Cumulative cost, and which of the three pixels above we came
-        // from, so the seam can be walked back.
-        let mut cost = energy.clone();
-        let mut from = vec![0i8; w * h];
-        for y in 1..h {
-            for x in 0..w {
-                let mut best = cost[(y - 1) * w + x];
-                let mut best_d = 0i8;
-                if x > 0 && cost[(y - 1) * w + x - 1] < best {
-                    best = cost[(y - 1) * w + x - 1];
-                    best_d = -1;
-                }
-                if x + 1 < w && cost[(y - 1) * w + x + 1] < best {
-                    best = cost[(y - 1) * w + x + 1];
-                    best_d = 1;
-                }
-                cost[y * w + x] = energy[y * w + x] + best;
-                from[y * w + x] = best_d;
-            }
-        }
-        let mut x = (0..w)
-            .min_by(|a, b| cost[(h - 1) * w + a].total_cmp(&cost[(h - 1) * w + b]))
-            .unwrap_or(0);
-        let mut seam = vec![0usize; h];
-        for y in (0..h).rev() {
-            seam[y] = x;
-            let d = from[y * w + x];
-            x = (x as isize + d as isize).clamp(0, w as isize - 1) as usize;
-        }
-        seam
-    }
-
-    /// Remove one vertical seam, narrowing the image by a pixel.
-    fn carve_vertical(&mut self) {
-        let seam = self.vertical_seam();
-        if seam.is_empty() || self.width == 0 {
-            return;
-        }
-        let (w, h) = (self.width, self.height);
-        let mut px = Vec::with_capacity((w - 1) * h);
-        let mut prot = Vec::with_capacity((w - 1) * h);
-        for (y, cut) in seam.iter().enumerate() {
-            for x in 0..w {
-                if x == *cut {
-                    continue;
-                }
-                px.push(self.px[y * w + x]);
-                prot.push(self.protect[y * w + x]);
-            }
-        }
-        self.px = px;
-        self.protect = prot;
-        self.width = w - 1;
-    }
-
-    /// Duplicate one vertical seam, widening the image by a pixel.
-    fn grow_vertical(&mut self) {
-        let seam = self.vertical_seam();
-        if seam.is_empty() {
-            return;
-        }
-        let (w, h) = (self.width, self.height);
-        let mut px = Vec::with_capacity((w + 1) * h);
-        let mut prot = Vec::with_capacity((w + 1) * h);
-        for (y, cut) in seam.iter().enumerate() {
-            for x in 0..w {
-                px.push(self.px[y * w + x]);
-                prot.push(self.protect[y * w + x]);
-                if x == *cut {
-                    // The inserted pixel is the average of its neighbours,
-                    // so the duplicate does not read as a hard repeat.
-                    let a = self.px[y * w + x];
-                    let b = self.px[y * w + (x + 1).min(w - 1)];
-                    px.push(Rgba::new(
-                        (a.r + b.r) / 2.0,
-                        (a.g + b.g) / 2.0,
-                        (a.b + b.b) / 2.0,
-                        (a.a + b.a) / 2.0,
-                    ));
-                    // Protect the inserted column too, or every later seam
-                    // picks the same place and a crease forms.
-                    prot.push(self.protect[y * w + x] + 200.0);
-                }
-            }
-        }
-        self.px = px;
-        self.protect = prot;
-        self.width = w + 1;
     }
 
     fn transpose(&mut self) {
         let (w, h) = (self.width, self.height);
-        let mut px = Vec::with_capacity(w * h);
+        let mut px = Vec::with_capacity(w * h * 4);
         let mut prot = Vec::with_capacity(w * h);
         for x in 0..w {
             for y in 0..h {
-                px.push(self.px[y * w + x]);
+                let i = (y * w + x) * 4;
+                px.extend_from_slice(&self.px[i..i + 4]);
                 prot.push(self.protect[y * w + x]);
             }
         }
@@ -218,22 +109,28 @@ impl Image {
     pub fn content_aware_resize(&mut self, width: usize, height: usize) {
         // Width first, then height via a transpose, which is the standard
         // way to avoid writing every routine twice.
-        while self.width > width.max(1) {
-            self.carve_vertical();
-        }
-        while self.width < width {
-            self.grow_vertical();
-        }
+        self.resize_width(width);
         if self.height != height {
             self.transpose();
-            while self.width > height.max(1) {
-                self.carve_vertical();
-            }
-            while self.width < height {
-                self.grow_vertical();
-            }
+            self.resize_width(height);
             self.transpose();
         }
+    }
+
+    fn resize_width(&mut self, target: usize) {
+        if self.width == target || self.width == 0 || self.height == 0 {
+            return;
+        }
+        let carved = schist_fx::carve(&schist_fx::CarveJob {
+            px: &self.px,
+            protect: &self.protect,
+            width: self.width,
+            height: self.height,
+            target_width: target,
+        });
+        self.px = carved.px;
+        self.protect = carved.protect;
+        self.width = carved.width;
     }
 }
 
@@ -244,14 +141,14 @@ mod tests {
     /// A vertical red bar on flat grey: carving should eat the grey and
     /// leave the bar alone.
     fn bar(width: usize, height: usize) -> Image {
-        let mut px = Vec::with_capacity(width * height);
+        let mut px = Vec::with_capacity(width * height * 4);
         for _y in 0..height {
             for x in 0..width {
                 let inside = x + 3 >= width / 2 && x < width / 2 + 3;
-                px.push(if inside {
-                    Rgba::new(1.0, 0.0, 0.0, 1.0)
+                px.extend_from_slice(if inside {
+                    &[1.0, 0.0, 0.0, 1.0]
                 } else {
-                    Rgba::new(0.5, 0.5, 0.5, 1.0)
+                    &[0.5, 0.5, 0.5, 1.0]
                 });
             }
         }
@@ -264,7 +161,12 @@ mod tests {
     }
 
     fn count_red(img: &Image) -> usize {
-        img.px.iter().filter(|p| p.r > 0.8 && p.g < 0.2).count()
+        img.px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[0] > 0.8 && p[1] < 0.2)
+            .count()
     }
 
     #[test]
@@ -308,12 +210,21 @@ mod tests {
         // Mark the protected region so it can be counted afterwards.
         for y in 0..32 {
             for x in 0..20 {
-                img.px[y * 64 + x] = Rgba::new(0.0, 0.0, 1.0, 1.0);
+                img.px[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4]
+                    .copy_from_slice(&[0.0, 0.0, 1.0, 1.0]);
             }
         }
-        let before = img.px.iter().filter(|p| p.b > 0.8 && p.r < 0.2).count();
+        let count_blue = |img: &Image| {
+            img.px
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[2] > 0.8 && p[0] < 0.2)
+                .count()
+        };
+        let before = count_blue(&img);
         img.content_aware_resize(48, 32);
-        let after = img.px.iter().filter(|p| p.b > 0.8 && p.r < 0.2).count();
+        let after = count_blue(&img);
         assert!(
             after as f32 > before as f32 * 0.9,
             "seams cut through the protected area: {before} -> {after}"
@@ -325,7 +236,7 @@ mod tests {
         let mut img = bar(32, 32);
         img.content_aware_resize(24, 20);
         assert_eq!((img.width, img.height), (24, 20));
-        assert_eq!(img.px.len(), 24 * 20);
+        assert_eq!(img.px.len(), 24 * 20 * 4);
     }
 
     #[test]

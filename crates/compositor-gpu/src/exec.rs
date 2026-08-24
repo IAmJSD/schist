@@ -35,8 +35,36 @@ pub struct GpuContext {
     fx_blur: wgpu::ComputePipeline,
     fx_lens: wgpu::ComputePipeline,
     fx_warp: wgpu::ComputePipeline,
+    /// Seam carving: six stages over one shared bind group layout, so the
+    /// whole run is a single set of buffers and no layout can drift
+    /// between entry points.
+    carve: CarvePipelines,
     info: wgpu::AdapterInfo,
 }
+
+struct CarvePipelines {
+    energy: wgpu::ComputePipeline,
+    dp_seed: wgpu::ComputePipeline,
+    dp_tile: wgpu::ComputePipeline,
+    pick: wgpu::ComputePipeline,
+    resample: wgpu::ComputePipeline,
+    advance_seam: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+/// Mirrors fx_carve.wgsl: rows per scan tile, and the columns a workgroup
+/// owns once the ±1 dependency has eaten one column an end per row.
+const CARVE_TILE_ROWS: usize = 64;
+const CARVE_WG: usize = 256;
+const CARVE_PER_THREAD: usize = 1;
+const CARVE_SPAN: usize = CARVE_WG * CARVE_PER_THREAD;
+const CARVE_TILE_COLS: usize = CARVE_SPAN - 2 * (CARVE_TILE_ROWS - 1);
+/// Uniform bindings are addressed at this granularity, which is what
+/// `Limits::default` guarantees.
+const UNIFORM_ALIGN: usize = 256;
+/// Seams per submission. The run never reads back mid-way, so this only
+/// bounds how large one command buffer gets.
+const CARVE_SEAMS_PER_SUBMIT: usize = 16;
 
 pub enum BatchOut {
     F32(Vec<Vec<f32>>),
@@ -116,6 +144,50 @@ impl GpuContext {
         let fx_blur_module = make_module("fx_blur.wgsl", include_str!("fx_blur.wgsl"));
         let fx_lens_module = make_module("fx_lens.wgsl", include_str!("fx_lens.wgsl"));
         let fx_warp_module = make_module("fx_warp.wgsl", include_str!("fx_warp.wgsl"));
+        let carve_module = make_module("fx_carve.wgsl", include_str!("fx_carve.wgsl"));
+        // Explicit, so every carve entry point provably shares one layout:
+        // naga's HLSL backend rejects entry points that disagree, and on
+        // DX12 that surfaces as a dispatch that silently does nothing.
+        let carve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("carve"),
+            entries: &(0..9)
+                .map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: if binding == 8 {
+                            wgpu::BufferBindingType::Uniform
+                        } else {
+                            wgpu::BufferBindingType::Storage {
+                                // Only the two input planes are read-only.
+                                read_only: binding == 1 || binding == 3,
+                            }
+                        },
+                        // The scan's band index rides on a dynamic offset:
+                        // one dispatch per band, no counter to bump.
+                        has_dynamic_offset: binding == 8,
+                        min_binding_size: wgpu::BufferSize::new(16).filter(|_| binding == 8),
+                    },
+                    count: None,
+                })
+                .collect::<Vec<_>>(),
+        });
+        let carve_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("carve"),
+                bind_group_layouts: &[&carve_layout],
+                push_constant_ranges: &[],
+            });
+        let carve_stage = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&carve_pipeline_layout),
+                module: &carve_module,
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            })
+        };
         let make = |module: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -135,6 +207,15 @@ impl GpuContext {
             fx_blur: make(&fx_blur_module, "box_pass"),
             fx_lens: make(&fx_lens_module, "lens_blur"),
             fx_warp: make(&fx_warp_module, "mesh_warp"),
+            carve: CarvePipelines {
+                energy: carve_stage("energy_pass"),
+                dp_seed: carve_stage("dp_seed"),
+                dp_tile: carve_stage("dp_tile"),
+                pick: carve_stage("pick"),
+                resample: carve_stage("resample"),
+                advance_seam: carve_stage("advance_seam"),
+                layout: carve_layout,
+            },
             info: adapter.get_info(),
             device,
             queue,
@@ -283,6 +364,206 @@ impl GpuContext {
             log::warn!("gpu viewport failed, falling back to the CPU: {err}");
             return None;
         }
+        Some(out)
+    }
+
+    /// Run a whole content-aware resize without coming back: every stage,
+    /// every seam, one readback at the end.
+    ///
+    /// `None` when a plane is too big for one storage binding — unlike the
+    /// blurs there is nothing to band, since each seam depends on the last
+    /// over the whole image.
+    pub fn run_carve(&self, job: &schist_fx::CarveJob<'_>) -> Option<schist_fx::Carved> {
+        let (w0, h) = (job.width, job.height);
+        let target = job.target_width.max(1);
+        if w0 == 0 || h == 0 || target == w0 {
+            return None;
+        }
+        // Buffers are strided to the widest the image ever gets, so
+        // growing has somewhere to put the extra columns.
+        let max_w = w0.max(target);
+        let plane = max_w.checked_mul(h)?;
+        let limit = self.binding_limit();
+        if plane.checked_mul(16)? > limit {
+            return None;
+        }
+
+        let _work = self.work.lock();
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let storage = |label: &str, bytes: u64| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        };
+        let upload = |label: &str, data: &[f32]| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: crate::fx::cast_f32s(data),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                })
+        };
+        let px = [
+            upload(
+                "carve-px-0",
+                &pad_rows(job.px, w0 * 4, max_w * 4, h, plane * 4),
+            ),
+            storage("carve-px-1", (plane * 16) as u64),
+        ];
+        let prot = [
+            upload("carve-prot-0", &pad_rows(job.protect, w0, max_w, h, plane)),
+            storage("carve-prot-1", (plane * 4) as u64),
+        ];
+        let energy = storage("carve-energy", (plane * 4) as u64);
+        let cost = storage("carve-cost", (plane * 4) as u64);
+        let from_dir = storage("carve-from", (plane * 4) as u64);
+        // The scan's band index, one 256-byte-aligned slot per band.
+        let tiles = (h - 1).div_ceil(CARVE_TILE_ROWS);
+        let mut bands = vec![0u32; tiles.max(1) * (UNIFORM_ALIGN / 4)];
+        for band in 0..tiles {
+            bands[band * (UNIFORM_ALIGN / 4)] = (band * CARVE_TILE_ROWS) as u32;
+        }
+        let band_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("carve-bands"),
+                contents: cast_u32s(&bands),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        // Slot 0..8 are the run's counters (see fx_carve.wgsl); the seam's
+        // one column per row follows.
+        let mut init = vec![0i32; 8 + h];
+        init[0] = w0 as i32;
+        init[1] = h as i32;
+        init[2] = max_w as i32;
+        init[3] = i32::from(target > w0);
+        let state = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("carve-state"),
+                contents: cast_u32s(cast_i32s(&init)),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+        // Two bind groups, one per ping-pong direction.
+        let binds: Vec<wgpu::BindGroup> = (0..2)
+            .map(|i| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("carve"),
+                    layout: &self.carve.layout,
+                    entries: &[
+                        bind_entry(0, &state),
+                        bind_entry(1, &px[i]),
+                        bind_entry(2, &px[1 - i]),
+                        bind_entry(3, &prot[i]),
+                        bind_entry(4, &prot[1 - i]),
+                        bind_entry(5, &energy),
+                        bind_entry(6, &cost),
+                        bind_entry(7, &from_dir),
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &band_buf,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(16),
+                            }),
+                        },
+                    ],
+                })
+            })
+            .collect();
+
+        let seams = w0.abs_diff(target);
+        let grid = (
+            (max_w as u32).div_ceil(16),
+            (h as u32).div_ceil(16),
+            (max_w as u32).div_ceil(CARVE_WG as u32),
+            (max_w as u32).div_ceil(CARVE_TILE_COLS as u32),
+        );
+        for chunk in 0..seams.div_ceil(CARVE_SEAMS_PER_SUBMIT) {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("carve"),
+                    timestamp_writes: None,
+                });
+                let first = chunk * CARVE_SEAMS_PER_SUBMIT;
+                for seam in first..(first + CARVE_SEAMS_PER_SUBMIT).min(seams) {
+                    let bind = &binds[seam % 2];
+                    pass.set_bind_group(0, bind, &[0]);
+                    pass.set_pipeline(&self.carve.energy);
+                    pass.dispatch_workgroups(grid.0, grid.1, 1);
+                    pass.set_pipeline(&self.carve.dp_seed);
+                    pass.dispatch_workgroups(grid.2, 1, 1);
+                    // The scan seeds row 0 outright, so the bands cover
+                    // what is left of the image.
+                    pass.set_pipeline(&self.carve.dp_tile);
+                    for band in 0..tiles {
+                        pass.set_bind_group(0, bind, &[(band * UNIFORM_ALIGN) as u32]);
+                        pass.dispatch_workgroups(grid.3, 1, 1);
+                    }
+                    pass.set_bind_group(0, bind, &[0]);
+                    pass.set_pipeline(&self.carve.pick);
+                    pass.dispatch_workgroups(1, 1, 1);
+                    pass.set_pipeline(&self.carve.resample);
+                    pass.dispatch_workgroups(grid.0, grid.1, 1);
+                    pass.set_pipeline(&self.carve.advance_seam);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
+            }
+            self.queue.submit([encoder.finish()]);
+        }
+
+        // Each seam writes to the other plane, so an odd count finishes in
+        // the second one.
+        let done = seams % 2;
+        let px_out = self.read_back(&px[done], (plane * 16) as u64)?;
+        let prot_out = self.read_back(&prot[done], (plane * 4) as u64)?;
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            log::warn!("gpu carve failed, falling back to the CPU: {err}");
+            return None;
+        }
+        Some(schist_fx::Carved {
+            px: unpad_rows(&px_out, max_w * 4, target * 4, h),
+            protect: unpad_rows(&prot_out, max_w, target, h),
+            width: target,
+        })
+    }
+
+    /// Copy a storage buffer out through a staging buffer.
+    fn read_back(&self, buffer: &wgpu::Buffer, bytes: u64) -> Option<Vec<f32>> {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("carve-staging"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range();
+        let out: Vec<f32> = data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        drop(data);
+        staging.unmap();
         Some(out)
     }
 
@@ -1045,4 +1326,31 @@ fn pack_mask(out: &mut Vec<u32>, buf: &[u8; TILE_PIXELS]) {
             .iter()
             .map(|p| p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16 | (p[3] as u32) << 24),
     );
+}
+
+/// Copy `rows` rows of `src_row` values into a `dst_row`-strided plane of
+/// `total` values. A carve never widens, so this is a plain clone there;
+/// growing needs the room on the right.
+fn pad_rows(src: &[f32], src_row: usize, dst_row: usize, rows: usize, total: usize) -> Vec<f32> {
+    if src_row == dst_row {
+        return src.to_vec();
+    }
+    let mut out = vec![0.0f32; total];
+    for y in 0..rows {
+        out[y * dst_row..y * dst_row + src_row]
+            .copy_from_slice(&src[y * src_row..(y + 1) * src_row]);
+    }
+    out
+}
+
+/// The inverse: take the left `dst_row` values of each strided row.
+fn unpad_rows(src: &[f32], src_row: usize, dst_row: usize, rows: usize) -> Vec<f32> {
+    if src_row == dst_row {
+        return src.to_vec();
+    }
+    let mut out = Vec::with_capacity(dst_row * rows);
+    for y in 0..rows {
+        out.extend_from_slice(&src[y * src_row..y * src_row + dst_row]);
+    }
+    out
 }

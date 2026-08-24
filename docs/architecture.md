@@ -11,7 +11,7 @@ crates/app              GPUI shell: window, canvas, panels, dialogs, keymap
 ├── crates/pixel-ops    CPU reference blend modes (the semantic contract)
 ├── crates/compositor   tile compositor, viewport resampling, damage cache
 ├── crates/compositor-gpu  wgpu compute backend, parity-tested against the CPU
-├── crates/fx           blur/warp kernels with the same CPU-reference seam
+├── crates/fx           blur/warp/carve kernels, same CPU-reference seam
 ├── crates/adjustments  adjustment parameters, PSD payloads, LUT compilation
 ├── crates/vector       path building, Bézier flattening, AA rasterization
 ├── crates/text-engine  font discovery, layout, glyph rasterization
@@ -113,7 +113,20 @@ pass would have produced. The warp can't do that — an arbitrary
 displacement may read anywhere in its source — so it declines instead, and
 in exchange keeps its source plane resident on the device for the length
 of a drag, since only the mesh changes between pointer moves.
-`compositor-gpu/examples/fxbench` measures both sides.
+
+Content-Aware Scale sits behind the same seam but is a different shape:
+not one sweep the caller repeats, but a loop the *backend* repeats.
+Finding the lowest-energy seam, cutting it and recomputing is hundreds of
+full-image passes for one command, so coming back between them would cost
+more than the work; `fx_carve.wgsl` holds every stage and one command
+runs the lot, with a single readback at the end. The awkward one is the
+cumulative-cost scan, which walks the rows in order: a dispatch per row
+would be tens of thousands per command, so a workgroup does a band of
+rows at once, loading a span wider than it owns and letting the valid
+region shrink by a column a row — exactly how far the ±1 dependency
+spreads. That band index rides on a dynamic uniform offset rather than a
+counter in a buffer, since bumping a counter would need its own dispatch
+between every band. `compositor-gpu/examples/fxbench` measures all of it.
 
 Tools declare a `group()`, so related tools share one toolbar slot with a
 flyout and a shared shortcut letter — third-party tools can join an existing

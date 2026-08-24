@@ -7,7 +7,7 @@
 //! representative. Run it on a real adapter.
 
 use schist_compositor_gpu::GpuCompositor;
-use schist_fx::{BlurJob, FxBackend, LensJob, WarpParams};
+use schist_fx::{BlurJob, CarveJob, FxBackend, LensJob, WarpParams};
 use std::time::Instant;
 
 fn noise(w: usize, h: usize) -> Vec<f32> {
@@ -47,7 +47,11 @@ fn main() {
             return;
         }
     };
-    println!("adapter: {}\n", gpu.describe());
+    println!(
+        "adapter: {} ({:?})\n",
+        gpu.describe(),
+        gpu.context().adapter_info().device_type
+    );
     let fx = gpu.fx();
 
     // A 12 MP layer, which is where a full-canvas filter preview hurts.
@@ -142,4 +146,49 @@ fn main() {
             },
         );
     }
+
+    // Content-Aware Scale: not one sweep but one per carved seam, all of
+    // them on the device, with a single readback at the end.
+    println!();
+    for (cw, ch, seams) in [
+        (800usize, 600usize, 80usize),
+        (1200, 900, 120),
+        (1600, 1200, 160),
+        (2000, 1500, 200),
+    ] {
+        let (cpx, protect) = carve_image(cw, ch);
+        let job = CarveJob {
+            px: &cpx,
+            protect: &protect,
+            width: cw,
+            height: ch,
+            target_width: cw - seams,
+        };
+        time(
+            &format!("seam carve {cw}x{ch} -{seams} cols"),
+            || {
+                schist_fx::carve_cpu(&job);
+            },
+            || fx.carve(&job).is_some(),
+        );
+    }
+}
+
+/// A textured subject on a smooth background, so the carve has somewhere
+/// obvious to eat.
+fn carve_image(w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
+    let n = noise(w, h);
+    let mut px = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if x > w / 3 && x < 2 * w / 3 && y > h / 4 && y < 3 * h / 4 {
+                px.extend_from_slice(&[n[i], n[i + 1], n[i + 2], 1.0]);
+            } else {
+                let t = y as f32 / h as f32;
+                px.extend_from_slice(&[0.4 + t * 0.2, 0.5 + t * 0.2, 0.9, 1.0]);
+            }
+        }
+    }
+    (px, vec![0.0; w * h])
 }

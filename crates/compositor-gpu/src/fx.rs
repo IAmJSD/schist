@@ -8,7 +8,7 @@
 //! snapshot on every pointer move).
 
 use crate::exec::GpuContext;
-use schist_fx::{BlurJob, FxBackend, LensJob, WarpParams};
+use schist_fx::{BlurJob, CarveJob, Carved, FxBackend, LensJob, WarpParams};
 use std::sync::Arc;
 
 pub struct GpuFx {
@@ -63,6 +63,29 @@ impl FxBackend for GpuFx {
             return None;
         }
         self.ctx.run_lens_blur(job)
+    }
+
+    fn carve(&self, job: &CarveJob<'_>) -> Option<Carved> {
+        let seams = job.width.abs_diff(job.target_width.max(1));
+        if seams == 0 {
+            return None;
+        }
+        let pixels = job.width.checked_mul(job.height)?;
+        // The cumulative-cost scan is the one stage that cannot be made
+        // embarrassingly parallel — it walks the rows in order, a band per
+        // dispatch — and that fixed cost is what a small image cannot pay
+        // for. On an adapter that *is* the CPU (llvmpipe, WARP) the bar is
+        // higher again: there is no memory bandwidth to win, only the
+        // parallelism, and the two paths measured here cross around 2 MP.
+        let floor = if self.ctx.adapter_info().device_type == wgpu::DeviceType::Cpu {
+            2_500_000
+        } else {
+            500_000
+        };
+        if pixels < floor {
+            return None;
+        }
+        self.ctx.run_carve(job)
     }
 
     fn warp_source_resident(&self, token: u64) -> bool {

@@ -315,3 +315,109 @@ fn banded_blurs_match_the_whole_image_result() {
         "a binding under one band's overlap must decline, not seam"
     );
 }
+
+// ===== seam carving =====
+
+fn carve_image(w: usize, h: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
+    let mut rng = Lcg(seed);
+    let mut px = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            // A textured subject in the middle, smooth gradient either
+            // side: the carve has an obvious place to eat, so a wrong
+            // seam shows up as a wrong image rather than noise.
+            let inside = x > w / 3 && x < 2 * w / 3 && y > h / 4 && y < 3 * h / 4;
+            if inside {
+                let n = rng.unit();
+                px.extend_from_slice(&[n, 1.0 - n, (n * 3.0) % 1.0, 1.0]);
+            } else {
+                let t = y as f32 / h as f32;
+                px.extend_from_slice(&[0.4 + t * 0.2, 0.5 + t * 0.2, 0.9, 1.0]);
+            }
+        }
+    }
+    (px, vec![0.0; w * h])
+}
+
+fn assert_carve_matches(w: usize, h: usize, target: usize, protect: Option<Vec<f32>>, what: &str) {
+    let Some(ctx) = gpu() else { return };
+    let (px, default_protect) = carve_image(w, h, 1000 + w as u64);
+    let protect = protect.unwrap_or(default_protect);
+    let job = schist_fx::CarveJob {
+        px: &px,
+        protect: &protect,
+        width: w,
+        height: h,
+        target_width: target,
+    };
+    let gpu_out = ctx.run_carve(&job).expect("carve dispatch");
+    let cpu_out = schist_fx::carve_cpu(&job);
+    assert_eq!(gpu_out.width, cpu_out.width, "{what}: width");
+    assert_eq!(gpu_out.px.len(), cpu_out.px.len(), "{what}: pixel count");
+    assert_close(&gpu_out.px, &cpu_out.px, what);
+    assert_close(
+        &gpu_out.protect,
+        &cpu_out.protect,
+        &format!("{what} protect"),
+    );
+}
+
+#[test]
+fn carving_matches_the_cpu_reference() {
+    assert_carve_matches(64, 48, 50, None, "carve 64->50");
+    assert_carve_matches(97, 33, 60, None, "carve 97->60 (ragged)");
+    assert_carve_matches(40, 1, 30, None, "carve single row");
+    assert_carve_matches(300, 200, 290, None, "carve wide");
+}
+
+#[test]
+fn growing_matches_the_cpu_reference() {
+    assert_carve_matches(48, 40, 60, None, "grow 48->60");
+    assert_carve_matches(70, 55, 74, None, "grow 70->74");
+}
+
+#[test]
+fn a_protect_mask_steers_the_seam_the_same_way() {
+    let (w, h) = (80usize, 60usize);
+    let mut protect = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..25 {
+            protect[y * w + x] = 1000.0;
+        }
+    }
+    assert_carve_matches(w, h, 60, Some(protect), "protected carve");
+}
+
+/// Sizes that fall off the ends of the loops: a single row (so the scan is
+/// the seed pass alone), a single column (nothing left to carve), and a
+/// target the reference clamps rather than honouring.
+#[test]
+fn degenerate_carves_agree_with_the_reference() {
+    let Some(ctx) = gpu() else { return };
+    for (w, h, target) in [
+        (30usize, 1usize, 1usize),
+        (1, 30, 1),
+        (12, 9, 0),
+        (2, 2, 3),
+        (33, 65, 32),
+    ] {
+        let (px, protect) = carve_image(w, h, 4000 + w as u64);
+        let job = schist_fx::CarveJob {
+            px: &px,
+            protect: &protect,
+            width: w,
+            height: h,
+            target_width: target,
+        };
+        let cpu = schist_fx::carve_cpu(&job);
+        match ctx.run_carve(&job) {
+            // Nothing to do is allowed to decline; anything it does run
+            // has to match.
+            None => assert_eq!(w, cpu.width, "declined a carve it had started"),
+            Some(out) => {
+                assert_eq!(out.width, cpu.width, "{w}x{h} -> {target}: width");
+                assert_close(&out.px, &cpu.px, &format!("{w}x{h} -> {target}"));
+            }
+        }
+    }
+}

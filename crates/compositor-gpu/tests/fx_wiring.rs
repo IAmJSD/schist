@@ -8,7 +8,7 @@
 
 use schist_color::Depth;
 use schist_core::{blit_rgba8, IntRect, TileMap};
-use schist_fx::{BlurJob, FxBackend, LensJob, WarpParams};
+use schist_fx::{BlurJob, CarveJob, Carved, FxBackend, LensJob, WarpParams};
 use schist_plugin_api::{FilterPlugin, FilterValues};
 use schist_tools_warp::mesh::{warp_tiles, Mesh};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,6 +51,10 @@ impl FxBackend for Counting {
 
     fn warp(&self, params: &WarpParams<'_>, src: &[f32]) -> Option<Vec<f32>> {
         self.count(self.inner.as_ref()?.warp(params, src))
+    }
+
+    fn carve(&self, job: &CarveJob<'_>) -> Option<Carved> {
+        self.count(self.inner.as_ref()?.carve(job))
     }
 
     fn warp_source_resident(&self, token: u64) -> bool {
@@ -212,4 +216,49 @@ fn a_tokened_warp_runs_through_the_installed_backend() {
         src.pixel(300, 300),
         "the mesh did not move anything"
     );
+}
+
+/// Content-Aware Scale through the tool's own entry point. Big enough that
+/// the backend accepts it, but only a few seams: each one is a handful of
+/// full-image passes and the point here is the wiring, not the throughput.
+#[test]
+fn a_content_aware_scale_runs_through_the_installed_backend() {
+    let _guard = exclusive();
+    let Some(backend) = install_gpu() else { return };
+    let (w, h) = (2000usize, 1500usize);
+    let noise = noise_f32(w, h, 0xCA5E);
+    let mut px = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if x > w / 3 && x < 2 * w / 3 && y > h / 4 && y < 3 * h / 4 {
+                px.extend_from_slice(&noise[i..i + 4]);
+            } else {
+                let t = y as f32 / h as f32;
+                px.extend_from_slice(&[0.4 + t * 0.2, 0.5 + t * 0.2, 0.9, 1.0]);
+            }
+        }
+    }
+    let make = || schist_tools_warp::scale::Image {
+        width: w,
+        height: h,
+        px: px.clone(),
+        protect: vec![0.0; w * h],
+    };
+
+    let mut on_gpu = make();
+    on_gpu.content_aware_resize(w - 4, h);
+    assert!(
+        backend.took() > 0,
+        "content-aware scale never reached the GPU backend"
+    );
+
+    schist_fx::set_backend(Arc::new(schist_fx::CpuFx));
+    let mut on_cpu = make();
+    on_cpu.content_aware_resize(w - 4, h);
+    schist_fx::set_backend(backend.clone());
+
+    assert_eq!((on_gpu.width, on_gpu.height), (w - 4, h));
+    assert_close(&on_gpu.px, &on_cpu.px, "content-aware scale");
+    assert_ne!(on_gpu.px.len(), px.len(), "nothing was carved");
 }

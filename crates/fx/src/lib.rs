@@ -3,9 +3,11 @@
 //! These are the filter and warp kernels that sweep an entire selection
 //! per keystroke of a dialog — blurs with a large kernel, and the
 //! displacement resample Liquify and Puppet Warp re-run on every pointer
-//! move. They are the only pixel work in the editor where a round trip to
-//! a second wgpu device can pay for itself; brush-footprint tools do a few
-//! thousand pixels per dab and stay on the CPU, where the latency is.
+//! move — plus Content-Aware Scale, which sweeps it once per carved seam
+//! and so does hundreds of passes for one command. They are the only
+//! pixel work in the editor where a round trip to a second wgpu device
+//! can pay for itself; brush-footprint tools do a few thousand pixels per
+//! dab and stay on the CPU, where the latency is.
 //!
 //! The functions here are the entry points callers use. Each dispatches to
 //! the installed [`FxBackend`] and falls back to the `*_cpu` reference —
@@ -70,6 +72,30 @@ pub struct WarpParams<'a> {
     pub src_token: u64,
 }
 
+/// Resize an image's width by seam carving: repeatedly remove (or
+/// duplicate) the lowest-energy connected path of pixels from top to
+/// bottom, so flat sky gives way before a face does.
+///
+/// Only the width moves; the caller transposes to do the height, which is
+/// the standard way to avoid writing every routine twice.
+pub struct CarveJob<'a> {
+    /// Straight-alpha RGBA f32, `width * height * 4` floats, row major.
+    pub px: &'a [f32],
+    /// Extra energy per pixel, keeping seams away from protected areas.
+    pub protect: &'a [f32],
+    pub width: usize,
+    pub height: usize,
+    pub target_width: usize,
+}
+
+/// What a carve leaves behind. `protect` comes back too: growing marks its
+/// inserted columns, so a second pass over the same image needs it.
+pub struct Carved {
+    pub px: Vec<f32>,
+    pub protect: Vec<f32>,
+    pub width: usize,
+}
+
 /// The accelerated-effects seam.
 ///
 /// Every method may decline by returning `None` — too small to be worth a
@@ -105,6 +131,17 @@ pub trait FxBackend: Send + Sync {
     fn warp_source_resident(&self, token: u64) -> bool {
         let _ = token;
         false
+    }
+
+    /// Seam-carve to `job.target_width`.
+    ///
+    /// Unlike the others this is not a single sweep but hundreds of them,
+    /// each depending on the last, so a backend is expected to run the
+    /// whole loop without coming back — the answer is one image, not one
+    /// pass.
+    fn carve(&self, job: &CarveJob<'_>) -> Option<Carved> {
+        let _ = job;
+        None
     }
 }
 
@@ -388,6 +425,167 @@ fn src_pixel(job: &WarpParams<'_>, src: &[f32], x: i32, y: i32) -> [f32; 4] {
     }
     let i = (ly as usize * job.src_width + lx as usize) * 4;
     [src[i], src[i + 1], src[i + 2], src[i + 3]]
+}
+
+// ===== seam carving =====
+
+/// Carve or grow vertical seams until the image is `target_width` wide.
+pub fn carve(job: &CarveJob<'_>) -> Carved {
+    if let Some(out) = backend().carve(job) {
+        return out;
+    }
+    carve_cpu(job)
+}
+
+pub fn carve_cpu(job: &CarveJob<'_>) -> Carved {
+    let mut img = Plane {
+        width: job.width,
+        height: job.height,
+        px: job.px.to_vec(),
+        protect: job.protect.to_vec(),
+    };
+    // A one-pixel image has no seam to remove and nothing to interpolate
+    // against, so both loops stop there.
+    while img.width > job.target_width.max(1) {
+        img.carve_one();
+    }
+    while img.width < job.target_width {
+        img.grow_one();
+    }
+    Carved {
+        px: img.px,
+        protect: img.protect,
+        width: img.width,
+    }
+}
+
+/// The working image a carve mutates in place.
+struct Plane {
+    width: usize,
+    height: usize,
+    px: Vec<f32>,
+    protect: Vec<f32>,
+}
+
+impl Plane {
+    #[inline]
+    fn lum(&self, x: usize, y: usize) -> f32 {
+        let i = (y * self.width + x) * 4;
+        0.299 * self.px[i] + 0.587 * self.px[i + 1] + 0.114 * self.px[i + 2]
+    }
+
+    /// Gradient magnitude plus protection.
+    fn energy(&self) -> Vec<f32> {
+        let (w, h) = (self.width, self.height);
+        let mut out = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let l = self.lum(x.saturating_sub(1), y);
+                let r = self.lum((x + 1).min(w - 1), y);
+                let u = self.lum(x, y.saturating_sub(1));
+                let d = self.lum(x, (y + 1).min(h - 1));
+                // Fully transparent pixels are free to remove.
+                let alpha = self.px[(y * w + x) * 4 + 3];
+                out[y * w + x] = ((r - l).abs() + (d - u).abs()) * alpha + self.protect[y * w + x];
+            }
+        }
+        out
+    }
+
+    /// The lowest-energy top-to-bottom seam, as one x per row.
+    fn seam(&self) -> Vec<usize> {
+        let (w, h) = (self.width, self.height);
+        if w == 0 || h == 0 {
+            return Vec::new();
+        }
+        let energy = self.energy();
+        // Cumulative cost, and which of the three pixels above we came
+        // from, so the seam can be walked back.
+        let mut cost = energy.clone();
+        let mut from = vec![0i8; w * h];
+        for y in 1..h {
+            for x in 0..w {
+                let mut best = cost[(y - 1) * w + x];
+                let mut best_d = 0i8;
+                if x > 0 && cost[(y - 1) * w + x - 1] < best {
+                    best = cost[(y - 1) * w + x - 1];
+                    best_d = -1;
+                }
+                if x + 1 < w && cost[(y - 1) * w + x + 1] < best {
+                    best = cost[(y - 1) * w + x + 1];
+                    best_d = 1;
+                }
+                cost[y * w + x] = energy[y * w + x] + best;
+                from[y * w + x] = best_d;
+            }
+        }
+        let mut x = (0..w)
+            .min_by(|a, b| cost[(h - 1) * w + a].total_cmp(&cost[(h - 1) * w + b]))
+            .unwrap_or(0);
+        let mut seam = vec![0usize; h];
+        for y in (0..h).rev() {
+            seam[y] = x;
+            let d = from[y * w + x];
+            x = (x as isize + d as isize).clamp(0, w as isize - 1) as usize;
+        }
+        seam
+    }
+
+    /// Remove one vertical seam, narrowing the image by a pixel.
+    fn carve_one(&mut self) {
+        let seam = self.seam();
+        if seam.is_empty() || self.width == 0 {
+            return;
+        }
+        let (w, h) = (self.width, self.height);
+        let mut px = Vec::with_capacity((w - 1) * h * 4);
+        let mut prot = Vec::with_capacity((w - 1) * h);
+        for (y, cut) in seam.iter().enumerate() {
+            for x in 0..w {
+                if x == *cut {
+                    continue;
+                }
+                let i = (y * w + x) * 4;
+                px.extend_from_slice(&self.px[i..i + 4]);
+                prot.push(self.protect[y * w + x]);
+            }
+        }
+        self.px = px;
+        self.protect = prot;
+        self.width = w - 1;
+    }
+
+    /// Duplicate one vertical seam, widening the image by a pixel.
+    fn grow_one(&mut self) {
+        let seam = self.seam();
+        if seam.is_empty() {
+            return;
+        }
+        let (w, h) = (self.width, self.height);
+        let mut px = Vec::with_capacity((w + 1) * h * 4);
+        let mut prot = Vec::with_capacity((w + 1) * h);
+        for (y, cut) in seam.iter().enumerate() {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                px.extend_from_slice(&self.px[i..i + 4]);
+                prot.push(self.protect[y * w + x]);
+                if x == *cut {
+                    // The inserted pixel is the average of its neighbours,
+                    // so the duplicate does not read as a hard repeat.
+                    let j = (y * w + (x + 1).min(w - 1)) * 4;
+                    for c in 0..4 {
+                        px.push((self.px[i + c] + self.px[j + c]) / 2.0);
+                    }
+                    // Protect the inserted column too, or every later seam
+                    // picks the same place and a crease forms.
+                    prot.push(self.protect[y * w + x] + 200.0);
+                }
+            }
+        }
+        self.px = px;
+        self.protect = prot;
+        self.width = w + 1;
+    }
 }
 
 // ===== shared pixel helpers =====
