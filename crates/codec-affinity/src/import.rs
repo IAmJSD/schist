@@ -1153,15 +1153,13 @@ impl Walker<'_> {
                         1.055 * v.powf(1.0 / 2.4) - 0.055
                     }
                 };
-                let curve_for = |k: f32| {
-                    let mut c = schist_adjustments::Curve::default();
-                    c.points = (0..=8)
+                let curve_for = |k: f32| schist_adjustments::Curve {
+                    points: (0..=8)
                         .map(|i| {
                             let v = i as f32 / 8.0;
                             (v, enc(dec(v) * k))
                         })
-                        .collect();
-                    c
+                        .collect(),
                 };
                 let params = Params::Curves(schist_adjustments::Curves {
                     rgb: schist_adjustments::Curve::default(),
@@ -2562,9 +2560,9 @@ fn lab_to_rgb(l: f32, a: f32, b: f32) -> [f32; 3] {
     let (xn, yn, zn) = (0.9642, 1.0, 0.8249);
     let (x, y, z) = (xn * inv(fx), yn * inv(fy), zn * inv(fz));
     // XYZ(D50) -> linear sRGB (Bradford-adapted matrix).
-    let rl = 3.1338561 * x - 1.6168667 * y - 0.4906146 * z;
-    let gl = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
-    let bl = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
+    let rl = 3.133_856 * x - 1.616_867 * y - 0.490_615 * z;
+    let gl = -0.978_768 * x + 1.916_142 * y + 0.033_454 * z;
+    let bl = 0.071_945 * x - 0.228_991 * y + 1.405_243 * z;
     let enc = |v: f32| {
         let v = v.clamp(0.0, 1.0);
         if v <= 0.0031308 {

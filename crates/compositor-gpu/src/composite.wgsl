@@ -398,9 +398,9 @@ fn apply_lut(lut: i32, c: vec3<f32>) -> vec3<f32> {
 // ---- full-colour adjustments ----
 //
 // A mirror of `Params::apply` for the four kinds no per-channel LUT can
-// express. The coefficients arrive pre-scaled (the /100 divisions and
-// posterize's `levels - 1` happen on the CPU), so what is left here is
-// the same arithmetic in the same order the reference runs.
+// express that the shader models. The coefficients arrive pre-scaled
+// (the /100 divisions happen on the CPU), so what is left here is the
+// same arithmetic in the same order the reference runs.
 
 fn rem_euclid_f(a: f32, b: f32) -> f32 {
     let r = a % b;
@@ -408,13 +408,6 @@ fn rem_euclid_f(a: f32, b: f32) -> f32 {
         return r + b;
     }
     return r;
-}
-
-// f32::round is half-away-from-zero; WGSL's round() is half-to-even, and
-// posterize lands exactly on halves whenever the level count divides the
-// input range.
-fn round_half_away(x: f32) -> f32 {
-    return sign(x) * floor(abs(x) + 0.5);
 }
 
 fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
@@ -549,12 +542,15 @@ fn apply_direct(kind: u32, base: u32, c: vec3<f32>) -> vec3<f32> {
             return vec3(0.0);
         }
         case D_POSTERIZE: {
-            let steps = dparams[base];
+            // floor into n equal input bands, outputs over the full
+            // range — the CPU's (and Photoshop's, and Affinity's)
+            // convention.
+            let n = dparams[base];
             return clamp(
                 vec3(
-                    round_half_away(c.r * steps) / steps,
-                    round_half_away(c.g * steps) / steps,
-                    round_half_away(c.b * steps) / steps,
+                    min(floor(c.r * n), n - 1.0) / (n - 1.0),
+                    min(floor(c.g * n), n - 1.0) / (n - 1.0),
+                    min(floor(c.b * n), n - 1.0) / (n - 1.0),
                 ),
                 vec3(0.0),
                 vec3(1.0),

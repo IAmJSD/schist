@@ -420,9 +420,9 @@ fn emit_adjust<'a>(
 /// The shader op and coefficient row for a full-colour adjustment.
 ///
 /// Everything that can be folded on the CPU is folded here — the /100
-/// scalings, posterize's `levels - 1` — so the shader does the same
-/// arithmetic on the same numbers `Params::apply` does, in the same
-/// order. `None` for a kind the shader has no branch for.
+/// scalings — so the shader does the same arithmetic on the same
+/// numbers `Params::apply` does, in the same order. `None` for a kind
+/// the shader has no branch for.
 fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
     match params {
         Params::HueSaturation {
@@ -463,7 +463,9 @@ fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
         Params::Posterize { levels } => Some((
             D_POSTERIZE,
             [
-                ((*levels).clamp(2, 255) - 1) as f32,
+                // The shader floors into `levels` bands and divides by
+                // `levels - 1`, mirroring the CPU's convention.
+                (*levels).clamp(2, 255) as f32,
                 0.0,
                 0.0,
                 0.0,
