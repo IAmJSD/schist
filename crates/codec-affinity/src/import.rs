@@ -18,6 +18,24 @@
 
 use crate::archive::Archive;
 use crate::error::{malformed, AffinityError};
+
+/// Ceiling on the pixel count of one imported canvas or bitmap.
+///
+/// Each dimension is capped separately at `1 << 20`, but nothing capped
+/// their product: 2^40 pixels is a 4 TiB RGBA buffer, requested from two
+/// numbers read straight out of the file. 2^28 pixels is a 16384x16384
+/// image, comfortably past anything real, and bounds the buffer at 1 GiB.
+const MAX_PIXELS: u64 = 1 << 28;
+
+fn check_pixel_count(width: u64, height: u64, what: &str) -> Result<(), AffinityError> {
+    let pixels = width.saturating_mul(height);
+    if pixels > MAX_PIXELS {
+        return Err(malformed(format!(
+            "implausible {what} {width}x{height}: {pixels} pixels is over the {MAX_PIXELS} limit"
+        )));
+    }
+    Ok(())
+}
 use crate::graph::{self, tag_name, Graph, Node, Value};
 use rayon::prelude::*;
 use schist_color::Depth;
@@ -182,6 +200,7 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
     if width == 0 || height == 0 || width > 1 << 20 || height > 1 << 20 {
         return Err(malformed(format!("implausible canvas {width}×{height}")));
     }
+    check_pixel_count(width as u64, height as u64, "canvas")?;
 
     let mut doc = Document::new("Affinity import", width, height, Depth::Eight);
     let mut report = ImportReport::default();
@@ -2169,6 +2188,7 @@ fn decode_bitmap(
     if width <= 0 || height <= 0 || width > 1 << 20 || height > 1 << 20 {
         return Err(malformed(format!("implausible bitmap {width}×{height}")));
     }
+    check_pixel_count(width as u64, height as u64, "bitmap")?;
     let (width, height) = (width as usize, height as usize);
 
     let row_bytes = width * fmt.bytes_per_sample;
@@ -4033,6 +4053,25 @@ mod tests {
         assert_eq!(m.apply(7.0, 11.0), rot.apply(ax, ay));
         assert!(!m.axis_aligned());
         assert!(scale.axis_aligned());
+    }
+
+    #[test]
+    fn the_pixel_cap_bounds_the_product_not_just_each_side() {
+        // Each dimension passes its own 1<<20 check, but the product is
+        // 2^40 pixels: a 4 TiB rgba buffer from two numbers in the file.
+        let err = check_pixel_count(1 << 20, 1 << 20, "bitmap").unwrap_err();
+        assert!(matches!(err, AffinityError::Malformed(_)), "got {err:?}");
+
+        // A very wide but short strip is fine, so the cap is not just a
+        // proxy for either side being large.
+        assert!(check_pixel_count(1 << 20, 16, "bitmap").is_ok());
+
+        // Ordinary sizes are untouched.
+        assert!(check_pixel_count(6000, 4000, "canvas").is_ok());
+        assert!(check_pixel_count(16384, 16384, "canvas").is_ok());
+
+        // And the multiply cannot overflow into a small number.
+        assert!(check_pixel_count(u64::MAX, u64::MAX, "bitmap").is_err());
     }
 
     #[test]
