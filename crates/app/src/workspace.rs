@@ -5091,7 +5091,10 @@ impl Workspace {
             self.prefetch_queue.clear();
             return false;
         }
-        let split = self.prefetch_queue.len().saturating_sub(PREFETCH_BATCH_TILES);
+        let split = self
+            .prefetch_queue
+            .len()
+            .saturating_sub(PREFETCH_BATCH_TILES);
         let batch = self.prefetch_queue.split_off(split);
         if let Some(doc) = self.doc.as_ref() {
             self.cache.prewarm(doc, &batch);
