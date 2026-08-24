@@ -214,13 +214,6 @@ Remap anything in `~/.config/schist/keymap.json`:
   individual ink channels are not separately editable.
 - **Text is not on a path**, and the type engine has no OpenType
   feature controls.
-- **Most tool and filter math is still CPU-only**, deliberately. The GPU
-  takes the large-kernel sweeps — the blurs, the warp tools' mesh
-  resample, Content-Aware Scale's carve — and leaves everything whose
-  cost is a few taps per pixel where it is. For brush-footprint tools
-  (smudge, clone, healing) that's the right call: a round trip per dab
-  would add latency to the most latency-sensitive path for a few thousand
-  pixels of work.
 - **The mesh warp and the carve need the layer to fit one storage
   binding.** A displacement may read anywhere in its source, and every
   seam depends on the one before it over the whole image, so neither can
