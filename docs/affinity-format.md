@@ -58,7 +58,9 @@ files_count × entry:
   u32 id · u8 flag        flag: 0 = named, 1 = revision, 2 = deleted
   flag ≠ 2: u64 offset · u64 size · u64 compressed_size · u32 crc32
             u8 compression
-            #FT2/#FT3/#FT4 add a u32; #FT4 adds one more
+            #FT2/#FT3/#FT4 add a u32 (always 32); #FT4 adds a
+            CRC-32 of the *compressed* payload — Affinity verifies
+            it and calls the file corrupted on a mismatch
   flag = 0: u16 name_len · name   ("doc.dat", "d/1", "d/2"…)
 dirs_count × (u16 name_len · u16 0 · u64 files_num · name)
 ```
@@ -500,7 +502,8 @@ Container conventions (v12), transcribed from 3.1-written files: one
 `#FT4` savepoint; every block after the first prefixed `FF FF FF FF`;
 `#Inf.length` = Σ compressed sizes; `num` = next free entry id; the
 FAT mirrors (thumb offset, length); per-entry `#FT2+` extra = 32,
-`#FT4` extra = 0; `Prot` = 12; entries zstd-compressed (`ruzstd`,
+`#FT4` extra = CRC-32 of the compressed payload (verified by
+Affinity); `Prot` = 12; entries zstd-compressed (`ruzstd`,
 falling back to stored), no prediction, CRC-32 over plain bytes; a
 `Thmb` block holds the composited PNG preview. `--example afwrite`
 exports any importable file (or `--demo`) for testing against real
@@ -587,12 +590,12 @@ per-channel behaviour from channel-mixing behaviour at a glance.
   shape's `Shpe` subtree) would keep them live in Affinity. Schist-
   native adjustments without a preserved block are skipped (only
   parameter-free Invert exports) — building `AdjP` classes from our
-  params by inverting the import tables is the fix. The `#FT4`
-  per-entry trailing u32 (random-looking in real files) is written as
-  0, and `#Inf`'s `revision` as 1 — both accepted by our reader,
-  neither yet verified against live Affinity.
-- Exports round-trip through our own reader; opening them in real
-  Affinity is the outstanding validation.
+  params by inverting the import tables is the fix. (The `#FT4`
+  per-entry trailing u32 looked random until live Affinity rejected a
+  file omitting it as corrupted — it is a CRC-32 of the compressed
+  payload, now written and documented above.)
+- Exports round-trip through our own reader; full validation in real
+  Affinity (open, edit, resave) is in progress.
 
 `cargo run -p schist-codec-affinity --example afdump -- file.afphoto`
 prints any file's container listing and full object graph;

@@ -131,8 +131,12 @@ pub fn write_container(
         out.extend_from_slice(&(p.compressed.len() as u64).to_le_bytes());
         out.extend_from_slice(&p.crc.to_le_bytes());
         out.push(p.compression);
-        out.extend_from_slice(&32u32.to_le_bytes()); // #FT2+ extra
-        out.extend_from_slice(&0u32.to_le_bytes()); // #FT4 extra
+        out.extend_from_slice(&32u32.to_le_bytes()); // #FT2+ extra: constant 32
+                                                     // The #FT4 extra is a CRC-32 of the *compressed* payload —
+                                                     // Affinity verifies it and reports the file corrupted when it
+                                                     // is wrong (decoded by matching real files' values; for stored
+                                                     // entries it coincides with the plain CRC).
+        out.extend_from_slice(&crc32(&p.compressed).to_le_bytes());
         out.extend_from_slice(&(e.name.len() as u16).to_le_bytes());
         out.extend_from_slice(e.name.as_bytes());
     }
