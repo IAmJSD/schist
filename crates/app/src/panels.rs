@@ -625,6 +625,7 @@ pub(crate) fn run_app_item(
         AppItem::ClearNotes => {
             if let Some(doc) = ws.doc.as_mut() {
                 doc.notes.clear();
+                doc.mark_dirty();
                 doc.damage_all();
             }
             ws.after_change(cx);
@@ -632,6 +633,7 @@ pub(crate) fn run_app_item(
         AppItem::ClearCounts => {
             if let Some(doc) = ws.doc.as_mut() {
                 doc.counts.clear();
+                doc.mark_dirty();
                 doc.damage_all();
             }
             ws.after_change(cx);

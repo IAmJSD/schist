@@ -182,6 +182,21 @@ impl Document {
         self.add_damage(all);
     }
 
+    /// Mark the document as having unsaved changes.
+    ///
+    /// `dirty` is otherwise set only by the edit machinery, so document
+    /// state that is mutated directly (guides, layer comps, saved
+    /// selections, notes, counts) never reached it: the tab closed with no
+    /// prompt and `autosave`, which filters on `dirty`, skipped the
+    /// document entirely.
+    ///
+    /// This is the minimum for not losing the work. Those lists still
+    /// belong in history; when they get their own `EditOp` the call here
+    /// becomes redundant rather than wrong.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn take_damage(&mut self) -> Vec<IntRect> {
         std::mem::take(&mut self.damage)
     }
@@ -1172,5 +1187,34 @@ mod tests {
         assert!(!doc.selection.is_empty());
         doc.undo();
         assert!(doc.selection.is_empty());
+    }
+    #[test]
+    fn marking_dirty_is_what_a_close_prompt_and_autosave_key_off() {
+        // Guides, layer comps, saved selections, notes and counts are all
+        // mutated directly rather than through `begin_edit`, so nothing
+        // set `dirty` for them. The tab then closed without a prompt and
+        // autosave, which filters on `dirty`, skipped the document.
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        assert!(!doc.dirty, "a fresh document is clean");
+
+        doc.guides.push(Guide {
+            horizontal: true,
+            position: 10.0,
+        });
+        assert!(!doc.dirty, "the push alone cannot set it");
+
+        doc.mark_dirty();
+        assert!(doc.dirty, "and this is what the call sites now do");
+    }
+
+    #[test]
+    fn damage_alone_does_not_imply_unsaved_changes() {
+        // `add_damage` bumps `revision` so the canvas repaints, which is
+        // why it looks like it should be enough and is not: a repaint is
+        // not an edit.
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        doc.damage_all();
+        assert!(doc.revision > 0, "repaint was requested");
+        assert!(!doc.dirty, "but nothing was actually changed");
     }
 }

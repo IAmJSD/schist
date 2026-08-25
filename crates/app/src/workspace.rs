@@ -2364,6 +2364,7 @@ impl Workspace {
         let mut comp = schist_core::LayerComp::new(format!("Layer Comp {n}"));
         comp.states = states;
         doc.layer_comps.push(comp);
+        doc.mark_dirty();
         self.status = "Layer comp captured".into();
         cx.notify();
     }
@@ -2400,6 +2401,7 @@ impl Workspace {
         if let Some(doc) = self.doc.as_mut() {
             if index < doc.layer_comps.len() {
                 doc.layer_comps.remove(index);
+                doc.mark_dirty();
             }
         }
         cx.notify();
@@ -4323,6 +4325,7 @@ impl Workspace {
             };
             if guide.position >= 0.0 && guide.position <= limit {
                 doc.guides.push(guide);
+                doc.mark_dirty();
                 doc.damage_all();
             }
         }
@@ -4337,6 +4340,7 @@ impl Workspace {
     pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
         if let Some(doc) = self.doc.as_mut() {
             doc.guides.clear();
+            doc.mark_dirty();
             doc.damage_all();
         }
         self.status = "Guides cleared".into();
