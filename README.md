@@ -173,16 +173,23 @@ swaps them, so plain scrolling zooms and the modifier pans.
 
 **Pinch-to-zoom** works on macOS, Linux — Wayland, and X11 on
 xorg-server 21.1+ (XI 2.4) — and Windows touchscreens, zooming about the
-centre of the gesture, and **stylus pressure** drives brush size on
-macOS, Linux/X11 and Windows. Upstream GPUI surfaces neither, so both
-come from a fork — [IAmJSD/gpui](https://github.com/IAmJSD/gpui), which
-adds `PinchEvent`, `on_pinch` and a `pressure` field on the mouse events
-on top of gpui 0.2.2 — pinned by revision in the workspace `Cargo.toml`.
+centre of the gesture, and **stylus pressure** drives brush size on all
+four backends. Upstream GPUI surfaces neither, so both come from a fork —
+[IAmJSD/gpui](https://github.com/IAmJSD/gpui), which adds `PinchEvent`,
+`on_pinch` and a `pressure` field on the mouse events on top of
+gpui 0.2.2 — pinned by revision in the workspace `Cargo.toml`.
 
-The one pinch gap left is Windows precision touchpads: Windows delivers
-their pinches as Ctrl+scroll rather than a gesture — which is already a
-zoom here anyway. Ctrl+scroll, the zoom-with-scroll preference,
-⌘+/⌘-, and the navigator's zoom slider work everywhere.
+The one pinch gap left is Windows precision touchpads, and it is a gap by
+choice. Windows delivers their pinches as Ctrl+scroll rather than as a
+gesture — which is already a zoom here anyway — and the only way to see
+the real gesture is Direct Manipulation, which cannot be claimed for
+pinches alone: the same claim covers two-finger pans and takes over
+scrolling with them. The fork implements it, behind
+`GPUI_ENABLE_DIRECT_MANIPULATION=1`, but it is untested on hardware and
+off by default rather than put in the path of ordinary scrolling. On a
+pre-21.1 X11 server there is no pinch at all. Ctrl+scroll, the
+zoom-with-scroll preference, ⌘+/⌘-, and the navigator's zoom slider work
+everywhere.
 
 Remap anything in `~/.config/schist/keymap.json`:
 
@@ -192,13 +199,15 @@ Remap anything in `~/.config/schist/keymap.json`:
 
 ## Not there yet
 
-- **Tablet pressure on Wayland.** The pipeline carries pressure end to
-  end, and macOS (`NSEvent`), X11 (the XInput2 pressure valuator) and
-  Windows (pen pointer messages) all feed it; Wayland still needs
-  `zwp_tablet_v2` and hardware to develop against, so it reports full
-  pressure. The X11 and Windows paths are new and verified against the
-  platform documentation rather than a physical tablet — reports from
-  real hardware welcome.
+- **Tablet pressure has never met a tablet.** The pipeline carries
+  pressure end to end and all four backends now feed it — macOS
+  (`NSEvent`), X11 (the XInput2 pressure valuator), Windows (pen pointer
+  messages) and Wayland (`zwp_tablet_v2`) — but every one of those paths
+  was written against the platform documentation rather than a physical
+  stylus. Wayland is the one to be most suspicious of: tablet input there
+  is a protocol of its own rather than an axis on the pointer, so binding
+  it means synthesising the whole mouse event stream from the tool, tip
+  and barrel buttons included. Reports from real hardware welcome.
 - **Only two Neural Filters run a network.** Super Zoom uses a small
   residual CNN trained for this application (`tools/train/detail.py`,
   39k parameters and 153 KB, shipped in the binary); Style Transfer uses
