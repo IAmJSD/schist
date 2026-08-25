@@ -488,10 +488,7 @@ pub(crate) fn run_app_item(
     cx: &mut Context<Workspace>,
 ) {
     match item {
-        AppItem::New => {
-            ws.rebuild_tool_groups();
-            ws.new_document();
-        }
+        AppItem::New => ws.open_new_document_dialog(cx),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),
         AppItem::Save => ws.save_current(window, cx),

@@ -2,11 +2,12 @@
 //! adjustments, export options and preferences.
 
 use crate::ui;
-use crate::workspace::{ColorTarget, Modal, Popup, Workspace};
+use crate::workspace::{ColorTarget, Modal, NewDocBackground, Popup, Workspace};
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _,
 };
+use schist_color::{ColorMode, Depth};
 use schist_core::Filter;
 
 /// Apply a stepper delta to a pixel dimension.
@@ -110,6 +111,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::Profile { convert, selected } => {
             profile_dialog(&state, convert, selected, cx).into_any_element()
         }
+        m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
     })
 }
 
@@ -2048,6 +2050,332 @@ fn layer_properties(
             cx,
         ));
     ui::modal_frame("Layer Properties", 340.0, body, actions)
+}
+
+/// (label, width, height, ppi) rows of the File ▸ New preset dropdown,
+/// matched against the dialog's current values to show which is selected.
+const NEW_DOC_PRESETS: &[(&str, u32, u32, f32)] = &[
+    ("Default (1280 × 800)", 1280, 800, 72.0),
+    ("HD (1920 × 1080)", 1920, 1080, 72.0),
+    ("4K UHD (3840 × 2160)", 3840, 2160, 72.0),
+    ("Square (1080 × 1080)", 1080, 1080, 72.0),
+    ("A4, 300 ppi", 2480, 3508, 300.0),
+    ("US Letter, 300 ppi", 2550, 3300, 300.0),
+];
+
+/// File ▸ New, asked before anything is created, as Photoshop does.
+fn new_document_dialog(
+    state: &DialogState,
+    modal: Modal,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let Modal::NewDocument {
+        name,
+        width,
+        height,
+        resolution,
+        mode,
+        depth,
+        background,
+    } = modal
+    else {
+        unreachable!("render dispatches only Modal::NewDocument here");
+    };
+
+    let name_focused = state.focused_field == Some("new-doc-name");
+    let shown_name = if name_focused && !state.field_buffer.is_empty() {
+        state.field_buffer.clone()
+    } else {
+        name.clone()
+    };
+
+    let preset = NEW_DOC_PRESETS
+        .iter()
+        .position(|(_, w, h, r)| *w == width && *h == height && (*r - resolution).abs() < 0.5);
+    let preset_label: SharedString = preset
+        .map(|i| NEW_DOC_PRESETS[i].0.into())
+        .unwrap_or_else(|| "Custom".into());
+    let preset_options: Vec<(SharedString, usize)> = NEW_DOC_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(i, (label, ..))| (SharedString::from(*label), i))
+        .collect();
+
+    let depth_label = |d: Depth| match d {
+        Depth::Eight => "8 bit",
+        Depth::Sixteen => "16 bit",
+        Depth::ThirtyTwo => "32 bit",
+    };
+    let mode_options: Vec<(SharedString, ColorMode)> = [
+        ColorMode::Rgb,
+        ColorMode::Grayscale,
+        ColorMode::Cmyk,
+        ColorMode::Lab,
+    ]
+    .into_iter()
+    .map(|m| (SharedString::from(m.display_name()), m))
+    .collect();
+    let background_options: Vec<(SharedString, NewDocBackground)> = [
+        NewDocBackground::White,
+        NewDocBackground::BackgroundColor,
+        NewDocBackground::Black,
+        NewDocBackground::Transparent,
+    ]
+    .into_iter()
+    .map(|b| (SharedString::from(b.display_name()), b))
+    .collect();
+
+    // Uncompressed pixel size, the way Photoshop's dialog reports it.
+    let bytes = width as u64
+        * height as u64
+        * (mode.channels() as u64 + 1)
+        * depth.bytes_per_channel() as u64;
+    let size = if bytes < 1 << 20 {
+        format!("{:.0} KB", bytes as f64 / (1u64 << 10) as f64)
+    } else if bytes < 1 << 30 {
+        format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1u64 << 30) as f64)
+    };
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(ui::field_row(
+            "Name",
+            div()
+                .w(px(200.0))
+                .h(px(22.0))
+                .px_1()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .bg(gpui::rgb(ui::palette().field_bg))
+                .border_1()
+                .border_color(gpui::rgb(if name_focused {
+                    ui::palette().accent
+                } else {
+                    ui::palette().field_bg
+                }))
+                .text_size(px(12.0))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|ws, _e, _w, cx| {
+                        ws.focus_field("new-doc-name");
+                        cx.notify();
+                    }),
+                )
+                // A caret makes it obvious the field takes typing.
+                .child(if name_focused {
+                    format!("{shown_name}|")
+                } else {
+                    shown_name.clone()
+                }),
+        ))
+        .child(ui::field_row(
+            "Preset",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("new-doc-preset"),
+                    is_open: state.open_popup == Some(Popup::Field("new-doc-preset")),
+                    current: preset.unwrap_or(usize::MAX),
+                    label: preset_label,
+                    width: 200.0,
+                    options: preset_options,
+                },
+                |ws, index, _cx| {
+                    let (_, w, h, r) = NEW_DOC_PRESETS[index];
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument {
+                            width,
+                            height,
+                            resolution,
+                            ..
+                        } = m
+                        {
+                            *width = w;
+                            *height = h;
+                            *resolution = r;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Width",
+            ui::num_field(
+                ui::NumField {
+                    id: "new-doc-w",
+                    value: width as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("new-doc-w"),
+                    buffer: state.field_buffer.clone(),
+                },
+                |ws, delta| {
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument { width, .. } = m {
+                            *width = (*width as f32 + delta).clamp(1.0, 30000.0) as u32;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Height",
+            ui::num_field(
+                ui::NumField {
+                    id: "new-doc-h",
+                    value: height as f32,
+                    suffix: " px",
+                    step: 10.0,
+                    focused: state.focused_field == Some("new-doc-h"),
+                    buffer: state.field_buffer.clone(),
+                },
+                |ws, delta| {
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument { height, .. } = m {
+                            *height = (*height as f32 + delta).clamp(1.0, 30000.0) as u32;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Resolution",
+            ui::num_field(
+                ui::NumField {
+                    id: "new-doc-dpi",
+                    value: resolution,
+                    suffix: " ppi",
+                    step: 1.0,
+                    focused: state.focused_field == Some("new-doc-dpi"),
+                    buffer: state.field_buffer.clone(),
+                },
+                |ws, delta| {
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument { resolution, .. } = m {
+                            *resolution = (*resolution + delta).max(1.0);
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Color Mode",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("new-doc-mode"),
+                    is_open: state.open_popup == Some(Popup::Field("new-doc-mode")),
+                    current: mode,
+                    label: (mode.display_name()).into(),
+                    width: 150.0,
+                    options: mode_options,
+                },
+                |ws, value, _cx| {
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument { mode, .. } = m {
+                            *mode = value;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Bit Depth",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("new-doc-depth"),
+                    is_open: state.open_popup == Some(Popup::Field("new-doc-depth")),
+                    current: depth,
+                    label: (depth_label(depth)).into(),
+                    width: 150.0,
+                    options: [Depth::Eight, Depth::Sixteen, Depth::ThirtyTwo]
+                        .into_iter()
+                        .map(|d| (SharedString::from(depth_label(d)), d))
+                        .collect(),
+                },
+                |ws, value, _cx| {
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument { depth, .. } = m {
+                            *depth = value;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(ui::field_row(
+            "Background",
+            ui::dropdown(
+                ui::Dropdown {
+                    popup: Popup::Field("new-doc-bg"),
+                    is_open: state.open_popup == Some(Popup::Field("new-doc-bg")),
+                    current: background,
+                    label: (background.display_name()).into(),
+                    width: 150.0,
+                    options: background_options,
+                },
+                |ws, value, _cx| {
+                    ws.update_modal(|m| {
+                        if let Modal::NewDocument { background, .. } = m {
+                            *background = value;
+                        }
+                    });
+                },
+                cx,
+            ),
+        ))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child(format!(
+                    "{width} × {height} px @ {resolution:.0} ppi · {size}"
+                )),
+        );
+
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(ui::button(
+            "Create",
+            true,
+            |ws, _w, cx| {
+                let Some(Modal::NewDocument {
+                    name,
+                    width,
+                    height,
+                    resolution,
+                    mode,
+                    depth,
+                    background,
+                }) = ws.modal.clone()
+                else {
+                    return;
+                };
+                ws.close_modal(cx);
+                ws.create_document(&name, width, height, resolution, mode, depth, background);
+                ws.status = format!("New document: {width} × {height} px").into();
+                cx.notify();
+            },
+            cx,
+        ));
+
+    ui::modal_frame("New Document", 400.0, body, actions)
 }
 
 #[cfg(test)]

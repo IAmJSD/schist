@@ -14,7 +14,7 @@ use gpui::{
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
 use rustc_hash::FxHashMap;
-use schist_color::{Depth, Rgba};
+use schist_color::{ColorMode, Depth, Rgba};
 use schist_compositor::TileCache;
 use schist_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE};
 use schist_plugin_api::{
@@ -641,6 +641,38 @@ pub enum Modal {
         params: schist_adjustments::Params,
         original: (Option<String>, Vec<u8>),
     },
+    /// File ▸ New: everything a fresh document needs, asked up front as
+    /// Photoshop does.
+    NewDocument {
+        name: String,
+        width: u32,
+        height: u32,
+        /// Pixels per inch.
+        resolution: f32,
+        mode: ColorMode,
+        depth: Depth,
+        background: NewDocBackground,
+    },
+}
+
+/// What fills the bottom layer of a document made by File ▸ New.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewDocBackground {
+    White,
+    BackgroundColor,
+    Black,
+    Transparent,
+}
+
+impl NewDocBackground {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            NewDocBackground::White => "White",
+            NewDocBackground::BackgroundColor => "Background Color",
+            NewDocBackground::Black => "Black",
+            NewDocBackground::Transparent => "Transparent",
+        }
+    }
 }
 
 /// What a picker is editing.
@@ -781,7 +813,8 @@ impl Workspace {
             proof_transform: None,
         };
         ws.rebuild_tool_groups();
-        ws.new_document();
+        // The workspace starts empty; File ▸ New asks for the document's
+        // settings before creating anything.
         // Periodic crash-recovery snapshot; the task ends with the entity.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -817,17 +850,79 @@ impl Workspace {
 
     // ----- document lifecycle -----
 
-    pub fn new_document(&mut self) {
-        let mut doc = Document::new("Untitled", 1280, 800, Depth::Eight);
-        let mut bg = Layer::new_raster("Background");
-        let white = vec![255u8; 1280 * 800 * 4];
-        blit_rgba8(
-            &mut bg.as_raster_mut().unwrap().tiles,
-            Depth::Eight,
-            IntRect::from_size(1280, 800),
-            &white,
+    /// File ▸ New. Photoshop asks for the settings before creating
+    /// anything, so this only opens the dialog; `create_document` runs on
+    /// Create.
+    pub fn open_new_document_dialog(&mut self, cx: &mut Context<Self>) {
+        self.open_modal(
+            Modal::NewDocument {
+                name: self.next_untitled_name(),
+                width: 1280,
+                height: 800,
+                resolution: 72.0,
+                mode: ColorMode::Rgb,
+                depth: Depth::Eight,
+                background: NewDocBackground::White,
+            },
+            cx,
         );
-        doc.push_layer(bg);
+    }
+
+    /// "Untitled-1", "Untitled-2", ... skipping names an open tab uses.
+    fn next_untitled_name(&self) -> String {
+        let taken = self.tab_strip();
+        (1..)
+            .map(|n| format!("Untitled-{n}"))
+            .find(|name| !taken.iter().any(|(title, _)| title.as_ref() == name))
+            .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_document(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        resolution: f32,
+        mode: ColorMode,
+        depth: Depth,
+        background: NewDocBackground,
+    ) {
+        self.rebuild_tool_groups();
+        let width = width.clamp(1, 30000);
+        let height = height.clamp(1, 30000);
+        let name = name.trim();
+        let mut doc = Document::new(
+            if name.is_empty() { "Untitled" } else { name },
+            width,
+            height,
+            depth,
+        );
+        doc.resolution_dpi = resolution.max(1.0);
+        doc.mode = mode;
+        let component = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let fill = match background {
+            NewDocBackground::White => Some([255, 255, 255, 255]),
+            NewDocBackground::Black => Some([0, 0, 0, 255]),
+            NewDocBackground::BackgroundColor => {
+                let c = self.editor.background;
+                Some([component(c.r), component(c.g), component(c.b), 255])
+            }
+            NewDocBackground::Transparent => None,
+        };
+        // A filled start is "Background", a transparent one an ordinary
+        // "Layer 1", as in Photoshop.
+        let mut layer = Layer::new_raster(if fill.is_some() { "Background" } else { "Layer 1" });
+        if let Some(rgba) = fill {
+            let buf = rgba.repeat(width as usize * height as usize);
+            blit_rgba8(
+                &mut layer.as_raster_mut().unwrap().tiles,
+                depth,
+                IntRect::from_size(width, height),
+                &buf,
+            );
+        }
+        doc.push_layer(layer);
         doc.dirty = false;
         self.open_in_tab(doc, false);
     }
@@ -3511,10 +3606,10 @@ impl Workspace {
         let Some(id) = self.focused_field else {
             return false;
         };
-        // Text fields (layer names) take any printable character; the
-        // picker's hex field takes hex digits up to a full triplet;
-        // numeric fields only digits.
-        let textual = id == "layer-name";
+        // Text fields (layer and document names) take any printable
+        // character; the picker's hex field takes hex digits up to a full
+        // triplet; numeric fields only digits.
+        let textual = id == "layer-name" || id == "new-doc-name";
         let hex = id == "cp-hex";
         match key {
             "space" if textual => self.field_buffer.push(' '),
@@ -3561,6 +3656,14 @@ impl Workspace {
         if id == "layer-name" {
             self.update_modal(|m| {
                 if let Modal::LayerProperties { name, .. } = m {
+                    *name = buffer;
+                }
+            });
+            return;
+        }
+        if id == "new-doc-name" {
+            self.update_modal(|m| {
+                if let Modal::NewDocument { name, .. } = m {
                     *name = buffer;
                 }
             });
@@ -3640,6 +3743,20 @@ impl Workspace {
                     *width = value as u32;
                 } else if id == "cas-height" {
                     *height = value as u32;
+                }
+            }
+            Modal::NewDocument {
+                width,
+                height,
+                resolution,
+                ..
+            } => {
+                if id == "new-doc-w" {
+                    *width = (value as u32).min(30000);
+                } else if id == "new-doc-h" {
+                    *height = (value as u32).min(30000);
+                } else if id == "new-doc-dpi" {
+                    *resolution = value;
                 }
             }
             // These dialogs have no typed fields.
@@ -5966,9 +6083,7 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &NewFile, _w, cx| {
-                ws.rebuild_tool_groups();
-                ws.new_document();
-                cx.notify();
+                ws.open_new_document_dialog(cx);
             }))
             .on_action(cx.listener(|ws, _: &OpenFile, window, cx| {
                 keymap::open_file_dialog(ws, window, cx);
