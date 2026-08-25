@@ -88,7 +88,7 @@ schist-commands-core = { path = "plugins/commands-core" }
 # mouse events, which upstream has no equivalent of; needed for trackpad
 # pinch-to-zoom and pressure-sensitive painting on the canvas.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "7fa666d3f19cd2372f9eaaa36674b8809f7de808" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "84bdb01b29887ca09b6c437dad9a0ae838fe48e8" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
