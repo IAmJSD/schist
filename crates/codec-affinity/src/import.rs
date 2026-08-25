@@ -4074,6 +4074,57 @@ mod tests {
         assert!(check_pixel_count(u64::MAX, u64::MAX, "bitmap").is_err());
     }
 
+    /// The cap only protects if the import path consults it: parse a
+    /// real fixture, inflate its declared sizes past the limit, and
+    /// watch `build` and `decode_bitmap` refuse. If a call site is
+    /// dropped, this fails even while the unit test above stays green.
+    #[test]
+    fn the_import_path_consults_the_pixel_cap() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/affinity-probe/invert.af"
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let doc = archive.extract(archive.head("doc.dat").unwrap()).unwrap();
+        let mut graph = graph::parse(&doc).unwrap();
+
+        // Untouched, the fixture imports.
+        build(&archive, &graph).expect("the fixture imports as authored");
+
+        // Canvas: each side passes its own 1<<20 check, so only the
+        // product cap can refuse it.
+        let side = (1u32 << 20) as f64;
+        for node in &mut graph.nodes {
+            for (t, value) in &mut node.fields {
+                if *t == graph::tag(b"SprB") {
+                    *value = Value::VecD(vec![0.0, 0.0, side, side]);
+                } else if *t == graph::tag(b"DfSz") {
+                    *value = Value::VecD(vec![side, side]);
+                }
+            }
+        }
+        let err = build(&archive, &graph).unwrap_err();
+        assert!(err.to_string().contains("pixels"), "got {err}");
+
+        // Bitmap: the same inflation on the declared bitmap size.
+        let bitm = graph
+            .nodes
+            .iter()
+            .position(|n| n.field(b"BmpW").is_some() && n.field(b"BmpH").is_some())
+            .expect("the fixture holds a bitmap");
+        for (t, value) in &mut graph.nodes[bitm].fields {
+            if *t == graph::tag(b"BmpW") || *t == graph::tag(b"BmpH") {
+                *value = Value::I32(1 << 20);
+            }
+        }
+        let err = match decode_bitmap(&archive, &graph, graph.node(bitm)) {
+            Ok(_) => panic!("an implausible bitmap decoded anyway"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("pixels"), "got {err}");
+    }
+
     #[test]
     fn mat_inverts() {
         let m = Mat([1.5, -0.5, 3.0, 0.25, 2.0, -7.0]);
