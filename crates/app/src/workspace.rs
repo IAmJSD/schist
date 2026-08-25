@@ -1228,6 +1228,9 @@ impl Workspace {
             doc.dirty = true;
             doc.title = format!("{} (recovered)", doc.title);
             self.open_in_tab(doc, recovered == 0);
+            // The load path prompts for fonts the document names but the
+            // system lacks; a recovered document deserves the same offer.
+            self.offer_missing_fonts(cx);
             let _ = std::fs::remove_file(&path);
             recovered += 1;
         }
