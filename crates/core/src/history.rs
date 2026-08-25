@@ -164,6 +164,30 @@ impl History {
         self.undo_stack.last().cloned()
     }
 
+    /// Drop the newest two entries when they are exactly this pair, and
+    /// report whether they were.
+    ///
+    /// For two edits that cancel each other out, where leaving them would
+    /// put two no-op steps in the History panel. Nothing is dropped unless
+    /// both are still on top: an edit committed in between is real work,
+    /// and collapsing across it would leave the history describing a
+    /// document that no longer matches.
+    ///
+    /// Note this is not `pop_redo`. That is the redo primitive: it moves
+    /// an entry from the redo stack *onto* the undo stack rather than
+    /// discarding anything.
+    pub fn drop_cancelling_pair(&mut self, newest: &str, older: &str) -> bool {
+        let n = self.undo_stack.len();
+        if n < 2 {
+            return false;
+        }
+        if self.undo_stack[n - 1].name != newest || self.undo_stack[n - 2].name != older {
+            return false;
+        }
+        self.undo_stack.truncate(n - 2);
+        true
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
