@@ -912,7 +912,11 @@ impl Workspace {
         };
         // A filled start is "Background", a transparent one an ordinary
         // "Layer 1", as in Photoshop.
-        let mut layer = Layer::new_raster(if fill.is_some() { "Background" } else { "Layer 1" });
+        let mut layer = Layer::new_raster(if fill.is_some() {
+            "Background"
+        } else {
+            "Layer 1"
+        });
         if let Some(rgba) = fill {
             let buf = rgba.repeat(width as usize * height as usize);
             blit_rgba8(
