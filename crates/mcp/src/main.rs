@@ -579,6 +579,12 @@ fn coerce_option(value: &Value, kind: OptionKind) -> Result<OptionValue> {
 
 fn parse_color(s: &str) -> Result<Rgba> {
     let hex = s.trim().trim_start_matches('#');
+    // The slices below are byte ranges and `len()` is a byte count, so a
+    // multi-byte char would both pick the wrong arm and split a codepoint,
+    // which panics. Reject anything that is not ASCII hex up front.
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("colour must be hex digits, not {s:?}");
+    }
     let channel = |at: usize, width: usize| -> Result<f32> {
         let raw = u8::from_str_radix(&hex[at * width..(at + 1) * width], 16)
             .map_err(|_| anyhow!("bad hex colour {s:?}"))?;
@@ -1205,6 +1211,18 @@ mod tests {
         assert!(parse_color("#zzz").is_err());
         assert!(parse_color("#ffff").is_err());
         assert_eq!(color_hex(Rgba::new(1.0, 0.0, 0.0, 1.0)), "#ff0000ff");
+    }
+
+    #[test]
+    fn non_ascii_colours_are_rejected_not_panicked_on() {
+        // Byte length, not char count, picks the arm: "é4" is three bytes,
+        // so it took the #rgb path and sliced through the middle of 'é'.
+        for s in ["#é4", "é4", "#ééé", "#日本語", "#ff00é0", "#—", "#ﬀﬀﬀ"] {
+            assert!(
+                parse_color(s).is_err(),
+                "expected an error for {s:?}, not a panic"
+            );
+        }
     }
 
     #[test]
