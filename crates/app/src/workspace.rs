@@ -1127,14 +1127,6 @@ impl Workspace {
         .detach();
     }
 
-    /// The synchronous version of [`Self::load_file`], for the recovery
-    /// path, which fixes up the document as soon as it is installed.
-    fn load_file_sync(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let result = decode_file(&self.registry.shared_codecs(), &path);
-        self.finish_load(result, cx);
-        cx.notify();
-    }
-
     fn finish_load(&mut self, result: anyhow::Result<Document>, cx: &mut Context<Self>) {
         match result {
             Ok(doc) => {
@@ -1275,44 +1267,80 @@ impl Workspace {
         }
     }
 
-    /// Newest recovery snapshot left behind by a previous run, if any.
-    pub fn pending_recovery() -> Option<PathBuf> {
-        let dir = Self::recovery_dir()?;
-        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("psd") {
-                continue;
-            }
-            // Skip snapshots this very process owns.
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&format!("session-{}-", std::process::id())))
-            {
-                continue;
-            }
-            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
-                best = Some((modified, path));
-            }
-        }
-        best.map(|(_, p)| p)
+    /// Every recovery snapshot left behind by a previous run, newest
+    /// first. Snapshots this process owns are skipped.
+    pub fn pending_recoveries() -> Vec<PathBuf> {
+        let Some(dir) = Self::recovery_dir() else {
+            return Vec::new();
+        };
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let found = read
+            .flatten()
+            .filter_map(|entry| {
+                let modified = entry.metadata().and_then(|m| m.modified()).ok()?;
+                Some((modified, entry.path()))
+            })
+            .collect();
+        Self::rank_snapshots(found, std::process::id())
     }
 
-    /// Load a recovery snapshot and mark it dirty (it has no real path).
-    pub fn recover_from(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.load_file_sync(path.clone(), cx);
-        if let Some(doc) = &mut self.doc {
+    /// Pick the snapshots belonging to previous runs, newest first.
+    ///
+    /// Split out from the directory walk so the filtering and ordering can
+    /// be tested without a filesystem.
+    fn rank_snapshots(
+        mut found: Vec<(std::time::SystemTime, PathBuf)>,
+        own_pid: u32,
+    ) -> Vec<PathBuf> {
+        let own_prefix = format!("session-{own_pid}-");
+        found.retain(|(_, path)| {
+            if path.extension().and_then(|e| e.to_str()) != Some("psd") {
+                return false;
+            }
+            !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&own_prefix))
+        });
+        // Newest first, so the most recent work is the front tab.
+        found.sort_by_key(|a| std::cmp::Reverse(a.0));
+        found.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// Load every pending snapshot, one tab each.
+    ///
+    /// `autosave` writes one snapshot per dirty document, so recovering
+    /// only the newest silently dropped the rest and left their files on
+    /// disk to be offered one per launch afterwards.
+    pub fn recover_all(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let codecs = self.registry.shared_codecs();
+        let mut recovered = 0usize;
+        for path in paths {
+            let Ok(mut doc) = decode_file(&codecs, &path) else {
+                log::warn!("could not read recovery snapshot {path:?}");
+                continue;
+            };
+            // No real path: it must be saved somewhere deliberate.
             doc.path = None;
             doc.dirty = true;
             doc.title = format!("{} (recovered)", doc.title);
+            self.open_in_tab(doc, recovered == 0);
+            // The load path prompts for fonts the document names but the
+            // system lacks; a recovered document deserves the same offer.
+            self.offer_missing_fonts(cx);
+            let _ = std::fs::remove_file(&path);
+            recovered += 1;
         }
-        let _ = std::fs::remove_file(&path);
-        self.status = "Recovered unsaved work from a previous session".into();
-        cx.notify();
+        if recovered > 0 {
+            self.status = if recovered == 1 {
+                "Recovered unsaved work from a previous session".into()
+            } else {
+                format!("Recovered {recovered} documents from a previous session").into()
+            };
+            cx.notify();
+        }
     }
 
     // ----- viewport -----
@@ -6460,6 +6488,56 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime};
+
+    fn snap(secs: u64, name: &str) -> (SystemTime, std::path::PathBuf) {
+        (
+            SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            std::path::PathBuf::from(format!("/recovery/{name}")),
+        )
+    }
+
+    #[test]
+    fn every_previous_snapshot_is_recovered_newest_first() {
+        // autosave writes one snapshot per dirty document. Returning only
+        // the newest left the rest on disk, offered one per launch.
+        let found = vec![
+            snap(300, "session-11-2.psd"),
+            snap(100, "session-11-1.psd"),
+            snap(200, "session-12-1.psd"),
+        ];
+        let ranked = Workspace::rank_snapshots(found, 99);
+        let names: Vec<_> = ranked
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["session-11-2.psd", "session-12-1.psd", "session-11-1.psd"]
+        );
+    }
+
+    #[test]
+    fn this_process_snapshots_and_other_files_are_skipped() {
+        let found = vec![
+            snap(400, "session-99-1.psd"),  // ours, still live
+            snap(300, "session-99-12.psd"), // ours, id prefix must not confuse
+            snap(200, "session-11-1.psd"),  // a previous run
+            snap(100, "notes.txt"),         // not a snapshot
+        ];
+        let ranked = Workspace::rank_snapshots(found, 99);
+        let names: Vec<_> = ranked
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["session-11-1.psd"]);
+    }
+
+    #[test]
+    fn no_snapshots_is_not_an_error() {
+        assert!(Workspace::rank_snapshots(Vec::new(), 1).is_empty());
+    }
+
     use super::*;
 
     /// The preview stands in for the real composite, so it may never be
