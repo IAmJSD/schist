@@ -533,6 +533,35 @@ struct Layout {
     first_baseline: f32,
     line_advance: f32,
     layout_width: f32,
+    lines: Vec<LineSpan>,
+}
+
+/// One laid-out line, and the byte range of `TextSpec::text` it covers.
+///
+/// Wrapping means a line does not always correspond to a source line, so
+/// the range is what lets a caret offset be mapped onto the page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineSpan {
+    /// Byte offset of the line's first character in `TextSpec::text`.
+    pub start: usize,
+    /// Byte offset one past the line's last character.
+    pub end: usize,
+    /// x of the line's first glyph, after alignment.
+    pub x: f32,
+    /// Advance width of the line.
+    pub width: f32,
+    /// y of the line's top, relative to the raster origin.
+    pub top: f32,
+    /// Baseline-to-baseline step, i.e. this line's height.
+    pub height: f32,
+}
+
+/// Where a caret sits, relative to the text raster's origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Caret {
+    pub x: f32,
+    pub top: f32,
+    pub height: f32,
 }
 
 fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
@@ -557,12 +586,24 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
         m.advance_width + kern + spec.tracking
     };
 
-    // Split into wrapped lines of (text, width).
-    let mut lines: Vec<(String, f32)> = Vec::new();
+    // Split into wrapped lines, carrying each line's byte range in
+    // `spec.text` so a caret offset can be mapped onto the page. The
+    // caret and the glyphs must come from the same pass: measuring them
+    // separately is what let the overlay drift away from the ink.
+    struct Line {
+        text: String,
+        width: f32,
+        start: usize,
+        end: usize,
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    let mut line_start = 0usize;
     for raw_line in spec.text.split('\n') {
         let mut current = String::new();
         let mut width = 0.0f32;
         let mut prev: Option<char> = None;
+        let mut start = line_start;
+        let mut at = line_start;
         // Wrap on word boundaries; a single over-long word is left to
         // overflow rather than being broken mid-word.
         for word in raw_line.split_inclusive(' ') {
@@ -576,7 +617,13 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
                 .wrap_width
                 .is_some_and(|w| !current.is_empty() && width + word_width > w);
             if wraps {
-                lines.push((std::mem::take(&mut current), width));
+                lines.push(Line {
+                    text: std::mem::take(&mut current),
+                    width,
+                    start,
+                    end: at,
+                });
+                start = at;
                 width = 0.0;
                 // Re-measure the word with no kerning context: it now
                 // starts a line, so there is no preceding glyph.
@@ -589,22 +636,40 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
             }
             current.push_str(word);
             width += word_width;
+            at += word.len();
             prev = word.chars().last();
         }
-        lines.push((current, width));
+        lines.push(Line {
+            text: current,
+            width,
+            start,
+            end: at,
+        });
+        // Step past this source line and the newline that ended it.
+        line_start = at + 1;
     }
 
-    let max_width = lines.iter().map(|(_, w)| *w).fold(0.0f32, f32::max);
+    let max_width = lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
     let mut placed = Vec::new();
-    for (i, (line, width)) in lines.iter().enumerate() {
+    let mut spans = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
         let baseline = ascent + i as f32 * line_advance;
-        let mut x = match spec.align {
+        let start_x = match spec.align {
             Align::Left => 0.0,
-            Align::Center => (max_width - width) / 2.0,
-            Align::Right => max_width - width,
+            Align::Center => (max_width - line.width) / 2.0,
+            Align::Right => max_width - line.width,
         };
+        spans.push(LineSpan {
+            start: line.start,
+            end: line.end,
+            x: start_x,
+            width: line.width,
+            top: i as f32 * line_advance,
+            height: line_advance,
+        });
+        let mut x = start_x;
         let mut prev: Option<char> = None;
-        for ch in line.chars() {
+        for ch in line.text.chars() {
             if !ch.is_whitespace() {
                 placed.push(PlacedGlyph { ch, x, baseline });
             }
@@ -617,7 +682,94 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
         first_baseline: ascent,
         line_advance,
         layout_width: max_width,
+        lines: spans,
     }
+}
+
+/// The laid-out lines of `spec`, with the byte range of `spec.text` each
+/// one covers.
+///
+/// Returns an empty vec when no font can be loaded.
+pub fn line_spans(spec: &TextSpec) -> Vec<LineSpan> {
+    let Some(face) = load_font(&spec.family, spec.bold, spec.italic) else {
+        return Vec::new();
+    };
+    layout(spec, &face).lines
+}
+
+/// Where a caret sitting at `byte` in `spec.text` lands, relative to the
+/// raster's top-left origin.
+///
+/// `byte` is clamped into range and snapped to a char boundary, so a
+/// caller that has lost track of the text cannot panic the layout.
+pub fn caret_at(spec: &TextSpec, byte: usize) -> Option<Caret> {
+    let face = load_font(&spec.family, spec.bold, spec.italic)?;
+    let laid = layout(spec, &face);
+    let byte = clamp_to_boundary(&spec.text, byte);
+
+    // The last line whose range starts at or before `byte`: with an
+    // explicit newline the offset sits in two ranges (the end of one and
+    // the start of the next), and a caret after a newline belongs on the
+    // new line.
+    let span = laid
+        .lines
+        .iter()
+        .rev()
+        .find(|l| l.start <= byte)
+        .copied()
+        .or_else(|| laid.lines.first().copied())
+        .unwrap_or(LineSpan {
+            start: 0,
+            end: 0,
+            x: 0.0,
+            width: 0.0,
+            top: 0.0,
+            height: laid.line_advance,
+        });
+
+    let upto = byte.clamp(span.start, span.end);
+    let prefix = spec.text.get(span.start..upto).unwrap_or("");
+    Some(Caret {
+        x: span.x + measure(spec, &face, prefix),
+        top: span.top,
+        height: if span.height > 0.0 {
+            span.height
+        } else {
+            spec.size
+        },
+    })
+}
+
+/// Advance width of `text` laid out with `spec`'s font and tracking.
+///
+/// Used for caret placement, so it has to agree with `layout`'s advance
+/// exactly, kerning included.
+fn measure(spec: &TextSpec, face: &LoadedFace, text: &str) -> f32 {
+    let font = &face.font;
+    let gpos = GposKern::new(&face.data, face.index, spec.size);
+    let mut width = 0.0;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        let m = font.metrics(ch, spec.size);
+        let kern = prev
+            .and_then(|p| match &gpos {
+                Some(g) => g.kern(p, ch),
+                None => font.horizontal_kern(p, ch, spec.size),
+            })
+            .unwrap_or(0.0);
+        width += m.advance_width + kern + spec.tracking;
+        prev = Some(ch);
+    }
+    width
+}
+
+/// Nearest char boundary at or below `byte`, clamped to the string.
+fn clamp_to_boundary(text: &str, byte: usize) -> usize {
+    let mut at = byte.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// Lay out and rasterize `spec` into a coverage mask.
@@ -642,6 +794,7 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
         first_baseline,
         line_advance,
         layout_width,
+        ..
     } = layout(spec, &face);
     if placed.is_empty() {
         return Some(TextRaster {
@@ -852,5 +1005,65 @@ mod tests {
         });
         assert!(r.is_some(), "should fall back to a system sans");
         assert!(!r.unwrap().is_empty());
+    }
+    #[test]
+    fn caret_advances_along_a_line() {
+        let s = spec("abc");
+        let a = caret_at(&s, 0).unwrap();
+        let b = caret_at(&s, 1).unwrap();
+        let c = caret_at(&s, 3).unwrap();
+        assert!(a.x < b.x && b.x < c.x, "{a:?} {b:?} {c:?}");
+        // All on the first line.
+        assert_eq!(a.top, 0.0);
+        assert_eq!(c.top, 0.0);
+    }
+
+    #[test]
+    fn caret_steps_down_by_the_real_line_advance() {
+        let s = spec("ab\ncd");
+        let first = caret_at(&s, 0).unwrap();
+        let second = caret_at(&s, 3).unwrap(); // just after the newline
+        assert!(second.top > first.top, "second line must sit lower");
+        // The step is the engine's own line advance, which is what the
+        // old overlay got wrong by assuming size * line_height.
+        let spans = line_spans(&s);
+        assert_eq!(spans.len(), 2);
+        assert!((second.top - first.top - spans[0].height).abs() < 0.01);
+    }
+
+    #[test]
+    fn caret_after_a_newline_starts_the_next_line() {
+        let s = spec("ab\ncd");
+        let after_newline = caret_at(&s, 3).unwrap();
+        let line_start = line_spans(&s)[1];
+        assert!((after_newline.x - line_start.x).abs() < 0.01);
+    }
+
+    #[test]
+    fn line_spans_cover_the_source_text() {
+        let s = spec("ab\ncde\nf");
+        let spans = line_spans(&s);
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[0].start, spans[0].end), (0, 2));
+        assert_eq!((spans[1].start, spans[1].end), (3, 6));
+        assert_eq!((spans[2].start, spans[2].end), (7, 8));
+    }
+
+    #[test]
+    fn a_trailing_newline_gets_its_own_line() {
+        // `str::lines` drops this, which is why the old caret stayed put
+        // when you pressed Enter at the end of the text.
+        let s = spec("ab\n");
+        assert_eq!(line_spans(&s).len(), 2);
+        let end = caret_at(&s, 3).unwrap();
+        assert!(end.top > 0.0, "caret must move to the new empty line");
+    }
+
+    #[test]
+    fn an_out_of_range_or_mid_char_offset_does_not_panic() {
+        let s = spec("héllo");
+        assert!(caret_at(&s, 999).is_some());
+        // Byte 2 is inside the two-byte 'é'.
+        assert!(caret_at(&s, 2).is_some());
     }
 }

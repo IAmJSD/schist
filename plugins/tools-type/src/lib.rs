@@ -177,6 +177,25 @@ struct Editing {
     /// removes it entirely).
     created: bool,
     dirty: bool,
+    /// Byte offset of the caret in `stored.spec.text`.
+    caret: usize,
+    /// The other end of the selection. Equal to `caret` when nothing is
+    /// selected, so the two together describe both states.
+    anchor: usize,
+}
+
+/// Does this char hang off the one before it, rather than standing alone?
+///
+/// Combining marks, zero-width joiners, variation selectors and skin-tone
+/// modifiers all render as part of the previous character, so a caret step
+/// has to cross them together with it.
+fn is_continuation(ch: char) -> bool {
+    matches!(ch as u32,
+        0x0300..=0x036F      // combining diacritics
+        | 0x200D             // zero-width joiner
+        | 0xFE00..=0xFE0F    // variation selectors
+        | 0x1F3FB..=0x1F3FF  // skin tone modifiers
+    ) || matches!(ch as u32, 0x1AB0..=0x1AFF | 0x20D0..=0x20FF)
 }
 
 /// The styles the options bar offers, in the order Photoshop lists them.
@@ -244,6 +263,8 @@ impl TypeTool {
             original: TileMap::new(),
             created: true,
             dirty: false,
+            caret: 0,
+            anchor: 0,
         });
     }
 
@@ -310,12 +331,15 @@ impl ToolPlugin for TypeTool {
                     text: String::new(),
                     ..stored.spec.clone()
                 };
+                let end = stored.spec.text.len();
                 self.editing = Some(Editing {
                     layer,
                     stored,
                     original,
                     created: false,
                     dirty: false,
+                    caret: end,
+                    anchor: end,
                 });
             }
             None => self.start_new(ctx, input.x, input.y),
@@ -335,27 +359,97 @@ impl ToolPlugin for TypeTool {
         if self.editing.is_none() {
             return false;
         }
-        // Let shortcuts through; we only capture plain typing.
-        if modifiers.ctrl_or_cmd {
-            return false;
-        }
-        let mut changed = true;
+        let shift = modifiers.shift;
+        let word = modifiers.ctrl_or_cmd;
+        let mut changed = false;
+        let mut handled = true;
         {
             let Some(session) = &mut self.editing else {
                 return false;
             };
             match key {
-                "backspace" => {
-                    session.stored.spec.text.pop();
+                // Ctrl+A selects the text being edited, not the canvas.
+                "a" if modifiers.ctrl_or_cmd => {
+                    session.anchor = 0;
+                    session.caret = session.stored.spec.text.len();
                 }
-                "enter" => session.stored.spec.text.push('\n'),
-                "tab" => session.stored.spec.text.push_str("    "),
-                "space" => session.stored.spec.text.push(' '),
+                "left" | "right" | "up" | "down" | "home" | "end" => {
+                    let at = session.caret;
+                    let to = match key {
+                        "left" if word => session.prev_word(at),
+                        "right" if word => session.next_word(at),
+                        // An unshifted arrow with a selection collapses to
+                        // its edge rather than stepping past it.
+                        "left" if session.has_selection() && !shift => session.selection().start,
+                        "right" if session.has_selection() && !shift => session.selection().end,
+                        "left" => session.prev_boundary(at),
+                        "right" => session.next_boundary(at),
+                        "up" => session.vertical(at, false),
+                        "down" => session.vertical(at, true),
+                        "home" => session.line_start(at),
+                        _ => session.line_end(at),
+                    };
+                    session.caret = to;
+                    if !shift {
+                        session.anchor = to;
+                    }
+                }
+                "backspace" => {
+                    if !session.delete_selection() {
+                        let to = if word {
+                            session.prev_word(session.caret)
+                        } else {
+                            session.prev_boundary(session.caret)
+                        };
+                        if to != session.caret {
+                            session
+                                .stored
+                                .spec
+                                .text
+                                .replace_range(to..session.caret, "");
+                            session.caret = to;
+                            session.anchor = to;
+                        }
+                    }
+                    changed = true;
+                }
+                "delete" => {
+                    if !session.delete_selection() {
+                        let to = if word {
+                            session.next_word(session.caret)
+                        } else {
+                            session.next_boundary(session.caret)
+                        };
+                        if to != session.caret {
+                            session
+                                .stored
+                                .spec
+                                .text
+                                .replace_range(session.caret..to, "");
+                        }
+                    }
+                    changed = true;
+                }
+                // Anything else with a modifier is a shortcut, not typing.
+                _ if modifiers.ctrl_or_cmd => return false,
+                "enter" => {
+                    session.insert("\n");
+                    changed = true;
+                }
+                "tab" => {
+                    session.insert("    ");
+                    changed = true;
+                }
+                "space" => {
+                    session.insert(" ");
+                    changed = true;
+                }
                 _ => match text {
                     Some(t) if !t.is_empty() && !t.chars().any(|c| c.is_control()) => {
-                        session.stored.spec.text.push_str(t)
+                        session.insert(t);
+                        changed = true;
                     }
-                    _ => changed = false,
+                    _ => handled = false,
                 },
             }
             if changed {
@@ -364,6 +458,9 @@ impl ToolPlugin for TypeTool {
         }
         if changed {
             self.refresh(ctx.doc);
+        }
+        if !handled {
+            return false;
         }
         // Swallow every plain keystroke while typing so letters don't
         // switch tools mid-word.
@@ -537,31 +634,247 @@ impl ToolPlugin for TypeTool {
             .find(session.layer)
             .map(|l| l.tight_bounds())
             .unwrap_or(IntRect::EMPTY);
+        // Layout coordinates are relative to the layout box's top-left,
+        // which `render_tiles` places at `origin`, so the same offset maps
+        // a caret onto the canvas. The old overlay measured x from the ink
+        // bounds and stepped y by `size * line_height`, neither of which
+        // is what the engine actually laid out.
         let (ox, oy) = session.origin_f32();
-        let size = session.stored.spec.size;
-        // Box around the text plus a caret at the end of the last line.
+        let spec = &session.stored.spec;
         let mut out = Vec::new();
         if !bounds.is_empty() {
             out.push(Overlay::Rect(bounds.inflated(2)));
         }
-        let lines = session.stored.spec.text.lines().count().max(1) as f32;
-        let caret_x = if bounds.is_empty() {
-            ox
-        } else {
-            bounds.right as f32
-        };
-        let caret_y = oy + (lines - 1.0) * size * session.stored.spec.line_height;
-        out.push(Overlay::Line {
-            x1: caret_x,
-            y1: caret_y,
-            x2: caret_x,
-            y2: caret_y + size,
-        });
+
+        if session.has_selection() {
+            let range = session.selection();
+            for span in schist_text_engine::line_spans(spec) {
+                let from = range.start.max(span.start);
+                let to = range.end.min(span.end);
+                if from >= to {
+                    continue;
+                }
+                let left = schist_text_engine::caret_at(spec, from).map(|c| c.x);
+                // At a line's end, measure the line rather than asking for
+                // a caret there: on a wrapped line that offset also starts
+                // the next line.
+                let right = if to >= span.end {
+                    Some(span.x + span.width)
+                } else {
+                    schist_text_engine::caret_at(spec, to).map(|c| c.x)
+                };
+                if let (Some(l), Some(r)) = (left, right) {
+                    if r > l {
+                        out.push(Overlay::Rect(IntRect::new(
+                            (ox + l).floor() as i32,
+                            (oy + span.top).floor() as i32,
+                            (ox + r).ceil() as i32,
+                            (oy + span.top + span.height).ceil() as i32,
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(caret) = schist_text_engine::caret_at(spec, session.caret) {
+            let x = ox + caret.x;
+            let y = oy + caret.top;
+            out.push(Overlay::Line {
+                x1: x,
+                y1: y,
+                x2: x,
+                y2: y + caret.height,
+            });
+        }
         out
     }
 }
 
 impl Editing {
+    /// The selected byte range, empty when the caret is a plain insertion
+    /// point.
+    fn selection(&self) -> std::ops::Range<usize> {
+        let (a, b) = (self.caret.min(self.anchor), self.caret.max(self.anchor));
+        a..b
+    }
+
+    fn has_selection(&self) -> bool {
+        self.caret != self.anchor
+    }
+
+    fn text(&self) -> &str {
+        &self.stored.spec.text
+    }
+
+    /// Collapse the selection, returning true if anything was removed.
+    fn delete_selection(&mut self) -> bool {
+        let range = self.selection();
+        if range.is_empty() {
+            return false;
+        }
+        self.stored.spec.text.replace_range(range.clone(), "");
+        self.caret = range.start;
+        self.anchor = range.start;
+        true
+    }
+
+    /// Insert at the caret, replacing the selection first.
+    fn insert(&mut self, s: &str) {
+        self.delete_selection();
+        let at = self.caret.min(self.stored.spec.text.len());
+        self.stored.spec.text.insert_str(at, s);
+        self.caret = at + s.len();
+        self.anchor = self.caret;
+    }
+
+    /// Byte offset one grapheme before `at`.
+    ///
+    /// Whole-grapheme rather than whole-`char`, so backspacing an accented
+    /// letter or an emoji removes what looks like one character instead of
+    /// peeling off a combining mark at a time.
+    fn prev_boundary(&self, at: usize) -> usize {
+        let text = self.text();
+        if at == 0 {
+            return 0;
+        }
+        let mut i = at - 1;
+        while i > 0 && !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        // Absorb any combining marks, zero-width joiners and variation
+        // selectors that hang off the character before.
+        while i > 0 {
+            let Some(ch) = text[i..].chars().next() else {
+                break;
+            };
+            if !is_continuation(ch) {
+                break;
+            }
+            let mut j = i - 1;
+            while j > 0 && !text.is_char_boundary(j) {
+                j -= 1;
+            }
+            i = j;
+        }
+        i
+    }
+
+    /// Byte offset one grapheme after `at`.
+    fn next_boundary(&self, at: usize) -> usize {
+        let text = self.text();
+        if at >= text.len() {
+            return text.len();
+        }
+        let mut i = at + 1;
+        while i < text.len() && !text.is_char_boundary(i) {
+            i += 1;
+        }
+        while i < text.len() {
+            let Some(ch) = text[i..].chars().next() else {
+                break;
+            };
+            if !is_continuation(ch) {
+                break;
+            }
+            i += ch.len_utf8();
+        }
+        i
+    }
+
+    /// Start of the word at or before `at`.
+    fn prev_word(&self, at: usize) -> usize {
+        let text = self.text();
+        let mut i = at;
+        while i > 0 {
+            let p = self.prev_boundary(i);
+            let ch = text[p..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            i = p;
+        }
+        while i > 0 {
+            let p = self.prev_boundary(i);
+            let ch = text[p..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            i = p;
+        }
+        i
+    }
+
+    /// End of the word at or after `at`.
+    fn next_word(&self, at: usize) -> usize {
+        let text = self.text();
+        let mut i = at;
+        while i < text.len() {
+            let ch = text[i..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            i = self.next_boundary(i);
+        }
+        while i < text.len() {
+            let ch = text[i..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            i = self.next_boundary(i);
+        }
+        i
+    }
+
+    /// Start of the source line containing `at`.
+    fn line_start(&self, at: usize) -> usize {
+        self.text()[..at].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    }
+
+    /// End of the source line containing `at`.
+    fn line_end(&self, at: usize) -> usize {
+        self.text()[at..]
+            .find('\n')
+            .map(|i| at + i)
+            .unwrap_or(self.text().len())
+    }
+
+    /// Move to the same column one line up or down, clamped to that
+    /// line's length.
+    fn vertical(&self, at: usize, down: bool) -> usize {
+        let column = at - self.line_start(at);
+        if down {
+            let end = self.line_end(at);
+            if end >= self.text().len() {
+                return at;
+            }
+            let next_start = end + 1;
+            let next_end = self.line_end(next_start);
+            let mut target = next_start + column;
+            if target > next_end {
+                target = next_end;
+            }
+            while target > next_start && !self.text().is_char_boundary(target) {
+                target -= 1;
+            }
+            target
+        } else {
+            let start = self.line_start(at);
+            if start == 0 {
+                return at;
+            }
+            let prev_start = self.line_start(start - 1);
+            let prev_end = start - 1;
+            let mut target = prev_start + column;
+            if target > prev_end {
+                target = prev_end;
+            }
+            while target > prev_start && !self.text().is_char_boundary(target) {
+                target -= 1;
+            }
+            target
+        }
+    }
+
     fn origin_f32(&self) -> (f32, f32) {
         (self.stored.origin.0 as f32, self.stored.origin.1 as f32)
     }
@@ -965,5 +1278,183 @@ mod tests {
             before,
             "the insert and its removal should collapse"
         );
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl_or_cmd: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// Type `s`, sending Enter for newlines the way a keyboard does.
+    fn type_lines(tool: &mut TypeTool, ctx: &mut ToolCtx, s: &str) {
+        for ch in s.chars() {
+            let text = ch.to_string();
+            match ch {
+                '\n' => {
+                    tool.on_key(ctx, "enter", None, Modifiers::default());
+                }
+                ' ' => {
+                    tool.on_key(ctx, "space", Some(" "), Modifiers::default());
+                }
+                _ => {
+                    tool.on_key(ctx, &text, Some(&text), Modifiers::default());
+                }
+            }
+        }
+    }
+
+    /// A tool mid-session with `s` typed into it.
+    fn editing(d: &mut Document, s: &str) -> TypeTool {
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_lines(&mut tool, &mut ctx, s);
+        tool
+    }
+
+    fn key(tool: &mut TypeTool, d: &mut Document, k: &str, m: Modifiers) -> bool {
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut ctx = ToolCtx {
+            doc: d,
+            state: &mut state,
+        };
+        tool.on_key(&mut ctx, k, None, m)
+    }
+
+    #[test]
+    fn ctrl_a_selects_the_text_not_the_canvas() {
+        // The reported bug. The binding change stops the canvas Select All
+        // running; this is the half that makes the keystroke do the right
+        // thing once it arrives.
+        let mut d = doc();
+        let mut tool = editing(&mut d, "hello");
+        assert!(key(&mut tool, &mut d, "a", ctrl()), "must be consumed");
+        let s = tool.editing.as_ref().unwrap();
+        assert_eq!(s.selection(), 0..5);
+        assert!(s.has_selection());
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "hello");
+        key(&mut tool, &mut d, "a", ctrl());
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_key(&mut ctx, "x", Some("x"), Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().text(), "x");
+    }
+
+    #[test]
+    fn the_caret_moves_and_inserts_in_the_middle() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "ac");
+        key(&mut tool, &mut d, "left", Modifiers::default());
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_key(&mut ctx, "b", Some("b"), Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().text(), "abc");
+    }
+
+    #[test]
+    fn home_and_end_reach_the_line_edges() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "one\ntwo");
+        key(&mut tool, &mut d, "home", Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().caret, 4);
+        key(&mut tool, &mut d, "end", Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().caret, 7);
+    }
+
+    #[test]
+    fn shift_arrow_extends_a_selection_and_a_plain_arrow_collapses_it() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "abcd");
+        key(&mut tool, &mut d, "left", shift());
+        key(&mut tool, &mut d, "left", shift());
+        assert_eq!(tool.editing.as_ref().unwrap().selection(), 2..4);
+        key(&mut tool, &mut d, "left", Modifiers::default());
+        let s = tool.editing.as_ref().unwrap();
+        assert!(!s.has_selection());
+        assert_eq!(s.caret, 2, "collapses to the selection's near edge");
+    }
+
+    #[test]
+    fn delete_forward_and_backspace_remove_one_character_each() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "abc");
+        key(&mut tool, &mut d, "left", Modifiers::default());
+        key(&mut tool, &mut d, "backspace", Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().text(), "ac");
+        key(&mut tool, &mut d, "delete", Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().text(), "a");
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_grapheme() {
+        // "e" + combining acute looks like one letter, so one backspace
+        // should remove it, not peel off the accent.
+        let mut d = doc();
+        let mut tool = editing(&mut d, "x");
+        {
+            let s = tool.editing.as_mut().unwrap();
+            s.stored.spec.text = "e\u{301}".into();
+            s.caret = s.stored.spec.text.len();
+            s.anchor = s.caret;
+        }
+        key(&mut tool, &mut d, "backspace", Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().text(), "");
+    }
+
+    #[test]
+    fn ctrl_arrow_jumps_by_word() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "one two three");
+        key(&mut tool, &mut d, "left", ctrl());
+        assert_eq!(tool.editing.as_ref().unwrap().caret, 8, "start of 'three'");
+        key(&mut tool, &mut d, "left", ctrl());
+        assert_eq!(tool.editing.as_ref().unwrap().caret, 4, "start of 'two'");
+    }
+
+    #[test]
+    fn up_and_down_keep_the_column() {
+        let mut d = doc();
+        let mut tool = editing(&mut d, "long line\nab");
+        // Caret is at the end of "ab" (column 2).
+        key(&mut tool, &mut d, "up", Modifiers::default());
+        assert_eq!(
+            tool.editing.as_ref().unwrap().caret,
+            2,
+            "column 2 of line 1"
+        );
+        key(&mut tool, &mut d, "down", Modifiers::default());
+        assert_eq!(tool.editing.as_ref().unwrap().caret, 12, "back to column 2");
+    }
+
+    #[test]
+    fn an_unhandled_shortcut_is_not_swallowed() {
+        // ctrl+s must still reach the app; only ctrl+a is ours.
+        let mut d = doc();
+        let mut tool = editing(&mut d, "hi");
+        assert!(!key(&mut tool, &mut d, "s", ctrl()));
     }
 }
