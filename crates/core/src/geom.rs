@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(r.width(), i32::MAX);
         assert_eq!(r.height(), i32::MAX);
 
-        // A wrapping subtraction here would report 1, which is exactly the
+        // A wrapping subtraction here would report 0, which is exactly the
         // failure mode: an absurd rect looking small enough to accept.
         let r = IntRect::new(i32::MIN, 0, i32::MAX, 10);
         assert_eq!(r.width(), i32::MAX);
