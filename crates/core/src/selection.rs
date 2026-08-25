@@ -233,7 +233,15 @@ impl Selection {
     }
 
     /// Invert within the canvas.
+    ///
+    /// Inverting nothing is a no-op, not "select all". With no selection
+    /// `coverage` reports 255 everywhere, so the inversion would write
+    /// zero everywhere and then mark itself active: an empty selection
+    /// that still blocks every edit, with no marching ants to explain why.
     pub fn invert(&mut self, canvas: IntRect) {
+        if self.is_empty() {
+            return;
+        }
         let mut inverted = MaskTileMap::new();
         for coord in TileCoord::covering(&canvas) {
             let trect = coord.rect();
@@ -643,6 +651,37 @@ mod tests {
         sel.invert(canvas);
         assert_eq!(sel.coverage(10, 10), 0);
         assert_eq!(sel.coverage(40, 10), 255);
+    }
+
+    #[test]
+    fn inverting_nothing_leaves_editing_unblocked() {
+        let canvas = IntRect::from_xywh(0, 0, 64, 64);
+        let mut sel = Selection::new();
+        assert!(sel.is_empty());
+
+        sel.invert(canvas);
+
+        // The failure this guards: `active` flipped true over an all-zero
+        // mask, so `is_empty()` said false, `outline()` drew no ants, and
+        // every edit multiplied by coverage 0 and silently did nothing.
+        assert!(sel.is_empty(), "inverting nothing must not activate");
+        assert!(sel.bounds().is_empty());
+        assert_eq!(
+            sel.coverage(10, 10),
+            255,
+            "edits must still reach the canvas"
+        );
+    }
+
+    #[test]
+    fn inverting_twice_returns_the_original() {
+        let canvas = IntRect::from_xywh(0, 0, 64, 64);
+        let mut sel = Selection::new();
+        sel.select_rect(IntRect::from_xywh(0, 0, 32, 64), SelectOp::Replace);
+        sel.invert(canvas);
+        sel.invert(canvas);
+        assert_eq!(sel.coverage(10, 10), 255);
+        assert_eq!(sel.coverage(40, 10), 0);
     }
 
     #[test]
