@@ -6,20 +6,13 @@ use super::header::Header;
 use super::pixels::{fill_mask_tiles, fill_tiles, fill_tiles_u8, plane_to_f32, ColorPlanes};
 use super::rle::unpack_channel;
 use crate::error::PsdError;
+use crate::PSB_U64_KEYS;
 use rayon::prelude::*;
 use schist_color::{ColorMode, Depth};
 use schist_core::{
     AdjustmentData, AdjustmentKind, BlendMode, GroupLayer, IntRect, Layer, LayerId, LayerKind,
     LayerMask, MaskTileMap, RasterLayer, RawBlock, TileMap,
 };
-
-/// Additional-layer-info keys whose length field widens to u64 in PSB files
-/// (per the spec's "Photoshop Big" notes). All other keys stay u32 even in
-/// PSB.
-const PSB_U64_KEYS: [[u8; 4]; 13] = [
-    *b"LMsk", *b"Lr16", *b"Lr32", *b"Layr", *b"Mt16", *b"Mt32", *b"Mtrn", *b"Alph", *b"FMsk",
-    *b"lnk2", *b"FEid", *b"FXid", *b"PxSD",
-];
 
 /// Sanity cap on a single layer dimension — PSB canvases max out at 300,000
 /// px; allow slack for layers extending past the canvas, but reject absurd
