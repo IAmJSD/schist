@@ -40,6 +40,17 @@ they will not break the plugin ABI or saved files.
    `schist-mcp-linux-aarch64`), a loose binary on Windows, and on macOS
    `schist-mcp-macos.zip`, signed and notarized on its own. See
    [mcp.md](mcp.md).
+5. Update the AUR package from `packaging/linux/aur/PKGBUILD`: bump
+   `pkgver` to the new version, reset `pkgrel=1`, then in an Arch
+   environment run `updpkgsums` (re-pins the tag tarball's sha256), test
+   with `makepkg -s` + `namcap`, and regenerate `.SRCINFO` with
+   `makepkg --printsrcinfo > .SRCINFO` — the AUR rejects pushes without
+   a current one. Commit `PKGBUILD` + `.SRCINFO` to the AUR remote
+   (`ssh://aur@aur.archlinux.org/schist.git`) and mirror the `PKGBUILD`
+   change back here. The PKGBUILD keeps `options=(!lto)` (makepkg's
+   `-flto=auto` breaks `ring`'s C objects under the clang link) and
+   `clang`/`mold` in `makedepends` for the linker settings in
+   `.cargo/config.toml` — don't drop either when touching it.
 
 Unsigned builds are still produced when signing credentials are absent, so
 forks and local builds work without secrets.
