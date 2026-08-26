@@ -117,6 +117,14 @@ pub enum EditOp {
         before: Box<Selection>,
         after: Box<Selection>,
     },
+    /// The document's embedded ICC profile changed (Assign / Convert to
+    /// Profile). Rides in the same edit as the pixel rewrite so undo puts
+    /// the pixels and their tag back together; undoing only the pixels
+    /// left the old numbers interpreted under the new profile.
+    IccProfileSet {
+        before: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Debug, Clone)]

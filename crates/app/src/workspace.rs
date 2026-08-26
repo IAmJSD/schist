@@ -4680,8 +4680,9 @@ impl Workspace {
     /// Assign a profile: same numbers, new interpretation.
     pub fn assign_profile(&mut self, profile: schist_colormgmt::Profile, cx: &mut Context<Self>) {
         if let Some(doc) = self.doc.as_mut() {
-            doc.icc_profile = profile.icc_bytes().map(|b| b.to_vec());
-            doc.dirty = true;
+            let mut edit = doc.begin_edit(format!("Assign {}", profile.name()));
+            edit.set_icc_profile(profile.icc_bytes().map(|b| b.to_vec()));
+            edit.commit();
             doc.damage_all();
         }
         self.status = format!("Assigned {}", profile.name()).into();
@@ -4726,8 +4727,8 @@ impl Workspace {
                 tile.encode_f32(&buf);
             }
         }
+        edit.set_icc_profile(profile.icc_bytes().map(|b| b.to_vec()));
         edit.commit();
-        doc.icc_profile = profile.icc_bytes().map(|b| b.to_vec());
         self.status = format!("Converted to {}", profile.name()).into();
         self.rebuild_color_transforms();
         self.after_change(cx);
@@ -4735,10 +4736,14 @@ impl Workspace {
 
     /// Toggle soft proofing against a device profile.
     pub fn toggle_proof(&mut self, profile: schist_colormgmt::Profile, cx: &mut Context<Self>) {
-        self.color.proof = match &self.color.proof {
-            Some(_) => None,
-            None => Some(profile),
-        };
+        // Picking a different proof profile while one is active switches
+        // to it; picking the active one turns proofing off.
+        let already_proofing_this = self
+            .color
+            .proof
+            .as_ref()
+            .is_some_and(|p| p.name() == profile.name());
+        self.color.proof = (!already_proofing_this).then_some(profile);
         self.status = if self.color.proof.is_some() {
             "Proof colors on".into()
         } else {

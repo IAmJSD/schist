@@ -94,18 +94,29 @@ impl Profile {
     }
 
     pub fn srgb() -> Profile {
-        Profile {
-            profile: Arc::new(ColorProfile::new_srgb()),
-            bytes: None,
-            name: "sRGB".into(),
-        }
+        Profile::builtin(ColorProfile::new_srgb(), "sRGB")
     }
 
     pub fn display_p3() -> Profile {
+        Profile::builtin(ColorProfile::new_display_p3(), "Display P3")
+    }
+
+    /// A built-in profile, serialized so it can be embedded on save.
+    ///
+    /// These used to carry `bytes: None`, which made them unusable as
+    /// assignment targets: `icc_bytes()` returned `None`, so assigning
+    /// either of the two profiles the UI offers *untagged* the document
+    /// instead of tagging it, and the next open reinterpreted the pixels
+    /// against whatever the working space happened to be.
+    fn builtin(profile: ColorProfile, name: &str) -> Profile {
+        let bytes = profile.encode().ok().map(Arc::new);
+        if bytes.is_none() {
+            log::warn!("could not serialize the built-in {name} profile");
+        }
         Profile {
-            profile: Arc::new(ColorProfile::new_display_p3()),
-            bytes: None,
-            name: "Display P3".into(),
+            profile: Arc::new(profile),
+            bytes,
+            name: name.into(),
         }
     }
 
@@ -184,6 +195,14 @@ impl ColorTransform {
     /// Convert a straight-alpha f32 RGBA buffer in place.
     ///
     /// Alpha is carried through untouched: it is coverage, not colour.
+    /// Transform a straight-alpha f32 RGBA buffer in place.
+    ///
+    /// Note this cannot preserve extended range even on the editing path:
+    /// moxcms clamps to 0..1 while evaluating the transfer curves
+    /// (`gamma.rs`), so a 32-bit document's out-of-range highlights are
+    /// clipped by the CMS before we see the output. Removing the clamp
+    /// below would not change that; it needs either CMS support or a
+    /// matrix-only path that skips the curves.
     pub fn apply(&self, pixels: &mut [f32]) {
         if self.identity || pixels.is_empty() {
             return;
@@ -194,8 +213,8 @@ impl ColorTransform {
             pixels.copy_from_slice(&src);
             return;
         }
-        // Extended-range output can exceed 0..1; clamp for display and
-        // restore alpha, which a matrix transform may have touched.
+        // Clamp for display and restore alpha, which a matrix transform
+        // may have touched.
         for (out, inp) in pixels
             .as_chunks_mut::<4>()
             .0
@@ -610,5 +629,38 @@ mod tests {
             .unwrap()
             .apply(&mut b);
         assert_eq!(a, b);
+    }
+    #[test]
+    fn builtin_profiles_can_be_embedded() {
+        // `bytes: None` made these unusable as assignment targets:
+        // `assign_profile` writes `icc_bytes()` onto the document, so
+        // assigning either of the two profiles the UI offers untagged the
+        // document rather than tagging it.
+        for p in [Profile::srgb(), Profile::display_p3()] {
+            let bytes = p
+                .icc_bytes()
+                .unwrap_or_else(|| panic!("{} has no bytes", p.name));
+            assert!(bytes.len() > 128, "{} icc is implausibly small", p.name);
+            assert_eq!(&bytes[36..40], b"acsp", "{} is not an icc profile", p.name);
+            // And it must round-trip back through the parser.
+            assert!(
+                Profile::from_bytes(bytes).is_ok(),
+                "{} did not parse back",
+                p.name
+            );
+        }
+    }
+
+    #[test]
+    fn conversion_still_leaves_alpha_alone() {
+        let mut px = vec![0.4f32, 0.2, 0.7, 0.33];
+        convert_pixels(
+            &mut px,
+            &Profile::srgb(),
+            &Profile::display_p3(),
+            Intent::Perceptual,
+        )
+        .unwrap();
+        assert!((px[3] - 0.33).abs() < 1e-6, "alpha changed: {}", px[3]);
     }
 }

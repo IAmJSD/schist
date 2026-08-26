@@ -127,6 +127,14 @@ fn write_image_resources(b: &mut Buf, doc: &Document) {
             continue; // written as its own section above
         }
         seen_resolution |= res.id == RES_RESOLUTION_INFO;
+        // `doc.icc_profile` is the authority when it is set. Convert and
+        // Assign Profile rewrite it, while the preserved resource still
+        // describes the space the file arrived in; re-emitting that one
+        // tagged converted pixels with the profile they were converted
+        // away from, and suppressed the correct tag below.
+        if res.id == RES_ICC_PROFILE && doc.icc_profile.is_some() {
+            continue;
+        }
         seen_icc |= res.id == RES_ICC_PROFILE;
         b.bytes(b"8BIM");
         b.u16(res.id);
