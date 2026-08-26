@@ -110,7 +110,7 @@ impl Session {
             &white,
         );
         doc.push_layer(bg);
-        doc.dirty = false;
+        doc.mark_saved();
         Ok(Session::install(doc))
     }
 
@@ -518,7 +518,7 @@ impl Session {
         })?;
         let bytes = codec.export(&self.doc)?;
         write_atomically(path, &bytes)?;
-        self.doc.dirty = false;
+        self.doc.mark_saved();
         self.doc.path = Some(path.to_path_buf());
         if let Some(name) = path.file_name() {
             self.doc.title = name.to_string_lossy().into_owned();

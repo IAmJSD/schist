@@ -308,9 +308,37 @@ fn merge_down(ctx: &mut CommandCtx) {
 }
 
 fn merge_visible(ctx: &mut CommandCtx) {
+    merge_all(ctx, false)
+}
+
+/// Flatten: like Merge Visible, but hidden layers are discarded and the
+/// result is opaque, named Background.
+///
+/// `layer.flatten` used to call `merge_visible` verbatim, so Flatten Image
+/// left every hidden layer in place, kept transparency, and named the
+/// result "Merged". Someone flattening before export still shipped a
+/// multi-layer file with holes in it.
+fn flatten_image(ctx: &mut CommandCtx) {
+    merge_all(ctx, true)
+}
+
+fn merge_all(ctx: &mut CommandCtx, flatten: bool) {
     let canvas = ctx.doc.canvas_rect();
-    let rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
-    let mut merged = Layer::new_raster("Merged");
+    let mut rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
+    if flatten {
+        // Flattening composites onto an opaque white background, the way
+        // Photoshop does, so the result has no transparency left.
+        for px in rgba.as_chunks_mut::<4>().0 {
+            let a = px[3] as u32;
+            let inv = 255 - a;
+            for c in px[..3].iter_mut() {
+                *c = ((*c as u32 * a + 255 * inv) / 255) as u8;
+            }
+            px[3] = 255;
+        }
+    }
+    let name = if flatten { "Background" } else { "Merged" };
+    let mut merged = Layer::new_raster(name);
     blit_rgba8(
         &mut merged.as_raster_mut().unwrap().tiles,
         ctx.doc.depth,
@@ -319,17 +347,23 @@ fn merge_visible(ctx: &mut CommandCtx) {
     );
     let merged_id = merged.id;
 
-    let visible_ids: Vec<LayerId> = ctx
+    // Flatten removes every layer; Merge Visible leaves the hidden ones.
+    let doomed: Vec<LayerId> = ctx
         .doc
         .tree
         .layers
         .iter()
-        .filter(|l| l.visible)
+        .filter(|l| flatten || l.visible)
         .map(|l| l.id)
         .collect();
-    let mut edit = ctx.doc.begin_edit("Merge Visible");
-    for vid in visible_ids {
-        edit.remove_layer(vid);
+    let title = if flatten {
+        "Flatten Image"
+    } else {
+        "Merge Visible"
+    };
+    let mut edit = ctx.doc.begin_edit(title);
+    for id in doomed {
+        edit.remove_layer(id);
     }
     let top = LayerPath(vec![edit.doc().tree.layers.len()]);
     edit.insert_layer(top, merged);
@@ -763,9 +797,7 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.set_mask(id, Some(mask));
                 edit.commit();
             }),
-            cmd("layer.flatten", "Flatten Image", None, |ctx| {
-                merge_visible(ctx);
-            }),
+            cmd("layer.flatten", "Flatten Image", None, flatten_image),
             cmd("layer.merge_down", "Merge Down", Some("cmd-e"), merge_down),
             cmd(
                 "layer.merge_visible",
@@ -1159,6 +1191,56 @@ mod tests {
             None,
             "saving a real selection must not refuse"
         );
+    }
+
+    #[test]
+    fn flatten_is_not_merge_visible() {
+        // `layer.flatten` called `merge_visible` verbatim, so Flatten
+        // Image left hidden layers in place, kept transparency and named
+        // the result "Merged".
+        let reg = registry();
+        let mut state = EditorState::default();
+
+        let build = || {
+            let mut doc = doc_with_pixels();
+            let mut hidden = Layer::new_raster("hidden");
+            hidden.visible = false;
+            doc.push_layer(hidden);
+            doc
+        };
+
+        let mut doc = build();
+        run(&reg, "layer.merge_visible", &mut doc, &mut state);
+        assert_eq!(doc.tree.len(), 2, "merge visible keeps the hidden layer");
+        assert!(doc.tree.iter().any(|l| l.name == "Merged"));
+
+        let mut doc = build();
+        run(&reg, "layer.flatten", &mut doc, &mut state);
+        assert_eq!(doc.tree.len(), 1, "flatten discards hidden layers");
+        assert_eq!(doc.tree.layers[0].name, "Background");
+    }
+
+    #[test]
+    fn flatten_leaves_no_transparency() {
+        let reg = registry();
+        let mut state = EditorState::default();
+        // A document whose only layer covers part of the canvas, so the
+        // rest is transparent.
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        let mut layer = Layer::new_raster("part");
+        let buf = [10u8, 20, 30, 255].repeat(8 * 8);
+        schist_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            schist_core::IntRect::from_xywh(0, 0, 8, 8),
+            &buf,
+        );
+        doc.push_layer(layer);
+
+        run(&reg, "layer.flatten", &mut doc, &mut state);
+        let px = doc.tree.layers[0].as_raster().unwrap().tiles.pixel(20, 20);
+        assert!(px.a >= 0.99, "flattened pixels must be opaque: {px:?}");
+        assert!(px.r > 0.9, "and matted onto white: {px:?}");
     }
 }
 

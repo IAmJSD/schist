@@ -943,7 +943,7 @@ impl Workspace {
             );
         }
         doc.push_layer(layer);
-        doc.dirty = false;
+        doc.mark_saved();
         self.open_in_tab(doc, false);
     }
 
@@ -1377,7 +1377,7 @@ impl Workspace {
         match self.write_document_to(&path) {
             Ok(()) => {
                 if let Some(doc) = &mut self.doc {
-                    doc.dirty = false;
+                    doc.mark_saved();
                     doc.path = Some(path.clone());
                     if let Some(name) = path.file_name() {
                         doc.title = name.to_string_lossy().into_owned();
@@ -1997,6 +1997,36 @@ impl Workspace {
             lo = [l; 3];
             hi = [h; 3];
         }
+        // Auto Color additionally pulls each channel's midtone to neutral
+        // grey, which is the only thing distinguishing it from Auto Tone.
+        // This used to be `v.powf(1.0)`, the identity, so the two menu
+        // items produced byte-identical results.
+        let mut gamma = [1.0f32; 3];
+        if mode == AutoMode::Color {
+            let mut sum = [0.0f64; 3];
+            let mut n = 0u64;
+            for p in buf.as_chunks::<4>().0 {
+                if p[3] <= 0.0 {
+                    continue;
+                }
+                for ch in 0..3 {
+                    let span = (hi[ch] - lo[ch]).max(1e-4);
+                    sum[ch] += f64::from(((p[ch] - lo[ch]) / span).clamp(0.0, 1.0));
+                }
+                n += 1;
+            }
+            if n > 0 {
+                for ch in 0..3 {
+                    let mean = (sum[ch] / n as f64) as f32;
+                    // Solve mean^gamma = 0.5 for gamma, so the channel's
+                    // midtone lands on neutral grey. Clamped so a nearly
+                    // black or white channel cannot explode.
+                    if mean > 1e-3 && mean < 1.0 - 1e-3 {
+                        gamma[ch] = (0.5f32.ln() / mean.ln()).clamp(0.2, 5.0);
+                    }
+                }
+            }
+        }
         for p in buf.as_chunks_mut::<4>().0 {
             if p[3] <= 0.0 {
                 continue;
@@ -2004,9 +2034,8 @@ impl Workspace {
             for ch in 0..3 {
                 let span = (hi[ch] - lo[ch]).max(1e-4);
                 let mut v = ((p[ch] - lo[ch]) / span).clamp(0.0, 1.0);
-                if mode == AutoMode::Color {
-                    // Auto Color also pulls the midtones to neutral grey.
-                    v = v.powf(1.0);
+                if gamma[ch] != 1.0 {
+                    v = v.powf(gamma[ch]);
                 }
                 p[ch] = v;
             }
@@ -2117,7 +2146,16 @@ impl Workspace {
         if doc.mode == mode {
             return;
         }
-        if mode == schist_color::ColorMode::Grayscale || mode == schist_color::ColorMode::Indexed {
+        // Indexed Color needs palette quantisation, which does not exist.
+        // It used to fall into the greyscale branch below, desaturating
+        // the image and labelling the history entry "Grayscale", so the
+        // menu item claimed to do something it had never implemented.
+        if mode == schist_color::ColorMode::Indexed {
+            self.status = "Indexed Color is not supported yet".into();
+            cx.notify();
+            return;
+        }
+        if mode == schist_color::ColorMode::Grayscale {
             // Flatten colour out of every layer, which is what the mode
             // change actually means for the pixels.
             let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
@@ -2143,10 +2181,16 @@ impl Workspace {
                     }
                 }
             }
+            edit.set_color_mode(mode);
+            edit.commit();
+        } else {
+            // CMYK/Lab/RGB change nothing but the mode, which still has
+            // to be undoable: it used to produce no history entry at all.
+            let mut edit = doc.begin_edit(mode.display_name().to_string());
+            edit.set_color_mode(mode);
             edit.commit();
         }
         if let Some(doc) = self.doc.as_mut() {
-            doc.mode = mode;
             doc.damage_all();
         }
         self.status = mode.display_name().into();

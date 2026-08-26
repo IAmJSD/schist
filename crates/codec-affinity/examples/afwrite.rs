@@ -140,6 +140,6 @@ fn demo_document() -> Document {
     doc.push_layer(group);
 
     doc.damage_all();
-    doc.dirty = false;
+    doc.mark_saved();
     doc
 }

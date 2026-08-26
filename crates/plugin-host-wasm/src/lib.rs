@@ -467,7 +467,7 @@ impl CodecPlugin for WasmCodec {
             &rgba,
         );
         doc.push_layer(layer);
-        doc.dirty = false;
+        doc.mark_saved();
         Ok(doc)
     }
 }
