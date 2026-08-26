@@ -43,14 +43,23 @@ fn main() {
             }
         };
         let id = message.get("id").cloned();
-        let Some(method) = message.get("method").and_then(|m| m.as_str()) else {
-            continue;
-        };
-        let params = message.get("params").cloned().unwrap_or(Value::Null);
-        // Notifications get no reply.
+        let method = message.get("method").and_then(|m| m.as_str());
+        // Notifications carry no id and get no reply.
         let Some(id) = id else {
             continue;
         };
+        // A request *with* an id and no usable method still needs an
+        // answer, or the client blocks forever waiting for one. This used
+        // to `continue` before the id was even considered.
+        let Some(method) = method else {
+            let reply = json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": {"code": -32600, "message": "Invalid Request: missing or non-string method"}
+            });
+            respond(&reply);
+            continue;
+        };
+        let params = message.get("params").cloned().unwrap_or(Value::Null);
         let reply = match server.handle(method, &params) {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(e) => json!({

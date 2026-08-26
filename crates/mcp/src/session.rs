@@ -15,7 +15,7 @@ use schist_plugin_api::{
     CodecPlugin, CommandCtx, EditorState, ExportOptions, FilterValues, Modifiers, OptionValue,
     PluginManifest, PluginRegistry, PointerInput, ToolCtx,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// PSD/PSB import and export via `schist-codec-psd` — the same wrapper the
 /// app shell registers.
@@ -99,6 +99,16 @@ impl Session {
     pub fn new_blank(title: &str, width: u32, height: u32, depth: Depth) -> Result<Session> {
         if width == 0 || height == 0 || width > 30_000 || height > 30_000 {
             bail!("document size must be 1..=30000 in each dimension");
+        }
+        // Each dimension was checked but not their product, and the
+        // background is allocated whole: 30000x30000 asked for 3.6 GB in
+        // one `vec!`, which aborts the server and takes every other
+        // session's unsaved work with it. 200 MP is far past any real
+        // document and bounds that buffer at 800 MB.
+        const MAX_PIXELS: u64 = 200_000_000;
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels > MAX_PIXELS {
+            bail!("document of {pixels} pixels is over the {MAX_PIXELS} pixel limit");
         }
         let mut doc = Document::new(title, width, height, depth);
         let mut bg = Layer::new_raster("Background");
@@ -567,9 +577,25 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let tmp: PathBuf = path.with_extension("schist-tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
+    // Append rather than replace the extension, and include the pid.
+    // `with_extension` *replaces* it, so saving `photo.psd` wrote and then
+    // renamed `photo.schist-tmp`, destroying any real file of that name;
+    // two processes saving at once would also collide.
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.schist-tmp", std::process::id()));
+    let tmp = path.with_file_name(name);
+    // Flush before the rename: `rename` is atomic against a process
+    // crash, but not against power loss, and it can otherwise reach the
+    // disk ahead of the data.
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -768,5 +794,50 @@ mod tests {
         let px = |x: usize, y: usize| &pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
         assert!(px(10, 24)[0] < 15, "inside the selection stays white");
         assert!(px(50, 24)[0] > 240, "outside the selection went dark");
+    }
+    #[test]
+    fn an_atomic_write_does_not_clobber_a_sibling() {
+        // `with_extension` *replaces* the extension, so saving `photo.psd`
+        // wrote and renamed `photo.schist-tmp`, destroying any real file
+        // of that name.
+        let dir = std::env::temp_dir().join(format!("schist-atomic-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let victim = dir.join("photo.schist-tmp");
+        std::fs::write(&victim, b"precious").unwrap();
+
+        let target = dir.join("photo.psd");
+        write_atomically(&target, b"new contents").unwrap();
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"precious",
+            "the sibling file must survive"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("schist-atomic2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("doc.psd");
+        write_atomically(&target, b"x").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("schist-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_absurd_session_size_is_refused_before_allocating() {
+        // 30000x30000 passed both dimension checks and then asked for
+        // 3.6 GB in one `vec!`, aborting the server.
+        assert!(Session::new_blank("t", 30_000, 30_000, Depth::Eight).is_err());
+        // An ordinary document still works.
+        assert!(Session::new_blank("t", 1920, 1080, Depth::Eight).is_ok());
     }
 }

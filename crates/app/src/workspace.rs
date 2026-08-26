@@ -1429,9 +1429,28 @@ impl Workspace {
         let bytes = codec.export(doc)?;
         // Write to a sibling temp file and rename, so an interrupted save
         // can't truncate the user's existing file.
-        let tmp = path.with_extension("schist-tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
+        //
+        // The name appends rather than replaces the extension:
+        // `with_extension` would turn `photo.psd` into `photo.schist-tmp`
+        // and destroy any real file of that name. The pid keeps two
+        // processes saving at once from colliding.
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".{}.schist-tmp", std::process::id()));
+        let tmp = path.with_file_name(name);
+        // `rename` is atomic against a process crash but not against power
+        // loss: without the flush it can reach the disk before the data,
+        // leaving a zero-length file where the document was.
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            std::io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()?;
+        }
+        if let Err(err) = std::fs::rename(&tmp, path) {
+            // Otherwise a failed save leaves an orphan next to the user's
+            // documents.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
         Ok(())
     }
 
