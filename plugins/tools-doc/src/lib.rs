@@ -224,6 +224,8 @@ impl ToolPlugin for RectTool {
                     rect.right + dx,
                     rect.bottom + dy,
                 );
+                // Moving one is a change to the document, not a repaint.
+                ctx.doc.mark_dirty();
             }
             ctx.doc.add_damage(ctx.doc.canvas_rect());
             return;
@@ -260,7 +262,12 @@ impl ToolPlugin for RectTool {
                     user: true,
                 });
             }
+            // A frame is a layer, so `make_frame` commits an edit and is
+            // already dirty; the other two are plain document state.
             RectKind::Frame => self.make_frame(ctx.doc, rect),
+        }
+        if !matches!(self.kind, RectKind::Frame) {
+            ctx.doc.mark_dirty();
         }
         ctx.doc.add_damage(ctx.doc.canvas_rect());
     }
@@ -349,6 +356,7 @@ impl ToolPlugin for PointTool {
                 {
                     if input.modifiers.alt {
                         ctx.doc.notes.remove(i);
+                        ctx.doc.mark_dirty();
                     } else {
                         self.grabbed = Some(i);
                     }
@@ -359,6 +367,7 @@ impl ToolPlugin for PointTool {
                         author: String::new(),
                         text: format!("Note {n}"),
                     });
+                    ctx.doc.mark_dirty();
                 }
             }
             PointKind::Count => {
@@ -378,9 +387,11 @@ impl ToolPlugin for PointTool {
                         .position(|p| (p.0 - input.x).hypot(p.1 - input.y) <= r)
                     {
                         group.points.remove(i);
+                        ctx.doc.mark_dirty();
                     }
                 } else {
                     group.points.push((input.x, input.y));
+                    ctx.doc.mark_dirty();
                 }
             }
         }
@@ -391,6 +402,7 @@ impl ToolPlugin for PointTool {
         if let Some(i) = self.grabbed {
             if let Some(note) = ctx.doc.notes.get_mut(i) {
                 note.at = (input.x, input.y);
+                ctx.doc.mark_dirty();
             }
             ctx.doc.add_damage(ctx.doc.canvas_rect());
         }

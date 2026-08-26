@@ -1194,6 +1194,10 @@ mod tests {
         // mutated directly rather than through `begin_edit`, so nothing
         // set `dirty` for them. The tab then closed without a prompt and
         // autosave, which filters on `dirty`, skipped the document.
+        //
+        // This only pins the helper's contract; the call sites are
+        // covered where they live, in `tools-doc` and `commands-core`,
+        // because a test here cannot tell whether they call it.
         let mut doc = Document::new("t", 32, 32, Depth::Eight);
         assert!(!doc.dirty, "a fresh document is clean");
 

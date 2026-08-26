@@ -220,3 +220,138 @@ fn slices_and_artboards_are_separate_lists() {
     assert_eq!(doc.slices.len(), 1);
     assert!(doc.slices[0].user, "a drawn slice should be a user slice");
 }
+
+/// Every tool here writes straight to a list on the `Document` rather
+/// than going through `begin_edit`, so nothing set `dirty`. The fix that
+/// prompted this covered the Clear menu items but not the tools that
+/// *create* the state, which is the common way to get it: place notes or
+/// drag out slices on a saved document, close the tab, and there was no
+/// prompt and autosave had skipped it.
+#[test]
+fn creating_document_furniture_counts_as_an_unsaved_change() {
+    type Place = Box<dyn Fn(&mut Document)>;
+    let cases: Vec<(&str, Place)> = vec![
+        (
+            "artboard",
+            Box::new(|d: &mut Document| {
+                let mut t = RectTool::new(RectKind::Artboard);
+                let mut s = EditorState::default();
+                let mut c = ToolCtx {
+                    doc: d,
+                    state: &mut s,
+                };
+                t.on_pointer_down(&mut c, input(20.0, 20.0));
+                t.on_pointer_up(&mut c, input(120.0, 90.0));
+            }),
+        ),
+        (
+            "slice",
+            Box::new(|d: &mut Document| {
+                let mut t = RectTool::new(RectKind::Slice);
+                let mut s = EditorState::default();
+                let mut c = ToolCtx {
+                    doc: d,
+                    state: &mut s,
+                };
+                t.on_pointer_down(&mut c, input(20.0, 20.0));
+                t.on_pointer_up(&mut c, input(120.0, 90.0));
+            }),
+        ),
+        (
+            "note",
+            Box::new(|d: &mut Document| {
+                let mut t = PointTool::new(PointKind::Note);
+                let mut s = EditorState::default();
+                let mut c = ToolCtx {
+                    doc: d,
+                    state: &mut s,
+                };
+                t.on_pointer_down(&mut c, input(40.0, 40.0));
+            }),
+        ),
+        (
+            "count",
+            Box::new(|d: &mut Document| {
+                let mut t = PointTool::new(PointKind::Count);
+                let mut s = EditorState::default();
+                let mut c = ToolCtx {
+                    doc: d,
+                    state: &mut s,
+                };
+                t.on_pointer_down(&mut c, input(40.0, 40.0));
+            }),
+        ),
+    ];
+    for (what, place) in cases {
+        let mut d = doc();
+        d.dirty = false;
+        place(&mut d);
+        assert!(d.dirty, "placing a {what} left the document looking saved");
+    }
+}
+
+/// Removing and moving them counts too.
+#[test]
+fn removing_and_moving_furniture_counts_as_well() {
+    // A note dragged to a new position.
+    let mut d = doc();
+    let mut s = EditorState::default();
+    let mut t = PointTool::new(PointKind::Note);
+    {
+        let mut c = ToolCtx {
+            doc: &mut d,
+            state: &mut s,
+        };
+        t.on_pointer_down(&mut c, input(40.0, 40.0));
+        t.on_pointer_up(&mut c, input(40.0, 40.0));
+    }
+    d.dirty = false;
+    {
+        let mut c = ToolCtx {
+            doc: &mut d,
+            state: &mut s,
+        };
+        t.on_pointer_down(&mut c, input(40.0, 40.0));
+        t.on_pointer_move(&mut c, input(90.0, 70.0));
+        t.on_pointer_up(&mut c, input(90.0, 70.0));
+    }
+    assert!(d.dirty, "moving a note left the document looking saved");
+
+    // And alt-clicking it away.
+    d.dirty = false;
+    {
+        let mut c = ToolCtx {
+            doc: &mut d,
+            state: &mut s,
+        };
+        t.on_pointer_down(&mut c, alt(90.0, 70.0));
+    }
+    assert!(d.notes.is_empty(), "the note was removed");
+    assert!(d.dirty, "removing a note left the document looking saved");
+
+    // An artboard dragged across the canvas.
+    let mut d = doc();
+    let mut r = RectTool::new(RectKind::Artboard);
+    {
+        let mut c = ToolCtx {
+            doc: &mut d,
+            state: &mut s,
+        };
+        r.on_pointer_down(&mut c, input(20.0, 20.0));
+        r.on_pointer_up(&mut c, input(120.0, 90.0));
+    }
+    d.dirty = false;
+    {
+        let mut c = ToolCtx {
+            doc: &mut d,
+            state: &mut s,
+        };
+        r.on_pointer_down(&mut c, input(70.0, 55.0));
+        r.on_pointer_move(&mut c, input(140.0, 95.0));
+        r.on_pointer_up(&mut c, input(140.0, 95.0));
+    }
+    assert!(
+        d.dirty,
+        "moving an artboard left the document looking saved"
+    );
+}

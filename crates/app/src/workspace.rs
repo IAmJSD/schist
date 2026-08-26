@@ -4339,9 +4339,14 @@ impl Workspace {
     /// Remove every guide.
     pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
         if let Some(doc) = self.doc.as_mut() {
-            doc.guides.clear();
-            doc.mark_dirty();
-            doc.damage_all();
+            // Clearing an already-empty list changes nothing, and marking
+            // dirty for it means a spurious close prompt plus a full
+            // export every 30 seconds from autosave until the next save.
+            if !doc.guides.is_empty() {
+                doc.guides.clear();
+                doc.mark_dirty();
+                doc.damage_all();
+            }
         }
         self.status = "Guides cleared".into();
         self.after_change(cx);
