@@ -20,7 +20,8 @@ pub mod tile;
 pub use annotate::{Artboard, CountGroup, LayerComp, LayerCompState, Note, Slice};
 pub use blend::BlendMode;
 pub use document::{
-    blit_rgba8, Document, DocumentId, EditBuilder, Guide, PreservedResource, StrokeEdit,
+    blit_rgba8, blit_rgba_f32, Document, DocumentId, EditBuilder, Guide, PreservedResource,
+    StrokeEdit,
 };
 pub use geom::IntRect;
 pub use history::{Edit, EditOp, History, LayerProps};

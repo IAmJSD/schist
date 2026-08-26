@@ -1038,6 +1038,40 @@ impl StrokeEdit {
 
 /// Fill a whole raster layer tilemap region from an RGBA8 buffer
 /// (importer/test convenience; not undoable).
+/// Blit straight-alpha f32 RGBA into a tile map at the map's own depth.
+///
+/// The u8 form below is the common path, but it caps everything that goes
+/// through it at 8 bits per channel -- which is why every non-PSD import
+/// used to collapse a 16-bit scan to half its precision on the way in.
+pub fn blit_rgba_f32(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[f32]) {
+    use crate::tile::TILE_SIZE;
+    assert_eq!(
+        rgba.len(),
+        rect.width() as usize * rect.height() as usize * 4
+    );
+    let w = rect.width() as usize;
+    for coord in TileCoord::covering(&rect) {
+        let trect = coord.rect();
+        let clip = trect.intersect(&rect);
+        if clip.is_empty() {
+            continue;
+        }
+        let buf = tiles.get_mut_or_insert(coord, depth);
+        for y in clip.top..clip.bottom {
+            let sy = (y - rect.top) as usize;
+            let ly = (y - trect.top) as usize;
+            for x in clip.left..clip.right {
+                let sx = (x - rect.left) as usize;
+                let lx = (x - trect.left) as usize;
+                let s = (sy * w + sx) * 4;
+                let px = schist_color::Rgba::new(rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]);
+                buf.set(ly * TILE_SIZE as usize + lx, px);
+            }
+        }
+    }
+    tiles.prune_blank();
+}
+
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
     use crate::tile::TILE_SIZE;
     assert_eq!(
