@@ -21,8 +21,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Instructions a plugin may execute per call before it is unwound.
-/// Generous for image work, still bounded.
-const FUEL_PER_CALL: u64 = 20_000_000_000;
+///
+/// This was 2e10, which at roughly one unit per instruction is tens of
+/// billions: a runaway plugin froze the window for about four seconds per
+/// call, and `preview_filter` re-runs on every slider tick. 5e8 is still
+/// hundreds of millions of instructions, ample for per-pixel work on a
+/// large image, while keeping a wedged plugin to a hitch rather than a
+/// hang.
+const FUEL_PER_CALL: u64 = 500_000_000;
+
+/// Memory a plugin may commit, in bytes.
+///
+/// There was no limit at all: `memory.grow` costs about one fuel unit, so
+/// the fuel budget did not bound allocation, and a module looping on it
+/// reached 4 GiB without trapping. That is an OOM kill of the editor with
+/// every unsaved document in it.
+const MAX_PLUGIN_MEMORY: usize = 256 * 1024 * 1024;
 
 /// wasmtime carries its own error type; funnel it into `anyhow` at the
 /// boundary so the rest of the host reads uniformly.
@@ -36,6 +50,8 @@ const MAX_RETURN_BYTES: usize = 512 * 1024 * 1024;
 
 struct HostState {
     plugin_name: String,
+    /// Enforced by wasmtime through the `limiter` below.
+    limits: wasmtime::StoreLimits,
 }
 
 /// A loaded plugin: its manifest plus a ready-to-instantiate module.
@@ -167,8 +183,23 @@ impl LoadedPlugin {
                 abi::ABI_VERSION
             ));
         }
-        if manifest.id.trim().is_empty() {
+        // The id is plugin-controlled text that ends up in a
+        // newline-separated `disabled.txt`, so a newline in it would write
+        // extra lines and disable unrelated plugins as a side effect --
+        // and `retain(|d| d != id)` could never remove the injected entry,
+        // so it would not be undoable from the UI either.
+        let id = manifest.id.trim();
+        if id.is_empty() {
             return Err(anyhow!("plugin manifest has an empty id"));
+        }
+        if id.len() > 128
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err(anyhow!(
+                "plugin id {id:?} must be 1-128 chars of [A-Za-z0-9._-]"
+            ));
         }
         drop(instance);
 
@@ -185,8 +216,13 @@ impl LoadedPlugin {
             &self.engine,
             HostState {
                 plugin_name: name.to_string(),
+                limits: wasmtime::StoreLimitsBuilder::new()
+                    .memory_size(MAX_PLUGIN_MEMORY)
+                    .instances(1)
+                    .build(),
             },
         );
+        store.limiter(|state| &mut state.limits);
         store.set_fuel(FUEL_PER_CALL).map_err(wasm_err)?;
         let mut linker = wasmtime::Linker::new(&self.engine);
         // The entire host surface: one logging call.

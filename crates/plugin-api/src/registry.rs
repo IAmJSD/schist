@@ -29,7 +29,20 @@ impl PluginRegistry {
         self.tools.push(tool);
     }
 
+    /// Register a codec, ignoring one whose id is already taken.
+    ///
+    /// WASM plugins register after the built-ins, so a plugin declaring an
+    /// id that already exists never won a `find` lookup but did add a
+    /// second, dead entry to the menus with no diagnostic.
     pub fn register_codec(&mut self, codec: Box<dyn CodecPlugin>) {
+        if let Some(existing) = self.codecs.iter().find(|c| c.id() == codec.id()) {
+            log::warn!(
+                "ignoring codec {:?}: that id is already registered by {:?}",
+                codec.id(),
+                existing.name()
+            );
+            return;
+        }
         self.codecs.push(Arc::from(codec));
     }
 
@@ -37,7 +50,16 @@ impl PluginRegistry {
         self.commands.extend(plugin.commands());
     }
 
+    /// Register a filter, ignoring one whose id is already taken.
     pub fn register_filter(&mut self, filter: Box<dyn FilterPlugin>) {
+        if let Some(existing) = self.filters.iter().find(|f| f.id() == filter.id()) {
+            log::warn!(
+                "ignoring filter {:?}: that id is already registered by {:?}",
+                filter.id(),
+                existing.name()
+            );
+            return;
+        }
         self.filters.push(filter);
     }
 
@@ -93,4 +115,43 @@ impl PluginRegistry {
 pub trait PluginManifest {
     fn id(&self) -> &'static str;
     fn register(&self, registry: &mut PluginRegistry);
+}
+
+#[cfg(test)]
+mod duplicate_id_tests {
+    use super::*;
+    use crate::FilterValues;
+
+    struct Dummy(&'static str);
+
+    impl FilterPlugin for Dummy {
+        fn id(&self) -> &'static str {
+            self.0
+        }
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+        fn apply(
+            &self,
+            _pixels: &mut [f32],
+            _width: usize,
+            _height: usize,
+            _values: &FilterValues,
+        ) {
+        }
+    }
+
+    #[test]
+    fn a_duplicate_filter_id_is_ignored_not_shadowed() {
+        // WASM plugins register after the built-ins, so a colliding id
+        // never won a `find` lookup but did add a second, dead menu entry.
+        let mut reg = PluginRegistry::new();
+        reg.register_filter(Box::new(Dummy("filter.same")));
+        reg.register_filter(Box::new(Dummy("filter.same")));
+        assert_eq!(
+            reg.filters().filter(|f| f.id() == "filter.same").count(),
+            1,
+            "the second registration must be dropped"
+        );
+    }
 }
