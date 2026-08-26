@@ -182,6 +182,9 @@ struct Editing {
     /// The other end of the selection. Equal to `caret` when nothing is
     /// selected, so the two together describe both states.
     anchor: usize,
+    /// True while the layer's name is still the auto-generated one, so
+    /// typing may keep updating it.
+    name_is_auto: bool,
 }
 
 /// Does this char hang off the one before it, rather than standing alone?
@@ -228,7 +231,14 @@ impl TypeTool {
             if let Some(raster) = layer.as_raster_mut() {
                 raster.tiles = tiles;
             }
-            layer.name = display_name(&session.stored.spec.text);
+            // Only auto-name while the name still looks auto-generated.
+            // Renaming a text layer to "Headline" and then editing its
+            // text reverted the name on the next keystroke, and no
+            // `LayerProps` op was recorded, so undo could not bring it
+            // back either.
+            if session.name_is_auto {
+                layer.name = display_name(&session.stored.spec.text);
+            }
             write_stored(layer, &session.stored);
         }
         doc.add_damage(before.union(&bounds));
@@ -265,6 +275,7 @@ impl TypeTool {
             dirty: false,
             caret: 0,
             anchor: 0,
+            name_is_auto: true,
         });
     }
 
@@ -273,6 +284,14 @@ impl TypeTool {
         let (px, py) = (x.round() as i32, y.round() as i32);
         let mut hit = None;
         for layer in doc.tree.iter() {
+            // Every other tool filters these; the type tool did not, so
+            // clicking where a hidden text layer used to be silently
+            // started editing it (caret over nothing, keystrokes changing
+            // an invisible layer), and a locked one could be edited
+            // despite the lock.
+            if !layer.visible || layer.locked {
+                continue;
+            }
             let Some(stored) = read_stored(layer) else {
                 continue;
             };
@@ -332,6 +351,11 @@ impl ToolPlugin for TypeTool {
                     ..stored.spec.clone()
                 };
                 let end = stored.spec.text.len();
+                let name_is_auto = ctx
+                    .doc
+                    .tree
+                    .find(layer)
+                    .is_some_and(|l| l.name == display_name(&stored.spec.text));
                 self.editing = Some(Editing {
                     layer,
                     stored,
@@ -340,6 +364,7 @@ impl ToolPlugin for TypeTool {
                     dirty: false,
                     caret: end,
                     anchor: end,
+                    name_is_auto,
                 });
             }
             None => self.start_new(ctx, input.x, input.y),
@@ -1260,6 +1285,44 @@ mod tests {
     }
 
     #[test]
+    fn a_user_set_layer_name_survives_editing_its_text() {
+        // `refresh` reset the name to the first line of the text on every
+        // keystroke, outside any edit, so a name the user had set was
+        // reverted by typing and undo could not bring it back: no
+        // `LayerProps` op was ever recorded for it.
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "Hi");
+        }
+        let id = tool.editing.as_ref().unwrap().layer;
+
+        // The user renames the layer, which makes the name no longer the
+        // auto-generated one.
+        d.tree.find_mut(id).unwrap().name = "Headline".into();
+        tool.editing.as_mut().unwrap().name_is_auto = false;
+
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            type_text(&mut tool, &mut ctx, "!");
+        }
+        assert_eq!(
+            d.tree.find(id).unwrap().name,
+            "Headline",
+            "typing must not overwrite a name the user set"
+        );
+    }
+
+    #[test]
     fn discarding_an_empty_layer_leaves_no_junk_history() {
         let mut d = doc();
         let mut state = schist_plugin_api::EditorState::default();
@@ -1456,5 +1519,57 @@ mod tests {
         let mut d = doc();
         let mut tool = editing(&mut d, "hi");
         assert!(!key(&mut tool, &mut d, "s", ctrl()));
+    }
+
+    #[test]
+    fn an_auto_named_layer_still_follows_its_text() {
+        // The other direction: while the name is still the generated one,
+        // it should keep tracking what is typed.
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi");
+        let id = tool.editing.as_ref().unwrap().layer;
+        assert_eq!(ctx.doc.tree.find(id).unwrap().name, "Hi");
+    }
+
+    #[test]
+    fn a_hidden_or_locked_text_layer_is_not_entered() {
+        // Every other tool filters these. Clicking where a hidden text
+        // layer used to be silently started editing it.
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "Hi");
+            tool.on_commit(&mut ctx);
+        }
+        let id = d.tree.iter().find(|l| l.name == "Hi").unwrap().id;
+        let layers_before = d.tree.len();
+        let b = d.tree.find(id).unwrap().tight_bounds();
+        d.tree.find_mut(id).unwrap().visible = false;
+
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            // Clicking the hidden layer must start a *new* layer instead
+            // of resuming the invisible one.
+            tool.on_pointer_down(&mut ctx, input(b.left as f32 + 2.0, b.top as f32 + 2.0));
+        }
+        let session = tool.editing.as_ref().expect("a session started");
+        assert_ne!(session.layer, id, "must not resume the hidden layer");
+        assert!(d.tree.len() > layers_before, "a new layer was created");
     }
 }
