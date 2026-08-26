@@ -489,12 +489,14 @@ fn import(lib: &LibHeif, bytes: &[u8]) -> anyhow::Result<Document> {
             for y in 0..h as usize {
                 let row = std::slice::from_raw_parts(data.add(y * stride), w as usize * 8);
                 pixels.extend(
-                    row.chunks_exact(2)
-                        .map(|s| u16::from_le_bytes([s[0], s[1]]) as f32 / max),
+                    row.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|s| u16::from_le_bytes(*s) as f32 / max),
                 );
             }
             if premultiplied {
-                for px in pixels.chunks_exact_mut(4) {
+                for px in pixels.as_chunks_mut::<4>().0 {
                     if px[3] > 0.0 {
                         let (r, g, b) = (px[0] / px[3], px[1] / px[3], px[2] / px[3]);
                         (px[0], px[1], px[2]) = (r, g, b);
@@ -524,7 +526,7 @@ fn import(lib: &LibHeif, bytes: &[u8]) -> anyhow::Result<Document> {
                 out.extend_from_slice(row);
             }
             if premultiplied {
-                for px in out.chunks_exact_mut(4) {
+                for px in out.as_chunks_mut::<4>().0 {
                     if px[3] > 0 {
                         for c in 0..3 {
                             px[c] = (px[c] as u32 * 255 / px[3] as u32).min(255) as u8;
