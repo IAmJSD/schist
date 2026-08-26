@@ -741,3 +741,154 @@ fn an_ordinary_layer_gains_no_vector_blocks() {
         "a vector mask appeared from nowhere"
     );
 }
+
+/// Four classes of PSD data were read and discarded, then regenerated as
+/// empty on save: the Global Layer Mask Info block, the document-level
+/// additional-info blocks (`Patt` pattern definitions, `lnk2` linked
+/// smart objects, `Txt2`, `FMsk`) and per-layer blending ranges. Open a
+/// Photoshop file that has any of them, save, and they were gone — while
+/// the README says every block is preserved byte-for-byte.
+#[test]
+fn document_level_blocks_survive_a_round_trip() {
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "art",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    doc.global_layer_mask = vec![0, 1, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 0];
+    doc.preserved_layer_info = vec![
+        RawBlock {
+            key: *b"Patt",
+            data: b"pattern definitions go here".to_vec(),
+        },
+        RawBlock {
+            key: *b"lnk2",
+            data: b"linked smart object".to_vec(),
+        },
+    ];
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert_eq!(back.global_layer_mask, doc.global_layer_mask);
+    let keys: Vec<[u8; 4]> = back.preserved_layer_info.iter().map(|b| b.key).collect();
+    assert_eq!(keys, vec![*b"Patt", *b"lnk2"]);
+    assert_eq!(
+        back.preserved_layer_info[0].data,
+        b"pattern definitions go here"
+    );
+    assert_eq!(back.preserved_layer_info[1].data, b"linked smart object");
+    // And the layer tree still reads back, so the extra blocks did not
+    // knock the section lengths out of step.
+    assert_eq!(back.tree.len(), 1);
+    assert_eq!(pixel(&back, 0, 1, 1), [10, 20, 30, 255]);
+}
+
+/// Photoshop's "Blend If" sliders live in the per-layer blending-ranges
+/// block. It was skipped on read and written back as a zero length.
+#[test]
+fn layer_blending_ranges_survive_a_round_trip() {
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "art",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    );
+    // A composite range plus one channel range: eight bytes each.
+    layer.blending_ranges = vec![
+        0, 0, 255, 255, 0, 0, 255, 255, // composite
+        0, 20, 200, 255, 0, 0, 255, 255, // channel 0
+    ];
+    let expected = layer.blending_ranges.clone();
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert_eq!(back.tree.layers[0].blending_ranges, expected);
+}
+
+/// A layer that never had them still writes none, so an ordinary file
+/// does not grow a block Photoshop would have omitted.
+#[test]
+fn a_layer_without_blending_ranges_writes_none() {
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "art",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert!(back.tree.layers[0].blending_ranges.is_empty());
+    assert!(back.global_layer_mask.is_empty());
+    assert!(back.preserved_layer_info.is_empty());
+}
+
+/// The README says "Smart objects keep their source pixels, so
+/// transforming one repeatedly costs no more quality than transforming it
+/// once". That was true inside a session and false across a save: the
+/// payload rides on `Layer::smart`, which the writer never serialized, so
+/// after save-and-reopen the layer was a plain raster of its last
+/// rasterization and every further transform degraded it.
+#[test]
+fn smart_objects_keep_their_source_pixels_across_a_save() {
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "placed",
+        IntRect::from_xywh(0, 0, 16, 16),
+        [200, 40, 60, 255],
+        Depth::Eight,
+    );
+    // A source twice the size of what is on the canvas, scaled down —
+    // exactly the case that degrades once the source is gone.
+    let mut source = schist_core::TileMap::default();
+    let buf = [200u8, 40, 60, 255].repeat(32 * 32);
+    blit_rgba8(
+        &mut source,
+        Depth::Eight,
+        IntRect::from_xywh(0, 0, 32, 32),
+        &buf,
+    );
+    let mut smart = schist_core::SmartObject::wrap(source, "placed.png");
+    smart.transform = schist_core::Affine {
+        a: 0.5,
+        b: 0.0,
+        c: 0.0,
+        d: 0.5,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    smart.filter = schist_core::Filter::Bicubic;
+    layer.smart = Some(Box::new(smart));
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let smart = back.tree.layers[0]
+        .smart
+        .as_deref()
+        .expect("the smart object should have survived the save");
+    assert_eq!(smart.name, "placed.png");
+    assert_eq!(smart.filter, schist_core::Filter::Bicubic);
+    assert_eq!(smart.transform.a, 0.5);
+    assert_eq!(smart.transform.d, 0.5);
+    assert_eq!(smart.source_bounds, IntRect::from_xywh(0, 0, 32, 32));
+    // The full-resolution source, not the 16x16 rasterization.
+    assert_eq!(smart.source.pixel(31, 31).to_u8(), [200, 40, 60, 255]);
+    assert_eq!(smart.source.pixel(20, 20).to_u8(), [200, 40, 60, 255]);
+}
+
+/// An ordinary layer gains no smart-object block, so files do not grow a
+/// key for something they do not have.
+#[test]
+fn an_ordinary_layer_gains_no_smart_object_block() {
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "art",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    let bytes = write_psd(&doc).unwrap();
+    assert!(!bytes.windows(4).any(|w| w == b"ScSo"));
+    assert!(read_psd(&bytes).unwrap().tree.layers[0].smart.is_none());
+}

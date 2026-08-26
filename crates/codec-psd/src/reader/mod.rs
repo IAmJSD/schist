@@ -40,6 +40,8 @@ pub fn read_psd(bytes: &[u8]) -> Result<Document, PsdError> {
 
     // 4. Layer & Mask Information.
     let parsed = layers::parse_layer_and_mask_info(&mut cur, &header)?;
+    let global_layer_mask = parsed.global_layer_mask;
+    let preserved_layer_info = parsed.preserved_layer_info;
     let mut tree_layers = parsed.layers;
 
     // 5. Merged image data. Only decoded when the file is flattened (zero
@@ -65,6 +67,8 @@ pub fn read_psd(bytes: &[u8]) -> Result<Document, PsdError> {
     }
     doc.icc_profile = res.icc_profile;
     doc.preserved_resources = res.preserved;
+    doc.global_layer_mask = global_layer_mask;
+    doc.preserved_layer_info = preserved_layer_info;
     if !color_mode_data.is_empty() {
         doc.preserved_resources.insert(
             0,

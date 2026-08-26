@@ -13,6 +13,7 @@
 //! them, which is the inverse of what the reader folds up.
 
 use crate::error::PsdError;
+use crate::PSB_U64_KEYS;
 use schist_color::{ColorMode, Depth};
 use schist_core::{
     Document, IntRect, Layer, LayerKind, LayerMask, MaskTileMap, TileCoord, TileMap, TILE_SIZE,
@@ -214,6 +215,8 @@ struct Prepared {
     name: String,
     /// Additional layer info blocks: (key, payload).
     extras: Vec<([u8; 4], Vec<u8>)>,
+    /// The layer's blending-ranges block, verbatim.
+    blending_ranges: Vec<u8>,
 }
 
 struct MaskOut {
@@ -264,8 +267,28 @@ fn write_layer_and_mask_info(b: &mut Buf, doc: &Document, psb: bool) -> Result<(
     b.pad_to(2);
     b.patch_len(layer_info_at, psb);
 
-    // --- Global layer mask info (none) ---
-    b.u32(0);
+    // --- Global layer mask info ---
+    // Preserved verbatim; a zero length here dropped the block from
+    // every file that had one.
+    b.u32(doc.global_layer_mask.len() as u32);
+    b.bytes(&doc.global_layer_mask);
+
+    // --- Document-level additional layer information ---
+    // Pattern definitions, linked smart objects and the rest, exactly as
+    // they arrived. `Lr16`/`Lr32`/`Layr` are not in here: the layer tree
+    // above is regenerated, so echoing the old copy back would write it
+    // twice. Spec quirk: these pad to 4 bytes, not 2.
+    for block in &doc.preserved_layer_info {
+        b.bytes(b"8BIM");
+        b.bytes(&block.key);
+        if psb && PSB_U64_KEYS.contains(&block.key) {
+            b.u64(block.data.len() as u64);
+        } else {
+            b.u32(block.data.len() as u32);
+        }
+        b.bytes(&block.data);
+        b.pad_to(4);
+    }
     b.patch_len(section_at, psb);
     Ok(())
 }
@@ -302,8 +325,10 @@ fn write_layer_record(b: &mut Buf, p: &Prepared, psb: bool) {
         }
         None => b.u32(0),
     }
-    // Layer blending ranges: regenerated as "none".
-    b.u32(0);
+    // Layer blending ranges, verbatim. Emitting a zero length here lost
+    // any "Blend If" the file arrived with.
+    b.u32(p.blending_ranges.len() as u32);
+    b.bytes(&p.blending_ranges);
     b.pascal(&p.name, 4);
     for (key, payload) in &p.extras {
         b.bytes(b"8BIM");
@@ -338,6 +363,7 @@ fn prepare_entry(entry: &Entry<'_>, doc: &Document, psb: bool) -> Result<Prepare
             mask: None,
             name: "</Layer group>".into(),
             extras: vec![(*b"lsct", lsct_payload(3, None))],
+            blending_ranges: Vec::new(),
         }),
         Entry::GroupHeader(layer, open) => {
             let mut p = prepare_common(layer, doc, psb, empty_channels(doc), IntRect::EMPTY);
@@ -401,6 +427,7 @@ fn prepare_common(
         mask,
         name: layer.name.clone(),
         extras: build_extras(layer, doc),
+        blending_ranges: layer.blending_ranges.clone(),
     }
 }
 
@@ -431,6 +458,10 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
         if &block.key == b"lfx2" || &block.key == b"lrFX" {
             continue;
         }
+        // Regenerated from `Layer::smart` below.
+        if block.key == crate::smart::SMART_BLOCK_KEY {
+            continue;
+        }
         if vector && (&block.key == b"vmsk" || &block.key == b"vsms" || &block.key == b"SoCo") {
             continue;
         }
@@ -447,6 +478,13 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
     }
     if let Some(payload) = encoded {
         out.push((*b"lfx2", payload));
+    }
+    // The smart object's source pixels. Photoshop's own `SoLd`/`PlLd`
+    // descriptors point at pixels held elsewhere in the file, which we
+    // preserve but do not author; this is our own block, ignored by
+    // readers that do not know it.
+    if let Some(payload) = crate::smart::write_smart(layer) {
+        out.push((crate::smart::SMART_BLOCK_KEY, payload));
     }
     out.extend(shape_blocks(layer, doc));
     out

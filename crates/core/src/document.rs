@@ -55,6 +55,18 @@ pub struct Document {
     pub history: History,
     /// PSD image resources we preserve for round-trip fidelity.
     pub preserved_resources: Vec<PreservedResource>,
+    /// The PSD Global Layer Mask Info payload, verbatim.
+    ///
+    /// Read and discarded, then written back as a zero length -- so the
+    /// block was silently dropped on every save.
+    pub global_layer_mask: Vec<u8>,
+    /// Document-level additional layer information blocks, verbatim:
+    /// `Patt` pattern definitions, `lnk2` linked smart objects, `Txt2`,
+    /// `FMsk` and anything else a writer put there. Also read and
+    /// discarded before; open a file with pattern definitions or linked
+    /// smart objects, save, and all of it was gone -- while the README
+    /// promised every block preserved byte-for-byte.
+    pub preserved_layer_info: Vec<crate::layer::RawBlock>,
     /// Monotonic counter bumped on every visible change; views compare it
     /// to decide whether to recomposite.
     pub revision: u64,
@@ -108,6 +120,8 @@ impl Document {
             selected: Vec::new(),
             history: History::new(),
             preserved_resources: Vec::new(),
+            global_layer_mask: Vec::new(),
+            preserved_layer_info: Vec::new(),
             revision: 0,
             guides: Vec::new(),
             last_selection: None,
