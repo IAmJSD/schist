@@ -532,8 +532,29 @@ impl ToolPlugin for TransformTool {
                 clip,
             ),
         };
+        // The mask moves with the artwork it clips. Leaving it behind cut
+        // the transformed layer along the mask's old outline.
+        let moved_mask = ctx
+            .doc
+            .tree
+            .find(session.layer)
+            .and_then(|l| l.mask.as_ref())
+            .map(|mask| {
+                let mut next = mask.clone();
+                next.tiles = schist_core::resample::transform_mask(
+                    &mask.tiles,
+                    mask.default_value,
+                    &session.matrix(),
+                    clip,
+                );
+                next.bounds = session.matrix().transform_bounds(mask.bounds);
+                next
+            });
         let mut edit = ctx.doc.begin_edit("Free Transform");
         edit.replace_layer_tiles(session.layer, tiles);
+        if let Some(mask) = moved_mask {
+            edit.set_mask(session.layer, Some(mask));
+        }
         if let Some(so) = smart {
             edit.set_smart_object(session.layer, Some(Box::new(so)));
         }
@@ -773,6 +794,10 @@ pub fn resize_image(doc: &mut Document, width: u32, height: u32, filter: Filter)
         );
         edit.replace_layer_tiles(id, tiles);
     }
+    // Masks scale with the pixels they clip. Leaving them at the old size
+    // meant halving a document clipped every masked layer to a quarter of
+    // its intended area.
+    rescale_masks(&mut edit, from, (width, height));
     edit.set_canvas_size(width, height);
     edit.commit();
 }
@@ -1046,6 +1071,33 @@ fn double_plane(src: &[f32], w: usize, h: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Rescale every layer mask by the same factor as the canvas.
+fn rescale_masks(edit: &mut schist_core::EditBuilder, from: (u32, u32), to: (u32, u32)) {
+    if from.0 == 0 || from.1 == 0 {
+        return;
+    }
+    let m = schist_core::Affine::scale(to.0 as f32 / from.0 as f32, to.1 as f32 / from.1 as f32);
+    let clip = IntRect::from_size(to.0, to.1);
+    let masked: Vec<_> = edit
+        .doc()
+        .tree
+        .iter()
+        .filter(|l| l.mask.is_some())
+        .map(|l| l.id)
+        .collect();
+    for id in masked {
+        let Some(mask) = edit.doc().tree.find(id).and_then(|l| l.mask.as_ref()) else {
+            continue;
+        };
+        let tiles =
+            schist_core::resample::transform_mask(&mask.tiles, mask.default_value, &m, clip);
+        let mut next = mask.clone();
+        next.tiles = tiles;
+        next.bounds = m.transform_bounds(mask.bounds).intersect(&clip);
+        edit.set_mask(id, Some(next));
+    }
 }
 
 /// Change the canvas without rescaling pixels (Canvas Size). `anchor` is the
@@ -1374,5 +1426,51 @@ mod tests {
         assert_eq!(px(&doc, 130, 130), [0, 128, 255, 255]);
         doc.undo();
         assert_eq!(px(&doc, 30, 30), [0, 128, 255, 255]);
+    }
+
+    #[test]
+    fn image_size_rescales_layer_masks_with_the_pixels() {
+        // The mask stayed at its old size while the artwork halved, so a
+        // masked layer was clipped to a quarter of its intended area.
+        use schist_core::LayerMask;
+        let mut doc = doc_with_square();
+        let id = doc.tree.layers[0].id;
+        {
+            let layer = doc.tree.find_mut(id).unwrap();
+            let mut mask = LayerMask::new_revealing();
+            // Reveal the left half of the document.
+            for coord in schist_core::TileCoord::covering(&IntRect::from_xywh(0, 0, 100, 200)) {
+                let trect = coord.rect();
+                let buf = mask.tiles.get_mut_or_insert(coord);
+                for ly in 0..schist_core::TILE_SIZE {
+                    for lx in 0..schist_core::TILE_SIZE {
+                        if trect.left + lx < 100 {
+                            buf[(ly * schist_core::TILE_SIZE + lx) as usize] = 255;
+                        }
+                    }
+                }
+            }
+            mask.bounds = IntRect::from_xywh(0, 0, 100, 200);
+            layer.mask = Some(mask);
+        }
+
+        resize_image(&mut doc, 100, 100, Filter::Bilinear);
+
+        let mask = doc.tree.find(id).unwrap().mask.as_ref().expect("mask kept");
+        // The revealed half must have halved with the canvas: covered at
+        // x=40, clear at x=60.
+        assert!(
+            mask.tiles.value(40, 50) > 200,
+            "left half should stay revealed"
+        );
+        assert!(
+            mask.tiles.value(60, 50) < 55,
+            "right half should stay hidden"
+        );
+        assert!(
+            mask.bounds.right <= 100,
+            "mask bounds must be inside the new canvas: {:?}",
+            mask.bounds
+        );
     }
 }

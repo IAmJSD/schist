@@ -297,9 +297,12 @@ impl Document {
                     if let Some(mask) = &mut l.mask {
                         match target {
                             Some(buf) => mask.tiles.insert(*coord, buf.clone()),
-                            None => {
-                                mask.tiles.prune_blank();
-                            }
+                            // The tile did not exist before, so undo has
+                            // to drop it. `prune_blank` could not: it only
+                            // removes all-zero tiles, so anything the
+                            // stroke left with coverage survived the undo
+                            // while unrelated blank tiles were deleted.
+                            None => mask.tiles.remove(*coord),
                         }
                     }
                 }
@@ -1191,8 +1194,12 @@ impl StrokeEdit {
         for ((layer, coord), before) in self.mask_befores {
             if let Some(l) = doc.tree.find_mut(layer) {
                 if let Some(m) = &mut l.mask {
-                    if let Some(buf) = before {
-                        m.tiles.insert(coord, buf);
+                    // Mirrors the raster branch above: `None` means the
+                    // tile did not exist, so rolling back removes it
+                    // rather than leaving the cancelled paint behind.
+                    match before {
+                        Some(buf) => m.tiles.insert(coord, buf),
+                        None => m.tiles.remove(coord),
                     }
                 }
             }
@@ -1667,5 +1674,62 @@ mod tests {
         assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&original));
         assert_eq!(doc.redo().as_deref(), Some("Camera Raw Development"));
         assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&changed));
+    }
+
+    #[test]
+    fn undoing_a_mask_write_removes_a_tile_it_created() {
+        // `prune_blank` could not remove a tile the stroke created with
+        // any coverage, so the paint survived the undo, and it deleted
+        // unrelated blank tiles as collateral.
+        use crate::layer::LayerMask;
+        let mut doc = Document::new("t", 64, 64, Depth::Eight);
+        let mut layer = Layer::new_raster("l");
+        layer.mask = Some(LayerMask::new_revealing());
+        let id = layer.id;
+        doc.push_layer(layer);
+
+        let coord = TileCoord::containing(0, 0);
+        assert!(doc
+            .tree
+            .find(id)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .tiles
+            .get(coord)
+            .is_none());
+
+        let mut edit = doc.begin_edit("Paint Mask");
+        if let Some(buf) = edit.writable_mask_tile(id, coord) {
+            buf[0] = 200;
+        }
+        edit.commit();
+        assert!(
+            doc.tree
+                .find(id)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .tiles
+                .get(coord)
+                .is_some(),
+            "the stroke created a tile"
+        );
+
+        doc.undo();
+        assert!(
+            doc.tree
+                .find(id)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .tiles
+                .get(coord)
+                .is_none(),
+            "undo must remove a tile that did not exist before"
+        );
     }
 }

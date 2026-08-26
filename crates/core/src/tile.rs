@@ -381,6 +381,17 @@ impl MaskTileMap {
         Arc::make_mut(arc)
     }
 
+    /// Drop a tile entirely.
+    ///
+    /// Undoing a mask write has to be able to remove a tile the stroke
+    /// created, which `prune_blank` cannot do: it only drops tiles that
+    /// are entirely zero, so any tile the stroke left with coverage
+    /// survived the undo, and other legitimately blank tiles were deleted
+    /// as collateral.
+    pub fn remove(&mut self, coord: TileCoord) {
+        self.tiles.remove(&coord);
+    }
+
     pub fn insert(&mut self, coord: TileCoord, buf: Arc<[u8; TILE_PIXELS]>) {
         self.tiles.insert(coord, buf);
     }

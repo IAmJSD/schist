@@ -6,7 +6,7 @@
 //! transparent pixels into the result and fringe the edge.
 
 use crate::geom::IntRect;
-use crate::tile::{TileBuf, TileCoord, TileMap, TILE_SIZE};
+use crate::tile::{TileBuf, TileCoord, TileMap, TILE_PIXELS, TILE_SIZE};
 use rayon::prelude::*;
 use schist_color::{Depth, Rgba};
 
@@ -410,6 +410,55 @@ pub fn resize_tiles(
     }
     let m = Affine::scale(to.0 as f32 / from.0 as f32, to.1 as f32 / from.1 as f32);
     transform_tiles(src, &m, depth, filter, IntRect::from_size(to.0, to.1))
+}
+
+/// Transform a layer mask by the same matrix as its pixels.
+///
+/// Image Size and Free Transform resampled `raster.tiles` and left
+/// `layer.mask` at its old size and place, so the mask clipped the
+/// artwork along the wrong edge afterwards. Bilinear throughout: a mask is
+/// coverage, and nearest-neighbour would alias its edge.
+pub fn transform_mask(
+    src: &crate::tile::MaskTileMap,
+    default_value: u8,
+    m: &Affine,
+    clip: IntRect,
+) -> crate::tile::MaskTileMap {
+    let mut out = crate::tile::MaskTileMap::new();
+    let Some(inv) = m.invert() else { return out };
+    if clip.is_empty() {
+        return out;
+    }
+    for coord in TileCoord::covering(&clip) {
+        let trect = coord.rect();
+        let region = trect.intersect(&clip);
+        if region.is_empty() {
+            continue;
+        }
+        let mut wrote = false;
+        let mut buf = [default_value; TILE_PIXELS];
+        for y in region.top..region.bottom {
+            for x in region.left..region.right {
+                let (sx, sy) = inv.apply(x as f32 + 0.5, y as f32 + 0.5);
+                // Bilinear over the four neighbours, in mask space.
+                let (fx, fy) = (sx - 0.5, sy - 0.5);
+                let (ix, iy) = (fx.floor(), fy.floor());
+                let (tx, ty) = (fx - ix, fy - iy);
+                let at =
+                    |ox: i32, oy: i32| -> f32 { src.value(ix as i32 + ox, iy as i32 + oy) as f32 };
+                let top = at(0, 0) * (1.0 - tx) + at(1, 0) * tx;
+                let bottom = at(0, 1) * (1.0 - tx) + at(1, 1) * tx;
+                let v = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
+                let i = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                buf[i] = v;
+                wrote |= v != default_value;
+            }
+        }
+        if wrote {
+            out.insert(coord, std::sync::Arc::new(buf));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
