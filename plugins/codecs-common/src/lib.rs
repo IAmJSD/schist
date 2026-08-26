@@ -103,19 +103,6 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
     };
 
     flat_document(title, w, h, rgba.as_raw(), icc)
-    let mut doc = Document::new(title, w, h, Depth::Eight);
-    doc.icc_profile = icc;
-    let mut layer = Layer::new_raster("Background");
-    blit_rgba8(
-        &mut layer.as_raster_mut().unwrap().tiles,
-        Depth::Eight,
-        IntRect::from_size(w, h),
-        rgba.as_raw(),
-    );
-    doc.push_layer(layer);
-    doc.damage_all();
-    doc.mark_saved();
-    Ok(doc)
 }
 
 fn export_flat(

@@ -37,7 +37,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         focused_field: ws.focused_field,
         field_buffer: ws.field_buffer.clone(),
     };
-    Some(match modal {
+    // Each dialog's primary button registers itself as the default
+    // action while it builds, so Enter can fire it.
+    ui::reset_default_action();
+    let body = match modal {
         Modal::ImageSize {
             width,
             height,
@@ -114,7 +117,9 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             profile_dialog(&state, convert, selected, cx).into_any_element()
         }
         m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
-    })
+    };
+    ws.default_action = ui::take_default_action();
+    Some(body)
 }
 
 /// An image was dropped on the window while a document is open: its own
@@ -2114,6 +2119,7 @@ fn layer_properties(
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let focused = state.focused_field == Some("layer-name");
+    let committed = name.clone();
     let shown = if focused && !state.field_buffer.is_empty() {
         state.field_buffer.clone()
     } else {
@@ -2138,8 +2144,8 @@ fn layer_properties(
             .text_size(px(12.0))
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|ws, _e, _w, cx| {
-                    ws.focus_field("layer-name");
+                cx.listener(move |ws, _e, _w, cx| {
+                    ws.focus_field("layer-name", committed.clone());
                     cx.notify();
                 }),
             )
@@ -2210,6 +2216,7 @@ fn new_document_dialog(
     };
 
     let name_focused = state.focused_field == Some("new-doc-name");
+    let committed = name.clone();
     let shown_name = if name_focused && !state.field_buffer.is_empty() {
         state.field_buffer.clone()
     } else {
@@ -2288,8 +2295,8 @@ fn new_document_dialog(
                 .text_size(px(12.0))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(|ws, _e, _w, cx| {
-                        ws.focus_field("new-doc-name");
+                    cx.listener(move |ws, _e, _w, cx| {
+                        ws.focus_field("new-doc-name", committed.clone());
                         cx.notify();
                     }),
                 )

@@ -634,10 +634,11 @@ fn hex_field(
     buffer: &str,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let committed = format!("{:06X}", to_hex(chosen));
     let shown: SharedString = if focused {
         format!("#{buffer}").into()
     } else {
-        format!("#{:06X}", to_hex(chosen)).into()
+        format!("#{committed}").into()
     };
     ui::field_row(
         "#",
@@ -658,8 +659,8 @@ fn hex_field(
             .text_size(px(11.0))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|ws, _e, _w, cx| {
-                    ws.focus_field("cp-hex");
+                cx.listener(move |ws, _e, _w, cx| {
+                    ws.focus_field("cp-hex", committed.clone());
                     cx.notify();
                 }),
             )

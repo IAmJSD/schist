@@ -212,6 +212,9 @@ pub struct Workspace {
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
+    /// What Enter does in the open dialog: the primary button's action,
+    /// captured while the dialog rendered.
+    pub default_action: Option<crate::ui::DialogAction>,
     /// Third-party plugin registry state.
     pub plugins: schist_plugin_host_wasm::PluginManager,
     /// Plugin enable/disable requested from the manager UI, applied on the
@@ -810,6 +813,7 @@ impl Workspace {
             modal_stack: Vec::new(),
             focused_field: None,
             field_buffer: String::new(),
+            default_action: None,
             plugins,
             pending_plugin_toggle: None,
             view: load_view_options(),
@@ -3899,6 +3903,7 @@ impl Workspace {
         self.revert_layer_style();
         // Closing the picker uncovers the dialog it was opened from.
         self.modal = self.modal_stack.pop();
+        self.default_action = None;
         self.focused_field = None;
         self.field_buffer.clear();
         self.open_popup = None;
@@ -3912,9 +3917,32 @@ impl Workspace {
         }
     }
 
-    pub fn focus_field(&mut self, id: &'static str) {
+    /// Focus a field, seeded with the text it is currently showing.
+    ///
+    /// The buffer used to be cleared, and the field falls back to
+    /// rendering its committed value while the buffer is empty, so a
+    /// freshly clicked field looked full but behaved empty: backspace
+    /// popped nothing, and changing 1920 to 1820 meant retyping all four
+    /// digits.
+    pub fn focus_field(&mut self, id: &'static str, current: impl Into<String>) {
         self.focused_field = Some(id);
-        self.field_buffer.clear();
+        self.field_buffer = current.into();
+    }
+
+    /// Fire the open dialog's primary button, as Enter should.
+    pub fn confirm_modal(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> bool {
+        let Some(action) = self.default_action.clone() else {
+            return false;
+        };
+        action(self, window, cx);
+        true
+    }
+
+    /// Push whatever is in the focused field into the modal and unfocus.
+    pub fn commit_focused_field(&mut self) {
+        if let Some(id) = self.focused_field {
+            self.commit_field(id);
+        }
     }
 
     /// Feed a keystroke to the focused numeric field. Returns true when the
@@ -3950,7 +3978,7 @@ impl Workspace {
                             || (hex
                                 && self.field_buffer.len() + t.len() <= 6
                                 && t.chars().all(|c| c.is_ascii_hexdigit()))
-                            || (!hex && t.chars().all(|c| c.is_ascii_digit()))) =>
+                            || (!hex && numeric_accepts(&self.field_buffer, t))) =>
                 {
                     self.field_buffer.push_str(t)
                 }
@@ -6141,8 +6169,28 @@ impl Workspace {
             )
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
-            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
+            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
                 if ws.layer_rename_key(ev, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                // A modal owns the keyboard while it is up. Without this
+                // the key fell through to `tool_key` whenever no field
+                // was focused, so opening a dialog on top of a text
+                // session typed into the layer behind it.
+                if ws.modal.is_some() {
+                    match ev.keystroke.key.as_str() {
+                        // Enter is the dialog's primary button, which is
+                        // the only way to reach OK without the mouse.
+                        "enter" => {
+                            ws.commit_focused_field();
+                            ws.confirm_modal(window, cx);
+                        }
+                        key => {
+                            ws.field_key(key, ev.keystroke.key_char.as_deref());
+                        }
+                    }
+                    cx.notify();
                     cx.stop_propagation();
                     return;
                 }
@@ -6789,9 +6837,49 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Whether `t` can be appended to a numeric field holding `buffer`.
+///
+/// Digits alone used to be accepted, yet every one of these fields is
+/// read back with `parse::<f32>()`, so fractional and negative values
+/// were unreachable from the keyboard -- the only way to a non-integer
+/// was the +/- step buttons. A leading `-` and a single `.` go through
+/// now; `parse` still rejects whatever is malformed.
+fn numeric_accepts(buffer: &str, t: &str) -> bool {
+    let mut len = buffer.len();
+    let mut dot = buffer.contains('.');
+    for c in t.chars() {
+        match c {
+            '0'..='9' => {}
+            '-' if len == 0 => {}
+            '.' if !dot => dot = true,
+            _ => return false,
+        }
+        len += c.len_utf8();
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    use super::numeric_accepts;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn numeric_fields_take_fractions_and_negatives() {
+        // These fields are all read back with `parse::<f32>()`, but only
+        // ASCII digits were let through, so no fractional or negative
+        // value could be typed at all.
+        assert!(numeric_accepts("", "-"));
+        assert!(numeric_accepts("1", "."));
+        assert!(numeric_accepts("1.", "5"));
+        assert!(numeric_accepts("-1.", "5"));
+        assert!(numeric_accepts("", "12.5"));
+        // A minus only leads, and there is only one decimal point.
+        assert!(!numeric_accepts("1", "-"));
+        assert!(!numeric_accepts("1.5", "."));
+        assert!(!numeric_accepts("", "1.2.3"));
+        assert!(!numeric_accepts("", "e"));
+    }
 
     fn snap(secs: u64, name: &str) -> (SystemTime, std::path::PathBuf) {
         (

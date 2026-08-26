@@ -10,6 +10,8 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The chrome colours for one theme. Everything that isn't document
 /// content draws from here; the active set is swapped by [`set_light`].
@@ -120,12 +122,44 @@ pub fn palette() -> &'static Palette {
 }
 
 /// A labelled push button.
+/// What a dialog does when the user presses Enter.
+pub type DialogAction = Rc<dyn Fn(&mut Workspace, &mut gpui::Window, &mut Context<Workspace>)>;
+
+thread_local! {
+    /// The primary button built most recently.
+    ///
+    /// A dialog's default action is, by definition, whatever its primary
+    /// button does, and the buttons are built as plain closures deep
+    /// inside each dialog body with no path back to the workspace. Rather
+    /// than thread an out-parameter through every dialog function, the
+    /// primary button leaves its handler here and `dialogs::render` --
+    /// which brackets the whole build and does hold `&mut Workspace` --
+    /// picks it up. GPUI renders on one thread, synchronously, so the
+    /// slot is only ever live for the duration of one dialog build.
+    static DEFAULT_ACTION: RefCell<Option<DialogAction>> = const { RefCell::new(None) };
+}
+
+/// Start a dialog build: forget any previous dialog's default action.
+pub fn reset_default_action() {
+    DEFAULT_ACTION.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// End a dialog build: take whatever its primary button registered.
+pub fn take_default_action() -> Option<DialogAction> {
+    DEFAULT_ACTION.with(|slot| slot.borrow_mut().take())
+}
+
 pub fn button(
     label: impl Into<SharedString>,
     primary: bool,
     on_click: impl Fn(&mut Workspace, &mut gpui::Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let on_click: DialogAction = Rc::new(on_click);
+    if primary {
+        let action = on_click.clone();
+        DEFAULT_ACTION.with(|slot| *slot.borrow_mut() = Some(action));
+    }
     div()
         .flex()
         .items_center()
@@ -186,12 +220,15 @@ pub fn num_field(
         focused,
         buffer,
     } = field;
-    let shown = if focused && !buffer.is_empty() {
-        buffer
-    } else if value.fract().abs() < 0.01 {
+    let committed = if value.fract().abs() < 0.01 {
         format!("{value:.0}")
     } else {
         format!("{value:.2}")
+    };
+    let shown = if focused && !buffer.is_empty() {
+        buffer
+    } else {
+        committed.clone()
     };
     let dec = on_change.clone();
     let inc = on_change.clone();
@@ -220,7 +257,7 @@ pub fn num_field(
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ws, _e, _w, cx| {
-                        ws.focus_field(id);
+                        ws.focus_field(id, committed.clone());
                         cx.notify();
                     }),
                 )
