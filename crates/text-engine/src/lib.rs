@@ -432,6 +432,120 @@ fn load_font(family: &str, bold: bool, italic: bool) -> Option<LoadedFace> {
     font
 }
 
+/// A face that actually has the glyph for `ch`.
+///
+/// `load_font` resolves one face for the whole spec and every glyph is
+/// rasterized from it. fontdue maps a codepoint the face does not cover
+/// to glyph 0, so `.notdef` -- the tofu box -- is drawn. Typing Japanese
+/// or an emoji gave a row of empty rectangles even with Noto CJK and
+/// Noto Color Emoji installed.
+///
+/// Returns `None` when the primary face already covers `ch`, so the
+/// common path allocates and locks nothing.
+fn fallback_for(ch: char, primary: &LoadedFace, bold: bool, italic: bool) -> Option<LoadedFace> {
+    // Whitespace has no ink; asking for a face for it would pick one at
+    // random and drag its metrics in.
+    if ch.is_whitespace() || primary.font.has_glyph(ch) {
+        return None;
+    }
+    let key = (fallback_key(ch), bold, italic);
+    if let Some(hit) = fallback_cache().lock().ok()?.get(&key) {
+        return hit.clone();
+    }
+    // Named preferences first -- they are what a person would pick, and
+    // they avoid a scan in the cases that actually come up.
+    let mut found = None;
+    for name in preferred_families(ch) {
+        if let Some(face) = load_font(name, bold, italic) {
+            if face.font.has_glyph(ch) {
+                found = Some(face);
+                break;
+            }
+        }
+    }
+    // Otherwise ask every installed face, once per script bucket.
+    if found.is_none() {
+        let ids: Vec<fontdb::ID> = db().faces().map(|f| f.id).collect();
+        for id in ids {
+            let covers = db()
+                .with_face_data(id, |data, index| {
+                    ttf_parser::Face::parse(data, index)
+                        .ok()
+                        .and_then(|f| f.glyph_index(ch))
+                        .is_some()
+                })
+                .unwrap_or(false);
+            if !covers {
+                continue;
+            }
+            let family = db()
+                .face(id)
+                .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+            if let Some(face) = family.and_then(|n| load_font(&n, bold, italic)) {
+                if face.font.has_glyph(ch) {
+                    found = Some(face);
+                    break;
+                }
+            }
+        }
+    }
+    if found.is_none() {
+        log::debug!("text-engine: no installed face covers U+{:04X}", ch as u32);
+    }
+    if let Ok(mut c) = fallback_cache().lock() {
+        c.insert(key, found.clone());
+    }
+    found
+}
+
+/// Which script bucket a character falls in, so the fallback is resolved
+/// once per script rather than once per character.
+fn fallback_key(ch: char) -> u32 {
+    let c = ch as u32;
+    match c {
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE00..=0xFE0F => 1, // emoji and symbols
+        0x3000..=0x30FF | 0x31F0..=0x31FF | 0xFF00..=0xFFEF => 2,   // kana and CJK punctuation
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF => 3,   // han
+        0xAC00..=0xD7AF | 0x1100..=0x11FF => 4,                     // hangul
+        0x0590..=0x05FF => 5,                                       // hebrew
+        0x0600..=0x06FF | 0x0750..=0x077F => 6,                     // arabic
+        0x0900..=0x097F => 7,                                       // devanagari
+        0x0E00..=0x0E7F => 8,                                       // thai
+        _ => 0,
+    }
+}
+
+/// Families worth trying for a character before scanning everything.
+fn preferred_families(ch: char) -> &'static [&'static str] {
+    match fallback_key(ch) {
+        1 => &["Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"],
+        2 | 3 => &[
+            "Noto Sans CJK JP",
+            "Noto Sans CJK SC",
+            "Noto Sans JP",
+            "Source Han Sans",
+            "Hiragino Sans",
+            "Yu Gothic",
+        ],
+        4 => &["Noto Sans CJK KR", "Noto Sans KR", "Malgun Gothic"],
+        5 => &["Noto Sans Hebrew", "David"],
+        6 => &["Noto Sans Arabic", "Geeza Pro"],
+        7 => &["Noto Sans Devanagari", "Mangal"],
+        8 => &["Noto Sans Thai", "Thonburi"],
+        _ => &[],
+    }
+}
+
+type FallbackKey = (u32, bool, bool);
+
+fn fallback_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<FallbackKey, Option<LoadedFace>>> {
+    static CACHE: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<FallbackKey, Option<LoadedFace>>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// The GPOS `kern`-feature pair adjustments of a face, resolved once per
 /// layout. fontdue reads only the legacy `kern` table; most modern faces
 /// keep their kerning here instead, and Affinity applies it, so matching
@@ -587,6 +701,12 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
     let advance = |ch: char, prev: Option<char>, pen: f32| -> f32 {
         if ch == '\t' {
             return ((pen / tab_stop).floor() + 1.0) * tab_stop - pen;
+        }
+        // A glyph the chosen face does not cover is drawn from a
+        // fallback, so its advance has to come from there too or the
+        // text would be laid out against the .notdef box's width.
+        if let Some(fb) = fallback_for(ch, face, spec.bold, spec.italic) {
+            return fb.font.metrics(ch, spec.size).advance_width + spec.tracking;
         }
         let m = font.metrics(ch, spec.size);
         let kern = prev
@@ -862,7 +982,9 @@ pub fn rasterize(spec: &TextSpec) -> Option<TextRaster> {
     let mut rasterized = Vec::with_capacity(placed.len());
     let mut bounds = IntRect::EMPTY;
     for g in &placed {
-        let (metrics, bitmap) = font.rasterize(g.ch, spec.size);
+        let fb = fallback_for(g.ch, &face, spec.bold, spec.italic);
+        let glyph_font = fb.as_ref().map_or(font, |f| &f.font);
+        let (metrics, bitmap) = glyph_font.rasterize(g.ch, spec.size);
         if metrics.width == 0 || metrics.height == 0 {
             continue;
         }
@@ -1226,5 +1348,60 @@ mod tests {
             long.layout_width
         );
         assert!(long.layout_width > alone.layout_width);
+    }
+
+    /// Every glyph was rasterized from one face, and fontdue maps a
+    /// codepoint that face does not cover to glyph 0 — the .notdef box.
+    /// The tell is identical ink per glyph across unrelated characters:
+    /// the same empty rectangle repeated.
+    #[test]
+    fn characters_outside_the_chosen_face_are_not_all_the_same_box() {
+        let hiragana = rasterize(&spec("\u{3053}\u{3093}\u{306b}")).expect("font loads");
+        let han = rasterize(&spec("\u{4e2d}\u{6587}\u{5b57}")).expect("font loads");
+        if hiragana.is_empty() || han.is_empty() {
+            // A machine with no CJK face installed has nothing to fall
+            // back to, and drawing tofu is then the honest answer.
+            return;
+        }
+        let per_glyph = |r: &TextRaster| ink(r) as f32 / 3.0;
+        let (a, b) = (per_glyph(&hiragana), per_glyph(&han));
+        assert!(
+            (a - b).abs() > 1.0,
+            "hiragana and han have identical ink per glyph ({a} vs {b}), \
+             which is the .notdef box repeated"
+        );
+    }
+
+    /// And the fallback's advance is used, so the layout is not measured
+    /// against the box it is not drawing.
+    #[test]
+    fn a_fallback_glyph_advances_by_its_own_width() {
+        let narrow = rasterize(&spec("AA")).expect("font loads");
+        let cjk = rasterize(&spec("\u{4e2d}\u{6587}"));
+        let Some(cjk) = cjk else { return };
+        if cjk.is_empty() {
+            return;
+        }
+        // Han glyphs are full-width; two of them are wider than two
+        // latin capitals at the same size.
+        assert!(
+            cjk.layout_width > narrow.layout_width,
+            "{} should exceed {}",
+            cjk.layout_width,
+            narrow.layout_width
+        );
+    }
+
+    /// Characters the chosen face does cover keep using it, so nothing
+    /// about ordinary latin text changes.
+    #[test]
+    fn covered_characters_do_not_go_through_the_fallback() {
+        let face = load_font(&default_family(), false, false).expect("a default face");
+        for ch in "Hello, world! 123".chars() {
+            assert!(
+                fallback_for(ch, &face, false, false).is_none(),
+                "{ch:?} should not need a fallback"
+            );
+        }
     }
 }
