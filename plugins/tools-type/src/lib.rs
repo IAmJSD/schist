@@ -143,26 +143,37 @@ pub fn rerender_family(doc: &mut Document, family: &str) -> usize {
     }
     let mut ids = Vec::new();
     collect(&doc.tree.layers, family, &mut ids);
-    let mut changed = 0;
-    for id in ids {
-        let Some(stored) = doc.tree.find(id).and_then(read_stored) else {
+    if ids.is_empty() {
+        return 0;
+    }
+    // One undoable edit for the lot. These pixels used to be assigned
+    // straight onto the raster with nothing but an `add_damage` call --
+    // no `begin_edit`, so "Installed Inter (2 faces) - re-set 7 text
+    // layer(s)" changed seven layers with no way to undo it, and the
+    // document was not even marked dirty, so it could be closed without
+    // a save prompt.
+    let mut rendered = Vec::new();
+    for id in &ids {
+        let Some(stored) = doc.tree.find(*id).and_then(read_stored) else {
             continue;
         };
-        let before = doc
-            .tree
-            .find(id)
-            .map(|l| l.content_bounds())
-            .unwrap_or(IntRect::EMPTY);
-        let (tiles, bounds) = render_tiles(doc, &stored);
+        let (tiles, _bounds) = render_tiles(doc, &stored);
+        rendered.push((*id, tiles));
+    }
+    if rendered.is_empty() {
+        return 0;
+    }
+    let changed = rendered.len();
+    let mut edit = doc.begin_edit("Update Fonts");
+    for (id, tiles) in rendered {
+        edit.replace_layer_tiles(id, tiles);
+    }
+    edit.commit();
+    // The style caches were built from the old glyphs.
+    for id in ids {
         if let Some(layer) = doc.tree.find_mut(id) {
-            if let Some(raster) = layer.as_raster_mut() {
-                raster.tiles = tiles;
-            }
-            // The style cache was built from the old glyphs.
             layer.styled = None;
-            changed += 1;
         }
-        doc.add_damage(before.union(&bounds));
     }
     changed
 }
@@ -205,13 +216,32 @@ fn is_continuation(ch: char) -> bool {
 const STYLES: &[&str] = &["Regular", "Bold", "Italic", "Bold Italic"];
 const ALIGNMENTS: &[&str] = &["Left", "Center", "Right"];
 
-#[derive(Default)]
 pub struct TypeTool {
     editing: Option<Editing>,
     /// What new text starts as, and what the options bar shows when
     /// nothing is being edited. Editing a layer adopts its spec, so the
     /// bar always describes the text you are looking at.
     spec: TextSpec,
+    /// Whether the text being edited tracks the foreground swatch.
+    ///
+    /// `StoredText.color` was written once in `start_new` and never
+    /// again -- `TextSpec` has no colour field, so nothing in the options
+    /// bar could reach it. Set the foreground to red, place text, switch
+    /// to blue and click back in: it stayed red, and the only way to
+    /// change it was to delete and retype. On (the default) the edited
+    /// text follows the swatch; off keeps whatever colour the layer
+    /// already had, for editing wording without restyling it.
+    follow_foreground: bool,
+}
+
+impl Default for TypeTool {
+    fn default() -> Self {
+        TypeTool {
+            editing: None,
+            spec: TextSpec::default(),
+            follow_foreground: true,
+        }
+    }
 }
 
 impl TypeTool {
@@ -533,6 +563,11 @@ impl ToolPlugin for TypeTool {
                 80.0,
                 " px",
             ),
+            ToolOption::toggle(
+                "type-follow-fg",
+                "Foreground Colour",
+                self.follow_foreground,
+            ),
         ]
     }
 
@@ -558,6 +593,7 @@ impl ToolPlugin for TypeTool {
             }
             "type-leading" => self.spec.line_height = value.num().clamp(0.5, 3.0),
             "type-tracking" => self.spec.tracking = value.num(),
+            "type-follow-fg" => self.follow_foreground = value.bool(),
             _ => {}
         }
     }
@@ -565,6 +601,7 @@ impl ToolPlugin for TypeTool {
     /// Push the bar's settings onto the text being edited, so a font or
     /// size change shows up immediately rather than on the next click.
     fn on_option_changed(&mut self, ctx: &mut ToolCtx, _key: &str) {
+        let foreground = ctx.state.foreground.to_u8();
         let Some(session) = &mut self.editing else {
             return;
         };
@@ -573,6 +610,9 @@ impl ToolPlugin for TypeTool {
             text,
             ..self.spec.clone()
         };
+        if self.follow_foreground {
+            session.stored.color = foreground;
+        }
         session.dirty = true;
         self.refresh(ctx.doc);
     }
@@ -1571,5 +1611,119 @@ mod tests {
         let session = tool.editing.as_ref().expect("a session started");
         assert_ne!(session.layer, id, "must not resume the hidden layer");
         assert!(d.tree.len() > layers_before, "a new layer was created");
+    }
+
+    /// `StoredText.color` was written once in `start_new` and never
+    /// again: `TextSpec` has no colour field, so nothing in the options
+    /// bar could reach it. Set the foreground to red, place text, switch
+    /// to blue and click back in — it stayed red, and the only way to
+    /// change it was to delete and retype.
+    #[test]
+    fn the_edited_text_follows_the_foreground_swatch() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState {
+            foreground: schist_color::Rgba::new(1.0, 0.0, 0.0, 1.0),
+            ..Default::default()
+        };
+        let mut tool = TypeTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "Hi");
+            assert_eq!(
+                tool.editing.as_ref().unwrap().stored.color,
+                [255, 0, 0, 255]
+            );
+        }
+
+        state.foreground = schist_color::Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.set_option("type-size", OptionValue::Num(40.0));
+        tool.on_option_changed(&mut ctx, "type-size");
+        assert_eq!(
+            tool.editing.as_ref().unwrap().stored.color,
+            [0, 0, 255, 255],
+            "the text did not pick up the new foreground"
+        );
+    }
+
+    /// And turning the toggle off keeps the layer's own colour, for
+    /// editing the wording without restyling it.
+    #[test]
+    fn the_colour_can_be_pinned_to_the_layer() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState {
+            foreground: schist_color::Rgba::new(1.0, 0.0, 0.0, 1.0),
+            ..Default::default()
+        };
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi");
+
+        tool.set_option("type-follow-fg", OptionValue::Bool(false));
+        ctx.state.foreground = schist_color::Rgba::new(0.0, 0.0, 1.0, 1.0);
+        tool.set_option("type-size", OptionValue::Num(40.0));
+        tool.on_option_changed(&mut ctx, "type-size");
+        assert_eq!(
+            tool.editing.as_ref().unwrap().stored.color,
+            [255, 0, 0, 255]
+        );
+    }
+
+    /// Installing a font re-rendered every layer set in it by assigning
+    /// straight onto the raster — no `begin_edit`, so the change was not
+    /// undoable and the document was not even marked dirty, meaning it
+    /// could be closed without a save prompt.
+    #[test]
+    fn a_font_re_render_is_one_undoable_edit() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let family = {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "Hi");
+            let family = tool.editing.as_ref().unwrap().stored.spec.family.clone();
+            tool.on_commit(&mut ctx);
+            family
+        };
+        d.dirty = false;
+        let steps_before = d.history.undo_name().map(String::from);
+
+        let changed = rerender_family(&mut d, &family);
+        assert_eq!(changed, 1, "the text layer should have been re-rendered");
+        assert_eq!(d.history.undo_name(), Some("Update Fonts"));
+        assert!(d.dirty, "a re-render is an unsaved change");
+
+        d.undo();
+        assert_eq!(
+            d.history.undo_name().map(String::from),
+            steps_before,
+            "the re-render left more than one entry"
+        );
+    }
+
+    /// A family nothing is set in changes nothing, and records nothing.
+    #[test]
+    fn a_font_nothing_uses_records_no_edit() {
+        let mut d = doc();
+        assert_eq!(rerender_family(&mut d, "Definitely Not Installed"), 0);
+        assert!(!d.history.can_undo());
     }
 }

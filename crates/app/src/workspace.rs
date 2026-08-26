@@ -3883,6 +3883,11 @@ impl Workspace {
             "backspace" => {
                 self.field_buffer.pop();
             }
+            // Escape is handled in `cancel_gesture`, which runs first:
+            // it is bound to `CancelGesture` in the always-matching
+            // "Workspace" context, so nothing escape-shaped ever reaches
+            // here. Kept as a fallback for a build with that binding
+            // removed rather than left as a dead arm that looks live.
             "escape" => {
                 self.focused_field = None;
                 self.field_buffer.clear();
@@ -4106,6 +4111,17 @@ impl Workspace {
         }
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
+            return;
+        }
+        // A focused field takes the escape first: it drops focus and
+        // leaves the dialog up, which is what `field_key`'s "escape" arm
+        // meant to do before `CancelGesture` -- bound in the
+        // always-matching "Workspace" context -- got there ahead of it
+        // and closed the whole dialog instead.
+        if self.modal.is_some() && self.focused_field.is_some() {
+            self.focused_field = None;
+            self.field_buffer.clear();
+            cx.notify();
             return;
         }
         if self.modal.is_some() {
@@ -5097,11 +5113,16 @@ impl Workspace {
                         // The engine caches parsed faces and the family
                         // list; both are stale until it re-scans.
                         schist_text_engine::refresh();
-                        let redrawn = ws
+                        // Parked tabs too: they were left with the
+                        // substituted glyphs until they were reopened.
+                        let mut redrawn = ws
                             .doc
                             .as_mut()
                             .map(|doc| schist_tools_type::rerender_family(doc, &family))
                             .unwrap_or(0);
+                        for tab in ws.background_tabs.iter_mut() {
+                            redrawn += schist_tools_type::rerender_family(&mut tab.doc, &family);
+                        }
                         ws.refresh_missing_fonts();
                         format!(
                             "Installed {target} ({n} faces) \u{b7} re-set {redrawn} text layer(s)"
