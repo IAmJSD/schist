@@ -99,6 +99,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         } => crate::color_picker::render(ws, target, hsv, original, cx).into_any_element(),
         Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
         Modal::DropImage { path } => drop_image(path, cx).into_any_element(),
+        Modal::HeifSupport { path } => heif_support(ws, path, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::ModelManager => model_manager(ws, cx).into_any_element(),
         Modal::MissingFonts { fonts } => missing_fonts(ws, &fonts, cx).into_any_element(),
@@ -155,6 +156,77 @@ fn drop_image(path: std::path::PathBuf, cx: &mut Context<Workspace>) -> impl Int
                 move |ws, _window, cx| {
                     ws.close_modal(cx);
                     ws.place_image_as_layer(path.clone(), cx);
+                },
+                cx,
+            )),
+    )
+}
+
+/// A HEIC file needs an HEVC decoder this machine doesn't have: ask
+/// before downloading one. Consent matters here — it is a network fetch
+/// of executable code (hash-pinned to a schist release) and the
+/// libraries carry their own (LGPL-3.0) licenses, which are installed
+/// alongside.
+fn heif_support(
+    ws: &Workspace,
+    path: std::path::PathBuf,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let managed = schist_codecs_common::heif::managed_library()
+        .expect("dialog only opens when a download exists for this platform");
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let downloading = ws.heif_download;
+    let source_url = managed.source_url;
+    ui::modal_frame(
+        "HEIC Support",
+        420.0,
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_size(px(12.0))
+            .child(format!(
+                "Opening \u{201C}{name}\u{201D} needs an HEVC decoder, which is not \
+                 installed on this system."
+            ))
+            .child(format!(
+                "Schist can download a decode-only build of libheif {} with the \
+                 libde265 HEVC decoder (\u{2248}5 MB). Both are LGPL-3.0 licensed; \
+                 their license texts are installed next to the library, and the \
+                 source is available at the project page.",
+                managed.version
+            )),
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(ui::button(
+                "Cancel",
+                false,
+                |ws, _window, cx| ws.close_modal(cx),
+                cx,
+            ))
+            .child(ui::button(
+                "Licenses & Source",
+                false,
+                move |_ws, _window, cx| cx.open_url(source_url),
+                cx,
+            ))
+            .child(ui::button(
+                if downloading {
+                    "Downloading\u{2026}"
+                } else {
+                    "Download"
+                },
+                true,
+                move |ws, _window, cx| {
+                    if !ws.heif_download {
+                        ws.close_modal(cx);
+                        ws.download_heif_support(path.clone(), cx);
+                    }
                 },
                 cx,
             )),

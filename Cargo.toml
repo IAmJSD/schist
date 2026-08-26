@@ -98,6 +98,11 @@ rayon = "1.10"
 smallvec = "1.13"
 rustc-hash = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
+# Runtime dlopen of libheif for HEIC import — the system's copy, or a
+# user-consented download of IAmJSD/libheif-prebuilt. Keeps the build
+# free of C dependencies (no pure-Rust HEVC decoder exists) and avoids
+# the LGPL relink obligations static linking would carry.
+libloading = "0.8"
 byteorder = "1.5"
 log = "0.4"
 # GPU compositing backend; wgpu is its own instance (GPUI's renderer does

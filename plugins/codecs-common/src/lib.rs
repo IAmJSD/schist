@@ -1,16 +1,43 @@
 //! Common raster format codecs (PNG, JPEG, WebP, TIFF) via the `image`
-//! crate, wrapped as `CodecPlugin`s, plus layered Affinity
-//! import/export. For the simple formats, import produces a single
-//! "Background" layer and export flattens through the compositor.
+//! crate, HEIC/HEIF via the system's libheif, wrapped as
+//! `CodecPlugin`s, plus layered Affinity import/export. For the simple
+//! formats, import produces a single "Background" layer and export
+//! flattens through the compositor.
 
 pub use affinity::AffinityCodec;
 use anyhow::Context as _;
+pub use heif::HeifCodec;
 use image::ImageFormat;
 use schist_color::Depth;
 use schist_core::{blit_rgba8, Document, IntRect, Layer};
 use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
 
 mod affinity;
+pub mod heif;
+
+/// A single-"Background"-layer document from decoded RGBA8 pixels.
+fn flat_document(
+    title: &str,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+    icc: Option<Vec<u8>>,
+) -> anyhow::Result<Document> {
+    anyhow::ensure!(rgba.len() == w as usize * h as usize * 4, "buffer size");
+    let mut doc = Document::new(title, w, h, Depth::Eight);
+    doc.icc_profile = icc;
+    let mut layer = Layer::new_raster("Background");
+    blit_rgba8(
+        &mut layer.as_raster_mut().unwrap().tiles,
+        Depth::Eight,
+        IntRect::from_size(w, h),
+        rgba,
+    );
+    doc.push_layer(layer);
+    doc.damage_all();
+    doc.dirty = false;
+    Ok(doc)
+}
 
 /// The four cICP fields (primaries, transfer, matrix, full-range) from a
 /// PNG's cICP chunk, if one is present before the image data.
@@ -75,19 +102,7 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
         _ => img.to_rgba8(),
     };
 
-    let mut doc = Document::new(title, w, h, Depth::Eight);
-    doc.icc_profile = icc;
-    let mut layer = Layer::new_raster("Background");
-    blit_rgba8(
-        &mut layer.as_raster_mut().unwrap().tiles,
-        Depth::Eight,
-        IntRect::from_size(w, h),
-        rgba.as_raw(),
-    );
-    doc.push_layer(layer);
-    doc.damage_all();
-    doc.dirty = false;
-    Ok(doc)
+    flat_document(title, w, h, rgba.as_raw(), icc)
 }
 
 fn export_flat(
@@ -229,6 +244,7 @@ impl PluginManifest for CommonCodecsPlugin {
         registry.register_codec(Box::new(JpegCodec));
         registry.register_codec(Box::new(WebPCodec));
         registry.register_codec(Box::new(TiffCodec));
+        registry.register_codec(Box::new(HeifCodec));
         registry.register_codec(Box::new(AffinityCodec));
     }
 }
@@ -370,6 +386,17 @@ mod tests {
         );
         assert_eq!(reg.codec_for(b"", Some("tiff")).unwrap().id(), "codec.tiff");
         assert_eq!(
+            reg.codec_for(b"\x00\x00\x00\x18ftypheic....", None)
+                .unwrap()
+                .id(),
+            "codec.heif"
+        );
+        assert_eq!(reg.codec_for(b"", Some("heic")).unwrap().id(), "codec.heif");
+        // AVIF shares the container but is not claimed.
+        assert!(reg
+            .codec_for(b"\x00\x00\x00\x18ftypavif....", None)
+            .is_none());
+        assert_eq!(
             reg.codec_for(b"\x00\xFFKA....", None).unwrap().id(),
             "codec.affinity"
         );
@@ -378,5 +405,103 @@ mod tests {
             "codec.affinity"
         );
         assert!(reg.codec_for(b"garbage", Some("xyz")).is_none());
+    }
+
+    /// Imports a vendored HEIC fixture, or None (skip, like the corpus
+    /// tests do) when the fixture is missing or the machine cannot
+    /// decode HEVC — no libheif at all, or one without a decoder, as on
+    /// stock CI runners.
+    fn import_heif_fixture(name: &str) -> Option<Document> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/heif")
+            .join(name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skipping: no fixture {}", path.display());
+            return None;
+        };
+        assert!(HeifCodec.probe(&bytes), "{name} should probe as HEIF");
+        match HeifCodec.import(&bytes) {
+            Err(err) if heif::download_would_help(&err) => {
+                eprintln!("skipping: {err:#}");
+                None
+            }
+            result => Some(result.unwrap()),
+        }
+    }
+
+    #[test]
+    fn heif_install_verifies_hash_and_writes_atomically() {
+        let dir = std::env::temp_dir().join(format!("schist-heif-install-{}", std::process::id()));
+        std::env::set_var("SCHIST_LIBHEIF_DIR", &dir);
+        let file = heif::RemoteFile {
+            name: "libtest.so.1",
+            url: "unused",
+            // sha256 of b"payload"
+            sha256: "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+        };
+        let err = heif::install(&file, b"tampered").unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        assert!(
+            !dir.join("libtest.so.1").exists(),
+            "nothing written on mismatch"
+        );
+
+        let path = heif::install(&file, b"payload").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+        assert!(
+            !path.with_extension("part").exists(),
+            "temp file renamed away"
+        );
+        std::env::remove_var("SCHIST_LIBHEIF_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn heif_imports_rgb() {
+        // Losslessly encoded: left half (200,30,40), right half (10,200,90).
+        let Some(doc) = import_heif_fixture("rgb.heic") else {
+            return;
+        };
+        assert_eq!((doc.width, doc.height), (16, 8));
+        let tiles = &doc.tree.layers[0].as_raster().unwrap().tiles;
+        assert_eq!(tiles.pixel(2, 2).to_u8(), [200, 30, 40, 255]);
+        assert_eq!(tiles.pixel(13, 5).to_u8(), [10, 200, 90, 255]);
+    }
+
+    #[test]
+    fn heif_imports_alpha() {
+        // Left half opaque (200,30,40), right half fully transparent.
+        let Some(doc) = import_heif_fixture("alpha.heic") else {
+            return;
+        };
+        let tiles = &doc.tree.layers[0].as_raster().unwrap().tiles;
+        assert_eq!(tiles.pixel(2, 2).to_u8(), [200, 30, 40, 255]);
+        assert_eq!(tiles.pixel(13, 5).to_u8()[3], 0);
+    }
+
+    #[test]
+    fn heif_keeps_icc_profile() {
+        let Some(doc) = import_heif_fixture("icc.heic") else {
+            return;
+        };
+        let icc = doc.icc_profile.expect("ICC profile survives import");
+        assert_eq!(&icc[36..40], b"acsp", "valid ICC header");
+    }
+
+    #[test]
+    fn heif_pq_bakes_to_srgb() {
+        // 10-bit BT.2020 PQ greys: black, ~203-nit reference white,
+        // ~1000 nits — same expectations as the HDR PNG test.
+        let Some(doc) = import_heif_fixture("pq.heic") else {
+            return;
+        };
+        assert!(doc.icc_profile.is_none(), "baked pixels are sRGB");
+        let tiles = &doc.tree.layers[0].as_raster().unwrap().tiles;
+        let black = tiles.pixel(2, 2).to_u8()[0];
+        let white = tiles.pixel(10, 2).to_u8()[0];
+        let spec = tiles.pixel(18, 2).to_u8()[0];
+        assert!(black < 5, "PQ black stays black: {black}");
+        assert!(white > 240, "reference white bakes near white: {white}");
+        assert!(spec >= white, "speculars roll off above white: {spec}");
     }
 }

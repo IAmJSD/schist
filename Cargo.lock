@@ -5670,6 +5670,7 @@ dependencies = [
  "anyhow",
  "crc32fast",
  "image",
+ "libloading",
  "log",
  "moxcms",
  "schist-codec-affinity",
@@ -5678,6 +5679,7 @@ dependencies = [
  "schist-compositor",
  "schist-core",
  "schist-plugin-api",
+ "sha2 0.10.9",
 ]
 
 [[package]]
