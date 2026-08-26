@@ -431,3 +431,148 @@ impl Writer<'_> {
         self.field_stream(&node.fields[at..], &node.wire[at..], &node.aux[at..], true)
     }
 }
+
+/// Rewrite 0x31 type chains to the declare-once convention Affinity's
+/// reader requires.
+///
+/// In every real file, the first node of a class spells out a full
+/// versioned declaration — type sections for the class and each
+/// not-yet-declared ancestor, ending closed at the ancestry root or
+/// with a lone tag naming the first already-declared ancestor — and
+/// every later node of the class is the lone-tag shorthand. The reader
+/// keeps a registry built from the declarations, and a second full
+/// declaration of a known class makes it reject the file as corrupted
+/// (verified against Affinity 3.2: cloning a template node is accepted,
+/// re-declaring its class is not).
+///
+/// Patching a template graph breaks the convention both ways: a fresh
+/// node may re-declare a class the template already declared, and a
+/// replaced subtree may orphan a declaration that later shorthand nodes
+/// depended on. This pass rebuilds every chain in emission order:
+/// class versions and ancestry are learned from all chains present
+/// (including orphans and freshly built nodes), then each node gets the
+/// canonical form for its stream position.
+pub fn normalize_declarations(graph: &mut Graph) {
+    use std::collections::{HashMap, HashSet};
+
+    // Class facts from every chain in the graph. `parent` maps a class
+    // to its next base class, or None once a closed chain proves it is
+    // an ancestry root. Sectioned types carry authoritative versions;
+    // lone tags do not.
+    let mut parent: HashMap<u32, Option<u32>> = HashMap::new();
+    let mut version: HashMap<u32, u32> = HashMap::new();
+    for n in &graph.nodes {
+        if n.framing != 0x31 {
+            continue;
+        }
+        let sections = n.section_lens.len();
+        for (i, (t, v)) in n.types.iter().enumerate() {
+            if i < sections {
+                version.entry(*t).or_insert(*v);
+            }
+            match n.types.get(i + 1) {
+                Some((p, _)) => {
+                    parent.entry(*t).or_insert(Some(*p));
+                }
+                None if n.chain_end == ChainEnd::Closed => {
+                    parent.entry(*t).or_insert(None);
+                }
+                None => {}
+            }
+        }
+    }
+
+    let order = emission_order(graph);
+    let mut declared: HashSet<u32> = HashSet::new();
+    for i in order {
+        let n = &mut graph.nodes[i];
+        if n.framing != 0x31 || n.types.is_empty() {
+            continue;
+        }
+        // A declaration whose sections carry fields cannot be reshaped
+        // without moving them; keep it and record what it declares.
+        if n.section_lens.iter().any(|l| *l != 0) {
+            for (j, (t, _)) in n.types.iter().enumerate() {
+                if j < n.section_lens.len() {
+                    declared.insert(*t);
+                }
+            }
+            continue;
+        }
+        let mut chain: Vec<(u32, u32)> = Vec::new();
+        let mut end = ChainEnd::Closed;
+        let mut cur = Some(n.types[0].0);
+        while let Some(t) = cur {
+            if declared.contains(&t) {
+                chain.push((t, 0));
+                end = ChainEnd::LoneTag;
+                break;
+            }
+            let v = version.get(&t).copied().unwrap_or_else(|| {
+                n.types
+                    .iter()
+                    .find(|(tt, _)| *tt == t)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0)
+            });
+            chain.push((t, v));
+            declared.insert(t);
+            cur = parent.get(&t).copied().unwrap_or(None);
+        }
+        let sections = chain.len() - usize::from(end == ChainEnd::LoneTag);
+        n.types = chain;
+        n.section_lens = vec![0; sections];
+        n.chain_end = end;
+    }
+}
+
+/// Reachable 0x31/0x30/0x32 nodes in the order [`serialize`] first
+/// emits them: depth-first through fields, arrays in element order.
+fn emission_order(graph: &Graph) -> Vec<usize> {
+    fn walk_value(g: &Graph, v: &Value, seen: &mut [bool], order: &mut Vec<usize>) {
+        match v {
+            Value::Class(Some(i)) => {
+                if !seen[*i] {
+                    seen[*i] = true;
+                    order.push(*i);
+                    walk_node(g, *i, seen, order);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk_value(g, item, seen, order);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk_node(g: &Graph, index: usize, seen: &mut [bool], order: &mut Vec<usize>) {
+        for (_, v) in &g.nodes[index].fields {
+            walk_value(g, v, seen, order);
+        }
+    }
+    let mut seen = vec![false; graph.nodes.len()];
+    let mut order = Vec::new();
+    seen[ROOT] = true;
+    walk_node(graph, ROOT, &mut seen, &mut order);
+    order
+}
+
+/// Rewrite 0x31 object ids to 0, 1, 2… in emission (stream) order.
+///
+/// Affinity numbers objects as it writes their definitions, so in every
+/// real file the ids count up 0, 1, 2… in exactly the order the
+/// definitions appear on the wire — and its reader relies on this: a
+/// graph with gaps or out-of-order ids is rejected as corrupted. A
+/// patched graph loses the property (replaced subtrees orphan their
+/// ids, freshly built nodes get ids past the template's maximum), so
+/// the exporter runs this before [`serialize`].
+pub fn renumber_ids(graph: &mut Graph) {
+    let mut next = 0u32;
+    for i in emission_order(graph) {
+        if graph.nodes[i].framing == 0x31 {
+            graph.nodes[i].id = next;
+            next += 1;
+        }
+    }
+}

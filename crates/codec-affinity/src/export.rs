@@ -68,6 +68,10 @@ pub fn write_affinity(
     };
     ex.patch_document(doc)?;
 
+    // Patching breaks the two stream-order invariants Affinity's reader
+    // enforces; restore declare-once type chains and 0,1,2… object ids.
+    emit::normalize_declarations(&mut ex.g);
+    emit::renumber_ids(&mut ex.g);
     let doc_dat = emit::serialize(&ex.g)?;
     let mut entries = vec![EntryData {
         name: "doc.dat".into(),

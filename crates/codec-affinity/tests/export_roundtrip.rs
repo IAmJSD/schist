@@ -229,6 +229,81 @@ fn fixture_documents_survive_reexport() {
     eprintln!("{checked} documents survived import → export → import");
 }
 
+/// Affinity's reader enforces two stream-order invariants our importer
+/// never needed (issue #40, "the file appears to be corrupted"): 0x31
+/// object ids count 0, 1, 2… in definition order, and each class is
+/// declared with a full versioned type chain exactly once — its first
+/// occurrence — with every later node using the lone-tag shorthand.
+/// Exported documents must satisfy both.
+#[test]
+fn exported_graphs_keep_affinitys_stream_invariants() {
+    use schist_codec_affinity::graph::{self, ChainEnd};
+    use schist_codec_affinity::Archive;
+
+    let mut doc = Document::new("invariants", 700, 500, Depth::Eight);
+    doc.push_layer(raster_layer(
+        "Background",
+        IntRect::new(0, 0, 700, 500),
+        [90, 90, 120, 255],
+    ));
+    let mut styled = raster_layer(
+        "Styled",
+        IntRect::new(40, 40, 400, 300),
+        [250, 200, 40, 255],
+    );
+    styled.style.drop_shadow.enabled = true;
+    styled.style.stroke.enabled = true;
+    doc.push_layer(styled);
+    let mut group = Layer::new_group("Group");
+    if let LayerKind::Group(g) = &mut group.kind {
+        g.children.push(raster_layer(
+            "Inner",
+            IntRect::new(0, 0, 64, 64),
+            [1, 2, 3, 255],
+        ));
+    }
+    doc.push_layer(group);
+
+    let (bytes, _) = write_affinity(&doc, None).expect("export");
+    let archive = Archive::parse(&bytes).expect("container");
+    let plain = archive
+        .extract(archive.head("doc.dat").expect("doc.dat"))
+        .expect("extract");
+    let g = graph::parse(&plain).expect("graph");
+
+    // Parse pushes nodes in stream order, so both invariants can be
+    // checked over `nodes` directly.
+    let mut next_id = 0u32;
+    let mut declared = std::collections::HashSet::new();
+    for n in &g.nodes {
+        if n.framing != 0x31 || n.types.is_empty() {
+            continue;
+        }
+        assert_eq!(n.id, next_id, "object ids must count up in stream order");
+        next_id += 1;
+
+        let sections = n.section_lens.len();
+        for (i, (t, _)) in n.types.iter().enumerate() {
+            if i < sections {
+                assert!(
+                    declared.insert(*t),
+                    "class {} declared twice",
+                    graph::tag_name(*t)
+                );
+            } else {
+                // The lone tag must reference an earlier declaration.
+                assert_eq!(n.chain_end, ChainEnd::LoneTag);
+                assert!(
+                    declared.contains(t),
+                    "shorthand for undeclared class {}",
+                    graph::tag_name(*t)
+                );
+            }
+        }
+    }
+    assert!(next_id > 0, "no 0x31 nodes exercised");
+}
+
 fn compare_stacks(
     a: &[schist_core::Layer],
     b: &[schist_core::Layer],

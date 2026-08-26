@@ -20,6 +20,46 @@ fn fixture_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// The exporter's normalization passes encode two stream invariants
+/// Affinity's reader enforces (declare-once type chains, object ids
+/// numbered 0, 1, 2… in definition order). Real documents already
+/// satisfy both, so the passes must be a no-op on them — if either
+/// changes a real doc.dat, the invariant model is wrong.
+#[test]
+fn normalization_is_identity_on_real_documents() {
+    let mut docs = 0usize;
+    for dir in fixture_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for file in entries.flatten() {
+            let path = file.path();
+            let is_affinity = path
+                .extension()
+                .is_some_and(|x| x.to_string_lossy().starts_with("af"));
+            if !is_affinity || path.to_string_lossy().contains("~lock~") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let Ok(archive) = Archive::parse(&bytes) else {
+                continue;
+            };
+            let Some(entry) = archive.head("doc.dat") else {
+                continue;
+            };
+            let plain = archive.extract(entry).unwrap();
+            let mut g = graph::parse(&plain).unwrap();
+            emit::normalize_declarations(&mut g);
+            emit::renumber_ids(&mut g);
+            let emitted = emit::serialize(&g).unwrap();
+            assert_eq!(emitted, plain, "{path:?}: normalization changed the graph");
+            docs += 1;
+        }
+    }
+    assert!(docs > 0, "no documents exercised — fixtures missing?");
+    eprintln!("normalization was a no-op on {docs} real documents");
+}
+
 #[test]
 fn every_graph_reserializes_byte_exactly() {
     let mut files = 0usize;

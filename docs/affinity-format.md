@@ -494,9 +494,32 @@ effects, `DyBm`/`Blck` bitmaps) are transcribed field-for-field from
 real documents with `--example afschema`, which prints each class's
 chain versions, framing, and per-field wire types. Notably, real
 writers put **all fields in the trailing stream** of a 0x31 definition
-— the type-chain sections are field-less — and abbreviate repeated
-chains to a lone tag (Schist always writes the full chain, which every
-first instance in real files also uses).
+— the type-chain sections are field-less.
+
+**Stream-order invariants.** Affinity's reader is stateful across the
+graph stream and enforces two conventions our own (stateless-enough)
+reader never needed; violating either makes the app reject the file as
+"corrupted" (issue #40):
+
+- *Declare-once type chains.* The first node of a class carries the
+  full versioned declaration: one field-less type section per
+  not-yet-declared class in its ancestry (most-derived first), ending
+  closed (flag 2) at the ancestry root or with a lone tag (flag 1)
+  naming the first ancestor an earlier declaration covered. Every
+  later node of the class is the single lone-tag shorthand. Verified
+  against Affinity 3.2: cloning an existing node is accepted, writing
+  a second full declaration of its class is not.
+- *Sequential object ids.* 0x31 object ids count 0, 1, 2… in exactly
+  definition (stream) order — the id is the stream position, in every
+  real file across the corpus.
+
+Patching a template graph breaks both (replaced subtrees orphan ids
+and declarations; fresh nodes append out-of-order ids and re-declare
+known classes), so the exporter runs `emit::normalize_declarations`
+and `emit::renumber_ids` — passes proven to be no-ops on real
+documents (`normalization_is_identity_on_real_documents`) — before
+serializing; `exported_graphs_keep_affinitys_stream_invariants` pins
+both properties on exporter output.
 
 Container conventions (v12), transcribed from 3.1-written files: one
 `#FT4` savepoint; every block after the first prefixed `FF FF FF FF`;
@@ -594,8 +617,11 @@ per-channel behaviour from channel-mixing behaviour at a glance.
   per-entry trailing u32 looked random until live Affinity rejected a
   file omitting it as corrupted — it is a CRC-32 of the compressed
   payload, now written and documented above.)
-- Exports round-trip through our own reader; full validation in real
-  Affinity (open, edit, resave) is in progress.
+- Exports open in real Affinity 3.2 (the whole 25-file corpus,
+  re-exported, opens with structure and rendering intact — the
+  stream-order invariants above were the blocker); edit-and-resave
+  validation, and carrying the source document's spread background
+  colour instead of the template's, are still open.
 
 `cargo run -p schist-codec-affinity --example afdump -- file.afphoto`
 prints any file's container listing and full object graph;
