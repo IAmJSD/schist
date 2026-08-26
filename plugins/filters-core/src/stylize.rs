@@ -1,5 +1,7 @@
 //! Filter ▸ Stylize: filters built on edges and local contrast.
 
+use rayon::prelude::*;
+
 use crate::util::{at, convolve3, gaussian_rgba, luma, put, value_noise};
 use crate::{param, simple_filter};
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
@@ -9,18 +11,25 @@ fn edges(px: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
     const GX: [f32; 9] = [-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0];
     const GY: [f32; 9] = [-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0];
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let (mut gx, mut gy) = (0.0, 0.0);
-            for i in 0..9 {
-                let p = at(px, w, h, x + (i % 3) as i32 - 1, y + (i / 3) as i32 - 1);
-                let l = luma(&p);
-                gx += l * GX[i];
-                gy += l * GY[i];
+    // A pure gather from `px`, so the rows are independent. This backs
+    // Find Edges, Glowing Edges and Trace Contour, and re-ran on one core
+    // over the whole selection on every slider tick of a live preview.
+    out.par_chunks_mut(w.max(1))
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as i32;
+            for (x, v) in row.iter_mut().enumerate() {
+                let x = x as i32;
+                let (mut gx, mut gy) = (0.0, 0.0);
+                for i in 0..9 {
+                    let p = at(px, w, h, x + (i % 3) as i32 - 1, y + (i / 3) as i32 - 1);
+                    let l = luma(&p);
+                    gx += l * GX[i];
+                    gy += l * GY[i];
+                }
+                *v = gx.hypot(gy);
             }
-            out[y as usize * w + x as usize] = gx.hypot(gy);
-        }
-    }
+        });
     out
 }
 
