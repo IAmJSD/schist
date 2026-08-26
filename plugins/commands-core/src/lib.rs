@@ -33,6 +33,7 @@ fn cmd(
 /// tolerance, which is what `state.tolerance` carries.
 fn grow_selection(ctx: &mut CommandCtx, contiguous: bool) {
     if ctx.doc.selection.is_empty() {
+        ctx.refuse("Select something first");
         return;
     }
     let canvas = ctx.doc.canvas_rect();
@@ -248,7 +249,8 @@ fn merge_down(ctx: &mut CommandCtx) {
     };
     let ix = *path.0.last().unwrap();
     if ix == 0 {
-        return; // nothing below
+        ctx.refuse("No layer below to merge into");
+        return;
     }
     let mut below_path = path.clone();
     *below_path.0.last_mut().unwrap() = ix - 1;
@@ -337,6 +339,7 @@ fn merge_visible(ctx: &mut CommandCtx) {
 
 fn paste(ctx: &mut CommandCtx, in_place: bool) {
     let Some(clip) = ctx.state.clipboard.clone() else {
+        ctx.refuse("Nothing on the clipboard");
         return;
     };
     let rect = if in_place {
@@ -626,6 +629,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             }),
             cmd("select.reselect", "Reselect", Some("cmd-shift-d"), |ctx| {
                 let Some(previous) = ctx.doc.last_selection.clone() else {
+                    ctx.refuse("Nothing to reselect");
                     return;
                 };
                 let mut edit = ctx.doc.begin_edit("Reselect");
@@ -645,6 +649,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             }),
             cmd("select.save", "Save Selection", None, |ctx| {
                 if ctx.doc.selection.is_empty() {
+                    ctx.refuse("Select something first");
                     return;
                 }
                 let n = ctx.doc.saved_selections.len() + 1;
@@ -905,7 +910,11 @@ mod tests {
     }
 
     fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
-        let mut ctx = CommandCtx { doc, state };
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
         (reg.command(id).expect(id).run)(&mut ctx);
     }
 
@@ -1059,6 +1068,7 @@ mod tests {
         assert_eq!(group.children().unwrap().len(), 1);
         assert_eq!(group.children().unwrap()[0].name, "bg");
     }
+
     #[test]
     fn saving_a_selection_marks_the_document_unsaved() {
         // `select.save` mutates `saved_selections` directly rather than
@@ -1079,6 +1089,77 @@ mod tests {
         assert_eq!(doc.saved_selections.len(), 1, "selection was saved");
         assert!(doc.dirty, "and the document must count as unsaved");
     }
+
+    /// Run a command and return the refusal it recorded, if any.
+    fn run_for_refusal(
+        reg: &PluginRegistry,
+        id: &str,
+        doc: &mut Document,
+        state: &mut EditorState,
+    ) -> Option<String> {
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
+        (reg.command(id).expect(id).run)(&mut ctx);
+        ctx.refusal
+    }
+
+    #[test]
+    fn a_command_that_does_nothing_says_why() {
+        // The command layer is full of bare `return`s and the shell then
+        // set the status line to the command's own title regardless, so
+        // every silent no-op reported itself as having worked.
+        let reg = registry();
+        let mut state = EditorState::default();
+
+        let mut doc = doc_with_pixels();
+        assert_eq!(
+            run_for_refusal(&reg, "select.grow", &mut doc, &mut state).as_deref(),
+            Some("Select something first"),
+            "Grow with no selection"
+        );
+
+        let mut doc = doc_with_pixels();
+        assert_eq!(
+            run_for_refusal(&reg, "select.reselect", &mut doc, &mut state).as_deref(),
+            Some("Nothing to reselect"),
+            "Reselect with no previous selection"
+        );
+
+        let mut doc = doc_with_pixels();
+        state.clipboard = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.paste", &mut doc, &mut state).as_deref(),
+            Some("Nothing on the clipboard"),
+            "Paste with an empty clipboard"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = Some(doc.tree.layers[0].id);
+        assert_eq!(
+            run_for_refusal(&reg, "layer.merge_down", &mut doc, &mut state).as_deref(),
+            Some("No layer below to merge into"),
+            "Merge Down on the bottom layer"
+        );
+    }
+
+    #[test]
+    fn a_command_that_works_refuses_nothing() {
+        let reg = registry();
+        let mut state = EditorState::default();
+        let mut doc = doc_with_pixels();
+        doc.selection.select_rect(
+            schist_core::IntRect::from_xywh(0, 0, 10, 10),
+            SelectOp::Replace,
+        );
+        assert_eq!(
+            run_for_refusal(&reg, "select.save", &mut doc, &mut state),
+            None,
+            "saving a real selection must not refuse"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1094,7 +1175,11 @@ mod m11_tests {
     }
 
     fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
-        let mut ctx = CommandCtx { doc, state };
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
         (reg.command(id)
             .unwrap_or_else(|| panic!("missing {id}"))
             .run)(&mut ctx);

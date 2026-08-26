@@ -163,8 +163,14 @@ impl Session {
         let mut ctx = CommandCtx {
             doc: &mut self.doc,
             state: &mut self.state,
+            refusal: None,
         };
         (command.run)(&mut ctx);
+        // A command that declined has to say so: reporting its own title
+        // told the caller it had worked.
+        if let Some(why) = ctx.refusal {
+            bail!("{why}");
+        }
         let title = command.title.to_string();
         self.after_change();
         Ok(title)

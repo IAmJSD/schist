@@ -2903,9 +2903,15 @@ impl Workspace {
             let mut ctx = CommandCtx {
                 doc,
                 state: &mut self.editor,
+                refusal: None,
             };
             (command.run)(&mut ctx);
-            self.status = command.title.into();
+            // Reporting the command's own title regardless meant every
+            // silent no-op looked like it had worked.
+            self.status = match ctx.refusal {
+                Some(why) => why.into(),
+                None => command.title.into(),
+            };
             // ...and copying makes the pixels available everywhere else.
             if id.starts_with("edit.copy") || id == "edit.cut" {
                 self.sync_clipboard_out(cx);
