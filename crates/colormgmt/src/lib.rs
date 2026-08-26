@@ -15,7 +15,10 @@
 //! Profiles are parsed by `moxcms` (pure Rust, no C toolchain).
 
 use anyhow::{anyhow, Result};
-use moxcms::{ColorProfile, Layout, RenderingIntent, TransformExecutor, TransformOptions};
+use moxcms::{
+    CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients, RenderingIntent,
+    TransferCharacteristics, TransformExecutor, TransformOptions,
+};
 use std::sync::Arc;
 
 /// How out-of-gamut colours are handled.
@@ -268,6 +271,78 @@ impl ColorSettings {
     }
 }
 
+/// Bake BT.2100 HDR pixels (PQ or HLG signal, straight-alpha RGBA f32)
+/// down to sRGB in place.
+///
+/// `primaries` and `transfer` are H.273/cICP code points; `transfer` must
+/// be PQ (16) or HLG (18). Graphic ("diffuse") white — 203 nits, per
+/// BT.2408 — maps to 1.0, and the specular range above it rolls off
+/// through an exponential shoulder rather than clipping, approximating
+/// the SDR rendition cameras bake for HDR captures.
+pub fn bake_hdr_to_srgb(pixels: &mut [f32], primaries: u8, transfer: u8) -> Result<()> {
+    const REF_WHITE_NITS: f32 = 203.0;
+    /// Where the shoulder starts, in diffuse-white-relative linear light.
+    const KNEE: f32 = 0.9;
+
+    let signal_to_nits: fn(f32) -> f32 = match transfer {
+        16 => |v: f32| pq_eotf(v) * 10_000.0,
+        // Per-channel HLG approximation: 1000-nit nominal display, with
+        // the BT.2100 OOTF's system gamma of 1.2 applied channel-wise
+        // rather than to luminance.
+        18 => |v: f32| hlg_inverse_oetf(v).powf(1.2) * 1_000.0,
+        other => return Err(anyhow!("cICP transfer {other} is not PQ or HLG")),
+    };
+    let primaries = CicpColorPrimaries::try_from(primaries)
+        .map_err(|e| anyhow!("bad cICP primaries: {e:?}"))?;
+    let source = Profile {
+        profile: Arc::new(ColorProfile::new_from_cicp(CicpProfile {
+            color_primaries: primaries,
+            transfer_characteristics: TransferCharacteristics::Linear,
+            matrix_coefficients: MatrixCoefficients::Identity,
+            full_range: true,
+        })),
+        bytes: None,
+        name: "HDR source".into(),
+    };
+    for px in pixels.as_chunks_mut::<4>().0 {
+        for c in px.iter_mut().take(3) {
+            let s = signal_to_nits(c.clamp(0.0, 1.0)) / REF_WHITE_NITS;
+            *c = if s <= KNEE {
+                s
+            } else {
+                KNEE + (1.0 - KNEE) * (1.0 - (-(s - KNEE) / (1.0 - KNEE)).exp())
+            };
+        }
+    }
+    ColorTransform::new(&source, &Profile::srgb(), Intent::RelativeColorimetric)?.apply(pixels);
+    Ok(())
+}
+
+/// BT.2100 PQ EOTF: signal 0..1 to display light as a fraction of the
+/// 10 000-nit peak.
+fn pq_eotf(v: f32) -> f32 {
+    const M1: f32 = 1305.0 / 8192.0;
+    const M2: f32 = 2523.0 / 32.0;
+    const C1: f32 = 107.0 / 128.0;
+    const C2: f32 = 2413.0 / 128.0;
+    const C3: f32 = 2392.0 / 128.0;
+    let p = v.max(0.0).powf(1.0 / M2);
+    ((p - C1).max(0.0) / (C2 - C3 * p).max(f32::EPSILON)).powf(1.0 / M1)
+}
+
+/// BT.2100 HLG inverse OETF: signal 0..1 to scene light 0..1.
+fn hlg_inverse_oetf(v: f32) -> f32 {
+    const A: f32 = 0.178_832_77;
+    const B: f32 = 0.284_668_92;
+    const C: f32 = 0.559_910_7;
+    let v = v.max(0.0);
+    if v <= 0.5 {
+        v * v / 3.0
+    } else {
+        (((v - C) / A).exp() + B) / 12.0
+    }
+}
+
 /// Convert pixels from one profile to another, preserving appearance
 /// (Image ▸ Convert to Profile).
 pub fn convert_pixels(
@@ -463,6 +538,61 @@ mod tests {
         dither_to_depth(&mut pixels, 2, 256);
         assert_eq!(pixels[0], 0.0);
         assert_eq!(pixels[4], 1.0);
+    }
+
+    #[test]
+    fn pq_reference_white_bakes_near_srgb_white() {
+        // PQ signal for 203 nits — HDR graphics white — must land close
+        // to full white, not the murky grey a naive 10 000-nit-relative
+        // transform would produce.
+        let mut px = rgba(0.5806, 0.5806, 0.5806);
+        bake_hdr_to_srgb(&mut px, 9, 16).unwrap();
+        assert!(px[0] > 0.93, "reference white stays white: {px:?}");
+        assert!((px[0] - px[1]).abs() < 0.01 && (px[1] - px[2]).abs() < 0.01);
+        assert_eq!(px[3], 1.0, "alpha untouched");
+    }
+
+    #[test]
+    fn pq_blacks_stay_black_and_speculars_stay_bounded() {
+        let mut px = vec![0.0f32, 0.0, 0.0, 1.0, 0.9, 0.9, 0.9, 1.0];
+        bake_hdr_to_srgb(&mut px, 9, 16).unwrap();
+        assert!(px[0] < 0.02, "black stays black: {}", px[0]);
+        // A ~1000-nit specular compresses into the shoulder above
+        // reference white but never exceeds 1.0.
+        assert!(
+            px[4] > 0.95 && px[4] <= 1.0,
+            "specular rolls off: {}",
+            px[4]
+        );
+    }
+
+    #[test]
+    fn pq_bake_is_monotone() {
+        let mut px: Vec<f32> = (0..64)
+            .flat_map(|i| [i as f32 / 63.0, i as f32 / 63.0, i as f32 / 63.0, 1.0])
+            .collect();
+        bake_hdr_to_srgb(&mut px, 9, 16).unwrap();
+        let greys: Vec<f32> = px.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+        assert!(
+            greys.windows(2).all(|w| w[1] >= w[0]),
+            "monotone: {greys:?}"
+        );
+    }
+
+    #[test]
+    fn hlg_mid_grey_bakes_sensibly() {
+        // HLG 0.5 signal is scene light 1/12 → ~26 nits after the OOTF,
+        // well below reference white but clearly not black.
+        let mut px = rgba(0.5, 0.5, 0.5);
+        bake_hdr_to_srgb(&mut px, 9, 18).unwrap();
+        assert!(px[0] > 0.2 && px[0] < 0.6, "HLG mid-grey: {px:?}");
+    }
+
+    #[test]
+    fn bake_rejects_sdr_transfers() {
+        let mut px = rgba(0.5, 0.5, 0.5);
+        assert!(bake_hdr_to_srgb(&mut px, 9, 1).is_err());
+        assert!(bake_hdr_to_srgb(&mut px, 9, 13).is_err());
     }
 
     #[test]
