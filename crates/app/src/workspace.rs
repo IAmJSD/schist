@@ -2889,6 +2889,18 @@ impl Workspace {
     }
 
     pub fn run_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Copy, cut and paste mean text when something is taking typing.
+        // The clipboard held pixels and nothing else, so ctrl-V while
+        // typing into a text layer pasted a "Pasted Layer" of pixels on
+        // top of the text rather than the string that had been copied,
+        // and ctrl-C copied the selection's pixels instead of the words.
+        if matches!(
+            id,
+            "edit.copy" | "edit.copy_merged" | "edit.cut" | "edit.paste"
+        ) && self.text_clipboard(id, cx)
+        {
+            return;
+        }
         // Grow, Similar and Color Range take their tolerance from the
         // magic wand, exactly as Photoshop does.
         self.sync_wand_tolerance();
@@ -2914,6 +2926,124 @@ impl Workspace {
             log::warn!("unknown command {id}");
         }
         self.after_change(cx);
+    }
+
+    /// Handle copy / cut / paste as text when a text sink has focus.
+    ///
+    /// Returns true when it did, so the pixel commands are skipped.
+    fn text_clipboard(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        /// Which sink, in the order the key listeners try them.
+        enum Sink {
+            Rename,
+            Field,
+            Tool,
+        }
+        let tool_id = self.editor.active_tool;
+        let sink = if self.layer_rename.is_some() {
+            Sink::Rename
+        } else if self.focused_field.is_some() {
+            Sink::Field
+        } else if self
+            .registry
+            .tool_mut(tool_id)
+            .is_some_and(|t| t.editing_text().is_some())
+        {
+            Sink::Tool
+        } else {
+            return false;
+        };
+
+        if id == "edit.paste" {
+            let Some(text) = Self::clipboard_text(cx) else {
+                // Nothing textual on the clipboard: say so rather than
+                // pasting pixels over the words.
+                self.status = "Nothing on the clipboard to paste as text".into();
+                cx.notify();
+                return true;
+            };
+            let one_line = text.trim_end_matches('\n');
+            match sink {
+                Sink::Rename => {
+                    if let Some((_, name)) = self.layer_rename.as_mut() {
+                        name.push_str(one_line);
+                    }
+                }
+                Sink::Field => {
+                    self.field_buffer.push_str(one_line);
+                    if let Some(field) = self.focused_field {
+                        self.commit_field_value(field);
+                    }
+                }
+                Sink::Tool => {
+                    if let (Some(doc), Some(tool)) =
+                        (self.doc.as_mut(), self.registry.tool_mut(tool_id))
+                    {
+                        let mut ctx = ToolCtx {
+                            doc,
+                            state: &mut self.editor,
+                        };
+                        tool.insert_text(&mut ctx, &text);
+                    }
+                }
+            }
+            self.after_change(cx);
+            return true;
+        }
+
+        // Copy or cut.
+        let cut = id == "edit.cut";
+        let text = match sink {
+            Sink::Rename => {
+                let text = self.layer_rename.as_ref().map(|(_, n)| n.clone());
+                if cut {
+                    if let Some((_, name)) = self.layer_rename.as_mut() {
+                        name.clear();
+                    }
+                }
+                text
+            }
+            Sink::Field => {
+                let text = Some(self.field_buffer.clone());
+                if cut {
+                    self.field_buffer.clear();
+                    if let Some(field) = self.focused_field {
+                        self.commit_field_value(field);
+                    }
+                }
+                text
+            }
+            Sink::Tool => match (self.doc.as_mut(), self.registry.tool_mut(tool_id)) {
+                (Some(doc), Some(tool)) => {
+                    if cut {
+                        let mut ctx = ToolCtx {
+                            doc,
+                            state: &mut self.editor,
+                        };
+                        tool.take_text(&mut ctx)
+                    } else {
+                        tool.editing_text().map(str::to_string)
+                    }
+                }
+                _ => None,
+            },
+        };
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+        self.after_change(cx);
+        true
+    }
+
+    /// A string from the system clipboard, if there is one.
+    ///
+    /// `sync_clipboard_in` walks the same entries but `continue`s on
+    /// anything that is not an image, so text was simply never seen.
+    fn clipboard_text(cx: &mut Context<Self>) -> Option<String> {
+        let item = cx.read_from_clipboard()?;
+        item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::String(s) if !s.text().is_empty() => Some(s.text().to_string()),
+            _ => None,
+        })
     }
 
     /// Mirror the magic wand's tolerance into the shared editor state.

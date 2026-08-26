@@ -216,6 +216,12 @@ fn is_continuation(ch: char) -> bool {
 const STYLES: &[&str] = &["Regular", "Bold", "Italic", "Bold Italic"];
 const ALIGNMENTS: &[&str] = &["Left", "Center", "Right"];
 
+/// Narrower than this and a drag was meant as a click.
+const MIN_AREA_WIDTH: f32 = 8.0;
+
+/// The widest wrap the options slider offers.
+const MAX_AREA_WIDTH: f32 = 4000.0;
+
 pub struct TypeTool {
     editing: Option<Editing>,
     /// What new text starts as, and what the options bar shows when
@@ -232,6 +238,13 @@ pub struct TypeTool {
     /// text follows the swatch; off keeps whatever colour the layer
     /// already had, for editing wording without restyling it.
     follow_foreground: bool,
+    /// A press that has not been released yet, which will make point
+    /// text if it was a click and an area-text box if it was a drag.
+    ///
+    /// `TextSpec::wrap_width` existed and the engine honoured it, but
+    /// nothing in the ui could set it, so every layer was point text and
+    /// paragraph text was unreachable.
+    pending: Option<(f32, f32)>,
 }
 
 impl Default for TypeTool {
@@ -240,6 +253,7 @@ impl Default for TypeTool {
             editing: None,
             spec: TextSpec::default(),
             follow_foreground: true,
+            pending: None,
         }
     }
 }
@@ -346,6 +360,22 @@ impl ToolPlugin for TypeTool {
     fn id(&self) -> &'static str {
         "type"
     }
+
+    fn editing_text(&self) -> Option<&str> {
+        self.editing.as_ref().map(|s| s.stored.spec.text.as_str())
+    }
+
+    fn insert_text(&mut self, ctx: &mut ToolCtx, text: &str) -> bool {
+        insert_text(self, ctx.doc, text)
+    }
+
+    fn take_text(&mut self, ctx: &mut ToolCtx) -> Option<String> {
+        let taken = self.editing.as_ref()?.stored.spec.text.clone();
+        if taken.is_empty() {
+            return None;
+        }
+        clear_text(self, ctx.doc).then_some(taken)
+    }
     fn name(&self) -> &'static str {
         "Type"
     }
@@ -397,12 +427,37 @@ impl ToolPlugin for TypeTool {
                     name_is_auto,
                 });
             }
-            None => self.start_new(ctx, input.x, input.y),
+            None => {
+                // The layer is created here as it always was, so a click
+                // and a keystroke still works with no release in
+                // between. A drag turns it into an area-text box on
+                // release.
+                self.pending = Some((input.x, input.y));
+                self.start_new(ctx, input.x, input.y);
+            }
         }
     }
 
     fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
-    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
+
+    fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        let Some((ax, _ay)) = self.pending.take() else {
+            return;
+        };
+        // A drag defines the box paragraph text wraps inside; a click
+        // leaves point text, which is all this could make before.
+        let width = (input.x - ax).abs();
+        if width < MIN_AREA_WIDTH {
+            return;
+        }
+        let wrap = width.min(MAX_AREA_WIDTH);
+        self.spec.wrap_width = Some(wrap);
+        if let Some(session) = &mut self.editing {
+            session.stored.spec.wrap_width = Some(wrap);
+            session.dirty = true;
+            self.refresh(ctx.doc);
+        }
+    }
 
     fn on_key(
         &mut self,
@@ -568,6 +623,14 @@ impl ToolPlugin for TypeTool {
                 "Foreground Colour",
                 self.follow_foreground,
             ),
+            ToolOption::slider(
+                "type-wrap",
+                "Wrap",
+                self.spec.wrap_width.unwrap_or(0.0),
+                0.0,
+                MAX_AREA_WIDTH,
+                " px",
+            ),
         ]
     }
 
@@ -594,6 +657,12 @@ impl ToolPlugin for TypeTool {
             "type-leading" => self.spec.line_height = value.num().clamp(0.5, 3.0),
             "type-tracking" => self.spec.tracking = value.num(),
             "type-follow-fg" => self.follow_foreground = value.bool(),
+            // Zero means "no box": point text, which is what every layer
+            // was before there was any way to set this.
+            "type-wrap" => {
+                let w = value.num();
+                self.spec.wrap_width = (w >= MIN_AREA_WIDTH).then_some(w.min(MAX_AREA_WIDTH));
+            }
             _ => {}
         }
     }
@@ -981,6 +1050,51 @@ pub fn set_family(tool: &mut TypeTool, doc: &mut Document, family: String) {
 /// True while a text layer is open for editing.
 pub fn is_editing(tool: &TypeTool) -> bool {
     tool.editing.is_some()
+}
+
+/// The text of the layer being edited, if one is.
+pub fn current_text(tool: &TypeTool) -> Option<&str> {
+    tool.editing.as_ref().map(|s| s.stored.spec.text.as_str())
+}
+
+/// Append text to the layer being edited and re-render.
+///
+/// The clipboard held pixels and nothing else, so ctrl-V while typing
+/// pasted a "Pasted Layer" of pixels on top of the text instead of the
+/// string that had been copied.
+pub fn insert_text(tool: &mut TypeTool, doc: &mut Document, text: &str) -> bool {
+    let Some(session) = &mut tool.editing else {
+        return false;
+    };
+    if text.is_empty() {
+        return false;
+    }
+    // Newlines are meaningful; other control characters are not.
+    let cleaned: String = text
+        .chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .collect();
+    if cleaned.is_empty() {
+        return false;
+    }
+    session.stored.spec.text.push_str(&cleaned);
+    session.dirty = true;
+    tool.refresh(doc);
+    true
+}
+
+/// Replace the edited layer's text, for a cut.
+pub fn clear_text(tool: &mut TypeTool, doc: &mut Document) -> bool {
+    let Some(session) = &mut tool.editing else {
+        return false;
+    };
+    if session.stored.spec.text.is_empty() {
+        return false;
+    }
+    session.stored.spec.text.clear();
+    session.dirty = true;
+    tool.refresh(doc);
+    true
 }
 
 pub struct TypeToolsPlugin;
@@ -1725,5 +1839,121 @@ mod tests {
         let mut d = doc();
         assert_eq!(rerender_family(&mut d, "Definitely Not Installed"), 0);
         assert!(!d.history.can_undo());
+    }
+
+    /// Copy, cut and paste meant pixels and nothing else: ctrl-V while
+    /// typing into a text layer pasted a "Pasted Layer" of pixels on top
+    /// of the text rather than the string that had been copied.
+    #[test]
+    fn the_type_tool_is_a_text_sink() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+
+        // Not editing: the tool is not a text sink, so the pixel
+        // clipboard keeps working.
+        assert_eq!(tool.editing_text(), None);
+        assert!(!tool.insert_text(&mut ctx, "hello"));
+        assert_eq!(tool.take_text(&mut ctx), None);
+
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi");
+        assert_eq!(tool.editing_text(), Some("Hi"));
+
+        assert!(tool.insert_text(&mut ctx, " there"));
+        assert_eq!(tool.editing_text(), Some("Hi there"));
+
+        // Newlines survive a paste; other control characters do not.
+        assert!(tool.insert_text(&mut ctx, "\nline\u{7}two"));
+        assert_eq!(tool.editing_text(), Some("Hi there\nlinetwo"));
+
+        assert_eq!(
+            tool.take_text(&mut ctx).as_deref(),
+            Some("Hi there\nlinetwo")
+        );
+        assert_eq!(tool.editing_text(), Some(""));
+        // Nothing left to cut.
+        assert_eq!(tool.take_text(&mut ctx), None);
+    }
+
+    /// Pasting nothing leaves the text alone rather than marking the
+    /// session dirty for no reason.
+    #[test]
+    fn pasting_nothing_changes_nothing() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi");
+
+        assert!(!tool.insert_text(&mut ctx, ""));
+        assert!(!tool.insert_text(&mut ctx, "\u{7}\u{1b}"));
+        assert_eq!(tool.editing_text(), Some("Hi"));
+    }
+
+    /// `TextSpec::wrap_width` existed and the engine honoured it, but
+    /// nothing in the ui could set it, so every layer was point text and
+    /// paragraph text was unreachable.
+    #[test]
+    fn dragging_the_type_tool_makes_an_area_text_box() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(140.0, 100.0));
+        let wrap = tool.editing.as_ref().unwrap().stored.spec.wrap_width;
+        assert_eq!(wrap, Some(120.0), "the drag did not set a wrap box");
+
+        // And the text wraps inside it: a long line becomes several.
+        type_text(&mut tool, &mut ctx, "wrapping text needs several words");
+        let tall = layer_height(ctx.doc);
+        tool.set_option("type-wrap", OptionValue::Num(0.0));
+        tool.on_option_changed(&mut ctx, "type-wrap");
+        let flat = layer_height(ctx.doc);
+        assert!(
+            tall > flat,
+            "wrapped text should be taller than one line: {tall} vs {flat}"
+        );
+    }
+
+    /// A click still makes point text, and does so on the press, so a
+    /// click and a keystroke with no release in between still works.
+    #[test]
+    fn clicking_still_makes_point_text() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        assert!(tool.editing.is_some(), "no layer on press");
+        // A jitter of a pixel or two is a click, not a drag.
+        tool.on_pointer_up(&mut ctx, input(22.0, 61.0));
+        assert_eq!(tool.editing.as_ref().unwrap().stored.spec.wrap_width, None);
+    }
+
+    fn layer_height(doc: &Document) -> i32 {
+        doc.tree
+            .iter()
+            .last()
+            .map(|l| l.content_bounds().height())
+            .unwrap_or(0)
     }
 }

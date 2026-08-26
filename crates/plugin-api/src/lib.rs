@@ -157,6 +157,27 @@ pub trait ToolPlugin: Send {
         false
     }
 
+    /// The text this tool is editing, if it edits text at all.
+    ///
+    /// Copy, cut and paste have to mean *text* when something is taking
+    /// typing, and the shell should not have to know which concrete tool
+    /// that is. A tool that says nothing here is not a text sink, and the
+    /// pixel clipboard runs as before.
+    fn editing_text(&self) -> Option<&str> {
+        None
+    }
+
+    /// Insert text into the tool's edit session, returning whether it
+    /// took it.
+    fn insert_text(&mut self, _ctx: &mut ToolCtx, _text: &str) -> bool {
+        false
+    }
+
+    /// Remove the edited text, for a cut. Returns what was removed.
+    fn take_text(&mut self, _ctx: &mut ToolCtx) -> Option<String> {
+        None
+    }
+
     /// The user switched to this tool. Modal tools (free transform, crop)
     /// start their session here.
     fn on_activate(&mut self, _ctx: &mut ToolCtx) {}
