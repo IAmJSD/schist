@@ -38,6 +38,14 @@ pub fn tag_name(t: u32) -> String {
         .collect()
 }
 
+/// Ceiling on how many elements one decoded array may hold.
+///
+/// Packed formats let a small amount of input describe a large number of
+/// values: a boolean array stores eight per byte, so the decoded `Vec` can
+/// be hundreds of times the size of the bytes it came from. Real Affinity
+/// graphs sit far below this.
+const MAX_ARRAY_ELEMENTS: usize = 1 << 24;
+
 /// One field value. Arrays of anything become [`Value::Array`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -394,6 +402,20 @@ impl Parser<'_> {
             return Ok(Value::Bool(byte != 0));
         }
         let count = self.c.u32()? as usize;
+        // `take` bounds the *input*, but each packed bit expands into a
+        // `Value` in the output, so one byte of file becomes eight enum
+        // values. That is roughly a 256x amplification, enough for a
+        // 100 MB file to ask for tens of gigabytes.
+        //
+        // Deliberately not the `count > remaining` check the sibling array
+        // readers use: eight booleans legitimately fit in one byte, so
+        // that test would reject valid files. The cap is on the decoded
+        // element count instead.
+        if count > MAX_ARRAY_ELEMENTS {
+            return Err(malformed(format!(
+                "boolean array of {count} elements is over the {MAX_ARRAY_ELEMENTS} limit"
+            )));
+        }
         let bytes = self.c.take(count.div_ceil(8))?;
         Ok(Value::Array(
             (0..count)
@@ -603,5 +625,54 @@ impl Parser<'_> {
     fn push(&mut self, node: Node) -> usize {
         self.nodes.push(node);
         self.nodes.len() - 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A parser positioned at the field bytes for one packed boolean array.
+    fn parser(bytes: &[u8]) -> Parser<'_> {
+        Parser {
+            c: Cursor::new(bytes),
+            nodes: Vec::new(),
+            by_id: HashMap::new(),
+            depth: 0,
+            aux: 0,
+        }
+    }
+
+    fn bool_array(count: u32, packed: &[u8]) -> Vec<u8> {
+        let mut b = count.to_le_bytes().to_vec();
+        b.extend_from_slice(packed);
+        b
+    }
+
+    #[test]
+    fn a_huge_boolean_array_is_rejected() {
+        // Eight bools per byte means a small file describes an enormous
+        // decoded Vec: one input byte becomes eight `Value`s, so the
+        // output is hundreds of times the input.
+        let bytes = bool_array(u32::MAX, &[0xFF; 8]);
+        assert!(matches!(
+            parser(&bytes).bools(true),
+            Err(AffinityError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn an_ordinary_boolean_array_still_decodes() {
+        // The `count > remaining` guard the sibling readers use would
+        // reject this: eight booleans legitimately arrive in one byte.
+        let bytes = bool_array(8, &[0b1010_1010]);
+        match parser(&bytes).bools(true).expect("valid array") {
+            Value::Array(v) => {
+                assert_eq!(v.len(), 8);
+                assert_eq!(v[0], Value::Bool(false));
+                assert_eq!(v[1], Value::Bool(true));
+            }
+            other => panic!("got {other:?}"),
+        }
     }
 }
