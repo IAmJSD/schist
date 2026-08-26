@@ -865,7 +865,11 @@ fn move_layer_by(ctx: &mut CommandCtx, delta: i32) {
     };
     let index = *path.0.last().unwrap() as i32;
     let target = index + delta;
-    if target < 0 {
+    // Both ends, not just the bottom: cmd-] on the topmost layer used to
+    // push a "Bring Forward" entry that changed nothing, which the user
+    // then had to undo away.
+    let siblings = sibling_count(ctx.doc, &path) as i32;
+    if target < 0 || target >= siblings {
         return;
     }
     let mut to = path.clone();
@@ -877,6 +881,21 @@ fn move_layer_by(ctx: &mut CommandCtx, delta: i32) {
     });
     edit.move_layer(path, to);
     edit.commit();
+}
+
+/// How many layers share `path`'s container.
+fn sibling_count(doc: &schist_core::Document, path: &LayerPath) -> usize {
+    let Some((_, groups)) = path.0.split_last() else {
+        return 0;
+    };
+    let mut layers: &[Layer] = &doc.tree.layers;
+    for step in groups {
+        match layers.get(*step).and_then(|l| l.children()) {
+            Some(children) => layers = children,
+            None => return 0,
+        }
+    }
+    layers.len()
 }
 
 /// Move the active layer to the top or bottom of its group.
@@ -1589,5 +1608,30 @@ mod m11_tests {
         binds.sort();
         binds.dedup();
         assert_eq!(binds.len(), count, "two commands share a keybinding");
+    }
+    #[test]
+    fn reordering_at_the_ends_of_the_stack_records_nothing() {
+        // `target` was only checked against `< 0`, so cmd-] on the
+        // topmost layer pushed a "Bring Forward" entry that changed
+        // nothing and then had to be undone away.
+        let reg = registry();
+        let mut state = EditorState::default();
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let bottom = doc.push_layer(Layer::new_raster("bottom"));
+        let top = doc.push_layer(Layer::new_raster("top"));
+
+        doc.active_layer = Some(top);
+        run(&reg, "layer.raise", &mut doc, &mut state);
+        assert!(!doc.history.can_undo(), "no-op at the top of the stack");
+
+        doc.active_layer = Some(bottom);
+        run(&reg, "layer.lower", &mut doc, &mut state);
+        assert!(!doc.history.can_undo(), "no-op at the bottom of the stack");
+
+        // A move that does something still records.
+        doc.active_layer = Some(bottom);
+        run(&reg, "layer.raise", &mut doc, &mut state);
+        assert!(doc.history.can_undo());
+        assert_eq!(doc.tree.layers[1].id, bottom);
     }
 }

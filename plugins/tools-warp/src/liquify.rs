@@ -75,12 +75,15 @@ pub struct LiquifyTool {
     pressure: f32,
     session: Option<Session>,
     cursor: Option<(f32, f32)>,
+    /// Size grew since the mesh was cut, so it needs re-cutting.
+    regrow: bool,
 }
 
 impl LiquifyTool {
     pub fn new() -> Self {
         LiquifyTool {
             mode: Mode::Forward,
+            regrow: false,
             size: 100.0,
             pressure: 50.0,
             session: None,
@@ -115,6 +118,7 @@ impl LiquifyTool {
         if rect.is_empty() {
             return;
         }
+        self.regrow = false;
         self.session = Some(Session {
             layer: id,
             original: raster.tiles.clone(),
@@ -131,6 +135,22 @@ impl LiquifyTool {
     /// the frozen snapshot through the mesh, and a dab only moves the
     /// vertices under the brush, so the rest of the layer was warped
     /// through offsets that still stand.
+    /// The region the live mesh covers, for tests and for anything that
+    /// needs to know how far a warp can reach.
+    pub fn mesh_rect(&self) -> Option<IntRect> {
+        self.session.as_ref().map(|s| s.mesh.rect)
+    }
+
+    /// True while the session's mesh still describes no deformation.
+    fn mesh_is_identity(&self) -> bool {
+        self.session.as_ref().is_none_or(|s| {
+            s.mesh
+                .offsets
+                .iter()
+                .all(|&(dx, dy)| dx == 0.0 && dy == 0.0)
+        })
+    }
+
     fn render(&self, doc: &mut Document, region: IntRect) {
         let Some(session) = &self.session else { return };
         let region = region.intersect(&doc.canvas_rect());
@@ -289,7 +309,18 @@ impl ToolPlugin for LiquifyTool {
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
             "liquify-mode" => self.mode = Mode::from_index(value.index()),
-            "liquify-size" => self.size = value.num(),
+            "liquify-size" => {
+                // The mesh is sized from the brush in `begin`, which only
+                // runs on activate/first press/after a commit -- so
+                // raising Size mid-session left the extra reach past the
+                // artwork's edge unavailable, because `Mesh::rect` was
+                // still cut for the old brush.
+                let grew = value.num() > self.size;
+                self.size = value.num();
+                if grew {
+                    self.regrow = true;
+                }
+            }
             "liquify-pressure" => self.pressure = value.num(),
             _ => {}
         }
@@ -301,6 +332,12 @@ impl ToolPlugin for LiquifyTool {
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         if self.session.is_none() {
+            self.begin(ctx);
+        } else if self.regrow && self.mesh_is_identity() {
+            // Re-cut the mesh for the larger brush. Only while nothing has
+            // been warped yet: rebuilding the grid throws away the
+            // offsets already accumulated, and Enter re-cuts it anyway.
+            self.session = None;
             self.begin(ctx);
         }
         if let Some(session) = &mut self.session {

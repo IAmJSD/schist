@@ -154,6 +154,13 @@ impl Session {
         ]
     }
 
+    /// Where a handle sits, in document space.
+    ///
+    /// `zoom` only matters to the rotate handle, whose standoff from the
+    /// box is a fixed number of *screen* pixels: it was a fixed 24
+    /// document units, so at 800% it sat three screen pixels off the box
+    /// and at 10% it floated 240 screen pixels away, while `hit` had
+    /// always divided its radius by the zoom.
     fn handle_pos(&self, handle: Handle, zoom: f32) -> (f32, f32) {
         let (ux, uy) = handle.anchor();
         let m = self.matrix();
@@ -550,6 +557,9 @@ impl ToolPlugin for TransformTool {
             // selection edit rather than a tile rewrite. (`restore` already
             // ran above; calling it twice was harmless but obscured the
             // control flow.)
+            // selection edit rather than a tile rewrite. (`restore` above
+            // has already run; calling it a second time here was
+            // idempotent but obscured the flow.)
             let canvas = ctx.doc.canvas_rect();
             let matrix = session.matrix();
             let base = session.original_selection.clone();
@@ -636,11 +646,15 @@ impl ToolPlugin for TransformTool {
         let r = 3.0;
         for handle in Handle::ALL {
             let (x, y) = session.handle_pos(handle, state.zoom);
+            // `as i32` truncates toward zero, so a handle shifts by a
+            // pixel once its coordinate goes negative -- on the
+            // off-canvas side, where the preview then disagrees with the
+            // floor/ceil used to commit the same gesture.
             out.push(Overlay::Rect(IntRect::new(
-                (x - r) as i32,
-                (y - r) as i32,
-                (x + r) as i32,
-                (y + r) as i32,
+                (x - r).floor() as i32,
+                (y - r).floor() as i32,
+                (x + r).ceil() as i32,
+                (y + r).ceil() as i32,
             )));
         }
         let (rx, ry) = session.handle_pos(Handle::Rotate, state.zoom);
@@ -1671,5 +1685,53 @@ mod tests {
         // The document was 200x200, so everything halves.
         assert_eq!(doc.guides[0].position, 50.0);
         assert_eq!(doc.notes[0].at, (50.0, 30.0));
+    }
+    /// The rotate handle's standoff is a fixed number of *screen* pixels.
+    /// It was a fixed 24 document units, so at 800% it sat three screen
+    /// pixels off the box and at 10% it floated 240 away -- while `hit`
+    /// had always divided its radius by the zoom.
+    #[test]
+    fn the_rotate_handle_keeps_its_screen_distance() {
+        let mut doc = doc_with_square();
+        let mut state = EditorState::default();
+        let mut tool = TransformTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_activate(&mut ctx);
+        let session = tool.session.as_ref().unwrap();
+        let top = session.base.top as f32;
+
+        for zoom in [0.1f32, 1.0, 8.0] {
+            let (_, hy) = session.handle_pos(Handle::Rotate, zoom);
+            let screen = (top - hy) * zoom;
+            assert!(
+                (screen - 24.0).abs() < 0.5,
+                "at {zoom}x the handle stood {screen} screen pixels off the box"
+            );
+        }
+    }
+
+    /// And it stays grabbable at every zoom, which is the point.
+    #[test]
+    fn the_rotate_handle_is_hittable_at_any_zoom() {
+        let mut doc = doc_with_square();
+        let mut state = EditorState::default();
+        let mut tool = TransformTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_activate(&mut ctx);
+        let session = tool.session.as_ref().unwrap();
+        for zoom in [0.1f32, 1.0, 8.0] {
+            let (hx, hy) = session.handle_pos(Handle::Rotate, zoom);
+            assert_eq!(
+                session.hit(hx, hy, zoom),
+                Some(Handle::Rotate),
+                "at {zoom}x"
+            );
+        }
     }
 }

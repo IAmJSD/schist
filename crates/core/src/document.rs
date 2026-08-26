@@ -5,7 +5,7 @@ use crate::history::{Edit, EditOp, History, LayerProps};
 use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree, RawBlock};
 use crate::selection::Selection;
 use crate::tile::{TileBuf, TileCoord, TileMap, TILE_PIXELS};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use schist_color::{ColorMode, Depth};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -736,9 +736,14 @@ impl<'a> EditBuilder<'a> {
         let Some(raster) = layer.as_raster() else {
             return;
         };
-        let mut coords: Vec<TileCoord> = raster.tiles.coords().collect();
+        // A set, not a linear scan: this ran `Vec::contains` per tile, so
+        // every transform, filter and Image Size on a large document paid
+        // a quadratic sweep -- a 12000x12000 document has ~2200 tiles, so
+        // roughly five million comparisons per call.
+        let mut seen: FxHashSet<TileCoord> = raster.tiles.coords().collect();
+        let mut coords: Vec<TileCoord> = seen.iter().copied().collect();
         for coord in new_tiles.coords() {
-            if !coords.contains(&coord) {
+            if seen.insert(coord) {
                 coords.push(coord);
             }
         }

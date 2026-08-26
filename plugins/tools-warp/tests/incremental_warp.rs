@@ -135,7 +135,7 @@ fn a_cropped_source_plane_reaches_as_far_as_the_displacement_does() {
 // ===== the tool itself =====
 
 use schist_core::{Document, Layer};
-use schist_plugin_api::{EditorState, PointerInput, ToolCtx, ToolPlugin};
+use schist_plugin_api::{EditorState, OptionValue, PointerInput, ToolCtx, ToolPlugin};
 use schist_tools_warp::liquify::LiquifyTool;
 
 fn document() -> (Document, schist_core::LayerId) {
@@ -273,4 +273,75 @@ fn escape_puts_the_pixels_back() {
             );
         }
     }
+}
+
+/// Raising Size mid-session must widen the mesh.
+///
+/// The extent is cut in `begin`, which only runs on activate, on the
+/// first press, and after a commit — so the extra reach past the
+/// artwork's edge stayed unavailable and pixels could not be pushed as
+/// far as the new brush promised.
+#[test]
+fn raising_the_brush_size_recuts_the_mesh() {
+    let mut doc = Document::new("t", 2000, 2000, Depth::Eight);
+    let mut layer = Layer::new_raster("art");
+    let buf = [200u8, 30, 30, 255].repeat(64 * 64);
+    schist_core::blit_rgba8(
+        &mut layer.as_raster_mut().unwrap().tiles,
+        Depth::Eight,
+        schist_core::IntRect::from_xywh(900, 900, 64, 64),
+        &buf,
+    );
+    let id = layer.id;
+    doc.tree.layers.push(layer);
+    doc.active_layer = Some(id);
+
+    let mut state = EditorState::default();
+    let mut tool = LiquifyTool::new();
+    let mut ctx = ToolCtx {
+        doc: &mut doc,
+        state: &mut state,
+    };
+    tool.on_activate(&mut ctx);
+    let small = tool.mesh_rect().expect("a session");
+
+    tool.set_option("liquify-size", OptionValue::Num(800.0));
+    tool.on_pointer_down(&mut ctx, at(930.0, 930.0));
+    let large = tool.mesh_rect().expect("a session");
+
+    assert!(
+        large.width() > small.width() && large.height() > small.height(),
+        "mesh stayed {small:?} after the brush grew to 800 (now {large:?})"
+    );
+}
+
+/// But not once pixels have been pushed: re-cutting the grid would throw
+/// the accumulated offsets away, and Enter re-cuts it anyway.
+#[test]
+fn a_warp_in_progress_keeps_its_mesh() {
+    let (mut doc, _id) = document();
+    let mut state = EditorState::default();
+    let mut tool = LiquifyTool::new();
+    let mut ctx = ToolCtx {
+        doc: &mut doc,
+        state: &mut state,
+    };
+    tool.on_activate(&mut ctx);
+    stroke(&mut tool, &mut ctx);
+    let warped = tool.mesh_rect().expect("a session");
+
+    tool.set_option("liquify-size", OptionValue::Num(800.0));
+    tool.on_pointer_down(&mut ctx, at(100.0, 110.0));
+
+    assert_eq!(
+        tool.mesh_rect(),
+        Some(warped),
+        "the size slider re-cut a mesh that already held a warp"
+    );
+
+    // Committing re-cuts it for the new brush, which is where the extra
+    // reach becomes available.
+    tool.on_commit(&mut ctx);
+    let after = tool.mesh_rect().expect("a session");
+    assert!(after.width() >= warped.width());
 }
