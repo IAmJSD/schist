@@ -408,8 +408,9 @@ mod tests {
     }
 
     /// Imports a vendored HEIC fixture, or None (skip, like the corpus
-    /// tests do) when the fixture is missing or the machine has no
-    /// libheif to decode with.
+    /// tests do) when the fixture is missing or the machine cannot
+    /// decode HEVC — no libheif at all, or one without a decoder, as on
+    /// stock CI runners.
     fn import_heif_fixture(name: &str) -> Option<Document> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/heif")
@@ -420,7 +421,7 @@ mod tests {
         };
         assert!(HeifCodec.probe(&bytes), "{name} should probe as HEIF");
         match HeifCodec.import(&bytes) {
-            Err(err) if heif::is_missing_library_error(&err) => {
+            Err(err) if heif::download_would_help(&err) => {
                 eprintln!("skipping: {err:#}");
                 None
             }

@@ -1197,10 +1197,11 @@ impl Workspace {
                 self.install_document(doc);
                 self.offer_missing_fonts(cx);
             }
-            // A HEIC on a machine with no libheif: downloading the
-            // decoder fixes this one, so offer that instead of failing.
+            // A HEIC on a machine with no libheif — or a libheif with
+            // no HEVC decoder, as stock Ubuntu ships: downloading the
+            // managed build fixes both, so offer that instead of failing.
             Err(err)
-                if schist_codecs_common::heif::is_missing_library_error(&err)
+                if schist_codecs_common::heif::download_would_help(&err)
                     && schist_codecs_common::heif::managed_library().is_some()
                     && self.modal.is_none() =>
             {

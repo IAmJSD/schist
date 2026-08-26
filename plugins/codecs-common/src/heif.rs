@@ -132,14 +132,33 @@ const LIBRARY_CANDIDATES: &[&str] = &[
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const LIBRARY_CANDIDATES: &[&str] = &["heif.dll", "libheif.dll", "libheif-1.dll"];
 
-/// The app and the tests match on this phrase to recognise "no library
-/// on this machine" (the case a consented download fixes, as opposed to
-/// a broken file); keep it out of other error messages.
+/// The app and the tests match on these phrases to recognise the cases
+/// a consented download fixes (as opposed to a broken file); keep them
+/// out of other error messages.
 const NOT_AVAILABLE: &str = "libheif is not available";
+const NO_DECODER: &str = "may lack an HEVC decoder";
+
+/// The loaded library, and whether it came from the managed directory.
+/// A failed load is deliberately not cached, and `install` clears this,
+/// so a download can take effect without a restart.
+static LOADED: Mutex<Option<(&'static LibHeif, bool)>> = Mutex::new(None);
 
 /// True when an `import` error means no libheif could be loaded.
 pub fn is_missing_library_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains(NOT_AVAILABLE)
+}
+
+/// True when this machine cannot decode HEIC today but installing the
+/// managed library would fix it: either no libheif loaded at all, or
+/// the loaded (system) build has no HEVC decoder — stock Ubuntu ships
+/// libheif with only AV1 plugins — and the managed build, which always
+/// carries one, is not the library in use.
+pub fn download_would_help(err: &anyhow::Error) -> bool {
+    if is_missing_library_error(err) {
+        return true;
+    }
+    let from_managed = LOADED.lock().unwrap().is_some_and(|(_, managed)| managed);
+    !from_managed && format!("{err:#}").contains(NO_DECODER)
 }
 
 /// One file the app may download: URL pinned to a release tag, contents
@@ -277,27 +296,32 @@ pub fn install(file: &RemoteFile, bytes: &[u8]) -> anyhow::Result<PathBuf> {
     let tmp = path.with_extension("part");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, &path)?;
+    // Drop any already-loaded library from the cache: a system libheif
+    // without an HEVC decoder may be in use, and the next import must
+    // pick up the managed one instead. The old mapping stays leaked —
+    // unloading a library other threads may hold references into is
+    // never safe.
+    *LOADED.lock().unwrap() = None;
     Ok(path)
 }
 
 fn libheif() -> anyhow::Result<&'static LibHeif> {
-    // A failed load is deliberately not cached: after the app installs
-    // the managed library, the next import must be able to succeed
-    // without a restart.
-    static LOADED: Mutex<Option<&'static LibHeif>> = Mutex::new(None);
     let mut loaded = LOADED.lock().unwrap();
-    if let Some(lib) = *loaded {
+    if let Some((lib, _)) = *loaded {
         return Ok(lib);
     }
 
-    let mut candidates: Vec<std::ffi::OsString> = Vec::new();
+    let mut candidates: Vec<(std::ffi::OsString, bool)> = Vec::new();
     if let Some(managed) = managed_library() {
-        candidates.push(managed_dir().join(managed.library.name).into_os_string());
+        candidates.push((
+            managed_dir().join(managed.library.name).into_os_string(),
+            true,
+        ));
     }
-    candidates.extend(LIBRARY_CANDIDATES.iter().map(Into::into));
+    candidates.extend(LIBRARY_CANDIDATES.iter().map(|name| (name.into(), false)));
 
     let mut last_err = String::new();
-    for name in &candidates {
+    for (name, from_managed) in &candidates {
         let lib = match unsafe { libloading::Library::new(name) } {
             Ok(lib) => lib,
             Err(err) => {
@@ -313,7 +337,7 @@ fn libheif() -> anyhow::Result<&'static LibHeif> {
                     check(unsafe { init(std::ptr::null()) }, "initialising libheif")?;
                 }
                 let lib = &*Box::leak(Box::new(lib));
-                *loaded = Some(lib);
+                *loaded = Some((lib, *from_managed));
                 return Ok(lib);
             }
             Err(err) => last_err = err,
@@ -336,7 +360,7 @@ fn check(err: HeifError, what: &str) -> anyhow::Result<()> {
     };
     if err.code == ERROR_UNSUPPORTED {
         anyhow::bail!(
-            "{what}: {message} — this libheif build may lack an HEVC decoder \
+            "{what}: {message} — this libheif build {NO_DECODER} \
              (on Debian/Ubuntu, install libheif-plugin-libde265)"
         );
     }
