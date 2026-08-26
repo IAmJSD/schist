@@ -892,3 +892,50 @@ fn an_ordinary_layer_gains_no_smart_object_block() {
     assert!(!bytes.windows(4).any(|w| w == b"ScSo"));
     assert!(read_psd(&bytes).unwrap().tree.layers[0].smart.is_none());
 }
+
+/// Fill opacity is what makes "Fill 0% plus a drop shadow" show only the
+/// shadow. The reader hard-coded it to 1.0 and left the 'iOpa' block in
+/// `extras`, so a Photoshop file with Fill 0% opened fully opaque; the
+/// writer then echoed the preserved block back, so changing Fill in
+/// Schist saved the file's original value over it.
+#[test]
+fn round_trips_fill_opacity() {
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "shadowed",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    );
+    layer.fill_opacity = 0.0;
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert_eq!(back.tree.layers[0].fill_opacity, 0.0);
+
+    // And editing it saves the new value, not the one that came in.
+    let mut edited = back;
+    edited.tree.layers[0].fill_opacity = 0.5;
+    let again = read_psd(&write_psd(&edited).unwrap()).unwrap();
+    assert!(
+        (again.tree.layers[0].fill_opacity - 0.5).abs() <= 1.0 / 255.0,
+        "got {}",
+        again.tree.layers[0].fill_opacity
+    );
+}
+
+/// Photoshop omits 'iOpa' at 100%, which readers take to mean fully
+/// filled, so writing it unconditionally would bloat every layer.
+#[test]
+fn a_fully_filled_layer_writes_no_fill_block() {
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "plain",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    let bytes = write_psd(&doc).unwrap();
+    assert!(!bytes.windows(4).any(|w| w == b"iOpa"));
+    assert_eq!(read_psd(&bytes).unwrap().tree.layers[0].fill_opacity, 1.0);
+}

@@ -234,20 +234,19 @@ impl Default for ColorSettings {
 }
 
 impl ColorSettings {
-    /// Build the transform for a document with the given embedded profile.
+    /// Build the display hop for a document with the given embedded
+    /// profile.
     ///
-    /// Soft proofing runs document→proof→display; the two hops are baked
-    /// into one executor chain by applying them in sequence.
+    /// Soft proofing runs document → proof → display, applied in
+    /// sequence. The second hop therefore starts at the *proof* profile:
+    /// building it from the document profile, as this used to, converts
+    /// from a space the pixels already left, so Proof Colors was doubly
+    /// wrong whenever the display profile differed from the document's --
+    /// and people make colour decisions against that view.
     pub fn transform_for(&self, document_icc: Option<&[u8]>) -> ColorTransform {
-        let source = match document_icc {
-            Some(bytes) => match Profile::from_bytes(bytes) {
-                Ok(p) => p,
-                Err(err) => {
-                    log::warn!("{err:#}; falling back to the working space");
-                    self.working.clone()
-                }
-            },
-            None => self.working.clone(),
+        let source = match &self.proof {
+            Some(proof) => proof.clone(),
+            None => self.document_profile(document_icc),
         };
         match ColorTransform::new(&source, &self.display, self.intent) {
             Ok(t) => t,
@@ -261,13 +260,25 @@ impl ColorSettings {
     /// The proofing hop, if soft proofing is on.
     pub fn proof_transform(&self, document_icc: Option<&[u8]>) -> Option<ColorTransform> {
         let proof = self.proof.as_ref()?;
-        let source = match document_icc {
-            Some(bytes) => Profile::from_bytes(bytes).unwrap_or_else(|_| self.working.clone()),
-            None => self.working.clone(),
-        };
+        let source = self.document_profile(document_icc);
         // Proofing is colorimetric by definition: it must show the target's
         // gamut clipping rather than re-map it pleasingly.
         ColorTransform::new(&source, proof, Intent::RelativeColorimetric).ok()
+    }
+
+    /// The document's own profile, or the working space when it has none
+    /// or carries one we cannot read.
+    fn document_profile(&self, document_icc: Option<&[u8]>) -> Profile {
+        match document_icc {
+            Some(bytes) => match Profile::from_bytes(bytes) {
+                Ok(p) => p,
+                Err(err) => {
+                    log::warn!("{err:#}; falling back to the working space");
+                    self.working.clone()
+                }
+            },
+            None => self.working.clone(),
+        }
     }
 }
 
@@ -610,5 +621,57 @@ mod tests {
             .unwrap()
             .apply(&mut b);
         assert_eq!(a, b);
+    }
+    /// Proofing to the very profile the display uses must show exactly
+    /// what an unproofed document→display conversion shows: the proof hop
+    /// takes the pixels to P3 and the display hop then has nothing left
+    /// to do. Building the display hop from the *document* profile
+    /// instead -- as it used to -- runs sRGB→P3 a second time over pixels
+    /// that are already P3, so Proof Colors was doubly wrong whenever the
+    /// display profile differed from the document's, and people make
+    /// colour decisions against that view.
+    #[test]
+    fn the_display_hop_starts_where_the_proof_hop_ended() {
+        let mut proofed = [0.8f32, 0.2, 0.1, 1.0];
+        let mut direct = proofed;
+
+        let proofing = ColorSettings {
+            working: Profile::srgb(),
+            display: Profile::display_p3(),
+            intent: Intent::Perceptual,
+            proof: Some(Profile::display_p3()),
+        };
+        proofing.proof_transform(None).unwrap().apply(&mut proofed);
+        proofing.transform_for(None).apply(&mut proofed);
+
+        let plain = ColorSettings {
+            proof: None,
+            ..proofing
+        };
+        plain.transform_for(None).apply(&mut direct);
+
+        for (got, want) in proofed.iter().zip(&direct) {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "proof + display applied a second conversion: {proofed:?} vs {direct:?}"
+            );
+        }
+    }
+
+    /// With proofing off, the display hop is still document → display.
+    #[test]
+    fn without_proofing_the_display_hop_is_unchanged() {
+        let settings = ColorSettings {
+            working: Profile::srgb(),
+            display: Profile::display_p3(),
+            intent: Intent::Perceptual,
+            proof: None,
+        };
+        let mut pixels = [0.8f32, 0.2, 0.1, 1.0];
+        settings.transform_for(None).apply(&mut pixels);
+        assert!(
+            (pixels[0] - 0.8).abs() > 1e-3 || (pixels[1] - 0.2).abs() > 1e-3,
+            "sRGB to Display P3 should have moved the pixel"
+        );
     }
 }

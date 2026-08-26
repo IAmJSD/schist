@@ -462,6 +462,12 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
         if block.key == crate::smart::SMART_BLOCK_KEY {
             continue;
         }
+        // Fill opacity is regenerated from the layer below, so a
+        // preserved copy is stale: echoing it back wrote the file's
+        // original value over whatever the user set in Schist.
+        if &block.key == b"iOpa" {
+            continue;
+        }
         if vector && (&block.key == b"vmsk" || &block.key == b"vsms" || &block.key == b"SoCo") {
             continue;
         }
@@ -485,6 +491,13 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
     // readers that do not know it.
     if let Some(payload) = crate::smart::write_smart(layer) {
         out.push((crate::smart::SMART_BLOCK_KEY, payload));
+    }
+    // 'iOpa' is one byte of fill opacity plus three of padding. Photoshop
+    // omits the block at 100%, which is what a reader assumes when it is
+    // absent, so only write it when it says something.
+    let fill = (layer.fill_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if fill != 255 {
+        out.push((*b"iOpa", vec![fill, 0, 0, 0]));
     }
     out.extend(shape_blocks(layer, doc));
     out

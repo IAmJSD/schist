@@ -131,7 +131,16 @@ fn export_flat(
     match format {
         // JPEG has no alpha and takes a quality setting.
         ImageFormat::Jpeg => {
-            let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+            // JPEG has no alpha, and `to_rgb8` simply drops it. A straight
+            // alpha composite leaves rgb at 0 where nothing was painted,
+            // so every transparent area came out black. Matte onto white
+            // instead, which is what Photoshop offers by default.
+            let mut rgb = image::RgbImage::new(doc.width, doc.height);
+            for (dst, src) in rgb.pixels_mut().zip(img.pixels()) {
+                let a = src[3] as f32 / 255.0;
+                let matte = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
+                *dst = image::Rgb([matte(src[0]), matte(src[1]), matte(src[2])]);
+            }
             let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
                 &mut out,
                 options.quality.clamp(1, 100),
@@ -173,8 +182,17 @@ macro_rules! simple_codec {
                 $exts
             }
             fn probe(&self, bytes: &[u8]) -> bool {
-                let magic: &[&[u8]] = $magic;
-                magic.iter().any(|m| bytes.starts_with(m))
+                // Each alternative is a list of (offset, bytes) that must
+                // all match. A bare prefix is not enough for every format:
+                // "RIFF" alone matches wav and avi as well as webp.
+                let magic: &[&[(usize, &[u8])]] = $magic;
+                magic.iter().any(|alt| {
+                    alt.iter().all(|(at, want)| {
+                        bytes
+                            .get(*at..at + want.len())
+                            .is_some_and(|got| got == *want)
+                    })
+                })
             }
             fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
                 import_with($format, bytes, $name)
@@ -205,7 +223,7 @@ simple_codec!(
     "PNG",
     ImageFormat::Png,
     &["png"],
-    &[b"\x89PNG"]
+    &[&[(0, b"\x89PNG")]]
 );
 simple_codec!(
     JpegCodec,
@@ -213,7 +231,7 @@ simple_codec!(
     "JPEG",
     ImageFormat::Jpeg,
     &["jpg", "jpeg"],
-    &[b"\xFF\xD8\xFF"]
+    &[&[(0, b"\xFF\xD8\xFF")]]
 );
 simple_codec!(
     WebPCodec,
@@ -221,7 +239,10 @@ simple_codec!(
     "WebP",
     ImageFormat::WebP,
     &["webp"],
-    &[b"RIFF"]
+    // "RIFF" alone is any RIFF container; webp also declares itself at
+    // offset 8. Without that, a .wav was handed to the webp decoder,
+    // because `decode_file` probes before it looks at the extension.
+    &[&[(0, b"RIFF"), (8, b"WEBP")]]
 );
 simple_codec!(
     TiffCodec,
@@ -229,7 +250,13 @@ simple_codec!(
     "TIFF",
     ImageFormat::Tiff,
     &["tif", "tiff"],
-    &[b"II*\x00", b"MM\x00*"]
+    // Classic TIFF plus BigTIFF, which uses version 43 instead of 42.
+    &[
+        &[(0, b"II*\x00")],
+        &[(0, b"MM\x00*")],
+        &[(0, b"II+\x00")],
+        &[(0, b"MM\x00+")],
+    ]
 );
 
 pub struct CommonCodecsPlugin;
@@ -503,5 +530,47 @@ mod tests {
         assert!(black < 5, "PQ black stays black: {black}");
         assert!(white > 240, "reference white bakes near white: {white}");
         assert!(spec >= white, "speculars roll off above white: {spec}");
+    }
+    #[test]
+    fn the_webp_probe_does_not_claim_every_riff_file() {
+        // `decode_file` probes before it consults the extension, so a wav
+        // was handed to the webp decoder and failed with "decoding WebP".
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&[0; 4]);
+        wav.extend_from_slice(b"WAVEfmt ");
+        assert!(!WebPCodec.probe(&wav), "a wav is not a webp");
+
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0; 4]);
+        webp.extend_from_slice(b"WEBPVP8 ");
+        assert!(WebPCodec.probe(&webp), "a real webp must still probe");
+    }
+
+    #[test]
+    fn the_tiff_probe_accepts_bigtiff() {
+        assert!(TiffCodec.probe(b"II*\x00rest"), "classic little-endian");
+        assert!(TiffCodec.probe(b"MM\x00*rest"), "classic big-endian");
+        assert!(TiffCodec.probe(b"II+\x00rest"), "bigtiff little-endian");
+        assert!(TiffCodec.probe(b"MM\x00+rest"), "bigtiff big-endian");
+        assert!(!TiffCodec.probe(b"II!\x00rest"), "and nothing else");
+    }
+
+    #[test]
+    fn transparent_areas_export_to_jpeg_as_white_not_black() {
+        // JPEG has no alpha and `to_rgb8` just drops it. A straight-alpha
+        // composite leaves rgb at 0 where nothing was painted, so every
+        // transparent region came out black.
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        doc.push_layer(Layer::new_raster("empty"));
+        let bytes = export_flat(&doc, ImageFormat::Jpeg, &ExportOptions::default()).unwrap();
+
+        let img = image::load_from_memory_with_format(&bytes, ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgb8();
+        let px = img.get_pixel(4, 4);
+        assert!(
+            px[0] > 200 && px[1] > 200 && px[2] > 200,
+            "transparent should matte to white, got {px:?}"
+        );
     }
 }
