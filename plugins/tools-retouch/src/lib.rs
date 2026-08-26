@@ -541,7 +541,14 @@ impl ToolPlugin for RedEyeTool {
             return;
         };
         let (threshold, darken) = (1.0 - self.amount, self.darken);
+        // Every sibling tool in this file confines itself to the selection;
+        // Red Eye recoloured matching pixels outside it too.
+        let sel = ctx.doc.selection.clone();
         write_rect(ctx.doc, layer, rect, "Red Eye", |x, y| {
+            let cov = sel.coverage(x, y) as f32 / 255.0;
+            if cov <= 0.0 {
+                return None;
+            }
             let c = tiles.pixel(x, y);
             if c.a <= 0.0 {
                 return None;
@@ -556,10 +563,18 @@ impl ToolPlugin for RedEyeTool {
             // what turns a glowing pupil back into a pupil.
             let grey = (c.g + c.b) / 2.0;
             let k = 1.0 - darken;
-            Some(Rgba {
+            let fixed = Rgba {
                 r: grey * k,
                 g: c.g * k,
                 b: c.b * k,
+                a: c.a,
+            };
+            // Feathered selection edges fade the correction rather than
+            // ending it abruptly.
+            Some(Rgba {
+                r: c.r + (fixed.r - c.r) * cov,
+                g: c.g + (fixed.g - c.g) * cov,
+                b: c.b + (fixed.b - c.b) * cov,
                 a: c.a,
             })
         });

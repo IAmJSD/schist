@@ -578,21 +578,20 @@ impl Stroke {
     }
 }
 
-/// Topmost paintable (raster, unlocked, visible) layer if the active layer
-/// isn't paintable.
+/// The active layer, if it can be painted on.
+///
+/// This used to fall back to the topmost other raster layer when the
+/// active one was a group, an adjustment layer or locked, so a brush
+/// stroke silently landed somewhere else entirely. The fallback also
+/// ignored `visible`, despite the doc comment claiming otherwise, so paint
+/// could go onto a hidden layer and appear to do nothing at all.
+///
+/// Photoshop refuses and says why; refusing is the half we can do here,
+/// and the caller reports it.
 fn paintable_layer(doc: &Document) -> Option<LayerId> {
-    if let Some(id) = doc.active_layer {
-        if let Some(l) = doc.tree.find(id) {
-            if matches!(l.kind, LayerKind::Raster(_)) && !l.locked {
-                return Some(id);
-            }
-        }
-    }
-    doc.tree
-        .iter()
-        .filter(|l| matches!(l.kind, LayerKind::Raster(_)) && !l.locked)
-        .map(|l| l.id)
-        .last()
+    let id = doc.active_layer?;
+    let layer = doc.tree.find(id)?;
+    (matches!(layer.kind, LayerKind::Raster(_)) && !layer.locked && layer.visible).then_some(id)
 }
 
 pub struct PaintTool {
