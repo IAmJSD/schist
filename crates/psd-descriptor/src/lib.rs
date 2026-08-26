@@ -150,13 +150,24 @@ pub fn parse_versioned(data: &[u8]) -> Option<Descriptor> {
     read_descriptor(&mut cur)
 }
 
+/// Most items one descriptor or list may hold. Real Photoshop descriptors
+/// are far smaller; a count past this means the stream is not what we
+/// think it is.
+const MAX_ITEMS: usize = 4096;
+
 fn read_descriptor(cur: &mut Cur) -> Option<Descriptor> {
     let _name = cur.unicode()?;
     let class = cur.key()?;
     let count = cur.u32()? as usize;
+    // A corrupt count claiming millions of entries used to be truncated to
+    // 4096 and parsing continued, which left the cursor mid-stream: a
+    // nested descriptor's parent then read the remains as its own fields.
+    // An over-count is a parse failure, not something to carry on from.
+    if count > MAX_ITEMS {
+        return None;
+    }
     let mut items = HashMap::new();
-    // Guard against corrupt counts claiming millions of entries.
-    for _ in 0..count.min(4096) {
+    for _ in 0..count {
         let key = cur.key()?;
         let value = read_value(cur)?;
         items.insert(key, value);
@@ -182,8 +193,11 @@ fn read_value(cur: &mut Cur) -> Option<Value> {
         }
         "VlLs" => {
             let count = cur.u32()? as usize;
+            if count > MAX_ITEMS {
+                return None;
+            }
             let mut out = Vec::new();
-            for _ in 0..count.min(4096) {
+            for _ in 0..count {
                 out.push(read_value(cur)?);
             }
             Value::List(out)
@@ -192,7 +206,12 @@ fn read_value(cur: &mut Cur) -> Option<Value> {
         // Types we don't need: consume their fixed payloads so the walk
         // stays in sync, or bail out if the size isn't knowable.
         "obj " | "type" | "GlbC" | "alis" | "tdta" => return None,
-        _ => Value::Unknown,
+        // An unrecognised signature has an unknown payload size, so the
+        // cursor is now pointing into the middle of it. Carrying on read
+        // that payload as the next key and value, and the nonsense was
+        // then re-encoded on save. Bail out the way the known-unhandled
+        // types above already do.
+        _ => return None,
     })
 }
 
@@ -550,5 +569,55 @@ mod encode_tests {
         b.bool("masterFXSwitch", true);
         let d = parse(&b.finish()).unwrap();
         assert_eq!(d.get("masterFXSwitch").unwrap().as_bool(), Some(true));
+    }
+    /// A descriptor whose first value has an unrecognised type, and whose
+    /// payload happens to spell a valid key/value pair.
+    ///
+    /// That is the case that matters: skipping the signature but not the
+    /// payload let the walk read the payload as the *next* item and carry
+    /// on, so the parse succeeded with values that were never in the file.
+    fn descriptor_with_unknown_type() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0u32.to_be_bytes()); // empty unicode name
+        b.extend_from_slice(&0u32.to_be_bytes()); // class key length
+        b.extend_from_slice(b"null");
+        b.extend_from_slice(&2u32.to_be_bytes()); // two items
+                                                  // Item 1: an unknown value type whose 16-byte payload reads as a
+                                                  // complete key + long value.
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(b"Ky01");
+        b.extend_from_slice(b"ZZZZ");
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(b"Ky02");
+        b.extend_from_slice(b"long");
+        b.extend_from_slice(&7i32.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn an_unknown_value_type_stops_rather_than_desyncing() {
+        // Previously the cursor consumed the 4-byte signature but not the
+        // payload, so the walk read that payload as the next item and
+        // returned a descriptor holding a value the file never contained.
+        // A layer style or SoCo fill using an unhandled type therefore
+        // came back with arbitrary colours and offsets, which were then
+        // re-encoded on save.
+        let bytes = descriptor_with_unknown_type();
+        let parsed = parse(&bytes);
+        assert!(
+            parsed.is_none(),
+            "an unknown type must fail the parse rather than inventing \
+             items, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn an_absurd_item_count_fails_rather_than_truncating() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(b"null");
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(parse(&b).is_none(), "an over-count must not be truncated");
     }
 }
