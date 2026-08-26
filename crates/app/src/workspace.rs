@@ -84,6 +84,12 @@ pub(crate) fn load_view_options() -> ViewOptions {
 }
 
 /// How often a dirty document is snapshotted for crash recovery.
+/// The most surrounding image a filter is handed beyond its selection.
+///
+/// A radius-250 blur on a four-pixel selection should not end up
+/// compositing the whole canvas.
+const MAX_FILTER_CONTEXT: u32 = 256;
+
 const AUTOSAVE_SECS: u64 = 30;
 
 /// A document open in another tab, parked with its view transform so
@@ -2692,6 +2698,7 @@ impl Workspace {
             .unwrap_or_else(|| "export".into());
         let dir = base.parent().unwrap_or(std::path::Path::new("."));
         let mut written = 0usize;
+        let mut failed: Vec<String> = Vec::new();
         for (name, rect) in regions {
             let rect = rect.intersect(&doc.canvas_rect());
             if rect.is_empty() {
@@ -2720,18 +2727,35 @@ impl Workspace {
                 .collect();
             let out = dir.join(format!("{stem}-{safe}.png"));
             let Some(codec) = self.registry.codecs().find(|c| c.id() == "png") else {
+                failed.push(format!("{name}: no png exporter"));
                 continue;
             };
-            match codec.export(&region_doc) {
-                Ok(bytes) => {
-                    if std::fs::write(&out, bytes).is_ok() {
-                        written += 1;
-                    }
+            // Both failure paths used to be silent -- a discarded
+            // `is_ok()` and a `log::error!` -- while the status bar
+            // reported however many had worked, so "Exported 3
+            // region(s)" out of five looked like success.
+            match codec
+                .export(&region_doc)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| std::fs::write(&out, bytes).map_err(|e| e.to_string()))
+            {
+                Ok(()) => written += 1,
+                Err(e) => {
+                    log::error!("export {name}: {e}");
+                    failed.push(format!("{name}: {e}"));
                 }
-                Err(e) => log::error!("export {name}: {e}"),
             }
         }
-        self.status = format!("Exported {written} region(s)").into();
+        self.status = if failed.is_empty() {
+            format!("Exported {written} region(s)").into()
+        } else {
+            format!(
+                "Exported {written} region(s); {} failed ({})",
+                failed.len(),
+                failed.join(", ")
+            )
+            .into()
+        };
         cx.notify();
     }
 
@@ -4755,19 +4779,44 @@ impl Workspace {
     /// The pixels a filter would touch: the layer's content clipped to the
     /// canvas, or to the selection when there is one.
     fn filter_region(&self, layer_id: schist_core::LayerId) -> IntRect {
+        self.filter_region_with_context(layer_id, 0)
+    }
+
+    /// The region a filter runs over, grown by how far it reads.
+    ///
+    /// With a selection active the buffer used to be exactly
+    /// `selection.bounds()`, and the kernels clamp at the buffer edge --
+    /// so blurring a selection repeated its boundary row outward instead
+    /// of pulling in the real pixels just outside it, leaving a visible
+    /// band along the selection edge. The write side masks by selection
+    /// coverage, so growing the region changes what the filter *sees*
+    /// without widening what it changes.
+    fn filter_region_with_context(&self, layer_id: schist_core::LayerId, context: u32) -> IntRect {
         let Some(doc) = self.doc.as_ref() else {
             return IntRect::EMPTY;
         };
         let canvas = doc.canvas_rect();
         if doc.selection.is_empty() {
-            doc.tree
+            return doc
+                .tree
                 .find(layer_id)
                 .map(|l| l.content_bounds())
                 .unwrap_or(IntRect::EMPTY)
-                .intersect(&canvas)
-        } else {
-            doc.selection.bounds().intersect(&canvas)
+                .intersect(&canvas);
         }
+        // Cap the growth: a radius-250 blur on a 4-pixel selection should
+        // not composite the whole canvas.
+        let pad = context.min(MAX_FILTER_CONTEXT) as i32;
+        doc.selection
+            .bounds()
+            .inflated(pad)
+            .intersect(&canvas)
+            .intersect(
+                &doc.tree
+                    .find(layer_id)
+                    .map(|l| l.content_bounds().inflated(pad))
+                    .unwrap_or(canvas),
+            )
     }
 
     /// Pull `region` out of a raster layer into a flat straight-alpha
@@ -4943,6 +4992,7 @@ impl Workspace {
             return;
         };
         let name = filter.name().to_string();
+        let context = filter.context(values);
         if self
             .doc
             .as_ref()
@@ -4957,7 +5007,7 @@ impl Workspace {
         let region = preview
             .filter(|p| p.layer == layer_id)
             .map(|p| p.region)
-            .unwrap_or_else(|| self.filter_region(layer_id));
+            .unwrap_or_else(|| self.filter_region_with_context(layer_id, context));
         if region.is_empty() {
             self.status = "Nothing to filter".into();
             return;
