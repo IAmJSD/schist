@@ -98,6 +98,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             original,
         } => crate::color_picker::render(ws, target, hsv, original, cx).into_any_element(),
         Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
+        Modal::DropImage { path } => drop_image(path, cx).into_any_element(),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::ModelManager => model_manager(ws, cx).into_any_element(),
         Modal::MissingFonts { fonts } => missing_fonts(ws, &fonts, cx).into_any_element(),
@@ -113,6 +114,51 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         }
         m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
     })
+}
+
+/// An image was dropped on the window while a document is open: its own
+/// tab, or a new layer in the current document?
+fn drop_image(path: std::path::PathBuf, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let tab_path = path.clone();
+    ui::modal_frame(
+        "Open Image",
+        380.0,
+        div().text_size(px(12.0)).child(format!(
+            "Open \u{201C}{name}\u{201D} in a new tab, or add it to the current document as a new layer?"
+        )),
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(ui::button(
+                "Cancel",
+                false,
+                |ws, _window, cx| ws.close_modal(cx),
+                cx,
+            ))
+            .child(ui::button(
+                "New Tab",
+                false,
+                move |ws, _window, cx| {
+                    ws.close_modal(cx);
+                    ws.load_file(tab_path.clone(), cx);
+                },
+                cx,
+            ))
+            .child(ui::button(
+                "New Layer",
+                true,
+                move |ws, _window, cx| {
+                    ws.close_modal(cx);
+                    ws.place_image_as_layer(path.clone(), cx);
+                },
+                cx,
+            )),
+    )
 }
 
 /// "Save changes before closing?" for the active tab. Save falls back to

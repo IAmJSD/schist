@@ -8,7 +8,7 @@ use crate::actions::*;
 use crate::keymap;
 use crate::panels;
 use gpui::{
-    canvas, div, point, px, size, App, Bounds, Context, FocusHandle, Focusable,
+    canvas, div, point, px, size, App, Bounds, Context, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
@@ -607,6 +607,9 @@ pub enum Modal {
     },
     /// "Save changes before closing?" for the active tab.
     ConfirmCloseTab,
+    /// An image file dropped on the window while a document is open:
+    /// open it in its own tab, or place it as a new layer?
+    DropImage { path: PathBuf },
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -1142,6 +1145,116 @@ impl Workspace {
                 self.status = format!("Open failed: {err}").into();
             }
         }
+    }
+
+    /// Files dragged from the OS and dropped anywhere in the window.
+    ///
+    /// Layered documents always open in their own tabs. A flat image
+    /// dropped onto an open document could mean "open it" or "place it",
+    /// so that case asks; with several files, or nothing to place into,
+    /// everything just opens.
+    pub fn handle_dropped_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if let [path] = paths.as_slice() {
+            if self.doc.is_some() && self.is_flat_image(path) {
+                self.open_modal(Modal::DropImage { path: path.clone() }, cx);
+                return;
+            }
+        }
+        for path in paths {
+            self.load_file(path, cx);
+        }
+    }
+
+    /// True when the extension belongs to a single-layer image format.
+    /// Layered formats never make sense as one new layer.
+    fn is_flat_image(&self, path: &std::path::Path) -> bool {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            return false;
+        };
+        let ext = ext.to_ascii_lowercase();
+        self.registry
+            .codecs()
+            .find(|c| c.extensions().contains(&ext.as_str()))
+            .is_some_and(|c| !matches!(c.id(), "codec.psd" | "codec.affinity"))
+    }
+
+    /// Decode `path` off the UI thread and insert it into the current
+    /// document as a new raster layer, centered like a paste.
+    pub fn place_image_as_layer(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.status = format!("Placing {}\u{2026}", path.display()).into();
+        cx.notify();
+        let codecs = self.registry.shared_codecs();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let doc = decode_file(&codecs, &path)?;
+                    // The codec hands back a document; the layer wants
+                    // pixels, so flatten it.
+                    let rect = doc.canvas_rect();
+                    let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
+                    anyhow::Ok((path, doc.title, rect, rgba))
+                })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.finish_place(result, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_place(
+        &mut self,
+        result: anyhow::Result<(PathBuf, String, IntRect, Vec<u8>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let (path, title, rect, rgba) = match result {
+            Ok(r) => r,
+            Err(err) => {
+                log::error!("place failed: {err:#}");
+                self.status = format!("Place failed: {err}").into();
+                return;
+            }
+        };
+        if self.doc.is_none() {
+            // The tab closed while the file decoded; open it in its own
+            // tab instead of dropping it on the floor.
+            self.load_file(path, cx);
+            return;
+        }
+        let doc = self.doc.as_mut().unwrap();
+        // Centered, like paste with no selection.
+        let cw = doc.width as i32;
+        let ch = doc.height as i32;
+        let dest = IntRect::from_xywh(
+            (cw - rect.width()) / 2,
+            (ch - rect.height()) / 2,
+            rect.width() as u32,
+            rect.height() as u32,
+        );
+        let mut layer = Layer::new_raster(title.clone());
+        blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            doc.depth,
+            dest,
+            &rgba,
+        );
+        let id = layer.id;
+        let insert_at = match doc.active_layer.and_then(|a| doc.tree.path_of(a)) {
+            Some(mut p) => {
+                *p.0.last_mut().unwrap() += 1;
+                p
+            }
+            None => schist_core::LayerPath(vec![doc.tree.layers.len()]),
+        };
+        let mut edit = doc.begin_edit("Place Image");
+        edit.insert_layer(insert_at, layer);
+        edit.commit();
+        doc.active_layer = Some(id);
+        self.status = format!("Placed {title}").into();
+        self.after_change(cx);
     }
 
     /// Serialize the document to `path`, choosing the codec by extension.
@@ -2811,6 +2924,11 @@ impl Workspace {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // An OS file drag reaches here as synthetic left-button moves;
+        // they must not feed the active tool.
+        if cx.has_active_drag() {
+            return;
+        }
         if self.dragging_guide() {
             let horizontal = self.dragging_guide.map(|g| g.horizontal).unwrap_or(false);
             let position = if horizontal {
@@ -3794,6 +3912,7 @@ impl Workspace {
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
             | Modal::ConfirmCloseTab
+            | Modal::DropImage { .. }
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }
@@ -6076,6 +6195,10 @@ impl Render for Workspace {
             } else {
                 "Workspace editable"
             })
+            // Files dragged in from the OS: anywhere in the window works.
+            .on_drop(cx.listener(|ws, paths: &ExternalPaths, _w, cx| {
+                ws.handle_dropped_paths(paths.paths().to_vec(), cx);
+            }))
             .on_action(cx.listener(|ws, action: &RunCommand, _w, cx| {
                 ws.run_command(&action.id.clone(), cx);
             }))
