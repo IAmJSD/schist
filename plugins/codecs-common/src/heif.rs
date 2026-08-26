@@ -171,7 +171,9 @@ macro_rules! managed {
                 name: $name,
                 url: concat!(
                     "https://github.com/IAmJSD/libheif-prebuilt/releases/download/",
-                    $tag, "/", $file
+                    $tag,
+                    "/",
+                    $file
                 ),
                 sha256: $sha,
             },
@@ -180,7 +182,8 @@ macro_rules! managed {
                     name: "COPYING-libheif.txt",
                     url: concat!(
                         "https://github.com/IAmJSD/libheif-prebuilt/releases/download/",
-                        $tag, "/COPYING-libheif.txt"
+                        $tag,
+                        "/COPYING-libheif.txt"
                     ),
                     sha256: "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596",
                 },
@@ -188,7 +191,8 @@ macro_rules! managed {
                     name: "COPYING-libde265.txt",
                     url: concat!(
                         "https://github.com/IAmJSD/libheif-prebuilt/releases/download/",
-                        $tag, "/COPYING-libde265.txt"
+                        $tag,
+                        "/COPYING-libde265.txt"
                     ),
                     sha256: "02cc1585a20677992e0ba578fa692635dc193735f2691dc81de924b51c4e8020",
                 },
@@ -372,8 +376,16 @@ impl CodecPlugin for HeifCodec {
             && &bytes[4..8] == b"ftyp"
             && matches!(
                 &bytes[8..12],
-                b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs"
-                    | b"mif1" | b"msf1"
+                b"heic"
+                    | b"heix"
+                    | b"hevc"
+                    | b"hevx"
+                    | b"heim"
+                    | b"heis"
+                    | b"hevm"
+                    | b"hevs"
+                    | b"mif1"
+                    | b"msf1"
             )
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
@@ -416,19 +428,20 @@ fn import(lib: &LibHeif, bytes: &[u8]) -> anyhow::Result<Document> {
             PROFILE_ICC | PROFILE_ICC_RESTRICTED => {
                 let size = (lib.image_handle_get_raw_color_profile_size)(handle.0);
                 let mut profile = vec![0u8; size];
-                (size > 0).then(|| {
-                    check(
-                        (lib.image_handle_get_raw_color_profile)(
-                            handle.0,
-                            profile.as_mut_ptr().cast(),
-                        ),
-                        "reading ICC profile",
-                    )
-                    .map(|()| profile)
-                    .map_err(|err| log::warn!("HEIF: {err:#}"))
-                    .ok()
-                })
-                .flatten()
+                (size > 0)
+                    .then(|| {
+                        check(
+                            (lib.image_handle_get_raw_color_profile)(
+                                handle.0,
+                                profile.as_mut_ptr().cast(),
+                            ),
+                            "reading ICC profile",
+                        )
+                        .map(|()| profile)
+                        .map_err(|err| log::warn!("HEIF: {err:#}"))
+                        .ok()
+                    })
+                    .flatten()
             }
             _ => None,
         };
@@ -450,7 +463,11 @@ fn import(lib: &LibHeif, bytes: &[u8]) -> anyhow::Result<Document> {
                 handle.0,
                 &mut image,
                 COLORSPACE_RGB,
-                if deep { CHROMA_RRGGBBAA_LE } else { CHROMA_RGBA },
+                if deep {
+                    CHROMA_RRGGBBAA_LE
+                } else {
+                    CHROMA_RGBA
+                },
                 std::ptr::null(),
             ),
             "decoding image",
@@ -461,9 +478,7 @@ fn import(lib: &LibHeif, bytes: &[u8]) -> anyhow::Result<Document> {
         let data = (lib.image_get_plane_readonly)(image.0, CHANNEL_INTERLEAVED, &mut stride);
         anyhow::ensure!(!data.is_null() && stride > 0, "no interleaved plane");
         let stride = stride as usize;
-        let premultiplied = lib
-            .is_premultiplied_alpha
-            .is_some_and(|f| f(handle.0) != 0);
+        let premultiplied = lib.is_premultiplied_alpha.is_some_and(|f| f(handle.0) != 0);
 
         let rgba = if deep {
             // 10/12-bit samples, stored as little-endian u16.

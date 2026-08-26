@@ -216,7 +216,11 @@ fn heif_support(
                 cx,
             ))
             .child(ui::button(
-                if downloading { "Downloading\u{2026}" } else { "Download" },
+                if downloading {
+                    "Downloading\u{2026}"
+                } else {
+                    "Download"
+                },
                 true,
                 move |ws, _window, cx| {
                     if !ws.heif_download {

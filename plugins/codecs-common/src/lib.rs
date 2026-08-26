@@ -386,12 +386,16 @@ mod tests {
         );
         assert_eq!(reg.codec_for(b"", Some("tiff")).unwrap().id(), "codec.tiff");
         assert_eq!(
-            reg.codec_for(b"\x00\x00\x00\x18ftypheic....", None).unwrap().id(),
+            reg.codec_for(b"\x00\x00\x00\x18ftypheic....", None)
+                .unwrap()
+                .id(),
             "codec.heif"
         );
         assert_eq!(reg.codec_for(b"", Some("heic")).unwrap().id(), "codec.heif");
         // AVIF shares the container but is not claimed.
-        assert!(reg.codec_for(b"\x00\x00\x00\x18ftypavif....", None).is_none());
+        assert!(reg
+            .codec_for(b"\x00\x00\x00\x18ftypavif....", None)
+            .is_none());
         assert_eq!(
             reg.codec_for(b"\x00\xFFKA....", None).unwrap().id(),
             "codec.affinity"
@@ -436,11 +440,17 @@ mod tests {
         };
         let err = heif::install(&file, b"tampered").unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"), "{err}");
-        assert!(!dir.join("libtest.so.1").exists(), "nothing written on mismatch");
+        assert!(
+            !dir.join("libtest.so.1").exists(),
+            "nothing written on mismatch"
+        );
 
         let path = heif::install(&file, b"payload").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
-        assert!(!path.with_extension("part").exists(), "temp file renamed away");
+        assert!(
+            !path.with_extension("part").exists(),
+            "temp file renamed away"
+        );
         std::env::remove_var("SCHIST_LIBHEIF_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }

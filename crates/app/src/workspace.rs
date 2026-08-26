@@ -1182,7 +1182,12 @@ impl Workspace {
         .detach();
     }
 
-    fn finish_load(&mut self, path: PathBuf, result: anyhow::Result<Document>, cx: &mut Context<Self>) {
+    fn finish_load(
+        &mut self,
+        path: PathBuf,
+        result: anyhow::Result<Document>,
+        cx: &mut Context<Self>,
+    ) {
         match result {
             Ok(doc) => {
                 self.status = match &doc.path {
@@ -1220,7 +1225,11 @@ impl Workspace {
             return;
         };
         self.heif_download = true;
-        self.status = format!("Downloading HEIC support (libheif {})\u{2026}", managed.version).into();
+        self.status = format!(
+            "Downloading HEIC support (libheif {})\u{2026}",
+            managed.version
+        )
+        .into();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let installed = cx
