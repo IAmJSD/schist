@@ -230,6 +230,13 @@ pub struct Workspace {
     /// checkbox to see what it did tore the backend down, rebuilt it and
     /// wrote the preference file, with no way to back out.
     preferences_snapshot: Option<Box<(ViewOptions, schist_colormgmt::Intent)>>,
+    /// Close the active tab once the in-flight save finishes.
+    ///
+    /// "Save…" on an Untitled document falls through to the *async* Save
+    /// As prompt and returns immediately with `dirty` still true, so the
+    /// close was skipped: the user asked to close the tab, the file was
+    /// written, and the tab stayed open.
+    close_after_save: bool,
     pub screen_mode: ScreenMode,
     /// A guide being dragged out of a ruler.
     dragging_guide: Option<schist_core::Guide>,
@@ -826,6 +833,7 @@ impl Workspace {
             pending_plugin_toggle: None,
             view: load_view_options(),
             preferences_snapshot: None,
+            close_after_save: false,
             screen_mode: ScreenMode::default(),
             dragging_guide: None,
             layer_drag: None,
@@ -1398,13 +1406,38 @@ impl Workspace {
                 }
                 self.clear_recovery();
                 self.status = format!("Saved {}", path.display()).into();
+                if std::mem::take(&mut self.close_after_save) {
+                    let index = self.active_tab();
+                    self.close_tab(index, cx);
+                }
             }
             Err(err) => {
+                // The tab stays open on a failed save, whatever was asked.
+                self.close_after_save = false;
                 log::error!("save failed: {err:#}");
                 self.status = format!("Save failed: {err}").into();
             }
         }
         cx.notify();
+    }
+
+    /// Ask for the active tab to close as soon as its save lands.
+    pub fn close_tab_after_save(&mut self) {
+        self.close_after_save = true;
+    }
+
+    /// Whether a save is still outstanding with a close waiting on it.
+    ///
+    /// Save As is asynchronous: `save_current` returns before the file
+    /// prompt resolves, so this is how a caller tells a synchronous save
+    /// (already done, tab already closed) from one still in flight.
+    pub fn has_pending_save(&self) -> bool {
+        self.close_after_save
+    }
+
+    /// The save never happened, so nothing is waiting on it.
+    pub fn cancel_pending_save(&mut self) {
+        self.close_after_save = false;
     }
 
     /// ⌘S: save over the document's existing path, or fall back to Save As

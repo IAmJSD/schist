@@ -442,6 +442,18 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// One toolbar slot: its group, the icon of the tool currently showing,
+/// whether that tool is active, whether the group has more than one tool,
+/// and the name and shortcut for its hover label.
+type ToolSlot = (
+    &'static str,
+    &'static str,
+    bool,
+    bool,
+    String,
+    Option<SharedString>,
+);
+
 fn keybind_hint(kb: Option<&str>) -> String {
     let Some(kb) = kb else { return String::new() };
     let kb = if cfg!(target_os = "macos") {
@@ -1403,18 +1415,26 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
     let active = ws.editor.active_tool;
     // One slot per group, showing whichever tool that group last used —
     // Photoshop's nested tools, so twenty tools take eleven slots.
-    let slots: Vec<(&'static str, &'static str, bool, bool)> = ws
+    let slots: Vec<ToolSlot> = ws
         .tool_groups
         .clone()
         .into_iter()
         .map(|(group, tools)| {
             let shown = ws.group_tool(group);
-            let icon = ws
+            let (icon, name, key) = ws
                 .registry
                 .tool_mut(shown)
-                .map(|t| t.icon())
-                .unwrap_or("move");
-            (group, icon, tools.contains(&active), tools.len() > 1)
+                .map(|t| (t.icon(), t.name().to_string(), t.shortcut()))
+                .unwrap_or(("move", "Move".into(), None));
+            let hint = key.map(|k| SharedString::from(k.to_uppercase()));
+            (
+                group,
+                icon,
+                tools.contains(&active),
+                tools.len() > 1,
+                name,
+                hint,
+            )
         })
         .collect();
 
@@ -1428,71 +1448,71 @@ pub fn toolbar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .border_r_1()
         .border_color(gpui::rgb(palette().panel_edge))
         .pt_1()
-        .children(
-            slots
-                .into_iter()
-                .map(|(group, icon_name, is_active, has_siblings)| {
-                    div()
-                        .relative()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(30.0))
-                        .my(px(1.0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .when_active(is_active)
-                        .hover(move |s| {
-                            if is_active {
-                                s
-                            } else {
-                                s.bg(gpui::rgb(palette().hover))
-                            }
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                ws.press_tool_group(group, ev.position, cx);
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(move |ws, _ev, _w, cx| {
-                                ws.release_tool_group(group, cx);
-                            }),
-                        )
-                        // Right-click opens the flyout immediately, for
-                        // people who don't want to wait out the hold.
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                                ws.open_tool_flyout(group, ev.position, cx);
-                            }),
-                        )
-                        .child(icon(
-                            icon_name,
-                            16.0,
-                            if is_active {
+        .children(slots.into_iter().map(
+            |(group, icon_name, is_active, has_siblings, name, hint)| {
+                div()
+                    .id(SharedString::from(format!("tool-slot-{group}")))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(30.0))
+                    .my(px(1.0))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .tooltip(ui::tip(name, hint))
+                    .when_active(is_active)
+                    .hover(move |s| {
+                        if is_active {
+                            s
+                        } else {
+                            s.bg(gpui::rgb(palette().hover))
+                        }
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                            ws.press_tool_group(group, ev.position, cx);
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _ev, _w, cx| {
+                            ws.release_tool_group(group, cx);
+                        }),
+                    )
+                    // Right-click opens the flyout immediately, for
+                    // people who don't want to wait out the hold.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                            ws.open_tool_flyout(group, ev.position, cx);
+                        }),
+                    )
+                    .child(icon(
+                        icon_name,
+                        16.0,
+                        if is_active {
+                            palette().accent_text
+                        } else {
+                            palette().text
+                        },
+                    ))
+                    .children(has_siblings.then(|| {
+                        // The corner mark that means "more tools here".
+                        div()
+                            .absolute()
+                            .right(px(2.0))
+                            .bottom(px(2.0))
+                            .size(px(4.0))
+                            .bg(gpui::rgb(if is_active {
                                 palette().accent_text
                             } else {
-                                palette().text
-                            },
-                        ))
-                        .children(has_siblings.then(|| {
-                            // The corner mark that means "more tools here".
-                            div()
-                                .absolute()
-                                .right(px(2.0))
-                                .bottom(px(2.0))
-                                .size(px(4.0))
-                                .bg(gpui::rgb(if is_active {
-                                    palette().accent_text
-                                } else {
-                                    palette().text_dim
-                                }))
-                        }))
-                }),
-        )
+                                palette().text_dim
+                            }))
+                    }))
+            },
+        ))
         .child(color_wells(ws, cx))
 }
 

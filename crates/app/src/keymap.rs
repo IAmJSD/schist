@@ -324,9 +324,18 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
         .unwrap_or_else(|| "untitled.psd".into());
     let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
     cx.spawn_in(window, async move |this, cx| {
-        if let Ok(Ok(Some(path))) = rx.await {
-            this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx))
-                .ok();
+        match rx.await {
+            Ok(Ok(Some(path))) => {
+                this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx))
+                    .ok();
+            }
+            // Cancelled, or the prompt failed. Anything waiting on the
+            // save -- closing the tab, say -- has to be called off, or it
+            // would fire on some later unrelated save instead.
+            _ => {
+                this.update_in(cx, |ws, _window, _cx| ws.cancel_pending_save())
+                    .ok();
+            }
         }
     })
     .detach();
