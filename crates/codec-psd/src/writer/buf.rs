@@ -68,7 +68,14 @@ impl Buf {
     /// PSD layer names are padded to 4, image-resource names to 2.
     pub fn pascal(&mut self, s: &str, align: usize) {
         let bytes = s.as_bytes();
-        let n = bytes.len().min(255);
+        // Truncate on a char boundary. Cutting at byte 255 could land
+        // mid-codepoint, and this is the name non-unicode-aware readers
+        // show, so it would render as a replacement character there. The
+        // real name is regenerated as `luni` either way.
+        let mut n = bytes.len().min(255);
+        while n > 0 && !s.is_char_boundary(n) {
+            n -= 1;
+        }
         let start = self.data.len();
         self.data.push(n as u8);
         self.data.extend_from_slice(&bytes[..n]);
@@ -152,5 +159,30 @@ mod tests {
         b.patch_len(at, true);
         let v = b.into_vec();
         assert_eq!(&v[..8], &[0, 0, 0, 0, 0, 0, 0, 2]);
+    }
+    #[test]
+    fn a_long_name_truncates_on_a_char_boundary() {
+        // The pascal name is what non-unicode-aware readers show, and a
+        // cut at byte 255 could land inside a codepoint.
+        let mut b = Buf::new();
+        // 128 two-byte chars is 256 bytes: the 255 limit lands mid-char.
+        let name: String = std::iter::repeat_n('é', 128).collect();
+        assert_eq!(name.len(), 256);
+        b.pascal(&name, 2);
+        let out = b.into_vec();
+        let n = out[0] as usize;
+        assert_eq!(n % 2, 0, "must not cut a two-byte char in half");
+        assert!(
+            std::str::from_utf8(&out[1..1 + n]).is_ok(),
+            "the truncated name must still be valid utf-8"
+        );
+    }
+
+    #[test]
+    fn an_ascii_name_is_unaffected() {
+        let mut b = Buf::new();
+        b.pascal("Background", 2);
+        let out = b.into_vec();
+        assert_eq!(out[0] as usize, "Background".len());
     }
 }

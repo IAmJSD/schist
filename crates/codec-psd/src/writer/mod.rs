@@ -241,6 +241,17 @@ fn write_layer_and_mask_info(b: &mut Buf, doc: &Document, psb: bool) -> Result<(
     let layer_info_at = b.reserve_len(psb);
     // A negative count declares that the merged image's alpha channel is
     // real transparency rather than a spot/alpha channel.
+    //
+    // `prepared` includes two extra records per group, so past 32767
+    // entries this cast wrapped and the file declared a nonsense layer
+    // count. Refuse instead of writing something unreadable.
+    if prepared.len() > i16::MAX as usize {
+        return Err(PsdError::Unsupported(format!(
+            "{} layer records exceeds the {} the format can declare",
+            prepared.len(),
+            i16::MAX
+        )));
+    }
     b.i16(-(prepared.len() as i16));
     for p in &prepared {
         write_layer_record(b, p, psb);
