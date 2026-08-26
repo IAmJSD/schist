@@ -105,6 +105,14 @@ struct Session {
     offset: (f32, f32),
     /// Live drag state.
     drag: Option<Drag>,
+    /// Where the transform is anchored, in 0..1 of `base`.
+    ///
+    /// Scaling pins the handle opposite the one being dragged, so the
+    /// dragged handle follows the cursor. Anchoring at the centre (which
+    /// is what this always used to be) moves each edge half the drag, so
+    /// the handle lagged the cursor and every scale behaved like an
+    /// Alt-drag with no way to ask for the ordinary one.
+    pivot_anchor: (f32, f32),
     dirty: bool,
 }
 
@@ -119,12 +127,12 @@ struct Drag {
 impl Session {
     fn pivot(&self) -> (f32, f32) {
         (
-            self.base.left as f32 + self.base.width() as f32 / 2.0,
-            self.base.top as f32 + self.base.height() as f32 / 2.0,
+            self.base.left as f32 + self.base.width() as f32 * self.pivot_anchor.0,
+            self.base.top as f32 + self.base.height() as f32 * self.pivot_anchor.1,
         )
     }
 
-    /// Current matrix: scale, then rotate, both about the box centre, then
+    /// Current matrix: scale, then rotate, both about the pivot, then
     /// translate.
     fn matrix(&self) -> Affine {
         let (px, py) = self.pivot();
@@ -146,7 +154,7 @@ impl Session {
         ]
     }
 
-    fn handle_pos(&self, handle: Handle) -> (f32, f32) {
+    fn handle_pos(&self, handle: Handle, zoom: f32) -> (f32, f32) {
         let (ux, uy) = handle.anchor();
         let m = self.matrix();
         let r = self.base;
@@ -160,7 +168,11 @@ impl Session {
             let top = m.apply(r.left as f32 + r.width() as f32 * 0.5, r.top as f32);
             let (dx, dy) = (top.0 - sx, top.1 - sy);
             let len = (dx * dx + dy * dy).sqrt().max(1e-3);
-            (top.0 + dx / len * 24.0, top.1 + dy / len * 24.0)
+            // 24 *screen* pixels, like the hit radius below. As a flat
+            // document offset the handle sat 3 px away at 800% zoom and
+            // 240 px away at 10%.
+            let reach = 24.0 / zoom.max(0.01);
+            (top.0 + dx / len * reach, top.1 + dy / len * reach)
         } else {
             (sx, sy)
         }
@@ -170,7 +182,7 @@ impl Session {
         // Handles are ~9 screen pixels; convert to document units.
         let r = (9.0 / zoom.max(0.01)).max(1.0);
         for handle in [Handle::Rotate].into_iter().chain(Handle::ALL) {
-            let (hx, hy) = self.handle_pos(handle);
+            let (hx, hy) = self.handle_pos(handle, zoom);
             if (x - hx).abs() <= r && (y - hy).abs() <= r {
                 return Some(handle);
             }
@@ -319,6 +331,7 @@ impl TransformTool {
             rotation: 0.0,
             offset: (0.0, 0.0),
             drag: None,
+            pivot_anchor: (0.5, 0.5),
             dirty: false,
         });
     }
@@ -405,6 +418,15 @@ impl ToolPlugin for TransformTool {
         let zoom = ctx.state.zoom;
         if let Some(session) = &mut self.session {
             if let Some(handle) = session.hit(input.x, input.y, zoom) {
+                // Pin the handle opposite the one being dragged, so the
+                // dragged one lands under the cursor. Alt asks for the
+                // centre, which is Photoshop's scale-from-centre.
+                let (ax, ay) = handle.anchor();
+                session.pivot_anchor = if input.modifiers.alt {
+                    (0.5, 0.5)
+                } else {
+                    (1.0 - ax, 1.0 - ay)
+                };
                 session.drag = Some(Drag {
                     handle,
                     start: (input.x, input.y),
@@ -466,7 +488,34 @@ impl ToolPlugin for TransformTool {
                     sx = drag.start_scale.0 * f;
                     sy = drag.start_scale.1 * f;
                 }
-                session.scale = (sx, sy);
+                // A handle dragged onto the pivot gives scale 0, whose
+                // matrix has no inverse: `transform_tiles` then returns an
+                // empty map and the layer vanishes. A later Shift-drag
+                // divides by that 0 and produces NaN, which `det.abs() <
+                // 1e-9` does not catch, so the NaN matrix saturates the
+                // bounds to empty and the commit records the empty result.
+                // Keep at least one pixel on each axis. Scale 0 has no
+                // invertible matrix, so `transform_tiles` returned an
+                // empty map and the layer vanished; a later Shift-drag
+                // then divided by that 0 and produced NaN, which
+                // `det.abs() < 1e-9` does not catch, so the NaN matrix
+                // saturated the bounds to empty and the commit recorded
+                // the empty result.
+                let clamp = |v: f32, start: f32, extent: i32| {
+                    if !v.is_finite() {
+                        return start;
+                    }
+                    let min = 1.0 / extent.max(1) as f32;
+                    if v.abs() < min {
+                        min.copysign(if v == 0.0 { 1.0 } else { v })
+                    } else {
+                        v
+                    }
+                };
+                session.scale = (
+                    clamp(sx, drag.start_scale.0, session.base.width()),
+                    clamp(sy, drag.start_scale.1, session.base.height()),
+                );
             }
         }
         session.dirty = true;
@@ -498,8 +547,9 @@ impl ToolPlugin for TransformTool {
             .inflated(session.base.width().max(session.base.height()));
         if session.mode == TransformMode::Selection {
             // Only the mask moves; the pixels are untouched, so this is one
-            // selection edit rather than a tile rewrite.
-            session.restore(ctx.doc);
+            // selection edit rather than a tile rewrite. (`restore` already
+            // ran above; calling it twice was harmless but obscured the
+            // control flow.)
             let canvas = ctx.doc.canvas_rect();
             let matrix = session.matrix();
             let base = session.original_selection.clone();
@@ -572,7 +622,7 @@ impl ToolPlugin for TransformTool {
         self.on_commit(ctx);
     }
 
-    fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
+    fn overlays(&self, _doc: &Document, state: &EditorState) -> Vec<Overlay> {
         let Some(session) = &self.session else {
             return Vec::new();
         };
@@ -585,7 +635,7 @@ impl ToolPlugin for TransformTool {
         }
         let r = 3.0;
         for handle in Handle::ALL {
-            let (x, y) = session.handle_pos(handle);
+            let (x, y) = session.handle_pos(handle, state.zoom);
             out.push(Overlay::Rect(IntRect::new(
                 (x - r) as i32,
                 (y - r) as i32,
@@ -593,7 +643,7 @@ impl ToolPlugin for TransformTool {
                 (y + r) as i32,
             )));
         }
-        let (rx, ry) = session.handle_pos(Handle::Rotate);
+        let (rx, ry) = session.handle_pos(Handle::Rotate, state.zoom);
         out.push(Overlay::Circle {
             cx: rx,
             cy: ry,
@@ -1367,7 +1417,7 @@ mod tests {
         };
         tool.on_activate(&mut ctx);
         let session = tool.session.as_ref().unwrap();
-        let (hx, hy) = session.handle_pos(Handle::Rotate);
+        let (hx, hy) = session.handle_pos(Handle::Rotate, 1.0);
         let (cx, cy) = session.pivot();
         tool.on_pointer_down(&mut ctx, input(hx, hy));
         // Drag the rotate handle a quarter turn around the centre.
@@ -1472,5 +1522,81 @@ mod tests {
             "mask bounds must be inside the new canvas: {:?}",
             mask.bounds
         );
+    }
+
+    #[test]
+    fn a_scale_handle_follows_the_cursor() {
+        // Scaling pivoted on the box centre, so each edge moved half the
+        // drag: the handle lagged the cursor by half, and every scale
+        // behaved like an Alt-drag with no way to ask for the ordinary
+        // one. Dragging the right handle should pin the left edge.
+        let mut doc = doc_with_square();
+        let mut state = EditorState {
+            zoom: 1.0,
+            ..EditorState::default()
+        };
+        let mut tool = TransformTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_activate(&mut ctx);
+            let base = tool.session.as_ref().unwrap().base;
+            // Grab the right-middle handle and pull it 40 px right.
+            let (hx, hy) = (
+                base.right as f32,
+                base.top as f32 + base.height() as f32 / 2.0,
+            );
+            tool.on_pointer_down(&mut ctx, input(hx, hy));
+            tool.on_pointer_move(&mut ctx, input(hx + 40.0, hy));
+
+            let session = tool.session.as_ref().unwrap();
+            let m = session.matrix();
+            let moved = m.transform_bounds(base);
+            assert_eq!(
+                moved.left, base.left,
+                "the opposite edge must stay pinned: {moved:?} vs {base:?}"
+            );
+            assert!(
+                (moved.right - (base.right + 40)).abs() <= 1,
+                "the dragged edge must land under the cursor: {moved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_scale_cannot_erase_the_layer() {
+        // Dragging a handle onto the pivot gave scale 0, whose matrix has
+        // no inverse, so the layer vanished and the commit recorded the
+        // empty result.
+        let mut doc = doc_with_square();
+        let mut state = EditorState {
+            zoom: 1.0,
+            ..EditorState::default()
+        };
+        let mut tool = TransformTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_activate(&mut ctx);
+            let base = tool.session.as_ref().unwrap().base;
+            let (hx, hy) = (
+                base.right as f32,
+                base.top as f32 + base.height() as f32 / 2.0,
+            );
+            tool.on_pointer_down(&mut ctx, input(hx, hy));
+            // Drag the right edge all the way onto the pinned left edge.
+            tool.on_pointer_move(&mut ctx, input(base.left as f32, hy));
+            tool.on_commit(&mut ctx);
+        }
+        let content = doc.tree.layers[0]
+            .as_raster()
+            .unwrap()
+            .tiles
+            .content_bounds();
+        assert!(!content.is_empty(), "the layer must not be erased");
     }
 }
