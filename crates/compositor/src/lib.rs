@@ -408,8 +408,12 @@ fn composite_layers(
                     scratch.give(src);
                 }
                 LayerKind::Group(g) => {
+                    // Fill opacity has to be part of this: a pass-through
+                    // group renders its children straight into `dst`, so
+                    // a group at fill 50% was drawn at full strength.
                     let pass_through = layer.blend == BlendMode::PassThrough
                         && layer.opacity >= 1.0
+                        && content_alpha(layer) >= 1.0
                         && layer.mask.is_none();
                     if pass_through {
                         composite_layers(doc, &g.children, coord, dst, scratch);
@@ -421,7 +425,20 @@ fn composite_layers(
                         } else {
                             layer.blend
                         };
-                        blend_buf_onto(mode, &group_buf, dst, coord, layer.opacity, layer, doc);
+                        // `content_alpha` is fill opacity. Every other
+                        // blend in this file multiplies it in; the
+                        // isolated-group path did not, so the Fill slider
+                        // did nothing on a group unless it happened to be
+                        // a clip base, where a different path applied it.
+                        blend_buf_onto(
+                            mode,
+                            &group_buf,
+                            dst,
+                            coord,
+                            layer.opacity * content_alpha(layer),
+                            layer,
+                            doc,
+                        );
                         scratch.give(group_buf);
                     }
                 }
@@ -513,11 +530,34 @@ fn apply_adjustment(
             blend_pixel(layer.blend, Rgba { a: weight, ..src }, base, x, y)
         } else {
             let adjusted = params.apply(base);
-            Rgba {
-                r: base.r + (adjusted.r - base.r) * weight,
-                g: base.g + (adjusted.g - base.g) * weight,
-                b: base.b + (adjusted.b - base.b) * weight,
-                a: base.a,
+            // The blend mode was read from the file, stored on the layer
+            // and uploaded to the shader, then dropped here: every
+            // "Curves set to Luminosity" or "Levels set to Multiply"
+            // rendered as Normal, with nothing to say it had been ignored.
+            if layer.blend == BlendMode::Normal {
+                Rgba {
+                    r: base.r + (adjusted.r - base.r) * weight,
+                    g: base.g + (adjusted.g - base.g) * weight,
+                    b: base.b + (adjusted.b - base.b) * weight,
+                    a: base.a,
+                }
+            } else {
+                // The adjusted colour is the source, `weight` its alpha,
+                // exactly as the fill path above treats its own colour.
+                let blended = blend_pixel(
+                    layer.blend,
+                    Rgba {
+                        a: weight,
+                        ..adjusted
+                    },
+                    base,
+                    x,
+                    y,
+                );
+                Rgba {
+                    a: base.a,
+                    ..blended
+                }
             }
         };
         d[0] = out.r;
@@ -945,6 +985,74 @@ mod tests {
         doc.selection
             .select_rect(IntRect::from_xywh(0, 0, 8, 8), SelectOp::Replace);
         assert_eq!(px(&doc, 20, 20), [5, 6, 7, 255]);
+    }
+
+    #[test]
+    fn a_groups_fill_opacity_is_honoured() {
+        // Every blend in this file multiplies in `content_alpha` (fill
+        // opacity) except the isolated-group one, so the Fill slider did
+        // nothing on a group unless it happened to be a clip base, where
+        // a different path applied it.
+        let build = |fill: f32| {
+            let mut doc = Document::new("t", 8, 8, Depth::Eight);
+            // An opaque backdrop, so the group's fill shows as tone
+            // rather than only as alpha.
+            doc.push_layer(solid_layer(
+                "black",
+                IntRect::from_xywh(0, 0, 8, 8),
+                [0, 0, 0, 255],
+            ));
+            let child = solid_layer(
+                "white",
+                IntRect::from_xywh(0, 0, 8, 8),
+                [255, 255, 255, 255],
+            );
+            let mut group = Layer::new_group("g");
+            if let LayerKind::Group(g) = &mut group.kind {
+                g.children.push(child);
+            }
+            group.fill_opacity = fill;
+            doc.push_layer(group);
+            px(&doc, 4, 4)
+        };
+        let full = build(1.0);
+        let half = build(0.5);
+        assert_ne!(full, half, "fill opacity must change the group");
+        assert!(half[0] < full[0], "half fill must be dimmer: {half:?}");
+    }
+
+    #[test]
+    fn an_adjustment_layers_blend_mode_is_used() {
+        // Parsed, stored, round-tripped to PSD and uploaded to the shader,
+        // then dropped here: every "Curves set to Luminosity" rendered as
+        // Normal, with nothing to say it had been ignored.
+        let build = |mode: BlendMode| {
+            let mut doc = Document::new("t", 8, 8, Depth::Eight);
+            doc.push_layer(solid_layer(
+                "grey",
+                IntRect::from_xywh(0, 0, 8, 8),
+                [128, 128, 128, 255],
+            ));
+            let mut adj = Layer::new_raster("invert");
+            adj.kind = LayerKind::Adjustment(schist_core::AdjustmentData {
+                kind: schist_core::AdjustmentKind::Invert,
+                raw: Vec::new(),
+                params_json: Some("\"Invert\"".into()),
+            });
+            adj.blend = mode;
+            doc.push_layer(adj);
+            px(&doc, 4, 4)
+        };
+        let normal = build(BlendMode::Normal);
+        let multiply = build(BlendMode::Multiply);
+        assert_ne!(
+            normal, multiply,
+            "the blend mode must reach the result (both {normal:?})"
+        );
+        assert!(
+            multiply[0] < normal[0],
+            "multiply must darken: {multiply:?} vs {normal:?}"
+        );
     }
 }
 
