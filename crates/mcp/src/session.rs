@@ -121,16 +121,6 @@ impl Session {
                  ({width}x{height})"
             );
         }
-        // Each dimension was checked but not their product, and the
-        // background is allocated whole: 30000x30000 asked for 3.6 GB in
-        // one `vec!`, which aborts the server and takes every other
-        // session's unsaved work with it. 200 MP is far past any real
-        // document and bounds that buffer at 800 MB.
-        const MAX_PIXELS: u64 = 200_000_000;
-        let pixels = u64::from(width) * u64::from(height);
-        if pixels > MAX_PIXELS {
-            bail!("document of {pixels} pixels is over the {MAX_PIXELS} pixel limit");
-        }
         let mut doc = Document::new(title, width, height, depth);
         let mut bg = Layer::new_raster("Background");
         // A row at a time rather than the whole canvas at once, so the

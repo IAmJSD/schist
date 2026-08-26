@@ -214,6 +214,50 @@ impl Document {
         }
     }
 
+    /// A copy of everything a codec reads, for encoding somewhere else.
+    ///
+    /// Tile maps are copy-on-write, so this is a handful of `Arc` bumps
+    /// rather than a pixel copy. History, the history-brush source and
+    /// the damage list are dropped: nothing exports them, and the first
+    /// is the one part of a document that is genuinely large.
+    ///
+    /// `Document` deliberately does not derive `Clone` -- an accidental
+    /// copy with a duplicate `DocumentId` would be a bad day -- so this
+    /// spells out what a snapshot is for.
+    pub fn snapshot_for_export(&self) -> Document {
+        Document {
+            id: self.id,
+            title: self.title.clone(),
+            path: self.path.clone(),
+            width: self.width,
+            height: self.height,
+            resolution_dpi: self.resolution_dpi,
+            mode: self.mode,
+            depth: self.depth,
+            icc_profile: self.icc_profile.clone(),
+            tree: self.tree.clone(),
+            selection: self.selection.clone(),
+            active_layer: self.active_layer,
+            selected: self.selected.clone(),
+            history: History::new(),
+            preserved_resources: self.preserved_resources.clone(),
+            revision: self.revision,
+            guides: self.guides.clone(),
+            last_selection: self.last_selection.clone(),
+            artboards: self.artboards.clone(),
+            slices: self.slices.clone(),
+            notes: self.notes.clone(),
+            counts: self.counts.clone(),
+            layer_comps: self.layer_comps.clone(),
+            paths: self.paths.clone(),
+            active_path: self.active_path,
+            history_source: Default::default(),
+            saved_selections: self.saved_selections.clone(),
+            damage: Vec::new(),
+            dirty: self.dirty,
+        }
+    }
+
     pub fn undo(&mut self) -> Option<String> {
         let edit = self.history.pop_undo()?;
         for op in edit.ops.iter().rev() {
@@ -1027,9 +1071,8 @@ impl StrokeEdit {
 /// The temp path to write beside `path` for an atomic save.
 ///
 /// `path.with_extension("schist-tmp")` *replaces* the final extension, so
-/// saving `photo.psd` wrote and renamed `photo.schist-tmp` -- destroying
-/// any pre-existing file of that name. The extension is appended instead,
-/// and the process id keeps two saves of the same file from colliding.
+/// saving `photo.psd` wrote and renamed `photo.schist-tmp`, destroying any
+/// pre-existing file of that name.
 pub fn temp_save_path(path: &std::path::Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".schist-tmp-{}", std::process::id()));
