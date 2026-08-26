@@ -436,43 +436,113 @@ fn precise_grow(a: &mut [f32], w: usize, h: usize, size: f32) {
 }
 
 /// Signed distance to the shape's edge in pixels, negative inside,
-/// searched out to `limit`. A brute-force search over a small window is
-/// enough: `limit` is an effect size, so tens of pixels at most.
+/// clamped at `limit`.
+///
+/// This used to scan a `(2r+1)^2` window per pixel looking for a sample
+/// on the other side of the 0.5-alpha threshold. The early break only
+/// fires within one pixel of an edge, so every interior and far-exterior
+/// pixel paid the full window: on a 1000x1000 layer an outside stroke
+/// measured 205 ms at size 4, 937 ms at size 12 and 5.53 s at size 30,
+/// growing as r^2 -- and Photoshop's stroke and glow sizes go to 250.
+///
+/// An exact Euclidean distance transform gives the same answer in O(w*h),
+/// independent of the radius. Two of them: one seeded on the inside
+/// pixels and one on the outside, so each pixel reads the distance to the
+/// nearest sample of the opposite class -- exactly what the window search
+/// was looking for. Clamping at `limit` afterwards matches the old
+/// bound, since any true nearest within `limit` also lay inside the
+/// square window.
 fn signed_distance(alpha: &[f32], w: usize, h: usize, limit: f32) -> Vec<f32> {
-    let r = limit.ceil().max(1.0) as i32;
-    let mut out = vec![0.0f32; w * h];
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let i = y as usize * w + x as usize;
-            let inside = alpha[i] >= 0.5;
-            let mut best = limit;
-            'search: for dy in -r..=r {
-                let sy = y + dy;
-                if sy < 0 || sy >= h as i32 {
-                    continue;
-                }
-                for dx in -r..=r {
-                    let sx = x + dx;
-                    if sx < 0 || sx >= w as i32 {
-                        continue;
-                    }
-                    let other = alpha[sy as usize * w + sx as usize] >= 0.5;
-                    if other == inside {
-                        continue;
-                    }
-                    let d = ((dx * dx + dy * dy) as f32).sqrt();
-                    if d < best {
-                        best = d;
-                        if best <= 1.0 {
-                            break 'search;
-                        }
-                    }
-                }
+    let inside: Vec<bool> = alpha.iter().map(|&a| a >= 0.5).collect();
+    let to_inside = squared_edt(&inside, w, h, false);
+    let to_outside = squared_edt(&inside, w, h, true);
+    (0..w * h)
+        .map(|i| {
+            if inside[i] {
+                -to_outside[i].sqrt().min(limit)
+            } else {
+                to_inside[i].sqrt().min(limit)
             }
-            out[i] = if inside { -best } else { best };
+        })
+        .collect()
+}
+
+/// Squared Euclidean distance to the nearest seed pixel.
+///
+/// Felzenszwalb and Huttenlocher's lower-envelope transform: one 1-D pass
+/// down the columns, one across the rows. `invert` seeds on the *false*
+/// entries instead of the true ones.
+fn squared_edt(seed: &[bool], w: usize, h: usize, invert: bool) -> Vec<f32> {
+    // Large but finite: an actual infinity turns the parabola
+    // intersections below into NaN.
+    const FAR: f32 = 1e20;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let mut grid: Vec<f32> = seed
+        .iter()
+        .map(|&s| if s != invert { 0.0 } else { FAR })
+        .collect();
+
+    let n = w.max(h);
+    let mut f = vec![0.0f32; n];
+    let mut d = vec![0.0f32; n];
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f32; n + 1];
+
+    for x in 0..w {
+        for (y, slot) in f[..h].iter_mut().enumerate() {
+            *slot = grid[y * w + x];
+        }
+        lower_envelope(&f[..h], &mut d[..h], &mut v[..h], &mut z[..h + 1]);
+        for y in 0..h {
+            grid[y * w + x] = d[y];
         }
     }
-    out
+    for y in 0..h {
+        f[..w].copy_from_slice(&grid[y * w..y * w + w]);
+        lower_envelope(&f[..w], &mut d[..w], &mut v[..w], &mut z[..w + 1]);
+        grid[y * w..y * w + w].copy_from_slice(&d[..w]);
+    }
+    grid
+}
+
+/// The 1-D squared distance transform: the lower envelope of the
+/// parabolas `(q - i)^2 + f[i]`.
+fn lower_envelope(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let mut k: isize = 0;
+    v[0] = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    let sq = |i: usize| (i * i) as f32;
+    for q in 1..n {
+        let mut s;
+        loop {
+            let p = v[k as usize];
+            s = ((f[q] + sq(q)) - (f[p] + sq(p))) / (2.0 * q as f32 - 2.0 * p as f32);
+            // `z[0]` is -inf, so this never walks off the front.
+            if s > z[k as usize] {
+                break;
+            }
+            k -= 1;
+        }
+        k += 1;
+        v[k as usize] = q;
+        z[k as usize] = s;
+        z[k as usize + 1] = f32::INFINITY;
+    }
+    let mut k: usize = 0;
+    for (q, out) in d.iter_mut().enumerate() {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let dq = q as f32 - v[k] as f32;
+        *out = dq * dq + f[v[k]];
+    }
 }
 
 /// Shift an alpha buffer by a fractional offset, sampling bilinearly.
@@ -562,3 +632,128 @@ pub fn outset(style: &LayerStyle) -> i32 {
 /// Re-exported so callers can name the settings types without also
 /// depending on core's module layout.
 pub use schist_core::style;
+
+#[cfg(test)]
+mod distance_tests {
+    use super::signed_distance;
+
+    /// The distance transform must return exactly what the window search
+    /// it replaced returned, for every pixel and every limit.
+    #[test]
+    fn the_distance_transform_matches_the_window_search() {
+        let (w, h) = (37usize, 29usize);
+        // A blob with a hole, plus a detached speck, so both signs and
+        // both near and far pixels are exercised.
+        let alpha: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let d = ((x - 12.0).powi(2) + (y - 12.0).powi(2)).sqrt();
+                let speck = (30..33).contains(&(x as usize)) && (4..7).contains(&(y as usize));
+                if (3.0..8.0).contains(&d) || speck {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        for limit in [1.0f32, 2.0, 4.5, 12.0, 100.0] {
+            let got = signed_distance(&alpha, w, h, limit);
+            let want = brute_force_signed_distance(&alpha, w, h, limit);
+            for i in 0..w * h {
+                assert!(
+                    (got[i] - want[i]).abs() < 1e-4,
+                    "limit {limit}, pixel ({}, {}): {} != {}",
+                    i % w,
+                    i / w,
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    /// A plane with no edge in it sits entirely at the clamp.
+    #[test]
+    fn a_uniform_plane_is_entirely_at_the_limit() {
+        let (w, h) = (8usize, 8usize);
+        let solid = vec![1.0f32; w * h];
+        let empty = vec![0.0f32; w * h];
+        assert!(signed_distance(&solid, w, h, 5.0)
+            .iter()
+            .all(|&d| (d + 5.0).abs() < 1e-4));
+        assert!(signed_distance(&empty, w, h, 5.0)
+            .iter()
+            .all(|&d| (d - 5.0).abs() < 1e-4));
+    }
+
+    /// `signed_distance` as it was written before the transform.
+    fn brute_force_signed_distance(alpha: &[f32], w: usize, h: usize, limit: f32) -> Vec<f32> {
+        let r = limit.ceil().max(1.0) as i32;
+        let mut out = vec![0.0f32; w * h];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let i = y as usize * w + x as usize;
+                let inside = alpha[i] >= 0.5;
+                let mut best = limit;
+                'search: for dy in -r..=r {
+                    let sy = y + dy;
+                    if sy < 0 || sy >= h as i32 {
+                        continue;
+                    }
+                    for dx in -r..=r {
+                        let sx = x + dx;
+                        if sx < 0 || sx >= w as i32 {
+                            continue;
+                        }
+                        let other = alpha[sy as usize * w + sx as usize] >= 0.5;
+                        if other == inside {
+                            continue;
+                        }
+                        let d = ((dx * dx + dy * dy) as f32).sqrt();
+                        if d < best {
+                            best = d;
+                            if best <= 1.0 {
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+                out[i] = if inside { -best } else { best };
+            }
+        }
+        out
+    }
+    /// Guards the complexity claim: the transform is O(w*h) regardless of
+    /// the radius, so a large limit must not cost meaningfully more than
+    /// a small one. The window search grew as r^2 -- 205 ms at size 4 and
+    /// 5.53 s at size 30 on a 1000x1000 layer.
+    #[test]
+    fn cost_does_not_grow_with_the_radius() {
+        let (w, h) = (400usize, 400usize);
+        let alpha: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                if ((x - 200.0).powi(2) + (y - 200.0).powi(2)).sqrt() < 100.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        let time = |limit: f32| {
+            let t = std::time::Instant::now();
+            std::hint::black_box(signed_distance(&alpha, w, h, limit));
+            t.elapsed()
+        };
+        // Warm up, then measure.
+        time(4.0);
+        let small = time(4.0);
+        let large = time(250.0);
+        assert!(
+            large < small * 4,
+            "radius 250 took {large:?} against {small:?} at radius 4"
+        );
+    }
+}

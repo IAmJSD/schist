@@ -5398,6 +5398,13 @@ impl Workspace {
             rgba
         };
         self.display_tiles.insert(coord, managed.clone());
+        // The colour-managed copy is a second 256 KiB per tile, and this
+        // map had no ceiling either. Keep it to what the composited cache
+        // still holds, so the two together stay inside one budget.
+        if self.display_tiles.len() > self.cache.len() {
+            let cache = &self.cache;
+            self.display_tiles.retain(|c, _| cache.contains(*c));
+        }
         Some(managed)
     }
 
@@ -5482,6 +5489,13 @@ impl Workspace {
         // the view moves is exactly when the prefetch pays off.
         if self.pointer_down {
             return true;
+        }
+        // Stop once the cache is full rather than keep warming tiles that
+        // only evict each other. The queue is ordered nearest-first, so
+        // what is already in is what the viewport actually needs.
+        if self.cache.is_full() {
+            self.prefetch_queue.clear();
+            return false;
         }
         let stale = match self.doc.as_ref() {
             Some(doc) => (doc.revision, self.color_epoch) != self.prefetch_stamp,
@@ -6572,8 +6586,13 @@ fn fx_key(layer: &Layer) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
     // The style itself, via its debug form: these are small plain structs
-    // with float fields, so there is nothing cheaper that is also correct.
-    format!("{:?}", layer.style).hash(&mut h);
+    // with float fields, so there is nothing cheaper that is also correct
+    // -- and going through Debug means a field added later is covered
+    // without anyone remembering to update this. What it does not need is
+    // the String: `LayerStyle` holds nine effect structs, so formatting
+    // it built a multi-kilobyte allocation, hashed it and threw it away,
+    // on every pointer move and once per styled layer.
+    hash_debug(&layer.style, &mut h);
     layer.fill_opacity.to_bits().hash(&mut h);
     if let Some(r) = layer.as_raster() {
         r.tiles.fingerprint().hash(&mut h);
@@ -6587,13 +6606,27 @@ fn fx_key(layer: &Layer) -> u64 {
     h.finish()
 }
 
+/// Hash a value's `Debug` form without building a `String` for it.
+fn hash_debug(value: &impl std::fmt::Debug, h: &mut rustc_hash::FxHasher) {
+    use std::fmt::Write as _;
+    struct Sink<'a>(&'a mut rustc_hash::FxHasher);
+    impl std::fmt::Write for Sink<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            std::hash::Hasher::write(self.0, s.as_bytes());
+            Ok(())
+        }
+    }
+    // Writing into a hasher cannot fail.
+    let _ = write!(Sink(h), "{value:?}");
+}
+
 fn fx_key_children(layers: &[Layer], h: &mut rustc_hash::FxHasher) {
     use std::hash::Hash;
     for l in layers {
         l.visible.hash(h);
         l.opacity.to_bits().hash(h);
         l.fill_opacity.to_bits().hash(h);
-        format!("{:?}", l.blend).hash(h);
+        l.blend.hash(h);
         l.render_offset.hash(h);
         l.clipping.hash(h);
         if let Some(r) = l.as_raster() {

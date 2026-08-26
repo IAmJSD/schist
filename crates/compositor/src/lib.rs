@@ -694,9 +694,42 @@ fn blend_buf_onto(
 
 /// Damage-driven cache of composited tiles (RGBA8 straight alpha), used by
 /// the canvas view. Invalidate with document damage rects, then fetch.
-#[derive(Default)]
+/// Composited tiles, under a byte budget.
+///
+/// Each entry is a 256x256 RGBA8 tile -- 256 KiB -- and nothing used to
+/// evict: entries only went away on damage or `invalidate_all`, while the
+/// prefetcher deliberately warms the whole canvas. An 8000x8000 document
+/// drifted to ~512 MB resident and a 16000x16000 one to ~2 GB, with no
+/// ceiling and no back pressure. Now the least recently touched tiles go
+/// first once the budget is passed.
 pub struct TileCache {
-    tiles: FxHashMap<TileCoord, Arc<Vec<u8>>>,
+    tiles: FxHashMap<TileCoord, Entry>,
+    /// Monotonic counter standing in for a clock: the tile with the
+    /// lowest stamp is the one untouched longest.
+    clock: u64,
+    bytes: usize,
+    budget: usize,
+}
+
+struct Entry {
+    pixels: Arc<Vec<u8>>,
+    touched: u64,
+}
+
+/// How much composited tile data to keep. 256 MiB is a thousand tiles,
+/// which covers a 8000x8000 document's visible working set several times
+/// over while staying a resident size a desktop app can justify.
+pub const DEFAULT_TILE_BUDGET: usize = 256 * 1024 * 1024;
+
+impl Default for TileCache {
+    fn default() -> Self {
+        TileCache {
+            tiles: FxHashMap::default(),
+            clock: 0,
+            bytes: 0,
+            budget: DEFAULT_TILE_BUDGET,
+        }
+    }
 }
 
 impl TileCache {
@@ -704,30 +737,97 @@ impl TileCache {
         Self::default()
     }
 
+    /// A cache with a specific byte budget.
+    pub fn with_budget(budget: usize) -> Self {
+        TileCache {
+            budget,
+            ..Default::default()
+        }
+    }
+
+    /// Bytes currently held.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// How many tiles are cached.
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Whether the cache is at or over its budget, so a prefetcher can
+    /// stop queueing rather than push resident memory up without limit.
+    pub fn is_full(&self) -> bool {
+        self.bytes >= self.budget
+    }
+
     pub fn invalidate(&mut self, rect: &IntRect) {
         if rect.is_empty() {
             return;
         }
         for coord in TileCoord::covering(rect) {
-            self.tiles.remove(&coord);
+            self.remove(coord);
         }
     }
 
     pub fn invalidate_all(&mut self) {
         self.tiles.clear();
+        self.bytes = 0;
+    }
+
+    fn remove(&mut self, coord: TileCoord) {
+        if let Some(entry) = self.tiles.remove(&coord) {
+            self.bytes = self.bytes.saturating_sub(entry.pixels.len());
+        }
+    }
+
+    fn insert(&mut self, coord: TileCoord, pixels: Arc<Vec<u8>>) {
+        self.remove(coord);
+        self.clock += 1;
+        self.bytes += pixels.len();
+        self.tiles.insert(
+            coord,
+            Entry {
+                pixels,
+                touched: self.clock,
+            },
+        );
+        self.evict();
+    }
+
+    /// Drop least-recently-touched tiles until back inside the budget.
+    fn evict(&mut self) {
+        while self.bytes > self.budget && self.tiles.len() > 1 {
+            let Some(&oldest) = self
+                .tiles
+                .iter()
+                .min_by_key(|(_, e)| e.touched)
+                .map(|(c, _)| c)
+            else {
+                break;
+            };
+            self.remove(oldest);
+        }
     }
 
     /// Get (compositing on miss) the RGBA8 pixels for a tile.
     pub fn get(&mut self, doc: &Document, coord: TileCoord) -> Arc<Vec<u8>> {
-        if let Some(t) = self.tiles.get(&coord) {
-            return t.clone();
+        self.clock += 1;
+        let clock = self.clock;
+        if let Some(entry) = self.tiles.get_mut(&coord) {
+            entry.touched = clock;
+            return entry.pixels.clone();
         }
         let bytes = backend()
             .tiles_rgba8(doc, &[coord])
             .pop()
             .unwrap_or_else(|| vec![0u8; TILE_PIXELS * 4]);
         let arc = Arc::new(bytes);
-        self.tiles.insert(coord, arc.clone());
+        self.insert(coord, arc.clone());
         arc
     }
 
@@ -748,7 +848,7 @@ impl TileCache {
         }
         let computed = backend().tiles_rgba8(doc, &missing);
         for (c, bytes) in missing.into_iter().zip(computed) {
-            self.tiles.insert(c, Arc::new(bytes));
+            self.insert(c, Arc::new(bytes));
         }
     }
 }
@@ -945,6 +1045,59 @@ mod tests {
         doc.selection
             .select_rect(IntRect::from_xywh(0, 0, 8, 8), SelectOp::Replace);
         assert_eq!(px(&doc, 20, 20), [5, 6, 7, 255]);
+    }
+
+    /// Nothing used to evict: entries went away only on damage or
+    /// `invalidate_all`, while the prefetcher deliberately warms the
+    /// whole canvas. An 8000x8000 document drifted to ~512 MB resident
+    /// and a 16000x16000 one to ~2 GB, with no ceiling.
+    #[test]
+    fn the_tile_cache_stays_inside_its_budget() {
+        let mut doc = Document::new("t", 4096, 4096, Depth::Eight);
+        let mut layer = Layer::new_raster("bg");
+        let buf = [10u8, 20, 30, 255].repeat(64 * 64);
+        blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(64, 64),
+            &buf,
+        );
+        doc.push_layer(layer);
+
+        // Room for four tiles.
+        let tile_bytes = TILE_PIXELS * 4;
+        let mut cache = TileCache::with_budget(tile_bytes * 4);
+        for i in 0..16 {
+            cache.get(&doc, TileCoord { tx: i, ty: 0 });
+        }
+        assert!(
+            cache.bytes() <= tile_bytes * 4,
+            "cache held {} bytes against a {} budget",
+            cache.bytes(),
+            tile_bytes * 4
+        );
+        assert!(cache.is_full());
+    }
+
+    /// And it evicts the tile untouched longest, not an arbitrary one.
+    #[test]
+    fn the_tile_cache_keeps_what_was_touched_most_recently() {
+        let mut doc = Document::new("t", 4096, 512, Depth::Eight);
+        doc.push_layer(Layer::new_raster("bg"));
+        let mut cache = TileCache::with_budget(TILE_PIXELS * 4 * 2);
+
+        let a = TileCoord { tx: 0, ty: 0 };
+        let b = TileCoord { tx: 1, ty: 0 };
+        let c = TileCoord { tx: 2, ty: 0 };
+        cache.get(&doc, a);
+        cache.get(&doc, b);
+        // Touch `a` again, so `b` is now the stalest.
+        cache.get(&doc, a);
+        cache.get(&doc, c);
+
+        assert!(cache.contains(a), "the recently used tile was evicted");
+        assert!(cache.contains(c));
+        assert!(!cache.contains(b), "the stalest tile survived");
     }
 }
 
