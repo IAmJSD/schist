@@ -212,6 +212,18 @@ impl Document {
         self.dirty = true;
     }
 
+    /// Snapshot the document-level geometry that moves with the canvas.
+    pub fn geometry(&self) -> crate::history::DocGeometry {
+        crate::history::DocGeometry {
+            guides: self.guides.clone(),
+            artboards: self.artboards.clone(),
+            slices: self.slices.clone(),
+            notes: self.notes.clone(),
+            counts: self.counts.clone(),
+            paths: self.paths.clone(),
+        }
+    }
+
     pub fn take_damage(&mut self) -> Vec<IntRect> {
         std::mem::take(&mut self.damage)
     }
@@ -492,6 +504,20 @@ impl Document {
                 };
                 self.selection = (**target).clone();
                 self.revision += 1;
+            }
+            EditOp::GeometrySet { before, after } => {
+                let g = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                self.guides = g.guides.clone();
+                self.artboards = g.artboards.clone();
+                self.slices = g.slices.clone();
+                self.notes = g.notes.clone();
+                self.counts = g.counts.clone();
+                self.paths = g.paths.clone();
+                self.damage_all();
             }
             EditOp::IccProfileSet { before, after } => {
                 let target = if dir == Direction::Undo {
@@ -964,6 +990,63 @@ impl<'a> EditBuilder<'a> {
     }
 
     /// Replace the selection via closure; captures before/after.
+    /// Move every piece of document-level geometry with the canvas.
+    ///
+    /// Guides, artboards, slices, notes, counts and stored paths are not
+    /// layer content, so no layer op touches them: crop, canvas size,
+    /// image size and the rotate/flip commands moved the pixels and left
+    /// all of it at the old coordinates. `map` takes a document-space
+    /// point and returns where it lands.
+    pub fn map_geometry(&mut self, map: impl Fn(f32, f32) -> (f32, f32)) {
+        let before = self.doc.geometry();
+        for guide in &mut self.doc.guides {
+            let (x, y) = if guide.horizontal {
+                map(0.0, guide.position)
+            } else {
+                map(guide.position, 0.0)
+            };
+            guide.position = if guide.horizontal { y } else { x };
+        }
+        let map_rect = |r: IntRect| {
+            let (x0, y0) = map(r.left as f32, r.top as f32);
+            let (x1, y1) = map(r.right as f32, r.bottom as f32);
+            IntRect::new(
+                x0.min(x1).round() as i32,
+                y0.min(y1).round() as i32,
+                x0.max(x1).round() as i32,
+                y0.max(y1).round() as i32,
+            )
+        };
+        for a in &mut self.doc.artboards {
+            a.rect = map_rect(a.rect);
+        }
+        for sl in &mut self.doc.slices {
+            sl.rect = map_rect(sl.rect);
+        }
+        for n in &mut self.doc.notes {
+            n.at = map(n.at.0, n.at.1);
+        }
+        for c in &mut self.doc.counts {
+            for p in &mut c.points {
+                *p = map(p.0, p.1);
+            }
+        }
+        for path in &mut self.doc.paths {
+            for sub in &mut path.subpaths {
+                for anchor in &mut sub.anchors {
+                    anchor.point = map(anchor.point.0, anchor.point.1);
+                }
+            }
+        }
+        let after = self.doc.geometry();
+        if before != after {
+            self.ops.push(EditOp::GeometrySet {
+                before: Box::new(before),
+                after: Box::new(after),
+            });
+        }
+    }
+
     pub fn change_selection(&mut self, f: impl FnOnce(&mut Selection, IntRect)) {
         let canvas = self.doc.canvas_rect();
         let before = Box::new(self.doc.selection.clone());

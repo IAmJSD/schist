@@ -817,6 +817,11 @@ pub fn crop_to(doc: &mut Document, rect: IntRect) {
     for id in ids {
         edit.translate_layer(id, -rect.left, -rect.top);
     }
+    // Guides, artboards, slices, notes, counts and stored paths move with
+    // the pixels; cropping 100 px off the left used to leave every one of
+    // them 100 px out of place.
+    let (ox, oy) = (rect.left as f32, rect.top as f32);
+    edit.map_geometry(|x, y| (x - ox, y - oy));
     edit.set_canvas_size(rect.width() as u32, rect.height() as u32);
     edit.change_selection(|sel, _| sel.deselect());
     edit.commit();
@@ -848,6 +853,12 @@ pub fn resize_image(doc: &mut Document, width: u32, height: u32, filter: Filter)
     // meant halving a document clipped every masked layer to a quarter of
     // its intended area.
     rescale_masks(&mut edit, from, (width, height));
+    // Guides, artboards, slices, notes, counts and paths scale with the
+    // canvas; halving the image used to leave them at full-size
+    // coordinates.
+    let sx = width as f32 / from.0.max(1) as f32;
+    let sy = height as f32 / from.1.max(1) as f32;
+    edit.map_geometry(|x, y| (x * sx, y * sy));
     edit.set_canvas_size(width, height);
     edit.commit();
 }
@@ -1163,6 +1174,7 @@ pub fn resize_canvas(doc: &mut Document, width: u32, height: u32, anchor: (f32, 
     for id in ids {
         edit.translate_layer(id, dx, dy);
     }
+    edit.map_geometry(|x, y| (x + dx as f32, y + dy as f32));
     edit.set_canvas_size(width, height);
     edit.commit();
 }
@@ -1598,5 +1610,66 @@ mod tests {
             .tiles
             .content_bounds();
         assert!(!content.is_empty(), "the layer must not be erased");
+    }
+
+    /// A document carrying one of everything that should move with the
+    /// canvas.
+    fn doc_with_geometry() -> Document {
+        let mut doc = doc_with_square();
+        doc.guides.push(schist_core::Guide {
+            horizontal: false,
+            position: 100.0,
+        });
+        doc.guides.push(schist_core::Guide {
+            horizontal: true,
+            position: 60.0,
+        });
+        doc.artboards.push(schist_core::annotate::Artboard {
+            name: "a".into(),
+            rect: IntRect::from_xywh(100, 100, 40, 40),
+        });
+        doc.notes.push(schist_core::annotate::Note {
+            at: (100.0, 60.0),
+            author: "me".into(),
+            text: "here".into(),
+        });
+        doc
+    }
+
+    #[test]
+    fn cropping_moves_guides_notes_and_artboards_with_the_pixels() {
+        // Crop 40 px off the left and 20 off the top: everything
+        // document-level shifts by the same amount. It used to stay put,
+        // so every guide and note was that far out of place.
+        let mut doc = doc_with_geometry();
+        crop_to(&mut doc, IntRect::from_xywh(40, 20, 100, 100));
+
+        assert_eq!(doc.guides[0].position, 60.0, "vertical guide");
+        assert_eq!(doc.guides[1].position, 40.0, "horizontal guide");
+        assert_eq!(doc.artboards[0].rect.left, 60);
+        assert_eq!(doc.artboards[0].rect.top, 80);
+        assert_eq!(doc.notes[0].at, (60.0, 40.0));
+    }
+
+    #[test]
+    fn undo_puts_the_geometry_back_with_the_canvas() {
+        // The reason this has to ride inside the edit: undoing the canvas
+        // while leaving the geometry moved is worse than either state.
+        let mut doc = doc_with_geometry();
+        let before = doc.geometry();
+        crop_to(&mut doc, IntRect::from_xywh(40, 20, 100, 100));
+        assert_ne!(doc.geometry(), before, "crop moved it");
+
+        doc.undo();
+        assert_eq!(doc.geometry(), before, "undo must move it back");
+    }
+
+    #[test]
+    fn image_size_scales_the_geometry_too() {
+        let mut doc = doc_with_geometry();
+        resize_image(&mut doc, 100, 100, Filter::Bilinear);
+        // The document was 200x200, so everything halves.
+        assert_eq!(doc.guides[0].position, 50.0);
+        assert_eq!(doc.notes[0].at, (50.0, 30.0));
     }
 }
