@@ -102,16 +102,35 @@ impl Workspace {
         }
     }
 
+    /// Commit or cancel the active tool's in-flight session against the
+    /// document currently on the canvas.
+    pub(super) fn deactivate_tool(&mut self) {
+        let active = self.editor.active_tool;
+        if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(active)) {
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
+            tool.on_deactivate(&mut ctx);
+        }
+    }
+
+    /// Start the active tool afresh against the document now on the canvas.
+    pub(super) fn activate_tool_for_current_doc(&mut self) {
+        let active = self.editor.active_tool;
+        if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(active)) {
+            let mut ctx = ToolCtx {
+                doc,
+                state: &mut self.editor,
+            };
+            tool.on_activate(&mut ctx);
+        }
+    }
+
     pub fn activate_tool(&mut self, id: &str, cx: &mut Context<Self>) {
         let previous = self.editor.active_tool;
         if previous != id {
-            if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(previous)) {
-                let mut ctx = ToolCtx {
-                    doc,
-                    state: &mut self.editor,
-                };
-                tool.on_deactivate(&mut ctx);
-            }
+            self.deactivate_tool();
         }
         if let Some(tool) = self.registry.tool_mut(id) {
             let id = tool.id();
@@ -120,13 +139,7 @@ impl Workspace {
             self.group_active.insert(group, id);
             self.editor.active_tool = id;
             self.status = format!("Tool: {name}").into();
-            if let (Some(doc), Some(tool)) = (self.doc.as_mut(), self.registry.tool_mut(id)) {
-                let mut ctx = ToolCtx {
-                    doc,
-                    state: &mut self.editor,
-                };
-                tool.on_activate(&mut ctx);
-            }
+            self.activate_tool_for_current_doc();
         }
         self.after_change(cx);
     }

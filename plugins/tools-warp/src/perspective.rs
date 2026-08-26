@@ -394,11 +394,33 @@ impl ToolPlugin for VanishingPointTool {
         }
     }
 
-    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+    fn on_cancel(&mut self, ctx: &mut ToolCtx) {
+        // Put the pixels back, the way Liquify's cancel does. Dropping the
+        // snapshot without restoring left the cloned pixels on the layer
+        // with no history entry and `dirty` never set, so escape during a
+        // stroke baked an edit the user could neither see nor undo, and
+        // closing the document would not even prompt.
+        if let Some((id, original)) = self.stroke.take() {
+            if let Some(raster) = ctx.doc.tree.find_mut(id).and_then(|l| l.as_raster_mut()) {
+                let damage = raster
+                    .tiles
+                    .content_bounds()
+                    .union(&original.content_bounds());
+                raster.tiles = original;
+                ctx.doc.add_damage(damage);
+            }
+        }
         self.grabbed = None;
-        self.stroke = None;
         self.source = None;
         self.offset = None;
+    }
+
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        // Switching tools mid-stroke committed nothing and restored
+        // nothing, which is the same silent edit as cancelling was.
+        if self.stroke.is_some() {
+            self.on_commit(ctx);
+        }
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {

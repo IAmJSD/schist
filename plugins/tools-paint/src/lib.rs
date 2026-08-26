@@ -879,6 +879,21 @@ impl ToolPlugin for PaintTool {
         }
     }
 
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        if let Some(stroke) = self.stroke.take() {
+            stroke.edit.cancel(ctx.doc);
+        }
+        // The clone source is a point in *this* document. The tool lives
+        // for the whole session, so keeping it meant alt-clicking a source
+        // in one document and then cloning in another sampled the new
+        // document at the old coordinates. The brush-cursor circle is
+        // dropped for the same reason: a stale one from a previous
+        // document reappeared the moment the tool was picked again.
+        self.clone_source = None;
+        self.clone_offset = None;
+        self.cursor = None;
+    }
+
     fn overlays(&self, _doc: &Document, state: &EditorState) -> Vec<Overlay> {
         match self.cursor {
             Some((cx, cy)) => {
@@ -1733,6 +1748,44 @@ mod tests {
         tool.on_cancel(&mut ctx);
         assert_eq!(pixel(&doc, 50, 50)[3], 0);
         assert!(!doc.history.can_undo());
+    }
+
+    #[test]
+    fn leaving_the_clone_tool_forgets_its_source() {
+        // The registry owns the tool for the whole session, so a source
+        // alt-clicked in one document was still set when another document
+        // came to the front: cloning there sampled the new document at the
+        // old coordinates.
+        let mut doc = doc_with_layer();
+        let mut state = EditorState::default();
+        let mut tool = PaintTool::new(PaintMode::Clone);
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            // Alt-click sets the source.
+            tool.on_pointer_down(
+                &mut ctx,
+                PointerInput {
+                    x: 20.0,
+                    y: 20.0,
+                    pressure: 1.0,
+                    modifiers: Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                },
+            );
+            assert!(tool.clone_source.is_some(), "alt-click sets a source");
+
+            tool.on_deactivate(&mut ctx);
+        }
+        assert!(
+            tool.clone_source.is_none() && tool.clone_offset.is_none(),
+            "the source belongs to the document it was picked in"
+        );
+        assert!(tool.cursor.is_none(), "and the cursor circle goes with it");
     }
 }
 
