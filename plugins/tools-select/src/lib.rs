@@ -17,7 +17,10 @@ use schist_plugin_api::{
 /// Shared by every tool that produces a pixel set rather than a shape:
 /// the wand, quick selection and object selection.
 fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &str) {
-    if pixels.is_empty() {
+    // An empty result in Replace mode still clears what was there, the way
+    // clicking with a marquee does. Returning early left the old selection
+    // in place, so wanding an empty area looked like nothing happened.
+    if pixels.is_empty() && (op != SelectOp::Replace || ctx.doc.selection.is_empty()) {
         return;
     }
     let mut edit = ctx.doc.begin_edit(name.to_string());
@@ -279,6 +282,13 @@ impl ToolPlugin for MarqueeTool {
         }
         let shape = self.shape;
         let feather = self.feather;
+        // A drag that starts or ends off-canvas would otherwise put the
+        // selection's bounds outside the document, which Transform
+        // Selection then frames and `coverage_ratio` over-reports.
+        let rect = rect.intersect(&ctx.doc.canvas_rect());
+        if rect.is_empty() {
+            return;
+        }
         let mut edit = ctx.doc.begin_edit("Select");
         edit.change_selection(|sel, _| {
             commit_shape(sel, feather, op, |target, op| match shape {
@@ -1519,6 +1529,34 @@ mod tests {
             ctx.doc.selection.coverage(40, 30),
             0,
             "blue side not selected"
+        );
+    }
+    #[test]
+    fn a_marquee_dragged_off_canvas_stays_inside_it() {
+        // `apply_shape` takes no canvas, so a drag starting outside put
+        // the selection's bounds off-document. Transform Selection then
+        // framed that, and `coverage_ratio` over-reported.
+        let mut doc = Document::new("t", 64, 64, Depth::Eight);
+        doc.push_layer(Layer::new_raster("bg"));
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Rect);
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            drag(
+                &mut tool,
+                &mut ctx,
+                (-40.0, -40.0),
+                (30.0, 30.0),
+                Modifiers::default(),
+            );
+        }
+        let b = doc.selection.bounds();
+        assert!(
+            b.left >= 0 && b.top >= 0 && b.right <= 64 && b.bottom <= 64,
+            "selection escaped the canvas: {b:?}"
         );
     }
 }

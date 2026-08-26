@@ -275,7 +275,7 @@ impl Selection {
     /// Feather: approximate gaussian blur of the coverage mask using three
     /// box blurs. Radius in pixels.
     pub fn feather(&mut self, radius: f32) {
-        if self.is_empty() || radius < 0.5 {
+        if self.is_empty() || radius <= 0.0 {
             return;
         }
         let work = self.bounds.inflated(radius.ceil() as i32 * 3 + 1);
@@ -287,7 +287,8 @@ impl Selection {
                 a[y * w + x] = self.mask.value(work.left + x as i32, work.top + y as i32) as f32;
             }
         }
-        let r = (radius / (3f32).sqrt()).max(0.5);
+        // Three box passes approximate a gaussian of this sigma.
+        let r = radius / (3f32).sqrt();
         let mut b = vec![0f32; w * h];
         for _ in 0..3 {
             box_blur_h(&a, &mut b, w, h, r);
@@ -384,11 +385,17 @@ impl Selection {
         if width <= 0 || !self.active {
             return;
         }
-        let half = (width / 2).max(1);
+        // Straddle the edge: half the width outside, half inside. The old
+        // `max(1)` forced at least one pixel outward, so Border 1 sat
+        // entirely outside the selection and Border 3 was 1 out / 2 in.
+        let outward = width / 2;
+        let inward = width - outward;
         let mut outer = self.clone();
-        outer.expand(half, canvas);
+        if outward > 0 {
+            outer.expand(outward, canvas);
+        }
         let mut inner = self.clone();
-        inner.contract(width - half, canvas);
+        inner.contract(inward, canvas);
         let rect = outer.bounds();
         let mut out = Selection::new();
         out.active = true;
@@ -553,40 +560,49 @@ impl Selection {
     pub const _TILE_PIXELS_CHECK: usize = TILE_PIXELS;
 }
 
+/// One box-blur pass with a fractional radius.
+///
+/// `r as usize` truncated, so any radius under 1 was the identity and 2
+/// and 3 blurred identically: the Feather slider advertises a continuous
+/// 0-250 px range it could not deliver. The whole taps inside the radius
+/// count once; the pair just outside count `frac`, which makes the pass
+/// continuous in `r`.
 fn box_blur_h(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: f32) {
-    let ir = r as usize;
-    let norm = 1.0 / (2 * ir + 1) as f32;
+    let ir = r.floor().max(0.0) as usize;
+    let frac = r - r.floor();
+    let norm = 1.0 / ((2 * ir + 1) as f32 + 2.0 * frac);
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
-        let mut acc: f32 = row[0] * (ir + 1) as f32;
-        for &v in &row[..ir.min(w)] {
-            acc += v;
-        }
+        let at = |i: isize| -> f32 { row[i.clamp(0, w as isize - 1) as usize] };
         for x in 0..w {
-            let add = row[(x + ir).min(w - 1)];
-            let sub = if x > ir { row[x - ir - 1] } else { row[0] };
-            acc += add - sub;
+            let xi = x as isize;
+            let mut acc = 0.0;
+            for d in -(ir as isize)..=(ir as isize) {
+                acc += at(xi + d);
+            }
+            if frac > 0.0 {
+                acc += frac * (at(xi - ir as isize - 1) + at(xi + ir as isize + 1));
+            }
             dst[y * w + x] = acc * norm;
         }
     }
 }
 
 fn box_blur_v(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: f32) {
-    let ir = r as usize;
-    let norm = 1.0 / (2 * ir + 1) as f32;
+    let ir = r.floor().max(0.0) as usize;
+    let frac = r - r.floor();
+    let norm = 1.0 / ((2 * ir + 1) as f32 + 2.0 * frac);
     for x in 0..w {
-        let mut acc: f32 = src[x] * (ir + 1) as f32;
-        for y in 0..ir.min(h) {
-            acc += src[y * w + x];
-        }
+        let at = |i: isize| -> f32 { src[i.clamp(0, h as isize - 1) as usize * w + x] };
         for y in 0..h {
-            let add = src[(y + ir).min(h - 1) * w + x];
-            let sub = if y > ir {
-                src[(y - ir - 1) * w + x]
-            } else {
-                src[x]
-            };
-            acc += add - sub;
+            let yi = y as isize;
+            let mut acc = 0.0;
+            for d in -(ir as isize)..=(ir as isize) {
+                acc += at(yi + d);
+            }
+            if frac > 0.0 {
+                acc += frac * (at(yi - ir as isize - 1) + at(yi + ir as isize + 1));
+            }
             dst[y * w + x] = acc * norm;
         }
     }
@@ -858,5 +874,51 @@ mod outline_tests {
         assert_ne!(start, after_select);
         sel.deselect();
         assert_ne!(after_select, sel.generation());
+    }
+    #[test]
+    fn feather_is_continuous_in_its_radius() {
+        // `r as usize` truncated, so every radius under 1.74 px was a
+        // silent no-op and 2 px blurred identically to 3 px, while the
+        // slider advertised a continuous 0-250 px range.
+        let edge = |radius: f32| {
+            let mut sel = Selection::new();
+            sel.select_rect(IntRect::from_xywh(0, 0, 64, 64), SelectOp::Replace);
+            sel.feather(radius);
+            sel.coverage(63, 32)
+        };
+        let hard = edge(0.0);
+        assert_eq!(hard, 255, "no feather leaves a hard edge");
+
+        let small = edge(1.0);
+        assert!(small < hard, "1 px must soften the edge, got {small}");
+
+        // Distinct radii must give distinct results.
+        let two = edge(2.0);
+        let three = edge(3.0);
+        assert_ne!(two, three, "2 px and 3 px must differ (both were {two})");
+
+        // And softening must be monotonic.
+        assert!(small >= two && two >= three, "{small} {two} {three}");
+    }
+
+    #[test]
+    fn border_straddles_the_selection_edge() {
+        let bordered = |width: i32| {
+            let canvas = IntRect::from_xywh(0, 0, 64, 64);
+            let mut sel = Selection::new();
+            sel.select_rect(IntRect::from_xywh(16, 16, 32, 32), SelectOp::Replace);
+            sel.border(width, canvas);
+            sel
+        };
+
+        // Border 1 used to land entirely outside the selection.
+        let one = bordered(1);
+        assert!(one.coverage(16, 32) > 0, "the edge pixel must be included");
+
+        // Border 2: one pixel either side of the boundary.
+        let two = bordered(2);
+        assert!(two.coverage(15, 32) > 0, "one pixel outside");
+        assert!(two.coverage(16, 32) > 0, "one pixel inside");
+        assert_eq!(two.coverage(13, 32), 0, "and no further out");
     }
 }
