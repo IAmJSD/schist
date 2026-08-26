@@ -2,7 +2,7 @@
 //! rest alone.
 
 use schist_color::{Depth, Rgba};
-use schist_core::{Document, IntRect, Layer, SelectOp, TileCoord, TILE_SIZE};
+use schist_core::{Document, IntRect, Layer, SelectOp, TileCoord, TileMap, TILE_SIZE};
 use schist_plugin_api::{EditorState, Modifiers, PointerInput, ToolCtx, ToolPlugin};
 use schist_tools_retouch::*;
 
@@ -210,4 +210,109 @@ fn patch_takes_texture_from_the_source_and_colour_from_the_destination() {
         patched.r < 0.55,
         "took the source's brightness instead of the destination's: {patched:?}"
     );
+}
+
+/// Parallelising the inpaint must not change what it produces.
+///
+/// It is 160 sweeps of the padded selection bounds, run synchronously on
+/// pointer release: over a 1500x1500 selection the window locked up for
+/// seconds. Each row now reads the previous pass and writes only its own
+/// slice, so the iteration is unchanged — only spread over the cores.
+#[test]
+fn the_inpaint_matches_a_sequential_jacobi_solve() {
+    let mut tiles = TileMap::default();
+    let rect = IntRect::from_xywh(0, 0, 40, 40);
+    for y in 0..40 {
+        for x in 0..40 {
+            let v = (x + y) as f32 / 80.0;
+            let coord = TileCoord::containing(x, y);
+            let trect = coord.rect();
+            let buf = tiles.get_mut_or_insert(coord, Depth::Eight);
+            buf.set(
+                ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize,
+                Rgba::new(v, 1.0 - v, 0.5, 1.0),
+            );
+        }
+    }
+    // A square hole in the middle.
+    let hole: Vec<bool> = (0..40 * 40)
+        .map(|i| {
+            let (x, y) = (i % 40, i / 40);
+            (12..28).contains(&x) && (12..28).contains(&y)
+        })
+        .collect();
+
+    let got = schist_tools_retouch::inpaint(&tiles, rect, &hole);
+    let want = sequential_inpaint(&tiles, rect, &hole);
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g.r - w.r).abs() < 1e-5 && (g.g - w.g).abs() < 1e-5 && (g.b - w.b).abs() < 1e-5,
+            "pixel {i}: {g:?} != {w:?}"
+        );
+    }
+    // And it actually filled the hole with something plausible.
+    let centre = got[20 * 40 + 20];
+    assert!(centre.a > 0.99 && centre.r > 0.0);
+}
+
+/// The inpaint's inner loop, written the way it was before rayon.
+fn sequential_inpaint(tiles: &TileMap, rect: IntRect, hole: &[bool]) -> Vec<Rgba> {
+    let (w, h) = (rect.width() as usize, rect.height() as usize);
+    let mut buf: Vec<Rgba> = (0..w * h)
+        .map(|i| tiles.pixel(rect.left + (i % w) as i32, rect.top + (i / w) as i32))
+        .collect();
+    // Seed the hole with the mean of everything outside it, as `inpaint`
+    // does.
+    let mut acc = [0f32; 4];
+    let mut n = 0f32;
+    for (i, px) in buf.iter().enumerate() {
+        if !hole[i] {
+            acc[0] += px.r;
+            acc[1] += px.g;
+            acc[2] += px.b;
+            acc[3] += px.a;
+            n += 1.0;
+        }
+    }
+    let seed = if n > 0.0 {
+        Rgba::new(acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n)
+    } else {
+        Rgba::new(0.0, 0.0, 0.0, 0.0)
+    };
+    for i in 0..buf.len() {
+        if hole[i] {
+            buf[i] = seed;
+        }
+    }
+    let passes = (w.min(h) as u32).clamp(8, 160);
+    let mut next = buf.clone();
+    for _ in 0..passes {
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if !hole[i] {
+                    continue;
+                }
+                let (mut acc, mut n) = ([0f32; 4], 0f32);
+                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let (sx, sy) = (x as i32 + dx, y as i32 + dy);
+                    if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
+                        continue;
+                    }
+                    let c = buf[sy as usize * w + sx as usize];
+                    acc[0] += c.r;
+                    acc[1] += c.g;
+                    acc[2] += c.b;
+                    acc[3] += c.a;
+                    n += 1.0;
+                }
+                if n > 0.0 {
+                    next[i] = Rgba::new(acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
+                }
+            }
+        }
+        std::mem::swap(&mut buf, &mut next);
+    }
+    buf
 }

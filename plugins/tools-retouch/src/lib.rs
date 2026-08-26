@@ -9,6 +9,7 @@
 //! right for smooth surroundings and visibly blurry over texture, which is
 //! at least a predictable failure.
 
+use rayon::prelude::*;
 use schist_color::Rgba;
 use schist_core::{Document, IntRect, LayerId, Selection, TileCoord, TileMap, TILE_SIZE};
 use schist_plugin_api::{
@@ -122,8 +123,15 @@ pub fn inpaint(tiles: &TileMap, rect: IntRect, hole: &[bool]) -> Vec<Rgba> {
     let passes = (w.min(h) as u32).clamp(8, 160);
     let mut next = buf.clone();
     for _ in 0..passes {
-        for y in 0..h {
-            for x in 0..w {
+        // A row at a time, in parallel. This runs synchronously on
+        // pointer release: over a 1500x1500 selection it is 160 sweeps of
+        // 2.25 M pixels, and the window locked up for seconds with no
+        // cursor change to explain it. Each row reads `buf` and writes
+        // only its own slice of `next`, so the passes stay exactly the
+        // Jacobi iteration they were -- same output, spread over the
+        // cores.
+        next.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+            for (x, out) in out_row.iter_mut().enumerate() {
                 let i = y * w + x;
                 if !hole[i] {
                     continue;
@@ -142,10 +150,10 @@ pub fn inpaint(tiles: &TileMap, rect: IntRect, hole: &[bool]) -> Vec<Rgba> {
                     n += 1.0;
                 }
                 if n > 0.0 {
-                    next[i] = Rgba::new(acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
+                    *out = Rgba::new(acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
                 }
             }
-        }
+        });
         std::mem::swap(&mut buf, &mut next);
     }
     buf

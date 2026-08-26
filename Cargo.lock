@@ -5930,6 +5930,7 @@ dependencies = [
 name = "schist-tools-retouch"
 version = "0.6.0"
 dependencies = [
+ "rayon",
  "schist-color",
  "schist-core",
  "schist-plugin-api",

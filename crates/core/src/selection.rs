@@ -189,6 +189,8 @@ impl Selection {
     /// Polygon (lasso) selection, even-odd fill, anti-aliased with 4x4
     /// supersampling. Points are document-space.
     pub fn select_polygon(&mut self, points: &[(f32, f32)], op: SelectOp) {
+        /// Supersamples per axis.
+        const SUB: usize = 4;
         if points.len() < 3 {
             return;
         }
@@ -202,33 +204,69 @@ impl Selection {
             ));
         }
         let pts: Vec<(f64, f64)> = points.iter().map(|&(x, y)| (x as f64, y as f64)).collect();
-        let inside = move |px: f64, py: f64| {
-            let mut winding = false;
-            let n = pts.len();
-            for i in 0..n {
-                let (x1, y1) = pts[i];
-                let (x2, y2) = pts[(i + 1) % n];
-                if (y1 > py) != (y2 > py) {
-                    let xint = x1 + (py - y1) / (y2 - y1) * (x2 - x1);
-                    if px < xint {
-                        winding = !winding;
-                    }
-                }
+
+        // Crossings per supersample row, built once.
+        //
+        // This used to test every edge against every subsample: a
+        // 600x600 lasso with 2000 points is 600*600*16*2000 edge tests --
+        // roughly 1.2e10, single-threaded, on pointer-up, which froze the
+        // window for many seconds. Walking each edge down the rows it
+        // actually spans costs the perimeter instead of the area, and the
+        // per-pixel work drops to a scan of the handful of crossings on
+        // that row.
+        let sub_rows = (rect.height() as usize).saturating_mul(SUB);
+        let mut crossings: Vec<Vec<f64>> = vec![Vec::new(); sub_rows];
+        let top = rect.top as f64;
+        for i in 0..pts.len() {
+            let (x1, y1) = pts[i];
+            let (x2, y2) = pts[(i + 1) % pts.len()];
+            if y1 == y2 {
+                continue;
             }
-            winding
-        };
+            // Half-open in y, matching the `(y1 > py) != (y2 > py)` rule
+            // the per-pixel test used, so shared vertices count once.
+            let (lo, hi) = if y1 < y2 { (y1, y2) } else { (y2, y1) };
+            let first = (((lo - top) * SUB as f64 - 0.5).ceil()).max(0.0) as usize;
+            let last = (((hi - top) * SUB as f64 - 0.5).floor()).max(-1.0);
+            let last = if last < 0.0 {
+                continue;
+            } else {
+                (last as usize).min(sub_rows.saturating_sub(1))
+            };
+            for (row, out) in crossings.iter_mut().enumerate().take(last + 1).skip(first) {
+                let py = top + (row as f64 + 0.5) / SUB as f64;
+                if (y1 > py) == (y2 > py) {
+                    continue;
+                }
+                out.push(x1 + (py - y1) / (y2 - y1) * (x2 - x1));
+            }
+        }
+        for row in crossings.iter_mut() {
+            row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        let top_i = rect.top;
         self.apply_shape(rect, op, move |x, y| {
             let mut hits = 0u32;
-            for sy in 0..4 {
-                for sx in 0..4 {
-                    let px = x as f64 + (sx as f64 + 0.5) / 4.0;
-                    let py = y as f64 + (sy as f64 + 0.5) / 4.0;
-                    if inside(px, py) {
+            for sy in 0..SUB {
+                let row = (y - top_i) as usize * SUB + sy;
+                let Some(xs) = crossings.get(row) else {
+                    continue;
+                };
+                if xs.is_empty() {
+                    continue;
+                }
+                for sx in 0..SUB {
+                    let px = x as f64 + (sx as f64 + 0.5) / SUB as f64;
+                    // Even-odd: inside when an odd number of edges lie to
+                    // the left.
+                    let left = xs.partition_point(|&xi| xi <= px);
+                    if left % 2 == 1 {
                         hits += 1;
                     }
                 }
             }
-            ((hits * 255) / 16) as u8
+            ((hits * 255) / (SUB * SUB) as u32) as u8
         });
     }
 
@@ -703,6 +741,78 @@ mod tests {
         sel.select_polygon(&[(0.0, 0.0), (40.0, 0.0), (0.0, 40.0)], SelectOp::Replace);
         assert!(sel.coverage(5, 5) > 200);
         assert_eq!(sel.coverage(35, 35), 0);
+    }
+
+    /// The scanline fill must agree with the brute-force point-in-polygon
+    /// test it replaced, pixel for pixel.
+    ///
+    /// The old form tested every edge against every subsample, so a
+    /// 600x600 lasso with 2000 points cost ~1.2e10 edge tests on
+    /// pointer-up and froze the window for seconds.
+    #[test]
+    fn the_scanline_fill_matches_the_brute_force_one() {
+        // A star, so the even-odd rule actually has self-crossings to
+        // resolve, plus a plain triangle and a concave L.
+        let star: Vec<(f32, f32)> = (0..10)
+            .map(|i| {
+                let a = i as f32 / 10.0 * std::f32::consts::TAU;
+                let r = if i % 2 == 0 { 40.0 } else { 16.0 };
+                (50.0 + r * a.cos(), 50.0 + r * a.sin())
+            })
+            .collect();
+        let triangle = vec![(5.0, 5.0), (90.0, 20.0), (30.0, 88.0)];
+        let ell = vec![
+            (10.0, 10.0),
+            (70.0, 10.0),
+            (70.0, 30.0),
+            (30.0, 30.0),
+            (30.0, 80.0),
+            (10.0, 80.0),
+        ];
+
+        for points in [star, triangle, ell] {
+            let mut sel = Selection::default();
+            sel.select_polygon(&points, SelectOp::Replace);
+
+            for y in 0..100 {
+                for x in 0..100 {
+                    let want = brute_force_coverage(&points, x, y);
+                    let got = sel.coverage(x, y);
+                    assert_eq!(got, want, "at ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    /// `select_polygon` as it was written before the scanline rewrite.
+    fn brute_force_coverage(points: &[(f32, f32)], x: i32, y: i32) -> u8 {
+        let pts: Vec<(f64, f64)> = points.iter().map(|&(x, y)| (x as f64, y as f64)).collect();
+        let inside = |px: f64, py: f64| {
+            let mut winding = false;
+            let n = pts.len();
+            for i in 0..n {
+                let (x1, y1) = pts[i];
+                let (x2, y2) = pts[(i + 1) % n];
+                if (y1 > py) != (y2 > py) {
+                    let xint = x1 + (py - y1) / (y2 - y1) * (x2 - x1);
+                    if px < xint {
+                        winding = !winding;
+                    }
+                }
+            }
+            winding
+        };
+        let mut hits = 0u32;
+        for sy in 0..4 {
+            for sx in 0..4 {
+                let px = x as f64 + (sx as f64 + 0.5) / 4.0;
+                let py = y as f64 + (sy as f64 + 0.5) / 4.0;
+                if inside(px, py) {
+                    hits += 1;
+                }
+            }
+        }
+        ((hits * 255) / 16) as u8
     }
 }
 
