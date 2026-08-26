@@ -418,10 +418,96 @@ pub trait FilterPlugin: Send + Sync {
     /// `width * height` pixels.
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues);
 
+    /// Apply, saying so when it could not.
+    ///
+    /// The default runs [`FilterPlugin::apply`] and reports success, which
+    /// is right for every in-process filter: they cannot fail. A sandboxed
+    /// plugin can -- it traps, or runs out of fuel -- and the shell needs
+    /// to know, or it records an undo entry for pixels that never changed
+    /// and puts the filter's name in the status bar as if it had worked.
+    fn try_apply(
+        &self,
+        pixels: &mut [f32],
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) -> Result<(), String> {
+        self.apply(pixels, width, height, values);
+        Ok(())
+    }
+
     /// A line shown in the filter's dialog, for anything the user should
     /// know before running it -- which is mostly whether a neural filter
     /// found its model or is about to use its fallback.
     fn info(&self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod filter_fallibility_tests {
+    use super::{FilterPlugin, FilterValues};
+
+    /// A filter that cannot fail — every in-process one.
+    struct Doubler;
+    impl FilterPlugin for Doubler {
+        fn id(&self) -> &'static str {
+            "test.doubler"
+        }
+        fn name(&self) -> &'static str {
+            "Doubler"
+        }
+        fn apply(&self, pixels: &mut [f32], _w: usize, _h: usize, _v: &FilterValues) {
+            for p in pixels.iter_mut() {
+                *p *= 2.0;
+            }
+        }
+    }
+
+    /// A sandboxed one that traps or runs out of fuel.
+    struct Trapping;
+    impl FilterPlugin for Trapping {
+        fn id(&self) -> &'static str {
+            "test.trapping"
+        }
+        fn name(&self) -> &'static str {
+            "Trapping"
+        }
+        fn apply(&self, pixels: &mut [f32], w: usize, h: usize, v: &FilterValues) {
+            let _ = self.try_apply(pixels, w, h, v);
+        }
+        fn try_apply(
+            &self,
+            _pixels: &mut [f32],
+            _w: usize,
+            _h: usize,
+            _v: &FilterValues,
+        ) -> Result<(), String> {
+            Err("out of fuel".into())
+        }
+    }
+
+    /// The default forwards to `apply` and reports success, so nothing
+    /// that already existed has to change.
+    #[test]
+    fn a_filter_that_cannot_fail_still_reports_success() {
+        let mut pixels = [0.25f32, 0.5, 0.5, 1.0];
+        let values = FilterValues::default();
+        assert_eq!(Doubler.try_apply(&mut pixels, 1, 1, &values), Ok(()));
+        assert_eq!(pixels, [0.5, 1.0, 1.0, 2.0]);
+    }
+
+    /// And a failure is now visible to the caller, which is what stops
+    /// the shell recording an undo entry for pixels that never changed
+    /// and putting the filter's name in the status bar as if it had run.
+    #[test]
+    fn a_failing_filter_says_so() {
+        let mut pixels = [0.25f32, 0.5, 0.5, 1.0];
+        let before = pixels;
+        let err = Trapping
+            .try_apply(&mut pixels, 1, 1, &FilterValues::default())
+            .unwrap_err();
+        assert!(err.contains("fuel"), "{err}");
+        assert_eq!(pixels, before);
     }
 }

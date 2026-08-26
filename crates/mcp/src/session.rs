@@ -94,11 +94,32 @@ pub struct Session {
     _wasm: schist_plugin_host_wasm::PluginManager,
 }
 
+/// Largest side a new document may have.
+const MAX_DIMENSION: u32 = 30_000;
+
+/// Largest total area, which is the limit that actually bounds memory:
+/// 200 megapixels is 800 MB of RGBA8 and comfortably past any real
+/// document.
+const MAX_PIXELS: u64 = 200_000_000;
+
 impl Session {
     /// A blank document with a white Background layer, like File ▸ New.
     pub fn new_blank(title: &str, width: u32, height: u32, depth: Depth) -> Result<Session> {
-        if width == 0 || height == 0 || width > 30_000 || height > 30_000 {
-            bail!("document size must be 1..=30000 in each dimension");
+        if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+            bail!("document size must be 1..={MAX_DIMENSION} in each dimension");
+        }
+        // Per-dimension limits alone allowed 30000x30000, and the white
+        // fill below is one `vec![255u8; w * h * 4]` -- 3.6 GB in a single
+        // allocation, before any tiling. `create_session
+        // {"width":30000,"height":30000}` is a plausible typo for
+        // 3000x3000 and it aborted the process, taking every other
+        // session's unsaved work with it.
+        let pixels = width as u64 * height as u64;
+        if pixels > MAX_PIXELS {
+            bail!(
+                "document is {pixels} pixels, over the {MAX_PIXELS} limit \
+                 ({width}x{height})"
+            );
         }
         // Each dimension was checked but not their product, and the
         // background is allocated whole: 30000x30000 asked for 3.6 GB in
@@ -112,13 +133,17 @@ impl Session {
         }
         let mut doc = Document::new(title, width, height, depth);
         let mut bg = Layer::new_raster("Background");
-        let white = vec![255u8; width as usize * height as usize * 4];
-        blit_rgba8(
-            &mut bg.as_raster_mut().unwrap().tiles,
-            depth,
-            IntRect::from_size(width, height),
-            &white,
-        );
+        // A row at a time rather than the whole canvas at once, so the
+        // peak allocation is bounded by the width.
+        let row = vec![255u8; width as usize * 4];
+        for y in 0..height {
+            blit_rgba8(
+                &mut bg.as_raster_mut().unwrap().tiles,
+                depth,
+                IntRect::from_xywh(0, y as i32, width, 1),
+                &row,
+            );
+        }
         doc.push_layer(bg);
         doc.dirty = false;
         Ok(Session::install(doc))
@@ -839,5 +864,38 @@ mod tests {
         assert!(Session::new_blank("t", 30_000, 30_000, Depth::Eight).is_err());
         // An ordinary document still works.
         assert!(Session::new_blank("t", 1920, 1080, Depth::Eight).is_ok());
+    }
+
+    /// Per-dimension limits alone allowed 30000x30000, whose white fill
+    /// was one 3.6 GB allocation — a plausible typo for 3000x3000 that
+    /// aborted the process and took every other session's unsaved work
+    /// with it.
+    #[test]
+    fn an_absurd_canvas_is_refused_rather_than_allocated() {
+        let err = match Session::new_blank("t", 30_000, 30_000, Depth::Eight) {
+            Ok(_) => panic!("30000x30000 must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("pixels"),
+            "unexpected message: {err}"
+        );
+        // Each side is still individually allowed; it is the area that
+        // is out of bounds.
+        assert!(Session::new_blank("t", 30_000, 100, Depth::Eight).is_ok());
+    }
+
+    #[test]
+    fn a_reasonable_canvas_is_white_all_the_way_across() {
+        // The fill is per-row now, so check both ends and the far corner.
+        let sess = Session::new_blank("t", 600, 400, Depth::Eight).unwrap();
+        let tiles = &sess.doc.tree.layers[0].as_raster().unwrap().tiles;
+        for (x, y) in [(0, 0), (599, 0), (0, 399), (599, 399), (300, 200)] {
+            assert_eq!(
+                tiles.pixel(x, y).to_u8(),
+                [255, 255, 255, 255],
+                "at ({x}, {y})"
+            );
+        }
     }
 }

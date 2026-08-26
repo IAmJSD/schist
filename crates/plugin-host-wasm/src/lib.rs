@@ -38,6 +38,15 @@ const FUEL_PER_CALL: u64 = 500_000_000;
 /// every unsaved document in it.
 const MAX_PLUGIN_MEMORY: usize = 256 * 1024 * 1024;
 
+/// Fuel for a codec probe.
+///
+/// `codec_for` probes every registered codec on every file open, so this
+/// runs on the interactive path -- with the full decode budget a hostile
+/// or merely broken plugin stalled every open of a file the built-in
+/// codecs did not recognise. Deciding whether a few magic bytes match is
+/// a tiny amount of work; a thousandth of a decode is generous.
+const FUEL_PER_PROBE: u64 = 20_000_000;
+
 /// wasmtime carries its own error type; funnel it into `anyhow` at the
 /// boundary so the rest of the host reads uniformly.
 fn wasm_err(err: wasmtime::Error) -> anyhow::Error {
@@ -212,6 +221,10 @@ impl LoadedPlugin {
     }
 
     fn instantiate(&self, name: &str) -> Result<Instance> {
+        self.instantiate_with_fuel(name, FUEL_PER_CALL)
+    }
+
+    fn instantiate_with_fuel(&self, name: &str, fuel: u64) -> Result<Instance> {
         let mut store = wasmtime::Store::new(
             &self.engine,
             HostState {
@@ -223,29 +236,38 @@ impl LoadedPlugin {
             },
         );
         store.limiter(|state| &mut state.limits);
-        store.set_fuel(FUEL_PER_CALL).map_err(wasm_err)?;
+        // The caller decides the budget: a codec probe runs on every file
+        // open and needs far less than a decode.
+        store.set_fuel(fuel).map_err(wasm_err)?;
         let mut linker = wasmtime::Linker::new(&self.engine);
-        // The entire host surface: one logging call.
-        linker
-            .func_wrap(
-                "schist",
-                "log",
-                |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
-                    let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
-                        return;
-                    };
-                    let len = (len.max(0) as usize).min(4096);
-                    let mut buf = vec![0u8; len];
-                    if memory.read(&mut caller, ptr as usize, &mut buf).is_ok() {
-                        log::info!(
-                            "[plugin {}] {}",
-                            caller.data().plugin_name,
-                            String::from_utf8_lossy(&buf)
-                        );
-                    }
-                },
-            )
-            .map_err(wasm_err)?;
+        // The entire host surface is one logging call, and even that is
+        // linked only when the manifest asked for it. `capabilities: []`
+        // used to get the import anyway, which made the documented
+        // "capabilities start empty and are granted per manifest request"
+        // untrue.
+        if self.manifest.capabilities.contains(&Capability::Log) {
+            linker
+                .func_wrap(
+                    "schist",
+                    "log",
+                    |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
+                        let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory")
+                        else {
+                            return;
+                        };
+                        let len = (len.max(0) as usize).min(4096);
+                        let mut buf = vec![0u8; len];
+                        if memory.read(&mut caller, ptr as usize, &mut buf).is_ok() {
+                            log::info!(
+                                "[plugin {}] {}",
+                                caller.data().plugin_name,
+                                String::from_utf8_lossy(&buf)
+                            );
+                        }
+                    },
+                )
+                .map_err(wasm_err)?;
+        }
         let instance = linker
             .instantiate(&mut store, &self.module)
             .map_err(wasm_err)
@@ -323,7 +345,7 @@ impl LoadedPlugin {
 
     /// Ask a codec plugin whether it recognises these bytes.
     pub fn probe(&self, bytes: &[u8]) -> Result<bool> {
-        let mut inst = self.instantiate(&self.manifest.name)?;
+        let mut inst = self.instantiate_with_fuel(&self.manifest.name, FUEL_PER_PROBE)?;
         let ptr = inst.call_alloc(bytes.len().max(1))?;
         inst.write(ptr, bytes)?;
         let verdict = inst
@@ -446,9 +468,27 @@ impl FilterPlugin for WasmFilter {
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {
         // A misbehaving plugin must not take the editor down with it.
-        if let Err(err) = self.plugin.run_filter(pixels, width, height, values) {
-            log::error!("plugin {} failed: {err:#}", self.plugin.manifest.id);
-        }
+        let _ = self.try_apply(pixels, width, height, values);
+    }
+
+    fn try_apply(
+        &self,
+        pixels: &mut [f32],
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) -> Result<(), String> {
+        // A trap or a fuel exhaustion used to be swallowed into
+        // `log::error!` and returned as though nothing had happened, so
+        // the status bar read the filter's name, the image was unchanged,
+        // the title showed unsaved changes and History gained a no-op
+        // step -- with the real reason only on stderr.
+        self.plugin
+            .run_filter(pixels, width, height, values)
+            .map_err(|err| {
+                log::error!("plugin {} failed: {err:#}", self.plugin.manifest.id);
+                format!("{err:#}")
+            })
     }
 }
 
@@ -490,7 +530,16 @@ impl CodecPlugin for WasmCodec {
         self.extensions
     }
     fn probe(&self, bytes: &[u8]) -> bool {
-        self.plugin.probe(bytes).unwrap_or(false)
+        // A trap, a fuel exhaustion or a missing export used to become a
+        // silent `false`, so a broken codec plugin looked exactly like
+        // "no codec for foo.xyz".
+        match self.plugin.probe(bytes) {
+            Ok(verdict) => verdict,
+            Err(err) => {
+                log::warn!("codec plugin {} failed to probe: {err:#}", self.id);
+                false
+            }
+        }
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
         let (width, height, rgba) = self.plugin.decode(bytes)?;

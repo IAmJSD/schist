@@ -4986,12 +4986,19 @@ impl Workspace {
         };
         let mut buf = original.clone();
         let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
-        filter.apply(
+        let outcome = filter.try_apply(
             &mut buf,
             region.width() as usize,
             region.height() as usize,
             values,
         );
+        if let Err(err) = outcome {
+            // No edit, no history entry, and say what happened rather
+            // than reporting the filter's name as if it had run.
+            self.status = format!("{name} failed: {err}").into();
+            cx.notify();
+            return;
+        }
         self.write_region(layer_id, region, &original, &buf, &name, true);
         self.status = name.into();
         self.after_change(cx);
