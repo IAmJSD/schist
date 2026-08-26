@@ -32,12 +32,25 @@ they will not break the plugin ABI or saved files.
 1. Update the version in the root `Cargo.toml` and `packaging/macos/Info.plist`.
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
 3. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-4. The release workflow builds a Linux AppImage, a macOS `Schist.zip`
-   (signed and notarized when the secrets below exist), and a Windows
-   installer, then drafts the release. Each platform also ships the
-   `schist-mcp` server from the same build: a loose binary on Linux and
-   Windows, and on macOS `schist-mcp-macos.zip`, signed and notarized on
-   its own. See [mcp.md](mcp.md).
+4. The release workflow builds Linux AppImages for x86_64 and aarch64, a
+   macOS `Schist.zip` (signed and notarized when the secrets below
+   exist), and a Windows installer, then drafts the release. Each
+   platform also ships the `schist-mcp` server from the same build: a
+   loose arch-suffixed binary on Linux (`schist-mcp-linux-x86_64`,
+   `schist-mcp-linux-aarch64`), a loose binary on Windows, and on macOS
+   `schist-mcp-macos.zip`, signed and notarized on its own. See
+   [mcp.md](mcp.md).
+5. Update the AUR package from `packaging/linux/aur/PKGBUILD`: bump
+   `pkgver` to the new version, reset `pkgrel=1`, then in an Arch
+   environment run `updpkgsums` (re-pins the tag tarball's sha256), test
+   with `makepkg -s` + `namcap`, and regenerate `.SRCINFO` with
+   `makepkg --printsrcinfo > .SRCINFO` — the AUR rejects pushes without
+   a current one. Commit `PKGBUILD` + `.SRCINFO` to the AUR remote
+   (`ssh://aur@aur.archlinux.org/schist.git`) and mirror the `PKGBUILD`
+   change back here. The PKGBUILD keeps `options=(!lto)` (makepkg's
+   `-flto=auto` breaks `ring`'s C objects under the clang link) and
+   `clang`/`mold` in `makedepends` for the linker settings in
+   `.cargo/config.toml` — don't drop either when touching it.
 
 Unsigned builds are still produced when signing credentials are absent, so
 forks and local builds work without secrets.

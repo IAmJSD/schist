@@ -34,9 +34,10 @@ exec "$HERE/usr/bin/schist" "$@"
 RUN
 chmod +x "$appdir/AppRun"
 
+out="$root/dist/Schist-$(uname -m).AppImage"
 if command -v "$tool" >/dev/null 2>&1; then
-    "$tool" "$appdir" "$root/dist/Schist-x86_64.AppImage"
-    echo "built $root/dist/Schist-x86_64.AppImage"
+    "$tool" "$appdir" "$out"
+    echo "built $out"
 else
     echo "appimagetool not found; the AppDir is ready at $appdir" >&2
 fi

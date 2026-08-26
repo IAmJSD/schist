@@ -16,7 +16,7 @@ commit:
 
 | platform | where it lands |
 |---|---|
-| Linux | `schist-mcp` on the release page, next to the AppImage |
+| Linux | `schist-mcp-linux-x86_64` / `schist-mcp-linux-aarch64` on the release page, next to the AppImages |
 | macOS | `schist-mcp-macos.zip` on the release page — unzip it anywhere |
 | Windows | `schist-mcp.exe`, installed beside `schist.exe` and also on the release page |
 
