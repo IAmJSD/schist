@@ -2099,15 +2099,28 @@ fn preferences(
                 .child(format!("Version {}", crate::crash::current_version())),
         );
 
-    let actions = div().flex().flex_row().gap_2().child(ui::button(
-        "Done",
-        true,
-        |ws, _w, cx| {
-            ws.save_view_options();
-            ws.close_modal(cx);
-        },
-        cx,
-    ));
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| {
+                ws.revert_preferences(cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ))
+        .child(ui::button(
+            "Done",
+            true,
+            |ws, _w, cx| {
+                ws.keep_preferences();
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
     ui::modal_frame("Preferences", 400.0, body, actions)
 }
 

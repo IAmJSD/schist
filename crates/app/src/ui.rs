@@ -168,6 +168,7 @@ pub fn button(
         .px_3()
         .rounded_sm()
         .text_size(px(12.0))
+        .cursor_pointer()
         .bg(gpui::rgb(if primary {
             palette().accent
         } else {

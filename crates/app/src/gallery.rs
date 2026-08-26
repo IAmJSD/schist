@@ -8,7 +8,7 @@
 
 use crate::dialogs::{param_slider, SliderSpec};
 use crate::ui;
-use crate::workspace::{GalleryEntry, Modal, Popup, Workspace};
+use crate::workspace::{GalleryEntry, Modal, Workspace};
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled,
@@ -286,6 +286,5 @@ pub fn render(
             },
             cx,
         ));
-    let _ = Popup::BlendModes;
     ui::modal_frame("Filter Gallery", 620.0, body, actions)
 }

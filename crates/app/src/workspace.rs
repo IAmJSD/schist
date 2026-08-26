@@ -222,6 +222,14 @@ pub struct Workspace {
     pub pending_plugin_toggle: Option<(String, bool)>,
     /// View toggles (rulers, grid, guides, snapping, theme).
     pub view: ViewOptions,
+    /// View options and rendering intent as they stood when Preferences
+    /// opened, so Cancel can put them back.
+    ///
+    /// Every control in that dialog applied and persisted on change and
+    /// the only action was "Done" -- flipping the GPU compositing
+    /// checkbox to see what it did tore the backend down, rebuilt it and
+    /// wrote the preference file, with no way to back out.
+    preferences_snapshot: Option<Box<(ViewOptions, schist_colormgmt::Intent)>>,
     pub screen_mode: ScreenMode,
     /// A guide being dragged out of a ruler.
     dragging_guide: Option<schist_core::Guide>,
@@ -817,6 +825,7 @@ impl Workspace {
             plugins,
             pending_plugin_toggle: None,
             view: load_view_options(),
+            preferences_snapshot: None,
             screen_mode: ScreenMode::default(),
             dragging_guide: None,
             layer_drag: None,
@@ -3901,6 +3910,10 @@ impl Workspace {
         // Same for a cancelled Layer Style session: OK clears the modal
         // itself before it gets here, so reaching this means Cancel.
         self.revert_layer_style();
+        // Escape out of Preferences is a cancel, like the button.
+        if matches!(self.modal, Some(Modal::Preferences)) {
+            self.revert_preferences(cx);
+        }
         // Closing the picker uncovers the dialog it was opened from.
         self.modal = self.modal_stack.pop();
         self.default_action = None;
@@ -4509,6 +4522,38 @@ impl Workspace {
     // ----- view options, guides and snapping -----
 
     /// Persist view options so they survive a restart.
+    /// Remember the current preferences so Cancel can restore them.
+    pub fn snapshot_preferences(&mut self) {
+        self.preferences_snapshot = Some(Box::new((self.view, self.color.intent)));
+    }
+
+    /// Accept whatever Preferences changed.
+    pub fn keep_preferences(&mut self) {
+        self.preferences_snapshot = None;
+        self.save_view_options();
+    }
+
+    /// Put back the preferences as they were when the dialog opened.
+    pub fn revert_preferences(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.preferences_snapshot.take() else {
+            return;
+        };
+        let (view, intent) = *snapshot;
+        let gpu_changed = view.gpu_compositing != self.view.gpu_compositing;
+        let theme_changed = view.theme != self.view.theme;
+        self.view = view;
+        self.color.intent = intent;
+        if gpu_changed {
+            init_compositor_backend(self.view.gpu_compositing);
+        }
+        if theme_changed {
+            self.set_theme_quiet(self.view.theme);
+        }
+        self.rebuild_color_transforms();
+        self.save_view_options();
+        cx.notify();
+    }
+
     pub fn save_view_options(&self) {
         let Some(path) = prefs_path() else { return };
         if let Some(dir) = path.parent() {
@@ -4753,6 +4798,28 @@ impl Workspace {
 
     fn color_managed(&self) -> bool {
         self.display_transform.is_some() || self.proof_transform.is_some()
+    }
+
+    /// Which built-in the document's profile matches, for the Assign /
+    /// Convert dialogs to open on.
+    ///
+    /// Both used to open on index 0 -- sRGB -- whatever the document was
+    /// actually in, so the dialog described a conversion the user had not
+    /// asked for and OK applied it.
+    pub fn current_profile_index(&self) -> usize {
+        let Some(name) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.icc_profile.as_ref())
+            .and_then(|bytes| schist_colormgmt::Profile::from_bytes(bytes).ok())
+            .map(|p| p.name().to_string())
+        else {
+            // No embedded profile means the working space, which is what
+            // the document is being shown in.
+            let working = self.color.working.name().to_string();
+            return builtin_index(&working);
+        };
+        builtin_index(&name)
     }
 
     /// Assign a profile: same numbers, new interpretation.
@@ -5044,7 +5111,13 @@ impl Workspace {
             return;
         };
         let mut buf = original.clone();
-        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
+        // Looked up a second time because the first borrow ended; an
+        // `unwrap` on registry state in a UI path is a panic waiting for
+        // someone to add an early return between the two lookups.
+        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            self.status = "Filter went away".into();
+            return;
+        };
         filter.apply(
             &mut buf,
             region.width() as usize,
@@ -6135,6 +6208,33 @@ impl Workspace {
         job
     }
 
+    /// The pointer shape for the active tool, so the canvas says what a
+    /// click will do before it happens.
+    fn canvas_cursor(&self) -> gpui::CursorStyle {
+        use gpui::CursorStyle;
+        // Space-to-pan overrides whatever tool is active, and a pan in
+        // progress grabs.
+        if self.space_held || self.pan_last.is_some() {
+            return if self.pan_last.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            };
+        }
+        match self.editor.active_tool {
+            "hand" => CursorStyle::OpenHand,
+            "zoom" => CursorStyle::Crosshair,
+            "type" => CursorStyle::IBeam,
+            // Everything that targets a point rather than a region: a
+            // crosshair is what Photoshop shows for these.
+            "eyedropper" | "crop" | "marquee.rect" | "marquee.ellipse" | "lasso.free"
+            | "lasso.polygonal" | "lasso.magnetic" | "wand" | "quick_select" | "object_select"
+            | "gradient" | "shape.rect" | "shape.ellipse" | "shape.line" | "shape.polygon"
+            | "pen" | "pen.freeform" | "pen.curvature" => CursorStyle::Crosshair,
+            _ => CursorStyle::Arrow,
+        }
+    }
+
     pub fn render_canvas(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         div()
@@ -6143,6 +6243,10 @@ impl Workspace {
             .size_full()
             .overflow_hidden()
             .bg(gpui::rgb(crate::ui::palette().canvas_bg))
+            // The pointer never changed shape anywhere in the app: the
+            // canvas showed an arrow whether the active tool was the
+            // hand, the zoom, the eyedropper, a brush or the crop.
+            .cursor(self.canvas_cursor())
             .track_focus(&self.focus)
             .on_mouse_down(
                 MouseButton::Left,
@@ -6549,6 +6653,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|ws, _: &ShowPreferences, _w, cx| {
+                ws.snapshot_preferences();
                 ws.open_modal(Modal::Preferences, cx);
             }))
             .on_action(cx.listener(|ws, _: &ShowCanvasSize, _w, cx| {
@@ -6859,9 +6964,19 @@ fn numeric_accepts(buffer: &str, t: &str) -> bool {
     true
 }
 
+/// The built-in profile list position for a profile name, defaulting to
+/// the first entry when nothing matches (an embedded profile that is not
+/// one of ours).
+fn builtin_index(name: &str) -> usize {
+    schist_colormgmt::Profile::builtins()
+        .iter()
+        .position(|(n, _)| n.eq_ignore_ascii_case(name))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::numeric_accepts;
+    use super::{builtin_index, numeric_accepts};
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -6961,5 +7076,22 @@ mod tests {
                 zoom * texel * scale_factor
             );
         }
+    }
+
+    /// Assign / Convert Profile both opened on index 0 -- sRGB -- however
+    /// the document was actually tagged, so the dialog described a
+    /// conversion the user had not asked for and OK applied it.
+    #[test]
+    fn the_profile_dialog_opens_on_the_documents_own_profile() {
+        let builtins = schist_colormgmt::Profile::builtins();
+        for (i, (name, _)) in builtins.iter().enumerate() {
+            assert_eq!(builtin_index(name), i, "{name}");
+            // Names arrive from a parsed profile, whose casing we do not
+            // control.
+            assert_eq!(builtin_index(&name.to_lowercase()), i, "{name}");
+        }
+        // Anything we do not ship falls back to the first entry rather
+        // than to a wrong one.
+        assert_eq!(builtin_index("Some Scanner Profile"), 0);
     }
 }
