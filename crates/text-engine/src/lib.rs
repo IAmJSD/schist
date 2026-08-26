@@ -649,15 +649,40 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
         line_start = at + 1;
     }
 
-    let max_width = lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
+    // Alignment measures the *visible* line. `split_inclusive(' ')` keeps
+    // each word's trailing space, so a line ending in one measured wider
+    // than its ink and right- and centre-aligned text hung short of the
+    // edge by exactly that space.
+    let visible = |line: &str, width: f32| -> f32 {
+        let trailing: f32 = line
+            .chars()
+            .rev()
+            .take_while(|c| c.is_whitespace())
+            .scan(None, |prev: &mut Option<char>, c| {
+                let w = advance(c, *prev);
+                *prev = Some(c);
+                Some(w)
+            })
+            .sum();
+        (width - trailing).max(0.0)
+    };
+    let widths: Vec<f32> = lines.iter().map(|l| visible(&l.text, l.width)).collect();
+    // Wrapped text aligns to its own box, not to whichever line happens to
+    // be longest.
+    let max_width = spec
+        .wrap_width
+        .unwrap_or_else(|| widths.iter().copied().fold(0.0f32, f32::max));
     let mut placed = Vec::new();
     let mut spans = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
+        // The span keeps the full width -- the caret and the selection
+        // highlight run to the end of the text, trailing space included.
+        let width = widths[i];
         let baseline = ascent + i as f32 * line_advance;
         let start_x = match spec.align {
             Align::Left => 0.0,
-            Align::Center => (max_width - line.width) / 2.0,
-            Align::Right => max_width - line.width,
+            Align::Center => (max_width - width) / 2.0,
+            Align::Right => max_width - width,
         };
         spans.push(LineSpan {
             start: line.start,
@@ -1006,6 +1031,7 @@ mod tests {
         assert!(r.is_some(), "should fall back to a system sans");
         assert!(!r.unwrap().is_empty());
     }
+
     #[test]
     fn caret_advances_along_a_line() {
         let s = spec("abc");
@@ -1065,5 +1091,52 @@ mod tests {
         assert!(caret_at(&s, 999).is_some());
         // Byte 2 is inside the two-byte 'é'.
         assert!(caret_at(&s, 2).is_some());
+    }
+
+    /// Right edge of the rendered ink.
+    fn right_edge(r: &TextRaster) -> i32 {
+        r.bounds.right
+    }
+
+    #[test]
+    fn a_trailing_space_does_not_shift_aligned_text() {
+        // `split_inclusive(' ')` keeps each word's trailing space, and the
+        // alignment offset was computed from that padded width, so a line
+        // ending in a space hung short of the edge by exactly one space.
+        let render = |text: &str| {
+            rasterize(&TextSpec {
+                text: text.into(),
+                size: 32.0,
+                align: Align::Right,
+                ..Default::default()
+            })
+            .expect("rasterized")
+        };
+        let without = render("mmmm\nX");
+        let with = render("mmmm\nX ");
+        assert_eq!(
+            right_edge(&without),
+            right_edge(&with),
+            "a trailing space must not move the ink"
+        );
+    }
+
+    #[test]
+    fn wrapped_text_aligns_to_its_box_not_its_longest_line() {
+        // `max_width` was the widest *rendered* line, so right-aligned
+        // paragraph text sat inside its own frame by however much the
+        // longest line fell short of the wrap width.
+        let spec = TextSpec {
+            text: "aaa bbb ccc ddd eee fff".into(),
+            size: 24.0,
+            align: Align::Right,
+            wrap_width: Some(400.0),
+            ..Default::default()
+        };
+        let r = rasterize(&spec).expect("rasterized");
+        assert_eq!(
+            r.layout_width, 400.0,
+            "the alignment box is the wrap width, not the longest line"
+        );
     }
 }
