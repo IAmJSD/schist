@@ -5668,8 +5668,10 @@ name = "schist-codecs-common"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "image",
  "log",
+ "moxcms",
  "schist-codec-affinity",
  "schist-color",
  "schist-colormgmt",

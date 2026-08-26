@@ -14,3 +14,7 @@ image.workspace = true
 schist-color.workspace = true
 schist-colormgmt.workspace = true
 schist-compositor.workspace = true
+
+[dev-dependencies]
+crc32fast.workspace = true
+moxcms = "0.8"
