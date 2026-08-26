@@ -277,6 +277,74 @@ fn psd_keeps_u32_lengths_for_the_same_keys() {
 }
 
 #[test]
+fn an_adjustment_layer_made_in_schist_survives_a_save() {
+    // The critical one: adjustment layers created in the app carry their
+    // settings only in `params_json`. With no encoder the writer emitted
+    // an empty raster layer, so saving destroyed every adjustment the user
+    // had made, crash-recovery snapshots included.
+    use schist_core::{AdjustmentData, AdjustmentKind, LayerKind};
+
+    let params = schist_adjustments::Params::Posterize { levels: 6 };
+    let mut doc = base_doc();
+    let mut layer = Layer::new_raster("Posterize");
+    layer.kind = LayerKind::Adjustment(AdjustmentData {
+        kind: AdjustmentKind::Posterize,
+        raw: Vec::new(),
+        params_json: Some(serde_json::to_string(&params).unwrap()),
+    });
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let layer = &back.tree.layers[0];
+    match &layer.kind {
+        LayerKind::Adjustment(data) => {
+            assert_eq!(data.kind, AdjustmentKind::Posterize);
+            assert_eq!(
+                schist_adjustments::parse_psd(data.kind, &data.raw),
+                params,
+                "the settings must come back"
+            );
+        }
+        other => panic!("came back as {other:?}, not an adjustment layer"),
+    }
+}
+
+#[test]
+fn editing_a_photoshop_adjustment_layer_writes_the_new_settings() {
+    // The other half: a layer that arrived from a PSD keeps a preserved
+    // block. Once the parameters are edited that block is stale, so the
+    // re-encoded one has to win or the save silently reverts the edit.
+    use schist_core::{AdjustmentData, AdjustmentKind, LayerKind, RawBlock};
+
+    let edited = schist_adjustments::Params::Threshold {
+        level: 200.0 / 255.0,
+    };
+    let mut doc = base_doc();
+    let mut layer = Layer::new_raster("Threshold");
+    layer.kind = LayerKind::Adjustment(AdjustmentData {
+        kind: AdjustmentKind::Threshold,
+        raw: 50u16.to_be_bytes().to_vec(),
+        params_json: Some(serde_json::to_string(&edited).unwrap()),
+    });
+    // The stale block as it came off disk.
+    layer.extras.push(RawBlock {
+        key: *b"thrs",
+        data: 50u16.to_be_bytes().to_vec(),
+    });
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    match &back.tree.layers[0].kind {
+        LayerKind::Adjustment(data) => assert_eq!(
+            schist_adjustments::parse_psd(data.kind, &data.raw),
+            edited,
+            "the edit must win over the preserved block"
+        ),
+        other => panic!("came back as {other:?}"),
+    }
+}
+
+#[test]
 fn preserves_image_resources_and_resolution() {
     let mut doc = base_doc();
     doc.resolution_dpi = 144.0;

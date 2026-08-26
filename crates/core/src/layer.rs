@@ -114,6 +114,34 @@ impl AdjustmentKind {
         })
     }
 
+    /// The 4-char PSD block key for this kind, the inverse of
+    /// [`Self::from_psd_key`].
+    pub fn psd_key(&self) -> [u8; 4] {
+        use AdjustmentKind::*;
+        match self {
+            Levels => *b"levl",
+            Curves => *b"curv",
+            HueSaturation => *b"hue2",
+            BrightnessContrast => *b"brit",
+            BlackWhite => *b"blwh",
+            SolidColor => *b"SoCo",
+            GradientFill => *b"GdFl",
+            PatternFill => *b"PtFl",
+            Invert => *b"nvrt",
+            Posterize => *b"post",
+            Threshold => *b"thrs",
+            ColorBalance => *b"blnc",
+            Vibrance => *b"vibA",
+            Exposure => *b"expA",
+            PhotoFilter => *b"phfl",
+            GradientMap => *b"grdm",
+            SelectiveColor => *b"selc",
+            ChannelMixer => *b"mixr",
+            // A kind we do not model, carrying the key it arrived with.
+            Other(key) => *key,
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         use AdjustmentKind::*;
         match self {

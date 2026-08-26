@@ -360,8 +360,8 @@ fn prepare_entry(entry: &Entry<'_>, doc: &Document, psb: bool) -> Result<Prepare
                         (bounds, encode_color_channels(&r.tiles, bounds, doc, psb))
                     }
                 }
-                // Adjustment layers carry no pixels; their parameters ride
-                // along in `extras` (preserved verbatim by the reader).
+                // Adjustment layers carry no pixels; their parameters are
+                // written as a settings block by `build_extras`.
                 _ => (IntRect::EMPTY, empty_channels(doc)),
             };
             Ok(prepare_common(layer, doc, psb, channels, bounds))
@@ -407,6 +407,16 @@ fn prepare_common(
 /// Preserved blocks plus a regenerated unicode name.
 fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
     let mut out = vec![(*b"luni", unicode_name_payload(&layer.name))];
+    // An adjustment layer's settings live in its own block. Layers created
+    // in Schist carry them only in `params_json`, which no PSD reader
+    // understands, so without re-encoding here the layer was written as an
+    // empty raster and every adjustment the user made was lost on save.
+    // A preserved block is stale once the parameters have been edited, so
+    // the encoded form wins and the old one is dropped below.
+    let adjustment = match &layer.kind {
+        LayerKind::Adjustment(data) => encode_adjustment(data),
+        _ => None,
+    };
     // Effects are re-encoded from the layer's own style, so any preserved
     // block is stale by definition. 'lrFX' is the pre-CS legacy form,
     // which we never write.
@@ -424,13 +434,35 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
         if vector && (&block.key == b"vmsk" || &block.key == b"vsms" || &block.key == b"SoCo") {
             continue;
         }
+        // Drop the stale settings block when we have re-encoded it.
+        if let Some((key, _)) = &adjustment {
+            if &block.key == key {
+                continue;
+            }
+        }
         out.push((block.key, block.data.clone()));
+    }
+    if let Some(entry) = adjustment {
+        out.push(entry);
     }
     if let Some(payload) = encoded {
         out.push((*b"lfx2", payload));
     }
     out.extend(shape_blocks(layer, doc));
     out
+}
+
+/// The settings block for an adjustment layer, preferring the live
+/// parameters over whatever the file arrived with.
+///
+/// Returns `None` when the parameters cannot be encoded, so the caller
+/// keeps the preserved bytes rather than writing a block that would be
+/// read back as something else.
+fn encode_adjustment(data: &schist_core::AdjustmentData) -> Option<([u8; 4], Vec<u8>)> {
+    let json = data.params_json.as_deref()?;
+    let params: schist_adjustments::Params = serde_json::from_str(json).ok()?;
+    let payload = schist_adjustments::encode_psd(data.kind, &params)?;
+    Some((data.kind.psd_key(), payload))
 }
 
 /// Vector mask and fill blocks for a shape layer, so the shape survives as

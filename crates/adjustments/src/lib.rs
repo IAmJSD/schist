@@ -917,6 +917,151 @@ pub fn parse_psd(kind: AdjustmentKind, raw: &[u8]) -> Params {
     }
 }
 
+/// Encode `params` back into the PSD block payload for `kind`.
+///
+/// Returns `None` for kinds this crate cannot round-trip; the caller then
+/// falls back to whatever raw bytes the file arrived with.
+///
+/// Adjustment layers created in Schist carry their settings only in
+/// `params_json`, which no PSD reader understands. Without an encoder the
+/// writer emitted an empty raster layer, so every adjustment layer a user
+/// made was destroyed by saving. Each encoder here is the exact inverse of
+/// the parser above it, which is what the round-trip tests check.
+pub fn encode_psd(kind: AdjustmentKind, params: &Params) -> Option<Vec<u8>> {
+    match (kind, params) {
+        (AdjustmentKind::Invert, Params::Invert) => Some(Vec::new()),
+        (AdjustmentKind::Posterize, Params::Posterize { levels }) => {
+            Some((*levels as u16).to_be_bytes().to_vec())
+        }
+        (AdjustmentKind::Threshold, Params::Threshold { level }) => {
+            let v = (level * 255.0).round().clamp(0.0, 65535.0) as u16;
+            Some(v.to_be_bytes().to_vec())
+        }
+        (
+            AdjustmentKind::BrightnessContrast,
+            Params::BrightnessContrast {
+                brightness,
+                contrast,
+            },
+        ) => {
+            let mut out = Vec::with_capacity(7);
+            out.extend_from_slice(&(brightness.round() as i16).to_be_bytes());
+            out.extend_from_slice(&(contrast.round() as i16).to_be_bytes());
+            out.extend_from_slice(&0i16.to_be_bytes()); // mean
+            out.push(0); // lab flag
+            Some(out)
+        }
+        (AdjustmentKind::Levels, Params::Levels(l)) => {
+            let mut out = Vec::with_capacity(2 + 29 * 10);
+            out.extend_from_slice(&2u16.to_be_bytes()); // version
+            let mut record = |c: &LevelsChannel| {
+                let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u16;
+                out.extend_from_slice(&q(c.input_black).to_be_bytes());
+                out.extend_from_slice(&q(c.input_white).to_be_bytes());
+                out.extend_from_slice(&q(c.output_black).to_be_bytes());
+                out.extend_from_slice(&q(c.output_white).to_be_bytes());
+                let gamma = (c.gamma * 100.0).round().clamp(1.0, 1000.0) as u16;
+                out.extend_from_slice(&gamma.to_be_bytes());
+            };
+            record(&l.rgb);
+            record(&l.red);
+            record(&l.green);
+            record(&l.blue);
+            // Photoshop always stores 29 records; the rest are identity.
+            let identity = LevelsChannel::default();
+            for _ in 4..29 {
+                record(&identity);
+            }
+            Some(out)
+        }
+        (
+            AdjustmentKind::HueSaturation,
+            Params::HueSaturation {
+                hue,
+                saturation,
+                lightness,
+                colorize,
+                ..
+            },
+        ) => {
+            let mut out = Vec::with_capacity(10);
+            out.extend_from_slice(&2u16.to_be_bytes()); // version
+            out.extend_from_slice(&u16::from(*colorize).to_be_bytes());
+            out.extend_from_slice(&(hue.round() as i16).to_be_bytes());
+            out.extend_from_slice(&(saturation.round() as i16).to_be_bytes());
+            out.extend_from_slice(&(lightness.round() as i16).to_be_bytes());
+            Some(out)
+        }
+        (AdjustmentKind::Curves, Params::Curves(c)) => {
+            let channels = [&c.rgb, &c.red, &c.green, &c.blue];
+            let mut bitmap = 0u32;
+            for (i, curve) in channels.iter().enumerate() {
+                if curve.points.len() >= 2 {
+                    bitmap |= 1 << i;
+                }
+            }
+            let mut out = Vec::new();
+            out.push(0); // padding
+            out.extend_from_slice(&1u16.to_be_bytes()); // version
+            out.extend_from_slice(&bitmap.to_be_bytes());
+            for curve in channels {
+                if curve.points.len() < 2 {
+                    continue;
+                }
+                let points: Vec<_> = curve.points.iter().take(32).collect();
+                out.extend_from_slice(&(points.len() as u16).to_be_bytes());
+                for (inp, outp) in points {
+                    let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u16;
+                    out.extend_from_slice(&q(*outp).to_be_bytes());
+                    out.extend_from_slice(&q(*inp).to_be_bytes());
+                }
+            }
+            Some(out)
+        }
+        (
+            AdjustmentKind::BlackWhite,
+            Params::BlackWhite {
+                reds,
+                yellows,
+                greens,
+                cyans,
+                blues,
+                magentas,
+            },
+        ) => {
+            let mut b = descriptor::Builder::new("null");
+            b.double("Rd  ", *reds as f64)
+                .double("Yllw", *yellows as f64)
+                .double("Grn ", *greens as f64)
+                .double("Cyn ", *cyans as f64)
+                .double("Bl  ", *blues as f64)
+                .double("Mgnt", *magentas as f64);
+            Some(versioned(b.finish()))
+        }
+        (AdjustmentKind::SolidColor, Params::SolidColor { rgba }) => {
+            let mut b = descriptor::Builder::new("null");
+            b.color(
+                "Clr ",
+                rgba[0] as f64 * 255.0,
+                rgba[1] as f64 * 255.0,
+                rgba[2] as f64 * 255.0,
+            );
+            Some(versioned(b.finish()))
+        }
+        _ => None,
+    }
+}
+
+/// A descriptor with the prefix `descriptor::parse_versioned` expects: a
+/// u16 layer-block version then a u32 descriptor version, six bytes in all.
+fn versioned(body: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 6);
+    out.extend_from_slice(&16u16.to_be_bytes());
+    out.extend_from_slice(&16u32.to_be_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
 fn parse_brightness(raw: &[u8]) -> Params {
     // Legacy 'brit': brightness i16, contrast i16, mean i16, lab u8.
     match (be_i16(raw, 0), be_i16(raw, 2)) {
@@ -2535,5 +2680,112 @@ mod curve_editing_tests {
         let out = p.apply(Rgba::new(0.5, 0.5, 0.5, 1.0));
         assert!(out.r > 0.7, "red curve did not apply");
         assert!((out.b - 0.5).abs() < 0.01, "blue was changed too");
+    }
+    /// Every kind the reader understands must survive encode -> parse.
+    #[test]
+    fn adjustment_params_round_trip_through_psd_bytes() {
+        let cases: Vec<(AdjustmentKind, Params)> = vec![
+            (AdjustmentKind::Invert, Params::Invert),
+            (AdjustmentKind::Posterize, Params::Posterize { levels: 7 }),
+            (
+                AdjustmentKind::Threshold,
+                Params::Threshold {
+                    level: 100.0 / 255.0,
+                },
+            ),
+            (
+                AdjustmentKind::BrightnessContrast,
+                Params::BrightnessContrast {
+                    brightness: 25.0,
+                    contrast: -40.0,
+                },
+            ),
+            (
+                AdjustmentKind::HueSaturation,
+                Params::HueSaturation {
+                    hue: 30.0,
+                    saturation: -20.0,
+                    lightness: 15.0,
+                    colorize: true,
+                    lightness_desaturates: false,
+                    reciprocal_saturation: false,
+                },
+            ),
+            (
+                AdjustmentKind::BlackWhite,
+                Params::BlackWhite {
+                    reds: 10.0,
+                    yellows: 20.0,
+                    greens: 30.0,
+                    cyans: 40.0,
+                    blues: 50.0,
+                    magentas: 60.0,
+                },
+            ),
+        ];
+        for (kind, params) in cases {
+            let raw =
+                encode_psd(kind, &params).unwrap_or_else(|| panic!("{kind:?} has no encoder"));
+            let back = parse_psd(kind, &raw);
+            assert_eq!(back, params, "{kind:?} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn levels_round_trip_through_psd_bytes() {
+        let levels = Levels {
+            rgb: LevelsChannel {
+                input_black: 10.0 / 255.0,
+                input_white: 240.0 / 255.0,
+                output_black: 5.0 / 255.0,
+                output_white: 250.0 / 255.0,
+                gamma: 1.25,
+            },
+            ..Levels::default()
+        };
+        let params = Params::Levels(levels);
+        let raw = encode_psd(AdjustmentKind::Levels, &params).unwrap();
+        assert_eq!(raw.len(), 2 + 29 * 10, "photoshop expects 29 records");
+        assert_eq!(parse_psd(AdjustmentKind::Levels, &raw), params);
+    }
+
+    #[test]
+    fn curves_round_trip_through_psd_bytes() {
+        let curves = Curves {
+            rgb: Curve {
+                points: vec![(0.0, 0.0), (128.0 / 255.0, 200.0 / 255.0), (1.0, 1.0)],
+            },
+            ..Curves::default()
+        };
+        let params = Params::Curves(curves);
+        let raw = encode_psd(AdjustmentKind::Curves, &params).unwrap();
+        assert_eq!(parse_psd(AdjustmentKind::Curves, &raw), params);
+    }
+
+    #[test]
+    fn solid_colour_round_trips_through_psd_bytes() {
+        let params = Params::SolidColor {
+            rgba: [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0],
+        };
+        let raw = encode_psd(AdjustmentKind::SolidColor, &params).unwrap();
+        match parse_psd(AdjustmentKind::SolidColor, &raw) {
+            Params::SolidColor { rgba } => {
+                for (a, b) in rgba
+                    .iter()
+                    .zip([64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0])
+                {
+                    assert!((a - b).abs() < 1.0 / 255.0, "{rgba:?}");
+                }
+            }
+            other => panic!("parsed back as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kinds_without_an_encoder_say_so() {
+        // Better an honest None, so the caller keeps whatever raw bytes the
+        // file arrived with, than a wrong block.
+        assert!(encode_psd(AdjustmentKind::Vibrance, &Params::Unsupported).is_none());
+        assert!(encode_psd(AdjustmentKind::GradientMap, &Params::Unsupported).is_none());
     }
 }
