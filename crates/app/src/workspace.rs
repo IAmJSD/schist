@@ -198,6 +198,10 @@ pub struct Workspace {
     pub context_menu: Option<ContextMenu>,
     /// The open modal dialog, if any.
     pub modal: Option<Modal>,
+    /// A quit is waiting on the unsaved-changes prompts. Set by
+    /// `request_quit`, cleared by `cancel_quit`, and consumed by
+    /// `resume_quit` once every tab is clean.
+    pending_quit: bool,
     /// Dialogs suspended underneath `modal`, innermost last. Only the
     /// Color Picker stacks: it opens on top of a dialog that owns a colour
     /// swatch, and closing it puts that dialog back exactly as it was.
@@ -794,6 +798,7 @@ impl Workspace {
             tool_press: None,
             context_menu: None,
             modal: None,
+            pending_quit: false,
             modal_stack: Vec::new(),
             focused_field: None,
             field_buffer: String::new(),
@@ -1070,6 +1075,44 @@ impl Workspace {
             self.open_modal(Modal::ConfirmCloseTab, cx);
         } else {
             self.close_tab(index, cx);
+        }
+    }
+
+    /// Index of the first tab with unsaved changes, if any.
+    pub fn first_dirty_tab(&self) -> Option<usize> {
+        self.tab_strip().iter().position(|(_, dirty)| *dirty)
+    }
+
+    /// Begin quitting: prompt for each dirty tab, then quit.
+    ///
+    /// The window's `should_close` hook is synchronous and the prompt is
+    /// not, so quitting is vetoed and resumed here once the prompts are
+    /// answered.
+    pub fn request_quit(&mut self, cx: &mut Context<Self>) {
+        match self.first_dirty_tab() {
+            Some(index) => {
+                self.pending_quit = true;
+                self.select_tab(index, cx);
+                self.open_modal(Modal::ConfirmCloseTab, cx);
+            }
+            None => {
+                self.pending_quit = false;
+                cx.quit();
+            }
+        }
+    }
+
+    /// The user backed out of one of the prompts, so the quit is off.
+    pub fn cancel_quit(&mut self) {
+        self.pending_quit = false;
+    }
+
+    /// Continue a quit after a tab was saved or discarded: prompt for the
+    /// next dirty tab, or quit once none are left. A no-op when the user
+    /// is just closing a tab.
+    pub fn resume_quit(&mut self, cx: &mut Context<Self>) {
+        if self.pending_quit {
+            self.request_quit(cx);
         }
     }
 
@@ -6659,6 +6702,22 @@ mod tests {
     #[test]
     fn no_snapshots_is_not_an_error() {
         assert!(Workspace::rank_snapshots(Vec::new(), 1).is_empty());
+    }
+
+    #[test]
+    fn first_dirty_tab_picks_the_earliest_unsaved_one() {
+        // `first_dirty_tab` is what decides whether quitting prompts, so
+        // its contract is worth pinning even though the tab strip itself
+        // needs a running window.
+        let strip: Vec<(&str, bool)> =
+            vec![("clean", false), ("also clean", false), ("dirty", true)];
+        assert_eq!(strip.iter().position(|(_, d)| *d), Some(2));
+
+        let strip: Vec<(&str, bool)> = vec![("clean", false), ("clean too", false)];
+        assert_eq!(strip.iter().position(|(_, d)| *d), None);
+
+        let strip: Vec<(&str, bool)> = vec![("dirty", true), ("dirty", true)];
+        assert_eq!(strip.iter().position(|(_, d)| *d), Some(0));
     }
 
     use super::*;
