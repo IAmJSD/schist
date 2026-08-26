@@ -15,6 +15,8 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: schist-linux-x86_64
+          - os: ubuntu-24.04-arm
+            artifact: schist-linux-aarch64
           - os: macos-latest
             artifact: schist-macos
           - os: windows-latest
@@ -63,17 +65,19 @@ jobs:
           strip --strip-debug target/release/schist target/release/schist-mcp
           sudo apt-get install -y libfuse2 || true
           curl -sSL -o /tmp/appimagetool \
-            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$(uname -m).AppImage"
           chmod +x /tmp/appimagetool
           # appimage.sh writes straight into dist/, so dist/ has to exist
           # before it runs -- mksquashfs otherwise dies with "Could not create
           # destination file" and no AppImage is produced.
           mkdir -p dist
           APPIMAGETOOL=/tmp/appimagetool ./packaging/linux/appimage.sh
-          cp target/release/schist dist/
+          # Arch-suffixed: the x86_64 and aarch64 jobs publish into the same
+          # release, and same-named assets would collide there.
+          cp target/release/schist "dist/schist-linux-$(uname -m)"
           # The MCP server is headless and needs none of the AppImage's
           # runtime, so it ships as a plain binary rather than inside it.
-          cp target/release/schist-mcp dist/
+          cp target/release/schist-mcp "dist/schist-mcp-linux-$(uname -m)"
 
       - name: Set up the signing keychain (macOS)
         if: runner.os == 'macOS'

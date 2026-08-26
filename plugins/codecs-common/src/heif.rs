@@ -226,27 +226,33 @@ macro_rules! managed {
 /// system package instead).
 pub fn managed_library() -> Option<&'static ManagedLibrary> {
     static LINUX_X86_64: ManagedLibrary = managed!(
-        "v1.23.2-2", "1.23.2",
+        "v1.23.2-3", "1.23.2",
         "libheif-1.23.2-linux-x86_64.so" as "libheif.so.1",
         "317fdcc0372234421a415112a6ce0ef84ab88be782efb57c44ee322a10837089"
     );
+    static LINUX_AARCH64: ManagedLibrary = managed!(
+        "v1.23.2-3", "1.23.2",
+        "libheif-1.23.2-linux-aarch64.so" as "libheif.so.1",
+        "cbdba60d3eb17d699af12a53d8399680f56ae7b5b61307e63c07172523808368"
+    );
     static MACOS_AARCH64: ManagedLibrary = managed!(
-        "v1.23.2-2", "1.23.2",
+        "v1.23.2-3", "1.23.2",
         "libheif-1.23.2-macos-aarch64.dylib" as "libheif.dylib",
         "fd44ea1e8a6ba69d7e6756ee055d7bb8351684ba8e7da83aad77bd21f0d1b4fd"
     );
     static MACOS_X86_64: ManagedLibrary = managed!(
-        "v1.23.2-2", "1.23.2",
+        "v1.23.2-3", "1.23.2",
         "libheif-1.23.2-macos-x86_64.dylib" as "libheif.dylib",
         "8f67631af968e8765150f9d45f286a1182f90c3aacecd4a997dbfd2bb61eb030"
     );
     static WINDOWS_X86_64: ManagedLibrary = managed!(
-        "v1.23.2-2", "1.23.2",
+        "v1.23.2-3", "1.23.2",
         "libheif-1.23.2-windows-x86_64.dll" as "heif.dll",
-        "134e5d5a58fcf61c3555e5689fad2e58193162d67f813a68288aec5248aa8efc"
+        "a3e200cb857fdd78d01cb05329a7650c035eceb359e9d3f0783dab5cf950b594"
     );
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some(&LINUX_X86_64),
+        ("linux", "aarch64") => Some(&LINUX_AARCH64),
         ("macos", "aarch64") => Some(&MACOS_AARCH64),
         ("macos", "x86_64") => Some(&MACOS_X86_64),
         ("windows", "x86_64") => Some(&WINDOWS_X86_64),
