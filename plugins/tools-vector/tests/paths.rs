@@ -170,6 +170,15 @@ fn direct_selection_ignores_a_click_on_nothing() {
     assert_eq!(doc.paths[0], before, "dragging empty space moved the path");
 }
 
+fn input_with(x: f32, y: f32, modifiers: Modifiers) -> PointerInput {
+    PointerInput {
+        x,
+        y,
+        pressure: 1.0,
+        modifiers,
+    }
+}
+
 #[test]
 fn dragging_a_handle_swings_its_partner() {
     let mut doc = doc();
@@ -194,12 +203,59 @@ fn dragging_a_handle_swings_its_partner() {
 
     let a = doc.paths[0].subpaths[0].anchors[1];
     assert_ne!(a.handle_out, grabbed.handle_out, "handle did not move");
-    assert_eq!(
-        a.handle_in,
-        (-a.handle_out.0, -a.handle_out.1),
-        "the opposite handle did not stay mirrored"
+
+    // A smooth point mirrors the opposite handle's *direction* and keeps
+    // its own length. This used to assert exact negation, which forced
+    // both handles to one magnitude: dragging either rescaled the curve on
+    // the far side of the anchor, and an asymmetric smooth point could not
+    // be built or preserved.
+    let len = |v: (f32, f32)| (v.0 * v.0 + v.1 * v.1).sqrt();
+    let dot = a.handle_in.0 * a.handle_out.0 + a.handle_in.1 * a.handle_out.1;
+    let cos = dot / (len(a.handle_in) * len(a.handle_out));
+    assert!(
+        (cos + 1.0).abs() < 1e-4,
+        "handles must stay anti-parallel, cos = {cos}"
+    );
+    assert!(
+        (len(a.handle_in) - len(grabbed.handle_in)).abs() < 1e-3,
+        "the opposite handle kept its own length: {} vs {}",
+        len(a.handle_in),
+        len(grabbed.handle_in)
     );
     assert_eq!(a.point, grabbed.point, "the anchor itself moved");
+}
+
+#[test]
+fn alt_breaks_a_smooth_point_into_a_corner() {
+    let mut doc = doc();
+    let mut path = square_path();
+    path.smooth_all();
+    let grabbed = path.subpaths[0].anchors[1];
+    doc.paths.push(path);
+    doc.active_path = Some(0);
+    let (hx, hy) = (
+        grabbed.point.0 + grabbed.handle_out.0,
+        grabbed.point.1 + grabbed.handle_out.1,
+    );
+    let mut state = EditorState::default();
+    let mut tool = PathSelectTool::new(ArrowKind::Direct);
+    let mut ctx = ToolCtx {
+        doc: &mut doc,
+        state: &mut state,
+    };
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    tool.on_pointer_down(&mut ctx, input_with(hx, hy, alt));
+    tool.on_pointer_move(&mut ctx, input_with(hx + 10.0, hy + 10.0, alt));
+    tool.on_pointer_up(&mut ctx, input_with(hx + 10.0, hy + 10.0, alt));
+
+    let a = doc.paths[0].subpaths[0].anchors[1];
+    assert_eq!(
+        a.handle_in, grabbed.handle_in,
+        "alt must leave the opposite handle alone"
+    );
 }
 
 #[test]
