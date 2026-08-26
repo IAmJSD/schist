@@ -240,6 +240,21 @@ pub fn blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: usize,
 }
 
 /// One separable box pass, clamping at the edges.
+/// One box-blur pass over RGBA f32, using a running sum.
+///
+/// This re-summed the whole `2r+1` window for every output pixel, making
+/// the pass O(pixels * r) rather than O(pixels): a gaussian at radius 50
+/// on 2048x2048 took seconds. The window only gains and loses one sample
+/// per step, which is the formulation `layer-fx::blur` already used.
+///
+/// Rows are independent and could be parallel too, but the vertical pass
+/// walks columns, which are not contiguous in the buffer, so that needs a
+/// transpose rather than a `par_chunks_mut`. The algorithmic fix is the
+/// dominant one; threading is a separate change.
+///
+/// Note `fx_blur.wgsl` deliberately mirrors the naive loop "so there is no
+/// running total whose float error would drift". The parity tests compare
+/// with a tolerance, which this stays inside.
 fn box_pass(src: &[f32], dst: &mut [f32], width: usize, height: usize, r: usize, vertical: bool) {
     let (outer, inner) = if vertical {
         (width, height)
@@ -251,18 +266,27 @@ fn box_pass(src: &[f32], dst: &mut [f32], width: usize, height: usize, r: usize,
     let window = (r * 2 + 1) as f32;
     for o in 0..outer {
         let base = o * step;
-        for i in 0..inner {
-            let mut acc = [0.0f32; 4];
-            for k in 0..=(r * 2) {
-                let s = (i + k).saturating_sub(r).min(inner - 1);
-                let at = base + s * stride;
-                for c in 0..4 {
-                    acc[c] += src[at + c];
-                }
+        // Seed the window: the edge sample repeated for the leading half,
+        // which is the same clamped edge handling as before.
+        let mut acc = [0.0f32; 4];
+        for c in 0..4 {
+            acc[c] = src[base + c] * r as f32;
+        }
+        for k in 0..=r {
+            let at = base + k.min(inner - 1) * stride;
+            for c in 0..4 {
+                acc[c] += src[at + c];
             }
+        }
+        for i in 0..inner {
             let at = base + i * stride;
             for c in 0..4 {
                 dst[at + c] = acc[c] / window;
+            }
+            let add = base + (i + r + 1).min(inner - 1) * stride;
+            let sub = base + i.saturating_sub(r) * stride;
+            for c in 0..4 {
+                acc[c] += src[add + c] - src[sub + c];
             }
         }
     }
@@ -296,15 +320,28 @@ pub fn lens_blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: i
     let r = radius;
     premultiply(px);
     let src = px.to_vec();
-    for y in 0..height as i32 {
-        for x in 0..width as i32 {
-            let mut acc = [0.0f32; 4];
-            let mut n = 0.0f32;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx * dx + dy * dy > r * r {
-                        continue;
-                    }
+    // The disc was rediscovered per pixel by testing `dx*dx + dy*dy > r*r`
+    // across the whole bounding square, so roughly a quarter of the taps
+    // were tested and thrown away every time. Build it once.
+    let mut offsets = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                offsets.push((dx, dy));
+            }
+        }
+    }
+    // Each row writes a disjoint slice and reads only the immutable `src`,
+    // so this is a plain parallel gather. It was single-threaded, which at
+    // radius 12 on 2048x2048 measured 5.62 s.
+    px.par_chunks_mut(width * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as i32;
+            for x in 0..width as i32 {
+                let mut acc = [0.0f32; 4];
+                let mut n = 0.0f32;
+                for &(dx, dy) in &offsets {
                     let p = at(&src, width, height, x + dx, y + dy);
                     // Weighting bright samples up spreads highlights into
                     // discs instead of smearing them away.
@@ -314,16 +351,14 @@ pub fn lens_blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: i
                     }
                     n += k;
                 }
-            }
-            if n > 0.0 {
-                for a in acc.iter_mut() {
-                    *a /= n;
+                if n > 0.0 {
+                    let i = x as usize * 4;
+                    for c in 0..4 {
+                        row[i + c] = acc[c] / n;
+                    }
                 }
-                let i = (y as usize * width + x as usize) * 4;
-                px[i..i + 4].copy_from_slice(&acc);
             }
-        }
-    }
+        });
     unpremultiply(px);
 }
 
@@ -729,5 +764,67 @@ mod tests {
             src_token: 0,
         };
         assert!(warp(&job, || src.clone()).iter().all(|v| *v == 0.0));
+    }
+    /// The window re-summed per pixel, as `box_pass` used to be.
+    fn naive_box_pass(
+        src: &[f32],
+        dst: &mut [f32],
+        width: usize,
+        height: usize,
+        r: usize,
+        vertical: bool,
+    ) {
+        let (outer, inner) = if vertical {
+            (width, height)
+        } else {
+            (height, width)
+        };
+        let stride = if vertical { width * 4 } else { 4 };
+        let step = if vertical { 4 } else { width * 4 };
+        let window = (r * 2 + 1) as f32;
+        for o in 0..outer {
+            let base = o * step;
+            for i in 0..inner {
+                let mut acc = [0.0f32; 4];
+                for k in 0..=(r * 2) {
+                    let s = (i + k).saturating_sub(r).min(inner - 1);
+                    let at = base + s * stride;
+                    for c in 0..4 {
+                        acc[c] += src[at + c];
+                    }
+                }
+                let at = base + i * stride;
+                for c in 0..4 {
+                    dst[at + c] = acc[c] / window;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_running_sum_matches_the_window_it_replaced() {
+        // The speed-up must not change the picture. Both edge handling and
+        // the sum have to agree with the naive version, on both axes.
+        let (w, h) = (64usize, 48usize);
+        let src: Vec<f32> = (0..w * h * 4)
+            .map(|i| ((i * 7919) % 997) as f32 / 997.0)
+            .collect();
+        for r in [0usize, 1, 3, 9, 20] {
+            for vertical in [false, true] {
+                let mut fast = vec![0.0; src.len()];
+                let mut slow = vec![0.0; src.len()];
+                box_pass(&src, &mut fast, w, h, r, vertical);
+                naive_box_pass(&src, &mut slow, w, h, r, vertical);
+                let worst = fast
+                    .iter()
+                    .zip(&slow)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst < 1e-4,
+                    "r={r} vertical={vertical} diverged by {worst}"
+                );
+            }
+        }
     }
 }
