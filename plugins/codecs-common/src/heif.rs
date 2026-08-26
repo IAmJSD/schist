@@ -1,18 +1,26 @@
-//! HEIC/HEIF import via the system's libheif, loaded at runtime.
+//! HEIC/HEIF import via libheif, loaded at runtime.
 //!
 //! HEIC is HEVC video frames in an ISO-BMFF container, and no pure-Rust
 //! HEVC decoder exists; linking libheif at build time would drag a C
-//! toolchain and dev headers into every build. Instead the system
-//! library is dlopen'd on first import: builds stay pure Rust, machines
-//! with libheif installed (macOS via Homebrew, virtually every Linux
-//! distro, Windows via vcpkg) open iPhone photos, and machines without
-//! it get an actionable error instead of a build failure.
+//! toolchain and dev headers into every build, and statically bundling
+//! it would put LGPL relink obligations on every binary. Instead a
+//! library is dlopen'd on first import, looked for in two places:
 //!
-//! Import only: encoding HEVC needs x265, which system libheif builds
-//! rarely ship, so `can_export` stays false.
+//! 1. The managed directory, holding a self-contained decode-only
+//!    build of libheif (with libde265 compiled in) that the app offers
+//!    to download — with the user's consent and with its LGPL license
+//!    texts — from pinned, hash-verified release assets of
+//!    <https://github.com/IAmJSD/libheif-prebuilt>.
+//! 2. The system's libheif (macOS via Homebrew, virtually every Linux
+//!    distro).
+//!
+//! Builds stay pure Rust, and machines with neither get an actionable
+//! error instead of a build failure. Import only: encoding HEVC needs
+//! x265, which neither source ships, so `can_export` stays false.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::Context as _;
 use schist_core::Document;
@@ -124,38 +132,157 @@ const LIBRARY_CANDIDATES: &[&str] = &[
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const LIBRARY_CANDIDATES: &[&str] = &["heif.dll", "libheif.dll", "libheif-1.dll"];
 
-/// The tests match on this phrase to skip when the library is absent;
-/// keep it out of other error messages.
+/// The app and the tests match on this phrase to recognise "no library
+/// on this machine" (the case a consented download fixes, as opposed to
+/// a broken file); keep it out of other error messages.
 const NOT_AVAILABLE: &str = "libheif is not available";
 
+/// True when an `import` error means no libheif could be loaded.
+pub fn is_missing_library_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(NOT_AVAILABLE)
+}
+
+/// One file the app may download: URL pinned to a release tag, contents
+/// pinned by hash in this source.
+pub struct RemoteFile {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+}
+
+/// The downloadable decode library for this platform, plus the LGPL
+/// license texts that get installed alongside it.
+pub struct ManagedLibrary {
+    /// libheif version, for display in the consent dialog.
+    pub version: &'static str,
+    pub library: RemoteFile,
+    pub licenses: [RemoteFile; 2],
+    /// Where the corresponding source lives, for display.
+    pub source_url: &'static str,
+}
+
+const LICENSES: [RemoteFile; 2] = [
+    RemoteFile {
+        name: "COPYING-libheif.txt",
+        url: concat!(
+            "https://github.com/IAmJSD/libheif-prebuilt/releases/download/v1.23.2-1",
+            "/COPYING-libheif.txt"
+        ),
+        sha256: "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596",
+    },
+    RemoteFile {
+        name: "COPYING-libde265.txt",
+        url: concat!(
+            "https://github.com/IAmJSD/libheif-prebuilt/releases/download/v1.23.2-1",
+            "/COPYING-libde265.txt"
+        ),
+        sha256: "02cc1585a20677992e0ba578fa692635dc193735f2691dc81de924b51c4e8020",
+    },
+];
+
+/// The pinned download for this OS/architecture, or None where no
+/// artifact is published yet (the error message then points at the
+/// system package instead).
+pub fn managed_library() -> Option<&'static ManagedLibrary> {
+    static LINUX_X86_64: ManagedLibrary = ManagedLibrary {
+        version: "1.23.2",
+        library: RemoteFile {
+            name: "libheif.so.1",
+            url: concat!(
+                "https://github.com/IAmJSD/libheif-prebuilt/releases/download/v1.23.2-1",
+                "/libheif-1.23.2-linux-x86_64.so"
+            ),
+            sha256: "8efb586af26e91d2c9560e0c899022294db2f55097a668eaa65fe36f5594084d",
+        },
+        licenses: LICENSES,
+        source_url: "https://github.com/IAmJSD/libheif-prebuilt",
+    };
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some(&LINUX_X86_64),
+        _ => None,
+    }
+}
+
+/// Where a consented download lands; looked at before the system
+/// library (a managed library is newer than most distros').
+pub fn managed_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("SCHIST_LIBHEIF_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share")
+        });
+    base.join("schist/libheif")
+}
+
+/// Verify a downloaded file against its pinned hash and move it into
+/// the managed directory. The library bytes are code this process will
+/// execute: nothing lands under the loader's path until the hash
+/// matches, and the write-then-rename means an interrupted install
+/// cannot leave a half-file that dlopen would try.
+pub fn install(file: &RemoteFile, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+    use sha2::Digest as _;
+    let got = format!("{:x}", sha2::Sha256::digest(bytes));
+    anyhow::ensure!(
+        got == file.sha256,
+        "checksum mismatch for {}: expected {}, got {got}",
+        file.name,
+        file.sha256
+    );
+    let dir = managed_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(file.name);
+    let tmp = path.with_extension("part");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 fn libheif() -> anyhow::Result<&'static LibHeif> {
-    static LIB: OnceLock<Result<LibHeif, String>> = OnceLock::new();
-    LIB.get_or_init(|| {
-        let mut last_err = String::new();
-        for name in LIBRARY_CANDIDATES {
-            match unsafe { libloading::Library::new(name) } {
-                Ok(lib) => {
-                    let lib = LibHeif::from_library(lib)?;
-                    if let Some(init) = lib.init {
-                        // Loads the decoder plugins on distros that ship
-                        // them as separate shared objects.
-                        check(unsafe { init(std::ptr::null()) }, "initialising libheif")
-                            .map_err(|err| format!("{err:#}"))?;
-                    }
-                    return Ok(lib);
-                }
-                Err(err) => last_err = err.to_string(),
+    // A failed load is deliberately not cached: after the app installs
+    // the managed library, the next import must be able to succeed
+    // without a restart.
+    static LOADED: Mutex<Option<&'static LibHeif>> = Mutex::new(None);
+    let mut loaded = LOADED.lock().unwrap();
+    if let Some(lib) = *loaded {
+        return Ok(lib);
+    }
+
+    let mut candidates: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(managed) = managed_library() {
+        candidates.push(managed_dir().join(managed.library.name).into_os_string());
+    }
+    candidates.extend(LIBRARY_CANDIDATES.iter().map(Into::into));
+
+    let mut last_err = String::new();
+    for name in &candidates {
+        let lib = match unsafe { libloading::Library::new(name) } {
+            Ok(lib) => lib,
+            Err(err) => {
+                last_err = err.to_string();
+                continue;
             }
+        };
+        match LibHeif::from_library(lib) {
+            Ok(lib) => {
+                if let Some(init) = lib.init {
+                    // Loads the decoder plugins on distros that ship
+                    // them as separate shared objects.
+                    check(unsafe { init(std::ptr::null()) }, "initialising libheif")?;
+                }
+                let lib = &*Box::leak(Box::new(lib));
+                *loaded = Some(lib);
+                return Ok(lib);
+            }
+            Err(err) => last_err = err,
         }
-        Err(format!("{NOT_AVAILABLE} ({last_err})"))
-    })
-    .as_ref()
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "{err}. Opening HEIC needs the libheif system library \
-             (Linux: install libheif1; macOS: brew install libheif)"
-        )
-    })
+    }
+    Err(anyhow::anyhow!(
+        "{NOT_AVAILABLE} ({last_err}). Opening HEIC needs the libheif library \
+         (Linux: install libheif1; macOS: brew install libheif)"
+    ))
 }
 
 fn check(err: HeifError, what: &str) -> anyhow::Result<()> {

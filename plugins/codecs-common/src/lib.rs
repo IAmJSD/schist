@@ -13,7 +13,7 @@ use schist_core::{blit_rgba8, Document, IntRect, Layer};
 use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
 
 mod affinity;
-mod heif;
+pub mod heif;
 
 /// A single-"Background"-layer document from decoded RGBA8 pixels.
 fn flat_document(
@@ -416,12 +416,33 @@ mod tests {
         };
         assert!(HeifCodec.probe(&bytes), "{name} should probe as HEIF");
         match HeifCodec.import(&bytes) {
-            Err(err) if format!("{err:#}").contains("libheif is not available") => {
+            Err(err) if heif::is_missing_library_error(&err) => {
                 eprintln!("skipping: {err:#}");
                 None
             }
             result => Some(result.unwrap()),
         }
+    }
+
+    #[test]
+    fn heif_install_verifies_hash_and_writes_atomically() {
+        let dir = std::env::temp_dir().join(format!("schist-heif-install-{}", std::process::id()));
+        std::env::set_var("SCHIST_LIBHEIF_DIR", &dir);
+        let file = heif::RemoteFile {
+            name: "libtest.so.1",
+            url: "unused",
+            // sha256 of b"payload"
+            sha256: "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+        };
+        let err = heif::install(&file, b"tampered").unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        assert!(!dir.join("libtest.so.1").exists(), "nothing written on mismatch");
+
+        let path = heif::install(&file, b"payload").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+        assert!(!path.with_extension("part").exists(), "temp file renamed away");
+        std::env::remove_var("SCHIST_LIBHEIF_DIR");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

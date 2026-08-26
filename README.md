@@ -46,8 +46,12 @@ all 27 blend modes, adjustment layers, layer effects, vector shapes,
 channels. Every block Schist doesn't understand is preserved
 byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
-than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos;
-decoded through the system's libheif when installed). Affinity files
+than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos).
+HEIC decodes through libheif loaded at runtime: the system's copy if
+installed, otherwise Schist offers to download a hash-pinned,
+decode-only build (with its LGPL license texts) from
+[libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) — nothing
+links at build time and the build stays pure Rust. Affinity files
 (`.af`/`.afphoto`/`.afdesign`/`.afpub` — Affinity 1, 2 and the unified Canva-era format) open through a
 natively reverse-engineered reader
 ([docs/affinity-format.md](docs/affinity-format.md)): pixel layers,

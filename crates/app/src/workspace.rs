@@ -164,6 +164,9 @@ pub struct Workspace {
     /// Font families currently downloading, so a second click does not
     /// start a second download.
     pub font_downloads: Vec<String>,
+    /// Whether the HEIC decode library is currently downloading, so a
+    /// second HEIC open does not start a second download.
+    pub heif_download: bool,
     /// Families already offered this session. Opening three documents
     /// that all want the same missing font should ask once, not thrice.
     pub fonts_offered: std::collections::HashSet<String>,
@@ -614,6 +617,10 @@ pub enum Modal {
     /// An image file dropped on the window while a document is open:
     /// open it in its own tab, or place it as a new layer?
     DropImage { path: PathBuf },
+    /// A HEIC file needs the libheif decoder and this machine has none:
+    /// offer to download it (with its LGPL license texts), then retry
+    /// opening `path`.
+    HeifSupport { path: PathBuf },
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -782,6 +789,7 @@ impl Workspace {
             rotation: 0.0,
             model_downloads: Vec::new(),
             font_downloads: Vec::new(),
+            heif_download: false,
             fonts_offered: std::collections::HashSet::new(),
             ant_phase: 0,
             tool_has_overlay: false,
@@ -1160,12 +1168,13 @@ impl Workspace {
         cx.notify();
         let codecs = self.registry.shared_codecs();
         cx.spawn(async move |this, cx| {
+            let decode_path = path.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { decode_file(&codecs, &path) })
+                .spawn(async move { decode_file(&codecs, &decode_path) })
                 .await;
             this.update(cx, |ws, cx| {
-                ws.finish_load(result, cx);
+                ws.finish_load(path, result, cx);
                 cx.notify();
             })
             .ok();
@@ -1173,7 +1182,7 @@ impl Workspace {
         .detach();
     }
 
-    fn finish_load(&mut self, result: anyhow::Result<Document>, cx: &mut Context<Self>) {
+    fn finish_load(&mut self, path: PathBuf, result: anyhow::Result<Document>, cx: &mut Context<Self>) {
         match result {
             Ok(doc) => {
                 self.status = match &doc.path {
@@ -1183,11 +1192,64 @@ impl Workspace {
                 self.install_document(doc);
                 self.offer_missing_fonts(cx);
             }
+            // A HEIC on a machine with no libheif: downloading the
+            // decoder fixes this one, so offer that instead of failing.
+            Err(err)
+                if schist_codecs_common::heif::is_missing_library_error(&err)
+                    && schist_codecs_common::heif::managed_library().is_some()
+                    && self.modal.is_none() =>
+            {
+                self.status = "HEIC support is not installed".into();
+                self.open_modal(Modal::HeifSupport { path }, cx);
+            }
             Err(err) => {
                 log::error!("open failed: {err:#}");
                 self.status = format!("Open failed: {err}").into();
             }
         }
+    }
+
+    /// Download the pinned decode-only libheif build and its license
+    /// texts — only ever called from the consent dialog — then retry
+    /// opening the file that needed it.
+    pub fn download_heif_support(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.heif_download {
+            return;
+        }
+        let Some(managed) = schist_codecs_common::heif::managed_library() else {
+            return;
+        };
+        self.heif_download = true;
+        self.status = format!("Downloading HEIC support (libheif {})\u{2026}", managed.version).into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let installed = cx
+                .background_executor()
+                .spawn(async move {
+                    // License texts first: the library must not land
+                    // without them.
+                    for file in managed.licenses.iter().chain([&managed.library]) {
+                        let bytes = fetch_model(file.url)
+                            .map_err(|e| anyhow::anyhow!("{}: {e}", file.name))?;
+                        schist_codecs_common::heif::install(file, &bytes)?;
+                    }
+                    anyhow::Ok(())
+                })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.heif_download = false;
+                match installed {
+                    Ok(()) => ws.load_file(path, cx),
+                    Err(err) => {
+                        log::error!("HEIC support download failed: {err:#}");
+                        ws.status = format!("HEIC support download failed: {err}").into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Files dragged from the OS and dropped anywhere in the window.
@@ -3956,6 +4018,7 @@ impl Workspace {
             Modal::DestructiveAdjustment { .. }
             | Modal::ConfirmCloseTab
             | Modal::DropImage { .. }
+            | Modal::HeifSupport { .. }
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }
