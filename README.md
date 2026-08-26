@@ -46,7 +46,8 @@ all 27 blend modes, adjustment layers, layer effects, vector shapes,
 channels. Every block Schist doesn't understand is preserved
 byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
-than transforming it once. Also PNG, JPEG, WebP and TIFF. Affinity files
+than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos;
+decoded through the system's libheif when installed). Affinity files
 (`.af`/`.afphoto`/`.afdesign`/`.afpub` — Affinity 1, 2 and the unified Canva-era format) open through a
 natively reverse-engineered reader
 ([docs/affinity-format.md](docs/affinity-format.md)): pixel layers,

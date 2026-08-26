@@ -5670,6 +5670,7 @@ dependencies = [
  "anyhow",
  "crc32fast",
  "image",
+ "libloading",
  "log",
  "moxcms",
  "schist-codec-affinity",
