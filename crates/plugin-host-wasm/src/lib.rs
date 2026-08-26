@@ -114,6 +114,17 @@ impl Instance {
         if len > MAX_RETURN_BYTES {
             return Err(anyhow!("plugin returned an implausible {len} bytes"));
         }
+        // Range-check before allocating. `memory.read` validates the
+        // range too, but only after `vec![0u8; len]` has already
+        // committed up to 512 MiB of host memory for a result that is
+        // about to be rejected.
+        let size = self.memory.data_size(&self.store);
+        let end = (ptr.max(0) as usize).checked_add(len);
+        if ptr < 0 || end.is_none_or(|e| e > size) {
+            return Err(anyhow!(
+                "plugin returned {len} bytes at {ptr}, outside its {size}-byte memory"
+            ));
+        }
         let mut out = vec![0u8; len];
         self.memory
             .read(&mut self.store, ptr as usize, &mut out)
@@ -192,22 +203,11 @@ impl LoadedPlugin {
                 abi::ABI_VERSION
             ));
         }
-        // The id is plugin-controlled text that ends up in a
-        // newline-separated `disabled.txt`, so a newline in it would write
-        // extra lines and disable unrelated plugins as a side effect --
-        // and `retain(|d| d != id)` could never remove the injected entry,
-        // so it would not be undoable from the UI either.
-        let id = manifest.id.trim();
-        if id.is_empty() {
-            return Err(anyhow!("plugin manifest has an empty id"));
-        }
-        if id.len() > 128
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        {
+        if !is_valid_plugin_id(&manifest.id) {
             return Err(anyhow!(
-                "plugin id {id:?} must be 1-128 chars of [A-Za-z0-9._-]"
+                "plugin manifest id {:?} is not a valid id (letters, digits, '.', '_' and '-', \
+                 1..={MAX_PLUGIN_ID_LEN} characters)",
+                manifest.id
             ));
         }
         drop(instance);
@@ -574,6 +574,8 @@ pub struct PluginEntry {
 pub struct PluginManager {
     pub entries: Vec<PluginEntry>,
     disabled: Mutex<Vec<String>>,
+    /// Why the last enable/disable could not be written, if it could not.
+    disabled_write_error: Option<String>,
 }
 
 impl PluginManager {
@@ -665,8 +667,35 @@ impl PluginManager {
         if !enabled {
             disabled.push(id.to_string());
         }
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(dir.join("disabled.txt"), disabled.join("\n"));
+        let path = dir.join(DISABLED_FILE);
+        // JSON, not newline-separated ids. An id is plugin-controlled
+        // text, so one containing a newline used to write extra lines --
+        // each read back as a separate disabled id, disabling an
+        // unrelated plugin as a side effect, and `retain(|d| d != id)`
+        // could never remove the injected entry. Ids are validated at
+        // load now as well, so this is belt and braces.
+        let written = serde_json::to_vec_pretty(&*disabled)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            });
+        // Saying nothing meant the UI reported success while the choice
+        // was silently lost on the next launch.
+        if let Err(err) = written {
+            log::error!(
+                "could not record disabled plugins in {}: {err}",
+                path.display()
+            );
+            self.disabled_write_error = Some(err);
+        } else {
+            self.disabled_write_error = None;
+        }
+    }
+
+    /// Why the last enable/disable could not be persisted, if it could not.
+    pub fn disabled_write_error(&self) -> Option<&str> {
+        self.disabled_write_error.as_deref()
     }
 
     /// Copy a plugin file into the plugin directory.
@@ -685,13 +714,65 @@ impl PluginManager {
 }
 
 fn read_disabled_list(dir: &Path) -> Vec<String> {
-    std::fs::read_to_string(dir.join("disabled.txt"))
-        .map(|s| {
-            s.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+    let Ok(text) = std::fs::read_to_string(dir.join(DISABLED_FILE)) else {
+        // The pre-JSON file, so an existing install keeps its choices.
+        return std::fs::read_to_string(dir.join("disabled.txt"))
+            .map(|s| {
+                s.lines()
+                    .map(str::trim)
+                    .filter(|l| is_valid_plugin_id(l))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
         .unwrap_or_default()
+        .into_iter()
+        .filter(|id| is_valid_plugin_id(id))
+        .collect()
+}
+
+/// Where the disabled set lives.
+const DISABLED_FILE: &str = "disabled.json";
+
+/// Longest plugin id we will load.
+const MAX_PLUGIN_ID_LEN: usize = 128;
+
+/// Whether a plugin id is one we are willing to store and compare.
+///
+/// Ids are arbitrary plugin-controlled text and were checked only for
+/// non-emptiness, which let one containing a newline inject entries into
+/// the disabled list.
+fn is_valid_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_PLUGIN_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::{is_valid_plugin_id, MAX_PLUGIN_ID_LEN};
+
+    /// Plugin ids are arbitrary plugin-controlled text, checked only for
+    /// non-emptiness before. The disabled list was newline-separated, so
+    /// an id containing a newline wrote extra lines -- each read back as
+    /// a separate disabled id, disabling an unrelated plugin as a side
+    /// effect of being disabled, and `retain(|d| d != id)` could never
+    /// remove the injected entry.
+    #[test]
+    fn an_id_cannot_smuggle_a_newline() {
+        assert!(is_valid_plugin_id("com.vendor.filter-1"));
+        assert!(is_valid_plugin_id("schist.codec_psd"));
+
+        assert!(!is_valid_plugin_id("evil\ncom.vendor.trusted"));
+        assert!(!is_valid_plugin_id("evil\r\ntrusted"));
+        assert!(!is_valid_plugin_id(""));
+        assert!(!is_valid_plugin_id(" leading-space"));
+        assert!(!is_valid_plugin_id("has/slash"));
+        assert!(!is_valid_plugin_id(&"x".repeat(MAX_PLUGIN_ID_LEN + 1)));
+        assert!(is_valid_plugin_id(&"x".repeat(MAX_PLUGIN_ID_LEN)));
+    }
 }

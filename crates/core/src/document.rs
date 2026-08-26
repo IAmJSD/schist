@@ -1024,6 +1024,18 @@ impl StrokeEdit {
 
 /// Fill a whole raster layer tilemap region from an RGBA8 buffer
 /// (importer/test convenience; not undoable).
+/// The temp path to write beside `path` for an atomic save.
+///
+/// `path.with_extension("schist-tmp")` *replaces* the final extension, so
+/// saving `photo.psd` wrote and renamed `photo.schist-tmp` -- destroying
+/// any pre-existing file of that name. The extension is appended instead,
+/// and the process id keeps two saves of the same file from colliding.
+pub fn temp_save_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".schist-tmp-{}", std::process::id()));
+    path.with_file_name(name)
+}
+
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
     use crate::tile::TILE_SIZE;
     assert_eq!(
@@ -1220,5 +1232,29 @@ mod tests {
         doc.damage_all();
         assert!(doc.revision > 0, "repaint was requested");
         assert!(!doc.dirty, "but nothing was actually changed");
+    }
+
+    #[test]
+    fn the_temp_save_path_does_not_clobber_a_sibling() {
+        use std::path::Path;
+        // `with_extension` *replaces* the final extension, so saving
+        // photo.psd wrote and renamed photo.schist-tmp -- destroying any
+        // pre-existing file of that name.
+        let tmp = temp_save_path(Path::new("/tmp/photos/photo.psd"));
+        let name = tmp.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("photo.psd."), "{name}");
+        assert!(name.contains("schist-tmp"), "{name}");
+        assert_eq!(tmp.parent(), Path::new("/tmp/photos/photo.psd").parent());
+        // Two files that differ only in extension get different temps.
+        let other = temp_save_path(Path::new("/tmp/photos/photo.png"));
+        assert_ne!(tmp, other);
+        // A file with no extension still works.
+        let bare = temp_save_path(Path::new("/tmp/photos/photo"));
+        assert!(bare
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("photo."));
     }
 }
