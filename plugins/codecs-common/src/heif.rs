@@ -161,44 +161,72 @@ pub struct ManagedLibrary {
     pub source_url: &'static str,
 }
 
-const LICENSES: [RemoteFile; 2] = [
-    RemoteFile {
-        name: "COPYING-libheif.txt",
-        url: concat!(
-            "https://github.com/IAmJSD/libheif-prebuilt/releases/download/v1.23.2-1",
-            "/COPYING-libheif.txt"
-        ),
-        sha256: "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596",
-    },
-    RemoteFile {
-        name: "COPYING-libde265.txt",
-        url: concat!(
-            "https://github.com/IAmJSD/libheif-prebuilt/releases/download/v1.23.2-1",
-            "/COPYING-libde265.txt"
-        ),
-        sha256: "02cc1585a20677992e0ba578fa692635dc193735f2691dc81de924b51c4e8020",
-    },
-];
+/// Expands to a `ManagedLibrary` whose files all come from one pinned
+/// release tag of IAmJSD/libheif-prebuilt.
+macro_rules! managed {
+    ($tag:literal, $version:literal, $file:literal as $name:literal, $sha:literal) => {
+        ManagedLibrary {
+            version: $version,
+            library: RemoteFile {
+                name: $name,
+                url: concat!(
+                    "https://github.com/IAmJSD/libheif-prebuilt/releases/download/",
+                    $tag, "/", $file
+                ),
+                sha256: $sha,
+            },
+            licenses: [
+                RemoteFile {
+                    name: "COPYING-libheif.txt",
+                    url: concat!(
+                        "https://github.com/IAmJSD/libheif-prebuilt/releases/download/",
+                        $tag, "/COPYING-libheif.txt"
+                    ),
+                    sha256: "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596",
+                },
+                RemoteFile {
+                    name: "COPYING-libde265.txt",
+                    url: concat!(
+                        "https://github.com/IAmJSD/libheif-prebuilt/releases/download/",
+                        $tag, "/COPYING-libde265.txt"
+                    ),
+                    sha256: "02cc1585a20677992e0ba578fa692635dc193735f2691dc81de924b51c4e8020",
+                },
+            ],
+            source_url: "https://github.com/IAmJSD/libheif-prebuilt",
+        }
+    };
+}
 
 /// The pinned download for this OS/architecture, or None where no
 /// artifact is published yet (the error message then points at the
 /// system package instead).
 pub fn managed_library() -> Option<&'static ManagedLibrary> {
-    static LINUX_X86_64: ManagedLibrary = ManagedLibrary {
-        version: "1.23.2",
-        library: RemoteFile {
-            name: "libheif.so.1",
-            url: concat!(
-                "https://github.com/IAmJSD/libheif-prebuilt/releases/download/v1.23.2-1",
-                "/libheif-1.23.2-linux-x86_64.so"
-            ),
-            sha256: "8efb586af26e91d2c9560e0c899022294db2f55097a668eaa65fe36f5594084d",
-        },
-        licenses: LICENSES,
-        source_url: "https://github.com/IAmJSD/libheif-prebuilt",
-    };
+    static LINUX_X86_64: ManagedLibrary = managed!(
+        "v1.23.2-2", "1.23.2",
+        "libheif-1.23.2-linux-x86_64.so" as "libheif.so.1",
+        "317fdcc0372234421a415112a6ce0ef84ab88be782efb57c44ee322a10837089"
+    );
+    static MACOS_AARCH64: ManagedLibrary = managed!(
+        "v1.23.2-2", "1.23.2",
+        "libheif-1.23.2-macos-aarch64.dylib" as "libheif.dylib",
+        "fd44ea1e8a6ba69d7e6756ee055d7bb8351684ba8e7da83aad77bd21f0d1b4fd"
+    );
+    static MACOS_X86_64: ManagedLibrary = managed!(
+        "v1.23.2-2", "1.23.2",
+        "libheif-1.23.2-macos-x86_64.dylib" as "libheif.dylib",
+        "8f67631af968e8765150f9d45f286a1182f90c3aacecd4a997dbfd2bb61eb030"
+    );
+    static WINDOWS_X86_64: ManagedLibrary = managed!(
+        "v1.23.2-2", "1.23.2",
+        "libheif-1.23.2-windows-x86_64.dll" as "heif.dll",
+        "134e5d5a58fcf61c3555e5689fad2e58193162d67f813a68288aec5248aa8efc"
+    );
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some(&LINUX_X86_64),
+        ("macos", "aarch64") => Some(&MACOS_AARCH64),
+        ("macos", "x86_64") => Some(&MACOS_X86_64),
+        ("windows", "x86_64") => Some(&WINDOWS_X86_64),
         _ => None,
     }
 }
@@ -209,11 +237,19 @@ pub fn managed_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("SCHIST_LIBHEIF_DIR") {
         return PathBuf::from(dir);
     }
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share")
-        });
+    let base = if cfg!(windows) {
+        std::env::var("LOCALAPPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                    .join(".local/share")
+            })
+    };
     base.join("schist/libheif")
 }
 
