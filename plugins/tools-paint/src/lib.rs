@@ -84,14 +84,58 @@ enum Tone {
     Sponge,
 }
 
+/// Which part of the tonal range dodge and burn act on.
+///
+/// Photoshop's Range menu. The tools had none: they always used the
+/// midtone weighting below, so there was no way to lift only the
+/// shadows or hold back only the highlights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneRange {
+    Shadows,
+    Midtones,
+    Highlights,
+}
+
+pub const TONE_RANGES: &[&str] = &["Shadows", "Midtones", "Highlights"];
+
+impl ToneRange {
+    fn from_index(i: usize) -> ToneRange {
+        match i {
+            0 => ToneRange::Shadows,
+            2 => ToneRange::Highlights,
+            _ => ToneRange::Midtones,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            ToneRange::Shadows => 0,
+            ToneRange::Midtones => 1,
+            ToneRange::Highlights => 2,
+        }
+    }
+
+    /// How strongly a pixel of this luminance is affected, 0..=1.
+    fn weight(self, lum: f32) -> f32 {
+        match self {
+            // The midtone bell this always used, unchanged, so the
+            // default behaviour is exactly what it was.
+            ToneRange::Midtones => 1.0 - (lum - 0.5).abs() * 0.8,
+            // Falling off away from black / white respectively.
+            ToneRange::Shadows => (1.0 - lum * 1.6).clamp(0.0, 1.0),
+            ToneRange::Highlights => ((lum - 0.375) * 1.6).clamp(0.0, 1.0),
+        }
+    }
+}
+
 /// Photoshop-style dodge/burn: scale toward white or black, weighted so
 /// midtones move more than the extremes; sponge pulls colour toward or away
 /// from its own luminance.
-fn apply_tone(tone: Tone, px: Rgba, amount: f32) -> Rgba {
+fn apply_tone(tone: Tone, range: ToneRange, px: Rgba, amount: f32) -> Rgba {
     let lum = 0.3 * px.r + 0.59 * px.g + 0.11 * px.b;
     match tone {
         Tone::Dodge => {
-            let w = amount * (1.0 - (lum - 0.5).abs() * 0.8);
+            let w = amount * range.weight(lum);
             Rgba {
                 r: px.r + (1.0 - px.r) * w,
                 g: px.g + (1.0 - px.g) * w,
@@ -100,7 +144,7 @@ fn apply_tone(tone: Tone, px: Rgba, amount: f32) -> Rgba {
             }
         }
         Tone::Burn => {
-            let w = amount * (1.0 - (lum - 0.5).abs() * 0.8);
+            let w = amount * range.weight(lum);
             Rgba {
                 r: px.r * (1.0 - w),
                 g: px.g * (1.0 - w),
@@ -313,6 +357,11 @@ impl Stroke {
             // Ensure before-capture happens (and get write access).
             let cov = self.coverage.get(&coord).unwrap();
             let (ink, opacity) = (self.ink.clone(), self.opacity);
+            let (range, exposure, strength) = (
+                self.dynamics.range,
+                self.dynamics.exposure,
+                self.dynamics.strength,
+            );
             let carried = self.carried;
             let (heal, heal_rect) = (&self.heal, self.heal_rect);
             let Some(tile) = self.edit.writable_tile(doc, self.layer, coord) else {
@@ -348,11 +397,12 @@ impl Stroke {
                             if orig.a <= 0.0 {
                                 orig
                             } else {
-                                apply_tone(*tone, orig, a)
+                                apply_tone(*tone, range, orig, a * exposure * 2.0)
                             }
                         }
                         Ink::Convolve { snapshot, sharpen } => {
                             let out = convolve_at(snapshot, x, y, *sharpen);
+                            let a = a * strength * 2.0;
                             Rgba {
                                 r: orig.r + (out.r - orig.r) * a,
                                 g: orig.g + (out.g - orig.g) * a,
@@ -574,6 +624,7 @@ impl Stroke {
         if n == 0.0 {
             return;
         }
+        let mix = self.dynamics.smudge_mix;
         let here = Rgba {
             r: acc[0] / n,
             g: acc[1] / n,
@@ -583,10 +634,10 @@ impl Stroke {
         self.carried = Some(match self.carried {
             None => here,
             Some(c) => Rgba {
-                r: c.r + (here.r - c.r) * 0.35,
-                g: c.g + (here.g - c.g) * 0.35,
-                b: c.b + (here.b - c.b) * 0.35,
-                a: c.a + (here.a - c.a) * 0.35,
+                r: c.r + (here.r - c.r) * mix,
+                g: c.g + (here.g - c.g) * mix,
+                b: c.b + (here.b - c.b) * mix,
+                a: c.a + (here.a - c.a) * mix,
             },
         });
     }
@@ -648,6 +699,17 @@ struct Dynamics {
     spacing: f32,
     /// Pen pressure scales coverage as well as radius.
     pressure_opacity: bool,
+    /// Dodge / burn: which part of the tonal range to act on.
+    range: ToneRange,
+    /// Dodge / burn / sponge strength, 0..=1. Photoshop calls it
+    /// Exposure; there was no control at all, so how hard the tool hit
+    /// was whatever the tool opacity happened to be.
+    exposure: f32,
+    /// Blur / sharpen strength, 0..=1.
+    strength: f32,
+    /// How much colour the smudge brush picks up per dab, 0..=1. Was
+    /// hard-coded to 0.35.
+    smudge_mix: f32,
 }
 
 impl Default for Dynamics {
@@ -657,6 +719,13 @@ impl Default for Dynamics {
             // The 15% this was hard-coded to.
             spacing: 0.15,
             pressure_opacity: false,
+            range: ToneRange::Midtones,
+            // Half strength, so the default doubles to the 1.0 the
+            // tools used to apply and nothing changes until it is moved.
+            exposure: 0.5,
+            strength: 0.5,
+            // The 0.35 this was hard-coded to.
+            smudge_mix: 0.35,
         }
     }
 }
@@ -893,6 +962,50 @@ impl ToolPlugin for PaintTool {
                 "%",
             ));
         }
+        // Dodge and burn act on a chosen part of the tonal range at a
+        // chosen strength; sponge takes the strength. None of these had
+        // any control at all.
+        if matches!(self.mode, PaintMode::Dodge | PaintMode::Burn) {
+            out.push(ToolOption::choice(
+                "tone-range",
+                "Range",
+                TONE_RANGES,
+                self.dynamics.range.index(),
+            ));
+        }
+        if matches!(
+            self.mode,
+            PaintMode::Dodge | PaintMode::Burn | PaintMode::Sponge
+        ) {
+            out.push(ToolOption::slider(
+                "tone-exposure",
+                "Exposure",
+                self.dynamics.exposure * 100.0,
+                1.0,
+                100.0,
+                "%",
+            ));
+        }
+        if matches!(self.mode, PaintMode::Blur | PaintMode::Sharpen) {
+            out.push(ToolOption::slider(
+                "convolve-strength",
+                "Strength",
+                self.dynamics.strength * 100.0,
+                1.0,
+                100.0,
+                "%",
+            ));
+        }
+        if self.mode == PaintMode::Smudge {
+            out.push(ToolOption::slider(
+                "smudge-mix",
+                "Strength",
+                self.dynamics.smudge_mix * 100.0,
+                1.0,
+                100.0,
+                "%",
+            ));
+        }
         // Dynamics belong to anything that stamps dabs, which is every
         // mode here.
         out.push(ToolOption::slider(
@@ -931,6 +1044,22 @@ impl ToolPlugin for PaintTool {
             }
             "brush-pressure-opacity" => {
                 self.dynamics.pressure_opacity = value.bool();
+                return;
+            }
+            "tone-range" => {
+                self.dynamics.range = ToneRange::from_index(value.index());
+                return;
+            }
+            "tone-exposure" => {
+                self.dynamics.exposure = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            "convolve-strength" => {
+                self.dynamics.strength = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            "smudge-mix" => {
+                self.dynamics.smudge_mix = (value.num() / 100.0).clamp(0.01, 1.0);
                 return;
             }
             _ => {}
@@ -1034,7 +1163,118 @@ pub enum GradientStyle {
 }
 
 const GRADIENT_STYLES: &[&str] = &["Linear", "Radial", "Angle", "Reflected", "Diamond"];
-const GRADIENT_FILLS: &[&str] = &["Foreground to Background", "Foreground to Transparent"];
+/// The ramps offered in the options bar.
+///
+/// The first two are built from the current foreground and background;
+/// the rest are fixed multi-stop presets. The ramp used to be exactly two
+/// colours interpolated end to end -- five *styles* but no way to put a
+/// third colour anywhere, and no per-stop opacity.
+const GRADIENT_FILLS: &[&str] = &[
+    "Foreground to Background",
+    "Foreground to Transparent",
+    "Black, White",
+    "Spectrum",
+    "Sunset",
+    "Transparent to Foreground to Transparent",
+];
+
+/// One colour stop on a gradient ramp.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    /// Where it sits, 0..=1 along the ramp.
+    pub at: f32,
+    pub color: Rgba,
+}
+
+/// The colour a ramp shows at `t`, interpolating between the two stops
+/// that bracket it. Stops must be sorted; a ramp with none is
+/// transparent, and one with a single stop is that colour throughout.
+pub fn ramp_at(stops: &[GradientStop], t: f32) -> Rgba {
+    let Some(first) = stops.first() else {
+        return Rgba::new(0.0, 0.0, 0.0, 0.0);
+    };
+    if t <= first.at {
+        return first.color;
+    }
+    let last = stops[stops.len() - 1];
+    if t >= last.at {
+        return last.color;
+    }
+    for pair in stops.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if t > b.at {
+            continue;
+        }
+        let span = b.at - a.at;
+        // Two stops in the same place are a hard edge; take the later.
+        let f = if span <= f32::EPSILON {
+            1.0
+        } else {
+            (t - a.at) / span
+        };
+        return Rgba {
+            r: a.color.r + (b.color.r - a.color.r) * f,
+            g: a.color.g + (b.color.g - a.color.g) * f,
+            b: a.color.b + (b.color.b - a.color.b) * f,
+            a: a.color.a + (b.color.a - a.color.a) * f,
+        };
+    }
+    last.color
+}
+
+/// The stops for the fill at `index`, given the current swatches.
+pub fn gradient_stops(index: usize, foreground: Rgba, background: Rgba) -> Vec<GradientStop> {
+    let stop = |at: f32, color: Rgba| GradientStop { at, color };
+    let rgb = |r: f32, g: f32, b: f32| Rgba::new(r, g, b, 1.0);
+    match index {
+        1 => vec![
+            stop(0.0, foreground),
+            stop(
+                1.0,
+                Rgba {
+                    a: 0.0,
+                    ..foreground
+                },
+            ),
+        ],
+        2 => vec![stop(0.0, rgb(0.0, 0.0, 0.0)), stop(1.0, rgb(1.0, 1.0, 1.0))],
+        3 => vec![
+            stop(0.0, rgb(1.0, 0.0, 0.0)),
+            stop(0.17, rgb(1.0, 1.0, 0.0)),
+            stop(0.33, rgb(0.0, 1.0, 0.0)),
+            stop(0.5, rgb(0.0, 1.0, 1.0)),
+            stop(0.67, rgb(0.0, 0.0, 1.0)),
+            stop(0.83, rgb(1.0, 0.0, 1.0)),
+            stop(1.0, rgb(1.0, 0.0, 0.0)),
+        ],
+        4 => vec![
+            stop(0.0, rgb(0.13, 0.10, 0.30)),
+            stop(0.45, rgb(0.85, 0.35, 0.30)),
+            stop(0.75, rgb(0.98, 0.70, 0.30)),
+            stop(1.0, rgb(1.0, 0.94, 0.72)),
+        ],
+        // Per-stop opacity, which the two-colour ramp could not express:
+        // opaque in the middle, transparent at both ends.
+        5 => vec![
+            stop(
+                0.0,
+                Rgba {
+                    a: 0.0,
+                    ..foreground
+                },
+            ),
+            stop(0.5, foreground),
+            stop(
+                1.0,
+                Rgba {
+                    a: 0.0,
+                    ..foreground
+                },
+            ),
+        ],
+        _ => vec![stop(0.0, foreground), stop(1.0, background)],
+    }
+}
 
 impl GradientStyle {
     fn from_index(i: usize) -> GradientStyle {
@@ -1061,7 +1301,8 @@ impl GradientStyle {
 pub struct GradientTool {
     pub kind: GradientKind,
     /// Fade the foreground out instead of ending on the background colour.
-    pub to_transparent: bool,
+    /// Index into [`GRADIENT_FILLS`].
+    pub fill: usize,
     /// The shape drawn. Starts at whichever one this tool was registered
     /// as, and follows the options bar after that.
     style: GradientStyle,
@@ -1077,7 +1318,7 @@ impl GradientTool {
     fn new(kind: GradientKind) -> GradientTool {
         GradientTool {
             kind,
-            to_transparent: false,
+            fill: 0,
             style: match kind {
                 GradientKind::Linear => GradientStyle::Linear,
                 GradientKind::Radial => GradientStyle::Radial,
@@ -1151,7 +1392,7 @@ impl ToolPlugin for GradientTool {
             ctx,
             GradientFill {
                 style: self.style,
-                to_transparent: self.to_transparent,
+                fill: self.fill,
                 reverse: self.reverse,
                 dither: self.dither,
             },
@@ -1167,12 +1408,7 @@ impl ToolPlugin for GradientTool {
 
     fn options(&self) -> Vec<ToolOption> {
         vec![
-            ToolOption::choice(
-                "gradient-fill",
-                "Gradient",
-                GRADIENT_FILLS,
-                usize::from(self.to_transparent),
-            ),
+            ToolOption::choice("gradient-fill", "Gradient", GRADIENT_FILLS, self.fill),
             ToolOption::choice(
                 "gradient-style",
                 "Style",
@@ -1186,7 +1422,7 @@ impl ToolPlugin for GradientTool {
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
-            "gradient-fill" => self.to_transparent = value.index() == 1,
+            "gradient-fill" => self.fill = value.index().min(GRADIENT_FILLS.len() - 1),
             "gradient-style" => self.style = GradientStyle::from_index(value.index()),
             "gradient-reverse" => self.reverse = value.bool(),
             "gradient-dither" => self.dither = value.bool(),
@@ -1210,7 +1446,7 @@ impl ToolPlugin for GradientTool {
 /// Everything the options bar contributes to one gradient.
 struct GradientFill {
     style: GradientStyle,
-    to_transparent: bool,
+    fill: usize,
     reverse: bool,
     dither: bool,
 }
@@ -1218,22 +1454,14 @@ struct GradientFill {
 fn fill_gradient(ctx: &mut ToolCtx, fill: GradientFill, from: (f32, f32), to: (f32, f32)) {
     let GradientFill {
         style,
-        to_transparent,
+        fill,
         reverse,
         dither,
     } = fill;
     let Some(layer) = paintable_layer(ctx.doc) else {
         return;
     };
-    let start = ctx.state.foreground;
-    let end = if to_transparent {
-        Rgba {
-            a: 0.0,
-            ..ctx.state.foreground
-        }
-    } else {
-        ctx.state.background
-    };
+    let stops = gradient_stops(fill, ctx.state.foreground, ctx.state.background);
     let opacity = ctx.state.tool_opacity;
     let canvas = ctx.doc.canvas_rect();
     let region = if ctx.doc.selection.is_empty() {
@@ -1293,11 +1521,10 @@ fn fill_gradient(ctx: &mut ToolCtx, fill: GradientFill, from: (f32, f32), to: (f
                     let n = (((x * 7 + y * 13) & 7) as f32 / 8.0 - 0.5) / 255.0;
                     t = (t + n).clamp(0.0, 1.0);
                 }
+                let ramp = ramp_at(&stops, t);
                 let src = Rgba {
-                    r: start.r + (end.r - start.r) * t,
-                    g: start.g + (end.g - start.g) * t,
-                    b: start.b + (end.b - start.b) * t,
-                    a: (start.a + (end.a - start.a) * t) * opacity * sel,
+                    a: ramp.a * opacity * sel,
+                    ..ramp
                 };
                 let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
                 tile.set(ix, src.over(tile.get(ix)));
@@ -2044,6 +2271,120 @@ mod tests {
         // leaves gaps between the dabs.
         assert_eq!(gaps(0.15), 0);
         assert!(gaps(2.0) > 0, "a 200% spacing should leave gaps");
+    }
+
+    /// The ramp was two colours interpolated end to end: five styles but
+    /// no way to put a third colour anywhere, and no per-stop opacity.
+    #[test]
+    fn a_ramp_interpolates_through_every_stop() {
+        let red = Rgba::new(1.0, 0.0, 0.0, 1.0);
+        let green = Rgba::new(0.0, 1.0, 0.0, 1.0);
+        let blue = Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let stops = vec![
+            GradientStop {
+                at: 0.0,
+                color: red,
+            },
+            GradientStop {
+                at: 0.5,
+                color: green,
+            },
+            GradientStop {
+                at: 1.0,
+                color: blue,
+            },
+        ];
+
+        assert_eq!(ramp_at(&stops, 0.0), red);
+        assert_eq!(ramp_at(&stops, 0.5), green);
+        assert_eq!(ramp_at(&stops, 1.0), blue);
+        // A quarter of the way is halfway between the first two, which a
+        // two-colour ramp could never produce.
+        let quarter = ramp_at(&stops, 0.25);
+        assert!((quarter.r - 0.5).abs() < 1e-5, "{quarter:?}");
+        assert!((quarter.g - 0.5).abs() < 1e-5, "{quarter:?}");
+        assert!(quarter.b.abs() < 1e-5, "{quarter:?}");
+        // Past the ends it holds, rather than extrapolating.
+        assert_eq!(ramp_at(&stops, -1.0), red);
+        assert_eq!(ramp_at(&stops, 2.0), blue);
+    }
+
+    /// Per-stop opacity: transparent at both ends, opaque in the middle.
+    #[test]
+    fn a_preset_can_vary_opacity_along_the_ramp() {
+        let fg = Rgba::new(0.2, 0.4, 0.8, 1.0);
+        let stops = gradient_stops(5, fg, Rgba::new(0.0, 0.0, 0.0, 1.0));
+        assert!(ramp_at(&stops, 0.0).a < 0.01);
+        assert!((ramp_at(&stops, 0.5).a - 1.0).abs() < 1e-5);
+        assert!(ramp_at(&stops, 1.0).a < 0.01);
+        // And the colour is the foreground all the way along.
+        assert!((ramp_at(&stops, 0.25).r - fg.r).abs() < 1e-5);
+    }
+
+    /// The two swatch-driven fills still behave exactly as they did.
+    #[test]
+    fn the_swatch_fills_are_unchanged() {
+        let fg = Rgba::new(1.0, 0.0, 0.0, 1.0);
+        let bg = Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let fg_to_bg = gradient_stops(0, fg, bg);
+        assert_eq!(ramp_at(&fg_to_bg, 0.0), fg);
+        assert_eq!(ramp_at(&fg_to_bg, 1.0), bg);
+
+        let fg_to_clear = gradient_stops(1, fg, bg);
+        assert_eq!(ramp_at(&fg_to_clear, 0.0), fg);
+        assert!(ramp_at(&fg_to_clear, 1.0).a < 1e-5);
+    }
+
+    /// Dodge and burn always used the midtone weighting, so there was no
+    /// way to lift only the shadows or hold back only the highlights.
+    #[test]
+    fn the_tone_range_decides_which_pixels_move() {
+        // The weighting is the thing that differs; the visible change
+        // also depends on how much headroom a pixel has, which is why
+        // this checks the weight rather than the result.
+        assert!(ToneRange::Shadows.weight(0.05) > ToneRange::Shadows.weight(0.5));
+        assert_eq!(
+            ToneRange::Shadows.weight(0.9),
+            0.0,
+            "shadows leave highlights alone"
+        );
+
+        assert!(ToneRange::Highlights.weight(0.95) > ToneRange::Highlights.weight(0.5));
+        assert_eq!(
+            ToneRange::Highlights.weight(0.1),
+            0.0,
+            "highlights leave shadows alone"
+        );
+
+        // Midtones is the bell the tools always used, unchanged.
+        let mid = ToneRange::Midtones;
+        assert!(mid.weight(0.5) > mid.weight(0.05));
+        assert!(mid.weight(0.5) > mid.weight(0.95));
+        assert!((mid.weight(0.5) - 1.0).abs() < 1e-6);
+    }
+
+    /// And a range that excludes a pixel leaves it completely alone.
+    #[test]
+    fn a_pixel_outside_the_range_is_untouched() {
+        let bright = Rgba::new(0.95, 0.95, 0.95, 1.0);
+        let out = apply_tone(Tone::Burn, ToneRange::Shadows, bright, 1.0);
+        assert_eq!(out, bright);
+
+        let dark = Rgba::new(0.05, 0.05, 0.05, 1.0);
+        let out = apply_tone(Tone::Dodge, ToneRange::Highlights, dark, 1.0);
+        assert_eq!(out, dark);
+    }
+
+    /// Exposure scales how hard dodge and burn hit; there was no control
+    /// at all, so the strength was whatever the tool opacity happened to
+    /// be. The default doubles to the 1.0 the tools used to apply.
+    #[test]
+    fn exposure_scales_the_tone_change() {
+        let px = Rgba::new(0.5, 0.5, 0.5, 1.0);
+        let light = apply_tone(Tone::Dodge, ToneRange::Midtones, px, 0.2);
+        let heavy = apply_tone(Tone::Dodge, ToneRange::Midtones, px, 1.0);
+        assert!(heavy.r > light.r);
+        assert!(light.r > px.r);
     }
 }
 
