@@ -130,6 +130,7 @@ struct Stroke {
     opacity: f32,
     size: f32,
     hardness: f32,
+    dynamics: Dynamics,
     mode: PaintMode,
     /// The layer as it was when the stroke began. Tile maps are
     /// copy-on-write, so this is a handful of Arc clones, not a copy.
@@ -151,6 +152,7 @@ impl Stroke {
         mode: PaintMode,
         ink: Ink,
         heal_offset: (i32, i32),
+        dynamics: Dynamics,
     ) -> Option<Stroke> {
         let layer = paintable_layer(ctx.doc)?;
         let mut stroke = Stroke {
@@ -175,6 +177,7 @@ impl Stroke {
             last: (input.x, input.y),
             spacing_debt: 0.0,
             ink,
+            dynamics,
             opacity: ctx.state.tool_opacity,
             size: ctx.state.brush_size,
             hardness: if mode == PaintMode::Pencil {
@@ -200,7 +203,7 @@ impl Stroke {
     }
 
     fn spacing(&self) -> f32 {
-        (self.size * 0.15).max(1.0)
+        (self.size * self.dynamics.spacing).max(1.0)
     }
 
     fn extend(&mut self, doc: &mut Document, x: f32, y: f32, pressure: f32) {
@@ -226,6 +229,15 @@ impl Stroke {
     /// from their pre-stroke values.
     fn dab(&mut self, doc: &mut Document, cx: f32, cy: f32, pressure: f32) {
         let radius = (self.size / 2.0 * pressure.max(0.05)).max(0.5);
+        let flow = self.dynamics.flow;
+        // Pen pressure changed the dab's size only; with this on it
+        // changes how much ink lands too, which is what a pressure-
+        // sensitive brush is for.
+        let ink_scale = if self.dynamics.pressure_opacity {
+            pressure.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         let bounds = IntRect::new(
             (cx - radius).floor() as i32,
             (cy - radius).floor() as i32,
@@ -272,12 +284,23 @@ impl Stroke {
                         a = if a >= 0.5 { 1.0 } else { 0.0 };
                     }
                     a *= selection.coverage(x, y) as f32 / 255.0;
+                    a *= ink_scale;
                     if a <= 0.0 {
                         continue;
                     }
                     let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
-                    if a > cov[ix] {
-                        cov[ix] = a;
+                    // At full flow the dabs of one stroke take the
+                    // maximum, so scribbling over the same spot at 50%
+                    // opacity stays 50%. Below full flow they accumulate
+                    // toward the same ceiling, which is what makes a low
+                    // flow build up as you go over an area again.
+                    let next = if flow >= 1.0 {
+                        a.max(cov[ix])
+                    } else {
+                        (cov[ix] + a * flow).min(1.0)
+                    };
+                    if next > cov[ix] {
+                        cov[ix] = next;
                         touched = true;
                     }
                 }
@@ -607,6 +630,35 @@ pub struct PaintTool {
     clone_offset: Option<(i32, i32)>,
     /// Background eraser colour tolerance, 0..=1.
     tolerance: f32,
+    /// Brush dynamics. The brush had no Flow, no adjustable spacing and
+    /// pen pressure only changed the dab's *size*, never how much ink it
+    /// laid down.
+    dynamics: Dynamics,
+}
+
+/// Per-stroke brush dynamics.
+#[derive(Debug, Clone, Copy)]
+struct Dynamics {
+    /// How much coverage one dab lays down, 0..=1. At 1 the dabs of a
+    /// stroke take the maximum, which is Photoshop's opacity model and
+    /// what this always did; below 1 they build up toward the tool
+    /// opacity instead, which is what Flow means.
+    flow: f32,
+    /// Dab spacing as a fraction of the brush diameter.
+    spacing: f32,
+    /// Pen pressure scales coverage as well as radius.
+    pressure_opacity: bool,
+}
+
+impl Default for Dynamics {
+    fn default() -> Self {
+        Dynamics {
+            flow: 1.0,
+            // The 15% this was hard-coded to.
+            spacing: 0.15,
+            pressure_opacity: false,
+        }
+    }
 }
 
 impl PaintTool {
@@ -619,6 +671,7 @@ impl PaintTool {
             clone_source: None,
             clone_offset: None,
             tolerance: 0.12,
+            dynamics: Dynamics::default(),
         }
     }
 
@@ -829,20 +882,59 @@ impl ToolPlugin for PaintTool {
     }
 
     fn options(&self) -> Vec<ToolOption> {
-        match self.mode {
-            PaintMode::BackgroundEraser => vec![ToolOption::slider(
+        let mut out = Vec::new();
+        if self.mode == PaintMode::BackgroundEraser {
+            out.push(ToolOption::slider(
                 "bge-tolerance",
                 "Tolerance",
                 self.tolerance * 100.0,
                 1.0,
                 100.0,
                 "%",
-            )],
-            _ => Vec::new(),
+            ));
         }
+        // Dynamics belong to anything that stamps dabs, which is every
+        // mode here.
+        out.push(ToolOption::slider(
+            "brush-flow",
+            "Flow",
+            self.dynamics.flow * 100.0,
+            1.0,
+            100.0,
+            "%",
+        ));
+        out.push(ToolOption::slider(
+            "brush-spacing",
+            "Spacing",
+            self.dynamics.spacing * 100.0,
+            1.0,
+            200.0,
+            "%",
+        ));
+        out.push(ToolOption::toggle(
+            "brush-pressure-opacity",
+            "Pressure \u{2192} Opacity",
+            self.dynamics.pressure_opacity,
+        ));
+        out
     }
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "brush-flow" => {
+                self.dynamics.flow = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            "brush-spacing" => {
+                self.dynamics.spacing = (value.num() / 100.0).clamp(0.01, 2.0);
+                return;
+            }
+            "brush-pressure-opacity" => {
+                self.dynamics.pressure_opacity = value.bool();
+                return;
+            }
+            _ => {}
+        }
         if key == "bge-tolerance" {
             self.tolerance = (value.num() / 100.0).clamp(0.01, 1.0);
         }
@@ -861,7 +953,7 @@ impl ToolPlugin for PaintTool {
             return;
         };
         let heal_offset = self.clone_offset.unwrap_or((0, 0));
-        self.stroke = Stroke::begin(ctx, input, self.mode, ink, heal_offset);
+        self.stroke = Stroke::begin(ctx, input, self.mode, ink, heal_offset, self.dynamics);
     }
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
@@ -1844,6 +1936,114 @@ mod tests {
             tool.overlays(ctx.doc, ctx.state).is_empty(),
             "a stale cursor survived the tool switch"
         );
+    }
+
+    /// Flow is how much ink one dab lays down. The brush had none: every
+    /// dab laid down full coverage and the dabs of a stroke took the
+    /// maximum, so there was no way to build a tone up gradually.
+    #[test]
+    fn flow_scales_what_one_dab_lays_down() {
+        let one_dab = |flow: f32| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 24.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-flow", OptionValue::Num(flow * 100.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(40.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(40.0, 40.0));
+            pixel(&doc, 40, 40)[3]
+        };
+
+        assert_eq!(one_dab(1.0), 255, "full flow should be opaque");
+        let quarter = one_dab(0.25);
+        assert!(
+            (quarter as i32 - 64).abs() <= 4,
+            "a quarter flow dab came out at {quarter}, expected about 64"
+        );
+        assert!(one_dab(0.5) > quarter);
+    }
+
+    /// And within one stroke, low-flow dabs accumulate toward the tool
+    /// opacity rather than each replacing the last.
+    #[test]
+    fn low_flow_dabs_accumulate_along_a_stroke() {
+        let along = |flow: f32| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 24.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-flow", OptionValue::Num(flow * 100.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(40.0, 40.0));
+            tool.on_pointer_move(&mut ctx, input(48.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(48.0, 40.0));
+            pixel(&doc, 44, 40)[3]
+        };
+        // A short drag stamps several overlapping dabs over the midpoint,
+        // so even a low flow builds past what one dab alone leaves.
+        let single = {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 24.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-flow", OptionValue::Num(10.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(44.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(44.0, 40.0));
+            pixel(&doc, 44, 40)[3]
+        };
+        assert!(
+            along(0.1) > single,
+            "dabs did not accumulate: {} vs one dab's {single}",
+            along(0.1)
+        );
+    }
+
+    /// Spacing was hard-coded at 15% of the brush size.
+    #[test]
+    fn spacing_controls_how_far_apart_the_dabs_land() {
+        let gaps = |spacing: f32| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 4.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-spacing", OptionValue::Num(spacing * 100.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(10.0, 40.0));
+            tool.on_pointer_move(&mut ctx, input(110.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(110.0, 40.0));
+            // How many pixels along the stroke are untouched.
+            (10..110).filter(|&x| pixel(&doc, x, 40)[3] == 0).count()
+        };
+        // A tight spacing leaves a continuous line; a very wide one
+        // leaves gaps between the dabs.
+        assert_eq!(gaps(0.15), 0);
+        assert!(gaps(2.0) > 0, "a 200% spacing should leave gaps");
     }
 }
 

@@ -136,20 +136,28 @@ fn commit_shape(
     sel.apply_shape(bounds, op, |x, y| shape.coverage(x, y));
 }
 
-fn drag_rect(ax: f32, ay: f32, bx: f32, by: f32, square: bool) -> IntRect {
+/// The rectangle a drag from `(ax, ay)` to `(bx, by)` describes.
+///
+/// `square` constrains it; `from_centre` treats the press point as the
+/// centre rather than a corner, which is what Alt-drag means everywhere
+/// else and was not implemented anywhere here.
+fn drag_rect_from(ax: f32, ay: f32, bx: f32, by: f32, square: bool, from_centre: bool) -> IntRect {
     let (mut w, mut h) = (bx - ax, by - ay);
     if square {
         let m = w.abs().max(h.abs());
         w = m * w.signum();
         h = m * h.signum();
     }
-    let (x1, x2) = if w < 0.0 { (ax + w, ax) } else { (ax, ax + w) };
-    let (y1, y2) = if h < 0.0 { (ay + h, ay) } else { (ay, ay + h) };
+    let (x1, x2, y1, y2) = if from_centre {
+        (ax - w, ax + w, ay - h, ay + h)
+    } else {
+        (ax, ax + w, ay, ay + h)
+    };
     IntRect::new(
-        x1.round() as i32,
-        y1.round() as i32,
-        x2.round() as i32,
-        y2.round() as i32,
+        x1.min(x2).round() as i32,
+        y1.min(y2).round() as i32,
+        x1.max(x2).round() as i32,
+        y1.max(y2).round() as i32,
     )
 }
 
@@ -258,7 +266,10 @@ impl ToolPlugin for MarqueeTool {
             // constraint during drag) — use press-time modifiers for the op
             // and live shift for the constraint, like Photoshop.
             let square = input.modifiers.shift && !m.shift;
-            self.current = Some(drag_rect(ax, ay, input.x, input.y, square));
+            // Alt is overloaded exactly as Shift is: subtract-from-
+            // selection at press time, draw-from-centre during the drag.
+            let centre = input.modifiers.alt && !m.alt;
+            self.current = Some(drag_rect_from(ax, ay, input.x, input.y, square, centre));
         }
     }
 
@@ -266,10 +277,16 @@ impl ToolPlugin for MarqueeTool {
         let Some((ax, ay, m)) = self.anchor.take() else {
             return;
         };
-        let rect = self
-            .current
-            .take()
-            .unwrap_or_else(|| drag_rect(ax, ay, input.x, input.y, false));
+        let rect = self.current.take().unwrap_or_else(|| {
+            drag_rect_from(
+                ax,
+                ay,
+                input.x,
+                input.y,
+                input.modifiers.shift && !m.shift,
+                input.modifiers.alt && !m.alt,
+            )
+        });
         let op = op_from(m, self.mode);
         if rect.is_empty() {
             // Click without drag: deselect (Photoshop behavior).
@@ -1576,6 +1593,34 @@ mod tests {
         assert!(
             b.left >= 0 && b.top >= 0 && b.right <= 64 && b.bottom <= 64,
             "selection escaped the canvas: {b:?}"
+        );
+    }
+
+    /// Alt-drag draws from the centre, which nothing here implemented —
+    /// alt was consumed entirely by subtract-from-selection with no
+    /// fallback for the geometry.
+    #[test]
+    fn alt_draws_a_marquee_from_its_centre() {
+        // Corner drag: the press point is one corner.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 140.0, 130.0, false, false),
+            IntRect::new(100, 100, 140, 130)
+        );
+        // From centre: the press point is the middle, and the rect grows
+        // both ways.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 140.0, 130.0, false, true),
+            IntRect::new(60, 70, 140, 130)
+        );
+        // Dragging up and left from the centre gives the same rect.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 60.0, 70.0, false, true),
+            IntRect::new(60, 70, 140, 130)
+        );
+        // Square plus from-centre compose.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 140.0, 130.0, true, true),
+            IntRect::new(60, 60, 140, 140)
         );
     }
 }
