@@ -83,13 +83,13 @@ pub(crate) fn load_view_options() -> ViewOptions {
         .unwrap_or_default()
 }
 
-/// How often a dirty document is snapshotted for crash recovery.
 /// The most surrounding image a filter is handed beyond its selection.
 ///
 /// A radius-250 blur on a four-pixel selection should not end up
 /// compositing the whole canvas.
 const MAX_FILTER_CONTEXT: u32 = 256;
 
+/// How often a dirty document is snapshotted for crash recovery.
 const AUTOSAVE_SECS: u64 = 30;
 
 /// A document open in another tab, parked with its view transform so
@@ -4778,10 +4778,6 @@ impl Workspace {
     /// selection, as one undoable edit.
     /// The pixels a filter would touch: the layer's content clipped to the
     /// canvas, or to the selection when there is one.
-    fn filter_region(&self, layer_id: schist_core::LayerId) -> IntRect {
-        self.filter_region_with_context(layer_id, 0)
-    }
-
     /// The region a filter runs over, grown by how far it reads.
     ///
     /// With a selection active the buffer used to be exactly
@@ -4806,17 +4802,14 @@ impl Workspace {
         }
         // Cap the growth: a radius-250 blur on a 4-pixel selection should
         // not composite the whole canvas.
+        //
+        // The grown region is *not* intersected with the layer's content:
+        // a generator like Render > Clouds fills the selection on an
+        // empty layer, where `content_bounds()` is EMPTY, and intersecting
+        // refused the whole operation with "Nothing to filter". The canvas
+        // is the only bound that always applies.
         let pad = context.min(MAX_FILTER_CONTEXT) as i32;
-        doc.selection
-            .bounds()
-            .inflated(pad)
-            .intersect(&canvas)
-            .intersect(
-                &doc.tree
-                    .find(layer_id)
-                    .map(|l| l.content_bounds().inflated(pad))
-                    .unwrap_or(canvas),
-            )
+        doc.selection.bounds().inflated(pad).intersect(&canvas)
     }
 
     /// Pull `region` out of a raster layer into a flat straight-alpha
@@ -4898,6 +4891,17 @@ impl Workspace {
     /// be re-run from the original on every slider tick and undone on
     /// cancel. Returns false when there is nothing to filter.
     pub fn begin_filter_preview(&mut self) -> bool {
+        self.begin_filter_preview_for(0)
+    }
+
+    /// As above, sized for a filter that reads `context` pixels outside
+    /// what it writes.
+    ///
+    /// The dialog's Apply reuses the preview's region, so growing it only
+    /// in `apply_filter` never reached any interactive path -- the
+    /// selection-edge band this is meant to remove stayed exactly where
+    /// it was.
+    pub fn begin_filter_preview_for(&mut self, context: u32) -> bool {
         self.filter_preview = None;
         let Some(layer_id) = self.doc.as_ref().and_then(|d| d.active_layer) else {
             self.status = "Select a layer first".into();
@@ -4913,7 +4917,7 @@ impl Workspace {
             self.status = "Filters need a pixel layer".into();
             return false;
         }
-        let region = self.filter_region(layer_id);
+        let region = self.filter_region_with_context(layer_id, context);
         if region.is_empty() {
             self.status = "Nothing to filter".into();
             return false;
@@ -5263,7 +5267,17 @@ impl Workspace {
             self.apply_filter(id, &values, cx);
             return;
         }
-        if !self.begin_filter_preview() {
+        // Size the preview for the widest reach this filter can be given,
+        // so dragging its radius to the maximum still reads real
+        // surrounding pixels rather than a clamped edge.
+        let reach = filter
+            .params()
+            .iter()
+            .filter(|p| matches!(p.key, "radius" | "amount" | "size" | "distance"))
+            .map(|p| p.max.ceil().max(0.0) as u32)
+            .max()
+            .unwrap_or(0);
+        if !self.begin_filter_preview_for(reach) {
             cx.notify();
             return;
         }
@@ -5496,6 +5510,12 @@ impl Workspace {
             missing.push(((dx.max(dy), dx * dx + dy * dy), coord));
         }
         missing.sort_unstable_by_key(|(k, _)| *k);
+        // Nearest-first, capped. The cap is on the queue rather than on
+        // the cache being full: once a large document fills the byte
+        // budget the steady state *is* full, so refusing to prefetch
+        // there left every new viewport cold and lost the mid-gesture
+        // warming that makes the settle frame land instantly. LRU evicts
+        // the distant tiles instead.
         missing.truncate(PREFETCH_TILE_BUDGET);
         missing.reverse();
         self.prefetch_queue = missing.into_iter().map(|(_, c)| c).collect();
@@ -5540,13 +5560,7 @@ impl Workspace {
         if self.pointer_down {
             return true;
         }
-        // Stop once the cache is full rather than keep warming tiles that
-        // only evict each other. The queue is ordered nearest-first, so
-        // what is already in is what the viewport actually needs.
-        if self.cache.is_full() {
-            self.prefetch_queue.clear();
-            return false;
-        }
+
         let stale = match self.doc.as_ref() {
             Some(doc) => (doc.revision, self.color_epoch) != self.prefetch_stamp,
             None => true,

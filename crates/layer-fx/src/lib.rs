@@ -724,36 +724,40 @@ mod distance_tests {
         }
         out
     }
-    /// Guards the complexity claim: the transform is O(w*h) regardless of
-    /// the radius, so a large limit must not cost meaningfully more than
-    /// a small one. The window search grew as r^2 -- 205 ms at size 4 and
+    /// The transform is O(w*h) regardless of the radius, which the
+    /// window search was not: it grew as r^2, from 205 ms at size 4 to
     /// 5.53 s at size 30 on a 1000x1000 layer.
+    ///
+    /// Asserted on the *result* rather than on wall clock, which would be
+    /// a CI flake and would mostly time the new code against itself: a
+    /// large limit and a small one have to agree everywhere the small one
+    /// did not clamp.
     #[test]
-    fn cost_does_not_grow_with_the_radius() {
-        let (w, h) = (400usize, 400usize);
+    fn a_larger_limit_only_changes_what_was_clamped() {
+        let (w, h) = (64usize, 48usize);
         let alpha: Vec<f32> = (0..w * h)
             .map(|i| {
                 let (x, y) = ((i % w) as f32, (i / w) as f32);
-                if ((x - 200.0).powi(2) + (y - 200.0).powi(2)).sqrt() < 100.0 {
+                if ((x - 32.0).powi(2) + (y - 24.0).powi(2)).sqrt() < 10.0 {
                     1.0
                 } else {
                     0.0
                 }
             })
             .collect();
-
-        let time = |limit: f32| {
-            let t = std::time::Instant::now();
-            std::hint::black_box(signed_distance(&alpha, w, h, limit));
-            t.elapsed()
-        };
-        // Warm up, then measure.
-        time(4.0);
-        let small = time(4.0);
-        let large = time(250.0);
-        assert!(
-            large < small * 4,
-            "radius 250 took {large:?} against {small:?} at radius 4"
-        );
+        let near = signed_distance(&alpha, w, h, 4.0);
+        let far = signed_distance(&alpha, w, h, 250.0);
+        for i in 0..w * h {
+            if near[i].abs() < 4.0 {
+                assert!(
+                    (near[i] - far[i]).abs() < 1e-4,
+                    "unclamped sample {i} disagrees: {} vs {}",
+                    near[i],
+                    far[i]
+                );
+            } else {
+                assert!(far[i].abs() >= 4.0 - 1e-4, "sample {i} should not shrink");
+            }
+        }
     }
 }

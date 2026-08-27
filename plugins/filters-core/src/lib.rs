@@ -86,7 +86,11 @@ macro_rules! simple_filter {
             /// hand it that much surrounding image.
             fn context(&self, values: &FilterValues) -> u32 {
                 let params = self.params();
-                ["radius", "amount", "size", "distance"]
+                // Only genuinely spatial parameters. "amount" is
+                // intensity in most filters (Add Noise, Unsharp), and
+                // treating it as reach grew the buffer by up to its whole
+                // slider range for no benefit.
+                ["radius", "size", "distance"]
                     .iter()
                     .filter(|key| params.iter().any(|p| p.key == **key))
                     .map(|key| values.get(key).ceil().max(0.0) as u32)
