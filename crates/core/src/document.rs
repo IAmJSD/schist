@@ -815,7 +815,6 @@ impl<'a> EditBuilder<'a> {
         }
     }
 
-    /// Replace the selection via closure; captures before/after.
     /// Change the document's colour mode as part of this edit.
     pub fn set_color_mode(&mut self, mode: schist_color::ColorMode) {
         if self.doc.mode == mode {
@@ -829,6 +828,7 @@ impl<'a> EditBuilder<'a> {
         });
     }
 
+    /// Replace the selection via closure; captures before/after.
     pub fn change_selection(&mut self, f: impl FnOnce(&mut Selection, IntRect)) {
         let canvas = self.doc.canvas_rect();
         let before = Box::new(self.doc.selection.clone());
@@ -1314,5 +1314,37 @@ mod tests {
         // Undoing *past* the save point is a change from what is on disk.
         doc.undo().unwrap();
         assert!(doc.dirty, "undoing past the save point must be dirty");
+    }
+    /// A save point that ends up in a discarded redo branch is
+    /// unreachable, so it must not go on matching the undo depth.
+    ///
+    /// Draw A, save, undo A, draw B (the redo branch holding the save
+    /// point is discarded), undo B, redo B: the depth matched again and
+    /// redo reported the document clean while it held B and the disk held
+    /// A. Behind the quit confirmation that loses B without asking.
+    #[test]
+    fn a_save_point_in_a_discarded_branch_does_not_come_back() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let id = doc.push_layer(Layer::new_raster("l"));
+        let rename = |doc: &mut Document, to: &str| {
+            let mut e = doc.begin_edit("Rename");
+            e.change_props(id, |l| l.name = to.into());
+            assert!(e.commit());
+        };
+
+        rename(&mut doc, "a");
+        doc.mark_saved();
+        assert!(!doc.dirty);
+
+        doc.undo().unwrap();
+        rename(&mut doc, "b"); // discards the branch the save point was in
+        doc.undo().unwrap();
+        doc.redo().unwrap();
+
+        assert_eq!(doc.tree.find(id).unwrap().name, "b");
+        assert!(
+            doc.dirty,
+            "the document holds b and the disk holds a, so it is not saved"
+        );
     }
 }

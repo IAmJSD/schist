@@ -136,8 +136,12 @@ fn histogram(ws: &Workspace) -> Vec<f32> {
     const GRID: i32 = 4;
     for gy in 0..GRID {
         for gx in 0..GRID {
-            let left = canvas.left + (canvas.width() - BLOCK).max(0) * gx / GRID.max(1);
-            let top = canvas.top + (canvas.height() - BLOCK).max(0) * gy / GRID.max(1);
+            // Divide by GRID - 1 so the last row and column reach the far
+            // edge; dividing by GRID never sampled the rightmost or
+            // bottom quarter of the canvas at all.
+            let span = (GRID - 1).max(1);
+            let left = canvas.left + (canvas.width() - BLOCK).max(0) * gx / span;
+            let top = canvas.top + (canvas.height() - BLOCK).max(0) * gy / span;
             let rect = IntRect::from_xywh(
                 left,
                 top,

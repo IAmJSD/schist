@@ -230,13 +230,13 @@ pub struct Workspace {
     /// checkbox to see what it did tore the backend down, rebuilt it and
     /// wrote the preference file, with no way to back out.
     preferences_snapshot: Option<Box<(ViewOptions, schist_colormgmt::Intent)>>,
-    /// Close the active tab once the in-flight save finishes.
+    /// Close *this* document's tab once its in-flight save finishes.
     ///
     /// "Save…" on an Untitled document falls through to the *async* Save
     /// As prompt and returns immediately with `dirty` still true, so the
     /// close was skipped: the user asked to close the tab, the file was
     /// written, and the tab stayed open.
-    close_after_save: bool,
+    close_after_save: Option<schist_core::DocumentId>,
     pub screen_mode: ScreenMode,
     /// A guide being dragged out of a ruler.
     dragging_guide: Option<schist_core::Guide>,
@@ -833,7 +833,7 @@ impl Workspace {
             pending_plugin_toggle: None,
             view: load_view_options(),
             preferences_snapshot: None,
-            close_after_save: false,
+            close_after_save: None,
             screen_mode: ScreenMode::default(),
             dragging_guide: None,
             layer_drag: None,
@@ -1406,14 +1406,19 @@ impl Workspace {
                 }
                 self.clear_recovery();
                 self.status = format!("Saved {}", path.display()).into();
-                if std::mem::take(&mut self.close_after_save) {
+                // Only if this is the document the close was asked for.
+                // The Save As portal does not block the window on Linux,
+                // so the user can switch tabs and save another one while
+                // it is up, and a bare flag closed the wrong tab.
+                let saved = self.doc.as_ref().map(|d| d.id);
+                if self.close_after_save.take() == saved && saved.is_some() {
                     let index = self.active_tab();
                     self.close_tab(index, cx);
                 }
             }
             Err(err) => {
                 // The tab stays open on a failed save, whatever was asked.
-                self.close_after_save = false;
+                self.close_after_save = None;
                 log::error!("save failed: {err:#}");
                 self.status = format!("Save failed: {err}").into();
             }
@@ -1423,7 +1428,7 @@ impl Workspace {
 
     /// Ask for the active tab to close as soon as its save lands.
     pub fn close_tab_after_save(&mut self) {
-        self.close_after_save = true;
+        self.close_after_save = self.doc.as_ref().map(|d| d.id);
     }
 
     /// Whether a save is still outstanding with a close waiting on it.
@@ -1432,12 +1437,12 @@ impl Workspace {
     /// prompt resolves, so this is how a caller tells a synchronous save
     /// (already done, tab already closed) from one still in flight.
     pub fn has_pending_save(&self) -> bool {
-        self.close_after_save
+        self.close_after_save.is_some()
     }
 
     /// The save never happened, so nothing is waiting on it.
     pub fn cancel_pending_save(&mut self) {
-        self.close_after_save = false;
+        self.close_after_save = None;
     }
 
     /// ⌘S: save over the document's existing path, or fall back to Save As
@@ -4554,7 +4559,6 @@ impl Workspace {
 
     // ----- view options, guides and snapping -----
 
-    /// Persist view options so they survive a restart.
     /// Remember the current preferences so Cancel can restore them.
     pub fn snapshot_preferences(&mut self) {
         self.preferences_snapshot = Some(Box::new((self.view, self.color.intent)));
@@ -4578,6 +4582,9 @@ impl Workspace {
         self.color.intent = intent;
         if gpu_changed {
             init_compositor_backend(self.view.gpu_compositing);
+            // The caches hold tiles composited by the other backend; the
+            // dialog's own toggle drops them and reverting has to as well.
+            self.rebuild_after_backend_change(cx);
         }
         if theme_changed {
             self.set_theme_quiet(self.view.theme);
@@ -4587,6 +4594,7 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Persist view options so they survive a restart.
     pub fn save_view_options(&self) {
         let Some(path) = prefs_path() else { return };
         if let Some(dir) = path.parent() {

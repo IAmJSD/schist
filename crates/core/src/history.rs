@@ -160,6 +160,15 @@ impl History {
     }
 
     pub fn push(&mut self, edit: Edit) {
+        // A new edit discards the redo branch. If the save point was in
+        // that branch it can never be reached again, so it has to go:
+        // otherwise draw A, save, undo A, draw B, undo B, redo B leaves
+        // `undo_stack.len() == saved_depth` and redo clears `dirty` while
+        // the document holds B and the disk holds A. With the quit
+        // confirmation in front of it, that loses B silently.
+        if self.saved_depth.is_some_and(|d| d > self.undo_stack.len()) {
+            self.saved_depth = None;
+        }
         self.redo_stack.clear();
         self.undo_stack.push(edit);
         if self.undo_stack.len() > self.limit {

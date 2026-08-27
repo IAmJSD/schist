@@ -294,13 +294,6 @@ impl Layer {
         }
     }
 
-    pub fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
-        match &mut self.kind {
-            LayerKind::Group(g) => Some(&mut g.children),
-            _ => None,
-        }
-    }
-
     /// Content bounds in document space (tile-granular for raster),
     /// including any transient drag offset.
     pub fn content_bounds(&self) -> IntRect {
