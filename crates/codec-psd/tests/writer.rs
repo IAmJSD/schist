@@ -939,3 +939,101 @@ fn a_fully_filled_layer_writes_no_fill_block() {
     assert!(!bytes.windows(4).any(|w| w == b"iOpa"));
     assert_eq!(read_psd(&bytes).unwrap().tree.layers[0].fill_opacity, 1.0);
 }
+
+/// The writer padded each preserved document-level block to the absolute
+/// file offset while the reader skips padding relative to the payload
+/// length. They disagree whenever a block does not happen to start
+/// 4-aligned, which depends on layer name lengths and channel sizes, so
+/// everything after the first misaligned block was silently dropped.
+#[test]
+fn preserved_blocks_survive_an_odd_alignment() {
+    let mut doc = base_doc();
+    // A two-character name shifts the following alignment by two.
+    doc.push_layer(solid_layer(
+        "ab",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    // An odd-length global mask block moves it again.
+    doc.global_layer_mask = vec![1, 2, 3, 4, 5];
+    doc.preserved_layer_info = vec![
+        RawBlock {
+            key: *b"Patt",
+            data: b"pattern".to_vec(),
+        },
+        RawBlock {
+            key: *b"lnk2",
+            data: b"linked smart object".to_vec(),
+        },
+    ];
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let keys: Vec<[u8; 4]> = back.preserved_layer_info.iter().map(|b| b.key).collect();
+    assert_eq!(keys, vec![*b"Patt", *b"lnk2"], "a block was dropped");
+    assert_eq!(back.preserved_layer_info[1].data, b"linked smart object");
+    assert_eq!(back.global_layer_mask, doc.global_layer_mask);
+}
+
+/// Payload lengths of every residue mod 4, so the padding cannot be right
+/// by luck.
+#[test]
+fn preserved_blocks_round_trip_at_every_alignment() {
+    for pad in 0..4usize {
+        let mut doc = base_doc();
+        doc.push_layer(solid_layer(
+            "ab",
+            IntRect::from_xywh(0, 0, 8, 8),
+            [10, 20, 30, 255],
+            Depth::Eight,
+        ));
+        doc.preserved_layer_info = vec![
+            RawBlock {
+                key: *b"Patt",
+                data: vec![7u8; 4 + pad],
+            },
+            RawBlock {
+                key: *b"Txt2",
+                data: b"second".to_vec(),
+            },
+        ];
+        let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+        assert_eq!(
+            back.preserved_layer_info.len(),
+            2,
+            "payload length {} lost a block",
+            4 + pad
+        );
+    }
+}
+
+/// The smart-object block stored 8-bit samples, so placing a 16-bit image
+/// in a 16-bit document and saving quantised it away — the exact loss the
+/// block exists to prevent.
+#[test]
+fn a_smart_object_source_keeps_more_than_eight_bits() {
+    let mut doc = Document::new("t", 64, 48, Depth::Sixteen);
+    let mut layer = Layer::new_raster("placed");
+    // A value with no 8-bit representation.
+    let deep = 0x0180 as f32 / 65535.0;
+    let mut source = schist_core::TileMap::default();
+    let buf: Vec<f32> = [deep, 0.5, 1.0, 1.0].repeat(16 * 16);
+    schist_core::blit_rgba_f32(
+        &mut source,
+        Depth::Sixteen,
+        IntRect::from_xywh(0, 0, 16, 16),
+        &buf,
+    );
+    layer.smart = Some(Box::new(schist_core::SmartObject::wrap(source, "deep.png")));
+    doc.push_layer(layer);
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    let smart = back.tree.layers[0].smart.as_deref().expect("smart object");
+    let px = smart.source.pixel(4, 4);
+    assert!(
+        (px.r - deep).abs() < 1e-4,
+        "red came back as {} (8-bit quantised would be {})",
+        px.r,
+        2.0 / 255.0
+    );
+}

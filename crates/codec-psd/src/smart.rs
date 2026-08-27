@@ -16,14 +16,21 @@
 //! file stays valid there; Schist reads its own smart objects back.
 
 use schist_color::Depth;
-use schist_core::{blit_rgba8, Affine, Filter, IntRect, Layer, SmartObject, TileMap};
+use schist_core::{
+    blit_rgba8, blit_rgba_f32, Affine, Filter, IntRect, Layer, SmartObject, TileMap,
+};
 
 /// Private block key. Not an Adobe key: "Sc" for Schist, "So" for smart
 /// object.
 pub const SMART_BLOCK_KEY: [u8; 4] = *b"ScSo";
 
-/// Format revision, so a later change can be told apart from this one.
-const VERSION: u32 = 1;
+/// Format revision.
+///
+/// v1 stored 8-bit samples, which quantised a 16-bit source the moment it
+/// was saved -- the exact loss the block exists to prevent. v2 stores
+/// f32, so a deep source survives; v1 payloads are still read.
+const VERSION: u32 = 2;
+const VERSION_U8: u32 = 1;
 
 /// Guard against a corrupt or hostile length claiming gigabytes.
 const MAX_SOURCE_PIXELS: u64 = 200_000_000;
@@ -53,10 +60,15 @@ pub fn write_smart(layer: &Layer) -> Option<Vec<u8>> {
     }
     let (w, h) = (bounds.width() as usize, bounds.height() as usize);
 
-    let mut rgba = Vec::with_capacity(w * h * 4);
+    // f32 per channel: `to_u8()` here threw away 8 bits of a 16-bit
+    // source on every save, which is what this block exists to avoid.
+    let mut rgba = Vec::with_capacity(w * h * 16);
     for y in bounds.top..bounds.bottom {
         for x in bounds.left..bounds.right {
-            rgba.extend_from_slice(&smart.source.pixel(x, y).to_u8());
+            let px = smart.source.pixel(x, y);
+            for c in [px.r, px.g, px.b, px.a] {
+                rgba.extend_from_slice(&c.to_be_bytes());
+            }
         }
     }
 
@@ -92,7 +104,8 @@ pub fn write_smart(layer: &Layer) -> Option<Vec<u8>> {
 /// better than failing the whole open.
 pub fn read_smart(data: &[u8], depth: Depth) -> Option<SmartObject> {
     let mut c = Cursor { data, at: 0 };
-    if c.u32()? != VERSION {
+    let version = c.u32()?;
+    if version != VERSION && version != VERSION_U8 {
         return None;
     }
     let name_len = c.u32()? as usize;
@@ -117,15 +130,28 @@ pub fn read_smart(data: &[u8], depth: Depth) -> Option<SmartObject> {
     }
     let packed_len = c.u32()? as usize;
     let packed = c.take(packed_len)?;
-    let expected = pixels as usize * 4;
-    let rgba =
+    let sample = if version == VERSION { 4 } else { 1 };
+    let expected = pixels as usize * 4 * sample;
+    // The decompression limit below is the real bound on host memory, so
+    // it has to know how wide a sample is.
+    let raw =
         miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(packed, expected.max(1)).ok()?;
-    if rgba.len() < expected {
+    if raw.len() < expected {
         return None;
     }
 
     let mut source = TileMap::default();
-    blit_rgba8(&mut source, depth, bounds, &rgba[..expected]);
+    if version == VERSION_U8 {
+        blit_rgba8(&mut source, depth, bounds, &raw[..expected]);
+    } else {
+        let floats: Vec<f32> = raw[..expected]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_be_bytes(*b))
+            .collect();
+        blit_rgba_f32(&mut source, depth, bounds, &floats);
+    }
     Some(SmartObject {
         source,
         source_bounds: bounds,

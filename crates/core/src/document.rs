@@ -1036,8 +1036,6 @@ impl StrokeEdit {
     }
 }
 
-/// Fill a whole raster layer tilemap region from an RGBA8 buffer
-/// (importer/test convenience; not undoable).
 /// Blit straight-alpha f32 RGBA into a tile map at the map's own depth.
 ///
 /// The u8 form below is the common path, but it caps everything that goes
@@ -1072,6 +1070,8 @@ pub fn blit_rgba_f32(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[f
     tiles.prune_blank();
 }
 
+/// Fill a whole raster layer tilemap region from an RGBA8 buffer
+/// (importer/test convenience; not undoable).
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
     use crate::tile::TILE_SIZE;
     assert_eq!(

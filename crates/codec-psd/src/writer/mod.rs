@@ -279,15 +279,34 @@ fn write_layer_and_mask_info(b: &mut Buf, doc: &Document, psb: bool) -> Result<(
     // above is regenerated, so echoing the old copy back would write it
     // twice. Spec quirk: these pad to 4 bytes, not 2.
     for block in &doc.preserved_layer_info {
-        b.bytes(b"8BIM");
+        // 8B64 marks a block whose length is u64 whatever the key, so a
+        // block that arrived that way has to go back out that way: an
+        // 8B64 block with a key outside `PSB_U64_KEYS` would otherwise be
+        // read as u64 and rewritten as u32, and `as u32` would silently
+        // truncate anything over 4 GiB.
+        let wide =
+            block.data.len() > u32::MAX as usize || (psb && PSB_U64_KEYS.contains(&block.key));
+        b.bytes(if wide && !PSB_U64_KEYS.contains(&block.key) {
+            b"8B64"
+        } else {
+            b"8BIM"
+        });
         b.bytes(&block.key);
-        if psb && PSB_U64_KEYS.contains(&block.key) {
+        if wide {
             b.u64(block.data.len() as u64);
         } else {
             b.u32(block.data.len() as u32);
         }
         b.bytes(&block.data);
-        b.pad_to(4);
+        // Pad relative to the payload length, not to the absolute file
+        // offset. `pad_to(4)` disagreed with the reader, which skips
+        // `(4 - len % 4) % 4`, whenever a block did not happen to start
+        // 4-aligned -- which depends on layer name lengths and channel
+        // sizes, so real files hit it constantly and everything after the
+        // first misaligned block was silently dropped.
+        for _ in 0..(4 - block.data.len() % 4) % 4 {
+            b.u8(0);
+        }
     }
     b.patch_len(section_at, psb);
     Ok(())
