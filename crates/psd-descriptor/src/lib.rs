@@ -18,7 +18,6 @@ pub enum Value {
     Unit(String, f64),
     List(Vec<Value>),
     Object(Descriptor),
-    Unknown,
 }
 
 impl Value {

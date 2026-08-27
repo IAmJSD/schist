@@ -482,6 +482,33 @@ mod tests {
         assert_eq!(doc2.icc_profile.as_deref(), Some(display_p3.as_slice()));
     }
 
+    /// Only png and jpeg were wired to `set_icc_profile`, so a
+    /// wide-gamut document exported to tiff or webp came out untagged and
+    /// every other application read it as sRGB.
+    ///
+    /// Asserted on the bytes: `image`'s own tiff decoder cannot read back
+    /// the `IccProfile` tag its encoder writes, so a round-trip through
+    /// it would test the reader rather than what we emit.
+    #[test]
+    fn tiff_and_webp_exports_carry_the_profile() {
+        let display_p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+        let mut doc = Document::new("t", 4, 4, Depth::Eight);
+        doc.push_layer(schist_core::Layer::new_raster("l"));
+        doc.icc_profile = Some(display_p3.clone());
+
+        for (name, bytes) in [
+            ("tiff", TiffCodec.export(&doc).unwrap()),
+            ("webp", WebPCodec.export(&doc).unwrap()),
+        ] {
+            assert!(
+                bytes
+                    .windows(display_p3.len())
+                    .any(|w| w == display_p3.as_slice()),
+                "{name} lost the profile"
+            );
+        }
+    }
+
     #[test]
     fn png_cicp_pq_bakes_to_srgb() {
         // Three PQ greys: black, ~203-nit reference white, ~1000 nits.
