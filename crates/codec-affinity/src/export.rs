@@ -233,6 +233,29 @@ impl Exporter {
         );
         self.set_field(sprd, b"MiID", Value::Str(mi_id));
 
+        // Affinity sizes the opened canvas from the spread's page
+        // geometry, not DfSz: the slice persona's spread rect and the
+        // spread-metadata page rects. Left at the template's values the
+        // document opens as a 512×512 square.
+        if let Some(slcp) = self.find_child(sprd, b"SlcP") {
+            self.set_field(slcp, b"SRct", Value::VecI(vec![0, 0, w as i32, h as i32]));
+        }
+        if let Some(spmd) = self.find_child(sprd, b"SpMd") {
+            let pages: Vec<usize> = match self.g.nodes[spmd].field(b"PagR") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Class(Some(i)) => Some(*i),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for page in pages {
+                self.set_field(page, b"rctp", Value::VecD(vec![0.0, 0.0, w, h]));
+            }
+        }
+
         // The spread's base rasters are evicted composite caches; they
         // just need the right dimensions.
         for name in [b"RasS", b"Ras2"] {
@@ -246,6 +269,12 @@ impl Exporter {
         // The layer stack.
         let layers = self.build_stack(&doc.tree.layers, (0.0, 0.0));
         self.set_field(sprd, b"Chld", Value::Array(layers));
+
+        // The template's selection points into its replaced layer stack;
+        // real writers store an empty Itms for "nothing selected".
+        if let Some(csel) = self.find_child(graph::ROOT, b"CSel") {
+            self.set_field(csel, b"Itms", Value::Array(Vec::new()));
+        }
         Ok(())
     }
 

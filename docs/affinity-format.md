@@ -489,6 +489,14 @@ corpus document, all generations (pinned by `tests/emit_roundtrip.rs`).
 fixture (a real Affinity 3.1 document) as a template, patches the
 canvas fields (`DfSz`, spread `MiID`, base-raster dimensions), replaces
 the spread's `Chld` with freshly built layer nodes, and re-emits.
+Affinity sizes the opened canvas from the spread's page geometry, not
+`DfSz`: the slice persona's `SlcP.SRct` and the spread's
+`SpMd.PagR[].rctp` must be patched too, or the document opens at the
+template's 512×512 (the `DocR`-level `spmd` page rect may stay
+`[0,0,0,0]` — the template, itself Affinity-written, has it so). The
+root's `CSel` selection is reset to an empty `Itms` (the real-file
+idiom for "nothing selected") so it doesn't drag an orphaned copy of
+the template's layer into the file.
 Layer node layouts (`Rstr`, `Grup`, `MRst`, adjustment nodes, `FilE`
 effects, `DyBm`/`Blck` bitmaps) are transcribed field-for-field from
 real documents with `--example afschema`, which prints each class's

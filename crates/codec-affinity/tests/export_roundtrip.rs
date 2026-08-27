@@ -304,6 +304,61 @@ fn exported_graphs_keep_affinitys_stream_invariants() {
     assert!(next_id > 0, "no 0x31 nodes exercised");
 }
 
+/// Affinity sizes the opened canvas from the spread's page geometry
+/// (`SlcP.SRct`, `SpMd.PagR[].rctp`), not `DfSz`; a template value
+/// left behind opens as a 512×512 square in the real app.
+#[test]
+fn exported_page_geometry_matches_the_canvas() {
+    use schist_codec_affinity::graph::{self, Value};
+    use schist_codec_affinity::Archive;
+
+    let mut doc = Document::new("geometry", 700, 500, Depth::Eight);
+    doc.push_layer(raster_layer(
+        "Background",
+        IntRect::new(0, 0, 700, 500),
+        [90, 90, 120, 255],
+    ));
+
+    let (bytes, _) = write_affinity(&doc, None).expect("export");
+    let archive = Archive::parse(&bytes).expect("container");
+    let plain = archive
+        .extract(archive.head("doc.dat").expect("doc.dat"))
+        .expect("extract");
+    let g = graph::parse(&plain).expect("graph");
+
+    let (mut srcts, mut rctps, mut dfszs) = (0, 0, 0);
+    for n in &g.nodes {
+        if let Some(Value::VecI(v)) = n.field(b"SRct") {
+            assert_eq!(v, &[0, 0, 700, 500], "slice persona spread rect");
+            srcts += 1;
+        }
+        if let Some(Value::VecD(v)) = n.field(b"rctp") {
+            // The DocR-level page rect may stay all-zero (the template,
+            // itself Affinity-written, has it so); any sized rect must
+            // be the canvas.
+            if v.iter().any(|&c| c != 0.0) {
+                assert_eq!(v, &[0.0, 0.0, 700.0, 500.0], "page rect");
+                rctps += 1;
+            }
+        }
+        if let Some(Value::VecD(v)) = n.field(b"DfSz") {
+            assert_eq!(v, &[700.0, 500.0], "document default size");
+            dfszs += 1;
+        }
+        // The template's selection pointed into its replaced layer
+        // stack; the export must write "nothing selected".
+        if n.types.first().map(|(t, _)| graph::tag_name(*t)).as_deref() == Some("Sele") {
+            match n.field(b"Itms") {
+                Some(Value::Array(items)) => assert!(items.is_empty(), "stale selection"),
+                other => panic!("selection without Itms array: {other:?}"),
+            }
+        }
+    }
+    assert!(srcts > 0, "no SRct exercised");
+    assert!(rctps > 0, "no page rect exercised");
+    assert!(dfszs > 0, "no DfSz exercised");
+}
+
 fn compare_stacks(
     a: &[schist_core::Layer],
     b: &[schist_core::Layer],
