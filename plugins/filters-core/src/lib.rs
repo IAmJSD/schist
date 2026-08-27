@@ -81,6 +81,22 @@ macro_rules! simple_filter {
             fn params(&self) -> Vec<FilterParam> {
                 vec![$($param),*]
             }
+            /// A filter with a spatial parameter reads that far outside
+            /// the pixel it writes, so the shell knows to hand it that
+            /// much surrounding image.
+            fn context(&self, values: &FilterValues) -> u32 {
+                let params = self.params();
+                // Only genuinely spatial parameters. "amount" is
+                // intensity in most filters (Add Noise, Unsharp), and
+                // treating it as reach grew the buffer by up to its whole
+                // slider range for no benefit.
+                ["radius", "size", "distance"]
+                    .iter()
+                    .filter(|key| params.iter().any(|p| p.key == **key))
+                    .map(|key| values.get(key).ceil().max(0.0) as u32)
+                    .max()
+                    .unwrap_or(0)
+            }
             fn apply(
                 &self,
                 pixels: &mut [f32],
@@ -103,6 +119,12 @@ use schist_fx::{gaussian_rgba as gaussian_blur, premultiply, unpremultiply};
 pub struct GaussianBlur;
 
 impl FilterPlugin for GaussianBlur {
+    /// Reads `radius` pixels outside what it writes, so a
+    /// selection blur can be handed the surrounding image
+    /// instead of clamping at the selection edge.
+    fn context(&self, values: &FilterValues) -> u32 {
+        values.get("radius").ceil().max(0.0) as u32
+    }
     fn id(&self) -> &'static str {
         "filter.gaussian_blur"
     }
@@ -131,6 +153,12 @@ impl FilterPlugin for GaussianBlur {
 pub struct BoxBlur;
 
 impl FilterPlugin for BoxBlur {
+    /// Reads `radius` pixels outside what it writes, so a
+    /// selection blur can be handed the surrounding image
+    /// instead of clamping at the selection edge.
+    fn context(&self, values: &FilterValues) -> u32 {
+        values.get("radius").ceil().max(0.0) as u32
+    }
     fn id(&self) -> &'static str {
         "filter.box_blur"
     }
@@ -741,6 +769,55 @@ mod tests {
                 assert!(!p.label.is_empty());
             }
             assert!(!f.category().is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    /// The buffer a filter is handed is exactly the region being
+    /// filtered and the kernels clamp at its edge, so a selection blur
+    /// repeated its boundary row outward instead of pulling in the real
+    /// pixels just outside it. A filter that reads its neighbours has to
+    /// say how far.
+    #[test]
+    fn filters_that_read_neighbours_advertise_their_reach() {
+        let blur = GaussianBlur;
+        let mut values = FilterValues::defaults(&blur.params());
+        values.set("radius", 12.0);
+        assert_eq!(blur.context(&values), 12);
+        values.set("radius", 0.0);
+        assert_eq!(blur.context(&values), 0);
+    }
+
+    /// The macro-built filters pick their reach up from whichever sizing
+    /// parameter they declare.
+    #[test]
+    fn a_radius_parameter_implies_the_reach() {
+        let registry = {
+            let mut r = schist_plugin_api::PluginRegistry::new();
+            CoreFiltersPlugin.register(&mut r);
+            r
+        };
+        // Maximum takes a radius and reads that far.
+        let max = registry
+            .filters()
+            .find(|f| f.id() == "filter.maximum")
+            .expect("maximum");
+        let mut values = FilterValues::defaults(&max.params());
+        values.set("radius", 7.0);
+        assert_eq!(max.context(&values), 7);
+
+        // A per-pixel filter reads nothing around it.
+        let invert = registry
+            .filters()
+            .find(|f| f.id() == "filter.invert" || f.category() == "Adjust")
+            .or_else(|| registry.filters().find(|f| f.params().is_empty()));
+        if let Some(f) = invert {
+            let values = FilterValues::defaults(&f.params());
+            assert_eq!(f.context(&values), 0, "{} should read nothing", f.id());
         }
     }
 }

@@ -418,6 +418,20 @@ pub trait FilterPlugin: Send + Sync {
     /// `width * height` pixels.
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues);
 
+    /// How far outside the region this filter reads, in pixels.
+    ///
+    /// The buffer a filter is handed is exactly the region being
+    /// filtered, and the kernels clamp at its edge -- so blurring a
+    /// selection repeated the boundary row outward instead of pulling in
+    /// the real pixels just outside it, leaving a visible band along the
+    /// selection edge. Advertising the reach lets the shell hand over a
+    /// grown buffer and blend back only the selection.
+    ///
+    /// Zero for anything that only reads the pixel it is writing.
+    fn context(&self, _values: &FilterValues) -> u32 {
+        0
+    }
+
     /// A line shown in the filter's dialog, for anything the user should
     /// know before running it -- which is mostly whether a neural filter
     /// found its model or is about to use its fallback.

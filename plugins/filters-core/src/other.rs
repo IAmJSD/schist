@@ -3,6 +3,7 @@
 
 use crate::util::{at, gaussian_rgba, premultiply, put, unpremultiply, value_noise};
 use crate::{param, simple_filter};
+use rayon::prelude::*;
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
@@ -62,29 +63,89 @@ simple_filter!(
 
 /// Grey-level morphology: dilate (`max`) grows light areas, erode grows
 /// dark ones. Photoshop calls them Maximum and Minimum.
+///
+/// The structuring element is a disc, which is not separable -- but it
+/// decomposes into one horizontal line segment per row, and a 1-D
+/// morphological pass over a line is O(1) per pixel with a monotonic
+/// deque. So instead of scanning the whole disc per pixel (about 5000
+/// taps at radius 40, single-threaded, on every slider tick of a live
+/// preview) this runs one horizontal pass per distinct row half-width
+/// and folds the results together: 81 passes at radius 40 rather than
+/// 5000 taps per pixel, and the rows within a pass go out to rayon.
 fn morph(px: &mut [f32], w: usize, h: usize, radius: i32, take_max: bool) {
-    let src = px.to_vec();
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let mut acc = if take_max { [0.0f32; 4] } else { [1.0f32; 4] };
-            for dy in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx * dx + dy * dy > radius * radius {
-                        continue;
-                    }
-                    let p = at(&src, w, h, x + dx, y + dy);
-                    for c in 0..4 {
-                        acc[c] = if take_max {
-                            acc[c].max(p[c])
-                        } else {
-                            acc[c].min(p[c])
-                        };
-                    }
-                }
-            }
-            put(px, w, x as usize, y as usize, acc);
-        }
+    if w == 0 || h == 0 || radius <= 0 {
+        return;
     }
+    let src = px.to_vec();
+    let pick = |a: f32, b: f32| if take_max { a.max(b) } else { a.min(b) };
+    // Start from the disc's own centre row, which every pixel is in.
+    let mut out = horizontal_morph(&src, w, h, radius, take_max);
+
+    let r2 = radius * radius;
+    for dy in 1..=radius {
+        // The disc's half-width at this row offset.
+        let hw = ((r2 - dy * dy) as f32).sqrt().floor() as i32;
+        if hw < 0 {
+            continue;
+        }
+        let band = horizontal_morph(&src, w, h, hw, take_max);
+        // The same band serves +dy and -dy: the disc is symmetric.
+        out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+            let up = (y as i32 - dy).clamp(0, h as i32 - 1) as usize;
+            let down = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+            for (x, v) in row.iter_mut().enumerate() {
+                let i = x;
+                *v = pick(*v, pick(band[up * w * 4 + i], band[down * w * 4 + i]));
+            }
+        });
+    }
+    px.copy_from_slice(&out);
+}
+
+/// One row-wise morphological pass with a `2 * half + 1` wide window.
+///
+/// A monotonic deque per channel keeps this O(1) per pixel however wide
+/// the window is.
+fn horizontal_morph(src: &[f32], w: usize, h: usize, half: i32, take_max: bool) -> Vec<f32> {
+    let mut out = vec![0f32; w * h * 4];
+    let half = half.max(0) as usize;
+    out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        let base = y * w * 4;
+        // Indices into the row, kept so their values are monotonic. A
+        // `VecDeque`, not a `Vec`: dropping from the front is what makes
+        // the window slide, and `Vec::remove(0)` shifts the whole thing
+        // each time, which is the O(window) cost this is here to avoid.
+        let mut deque: std::collections::VecDeque<usize> =
+            std::collections::VecDeque::with_capacity(2 * half + 2);
+        for c in 0..4 {
+            deque.clear();
+            let value = |x: usize| src[base + x * 4 + c];
+            let better = |a: f32, b: f32| if take_max { a >= b } else { a <= b };
+            // Prime the window with everything left of the first
+            // output pixel's right edge.
+            let mut next = 0usize;
+            for x in 0..w {
+                let right = (x + half).min(w - 1);
+                while next <= right {
+                    while deque
+                        .back()
+                        .is_some_and(|&i| !better(value(i), value(next)))
+                    {
+                        deque.pop_back();
+                    }
+                    deque.push_back(next);
+                    next += 1;
+                }
+                // Drop anything that has fallen off the left edge.
+                let left = x.saturating_sub(half);
+                while deque.front().is_some_and(|&i| i < left) {
+                    deque.pop_front();
+                }
+                row[x * 4 + c] = value(deque[0]);
+            }
+        }
+    });
+    out
 }
 
 simple_filter!(
@@ -460,4 +521,110 @@ pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(Despeckle));
     registry.register_filter(Box::new(DustAndScratches));
     registry.register_filter(Box::new(ReduceNoise));
+}
+
+#[cfg(test)]
+mod morph_tests {
+    use super::{horizontal_morph, morph};
+    use crate::util::{at, put};
+
+    /// `morph` as it was written before the decomposition: a full disc
+    /// scan per pixel, about 5000 taps at radius 40.
+    fn brute_force(px: &mut [f32], w: usize, h: usize, radius: i32, take_max: bool) {
+        let src = px.to_vec();
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let mut acc = if take_max { [0.0f32; 4] } else { [1.0f32; 4] };
+                for dy in -radius..=radius {
+                    for dx in -radius..=radius {
+                        if dx * dx + dy * dy > radius * radius {
+                            continue;
+                        }
+                        let p = at(&src, w, h, x + dx, y + dy);
+                        for c in 0..4 {
+                            acc[c] = if take_max {
+                                acc[c].max(p[c])
+                            } else {
+                                acc[c].min(p[c])
+                            };
+                        }
+                    }
+                }
+                put(px, w, x as usize, y as usize, acc);
+            }
+        }
+    }
+
+    /// A field with isolated bright and dark specks, so a dilation and an
+    /// erosion both have something to spread.
+    fn field(w: usize, h: usize) -> Vec<f32> {
+        let mut px = vec![0.5f32; w * h * 4];
+        for (i, v) in px.iter_mut().enumerate() {
+            let p = i / 4;
+            let (x, y) = (p % w, p / w);
+            *v = match (x * 7 + y * 13) % 11 {
+                0 => 0.95,
+                3 => 0.05,
+                _ => 0.4 + ((x + y) % 5) as f32 * 0.05,
+            };
+        }
+        px
+    }
+
+    #[test]
+    fn the_decomposed_disc_matches_a_full_disc_scan() {
+        let (w, h) = (37usize, 23usize);
+        for radius in [1, 2, 3, 5, 9] {
+            for take_max in [true, false] {
+                let mut fast = field(w, h);
+                let mut slow = fast.clone();
+                morph(&mut fast, w, h, radius, take_max);
+                brute_force(&mut slow, w, h, radius, take_max);
+                for i in 0..fast.len() {
+                    assert!(
+                        (fast[i] - slow[i]).abs() < 1e-6,
+                        "radius {radius}, max {take_max}, sample {i}: {} != {}",
+                        fast[i],
+                        slow[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A radius wider than the image still clamps at the edges rather
+    /// than reading out of bounds.
+    #[test]
+    fn a_radius_larger_than_the_image_is_fine() {
+        let (w, h) = (5usize, 4usize);
+        let mut fast = field(w, h);
+        let mut slow = fast.clone();
+        morph(&mut fast, w, h, 12, true);
+        brute_force(&mut slow, w, h, 12, true);
+        for i in 0..fast.len() {
+            assert!((fast[i] - slow[i]).abs() < 1e-6, "sample {i}");
+        }
+    }
+
+    /// The 1-D pass is the piece everything else is built from.
+    #[test]
+    fn the_row_pass_is_a_sliding_window_extreme() {
+        let w = 8usize;
+        let mut src = vec![0f32; w * 4];
+        for (x, v) in [0.1f32, 0.9, 0.2, 0.3, 0.05, 0.7, 0.4, 0.6]
+            .iter()
+            .enumerate()
+        {
+            for c in 0..4 {
+                src[x * 4 + c] = *v;
+            }
+        }
+        let out = horizontal_morph(&src, w, 1, 1, true);
+        // Each output is the max of the pixel and its neighbours,
+        // clamped at the ends.
+        let want = [0.9f32, 0.9, 0.9, 0.3, 0.7, 0.7, 0.7, 0.6];
+        for (x, w_) in want.iter().enumerate() {
+            assert!((out[x * 4] - w_).abs() < 1e-6, "at {x}: {}", out[x * 4]);
+        }
+    }
 }

@@ -19,7 +19,15 @@ fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &
         return;
     }
     let mut edit = ctx.doc.begin_edit(name.to_string());
-    edit.change_selection(|sel, _| {
+    edit.change_selection(|sel, _| apply_pixels(sel, pixels, op));
+    edit.commit();
+}
+
+/// Fold a set of pixels into a selection. No history of its own, so a
+/// tool that touches the selection many times in one gesture can record a
+/// single edit at the end of it.
+fn apply_pixels(sel: &mut Selection, pixels: &[(i32, i32)], op: SelectOp) {
+    {
         if op == SelectOp::Replace {
             sel.deselect();
         }
@@ -57,10 +65,9 @@ fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &
                 }
             }
         }
-        sel.activate();
-        sel.recompute_bounds();
-    });
-    edit.commit();
+    }
+    sel.activate();
+    sel.recompute_bounds();
 }
 
 /// The active layer's pixels, if it has any.
@@ -498,8 +505,14 @@ impl ToolPlugin for LassoTool {
         self.cursor = Some(p);
         match self.kind {
             LassoKind::Free => {
-                if !self.points.is_empty() {
-                    self.points.push(p);
+                // Decimate on capture. A point per pointer-move meant a
+                // leisurely trace round a moderate region collected
+                // thousands of them, and every one is an edge the fill
+                // has to consider. Sub-pixel steps carry no shape.
+                if let Some(&last) = self.points.last() {
+                    if (last.0 - p.0).hypot(last.1 - p.1) >= 1.0 {
+                        self.points.push(p);
+                    }
                 }
             }
             LassoKind::Polygonal => {}
@@ -709,11 +722,15 @@ pub struct QuickSelectTool {
     /// Everything the current stroke has selected, so each dab extends the
     /// same region rather than restarting.
     stroke: std::collections::HashSet<(i32, i32)>,
+    /// The selection as it stood before the drag started, so the whole
+    /// drag can be recorded as one undoable edit.
+    original: Option<Selection>,
 }
 
 impl QuickSelectTool {
     fn new() -> Self {
         QuickSelectTool {
+            original: None,
             radius: 20.0,
             tolerance: 28.0,
             subtract: false,
@@ -787,6 +804,18 @@ impl QuickSelectTool {
     }
 }
 
+impl QuickSelectTool {
+    /// Fold a dab into the live selection without touching history.
+    fn apply_live(&self, ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp) {
+        if pixels.is_empty() {
+            return;
+        }
+        apply_pixels(&mut ctx.doc.selection, pixels, op);
+        let canvas = ctx.doc.canvas_rect();
+        ctx.doc.add_damage(canvas);
+    }
+}
+
 impl ToolPlugin for QuickSelectTool {
     fn id(&self) -> &'static str {
         "quick_select"
@@ -825,6 +854,13 @@ impl ToolPlugin for QuickSelectTool {
         self.seed = [0.0; 3];
         self.seen = 0;
         self.stroke.clear();
+        // One drag is one edit. Every dab used to call `commit_pixels`,
+        // which deep-clones the whole selection twice for its before/after
+        // snapshot -- so a single drag left dozens to hundreds of "Quick
+        // Selection" entries, needing that many undos to take back and
+        // blowing past the 200-entry limit, which discards everything the
+        // user did before it.
+        self.original = Some(ctx.doc.selection.clone());
         let added = self.grow(ctx.doc, input.x as i32, input.y as i32);
         // A plain drag starts a new selection; shift extends the old one.
         let op = if self.subtract {
@@ -834,7 +870,7 @@ impl ToolPlugin for QuickSelectTool {
         } else {
             SelectOp::Replace
         };
-        commit_pixels(ctx, &added, op, "Quick Selection");
+        self.apply_live(ctx, &added, op);
     }
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
@@ -847,17 +883,31 @@ impl ToolPlugin for QuickSelectTool {
         } else {
             SelectOp::Add
         };
-        commit_pixels(ctx, &added, op, "Quick Selection");
+        self.apply_live(ctx, &added, op);
     }
 
-    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {
+    fn on_pointer_up(&mut self, ctx: &mut ToolCtx, _input: PointerInput) {
         self.dragging = false;
         self.stroke.clear();
+        let Some(original) = self.original.take() else {
+            return;
+        };
+        let drawn = ctx.doc.selection.clone();
+        // Put the pre-drag selection back so the edit records the right
+        // "before", then replay the whole drag as one change.
+        ctx.doc.selection = original;
+        let mut edit = ctx.doc.begin_edit("Quick Selection");
+        edit.change_selection(|sel, _| *sel = drawn);
+        edit.commit();
     }
 
-    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+    fn on_cancel(&mut self, ctx: &mut ToolCtx) {
         self.dragging = false;
         self.stroke.clear();
+        if let Some(original) = self.original.take() {
+            ctx.doc.selection = original;
+            ctx.doc.damage_all();
+        }
     }
 }
 
@@ -1314,6 +1364,54 @@ mod tests {
             0,
             "blue side not selected"
         );
+    }
+
+    /// One drag, one undo step.
+    ///
+    /// Every dab used to call `commit_pixels`, which deep-clones the
+    /// whole selection twice for its before/after snapshot — so a single
+    /// drag left dozens to hundreds of "Quick Selection" entries, needing
+    /// that many undos to take back, and blew past the 200-entry history
+    /// limit, discarding everything the user did before it.
+    #[test]
+    fn a_quick_selection_drag_is_one_undo_step() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut layer = Layer::new_raster("bg");
+        let buf = [40u8, 40, 40, 255].repeat(200 * 200);
+        blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(200, 200),
+            &buf,
+        );
+        doc.push_layer(layer);
+        let mut state = EditorState::default();
+        let mut tool = QuickSelectTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        tool.on_pointer_down(&mut ctx, input(40.0, 40.0, Modifiers::default()));
+        for i in 1..=20 {
+            tool.on_pointer_move(
+                &mut ctx,
+                input(40.0 + i as f32 * 3.0, 40.0, Modifiers::default()),
+            );
+        }
+        // The selection is live during the drag, before anything is
+        // recorded.
+        assert!(!ctx.doc.selection.is_empty());
+        assert!(!ctx.doc.history.can_undo(), "the drag recorded mid-gesture");
+
+        tool.on_pointer_up(&mut ctx, input(100.0, 40.0, Modifiers::default()));
+        assert_eq!(ctx.doc.history.undo_name(), Some("Quick Selection"));
+
+        doc.undo();
+        assert!(!doc.history.can_undo(), "one drag left more than one entry");
+        // `coverage` reports 255 everywhere when nothing is selected, so
+        // emptiness is the thing to check.
+        assert!(doc.selection.is_empty(), "undo left the selection behind");
     }
 }
 

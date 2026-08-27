@@ -3,6 +3,8 @@
 //! Everything here works on the same straight-alpha f32 RGBA buffer the
 //! `FilterPlugin` trait hands out: `width * height * 4` floats, row major.
 
+use rayon::prelude::*;
+
 /// Premultiplied-alpha conversion and the separable blur live in
 /// `schist_fx`, which is where the GPU seam is; re-exported so the filter
 /// modules keep a single import.
@@ -53,18 +55,22 @@ pub fn put(px: &mut [f32], w: usize, x: usize, y: usize, v: [f32; 4]) {
 ///
 /// The workhorse for the distort filters: they differ only in the mapping.
 /// Sampling is done on premultiplied alpha so edges do not fringe.
-pub fn warp(px: &mut [f32], w: usize, h: usize, map: impl Fn(f32, f32) -> (f32, f32)) {
+pub fn warp(px: &mut [f32], w: usize, h: usize, map: impl Fn(f32, f32) -> (f32, f32) + Sync) {
     if w == 0 || h == 0 {
         return;
     }
     premultiply(px);
     let src = px.to_vec();
-    for y in 0..h {
+    // A pure gather from an immutable `src`, so the rows are independent.
+    // These run on every slider tick of a live preview over the whole
+    // selection, and did it on one core.
+    px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         for x in 0..w {
             let (sx, sy) = map(x as f32 + 0.5, y as f32 + 0.5);
-            put(px, w, x, y, sample(&src, w, h, sx - 0.5, sy - 0.5));
+            let v = sample(&src, w, h, sx - 0.5, sy - 0.5);
+            row[x * 4..x * 4 + 4].copy_from_slice(&v);
         }
-    }
+    });
     unpremultiply(px);
 }
 
@@ -74,7 +80,8 @@ pub fn convolve3(px: &mut [f32], w: usize, h: usize, k: [f32; 9], bias: f32) {
         return;
     }
     let src = px.to_vec();
-    for y in 0..h as i32 {
+    px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        let y = y as i32;
         for x in 0..w as i32 {
             let mut acc = [0.0f32; 3];
             for (i, weight) in k.iter().enumerate() {
@@ -84,20 +91,13 @@ pub fn convolve3(px: &mut [f32], w: usize, h: usize, k: [f32; 9], bias: f32) {
                 }
             }
             let a = at(&src, w, h, x, y)[3];
-            put(
-                px,
-                w,
-                x as usize,
-                y as usize,
-                [
-                    (acc[0] + bias).clamp(0.0, 1.0),
-                    (acc[1] + bias).clamp(0.0, 1.0),
-                    (acc[2] + bias).clamp(0.0, 1.0),
-                    a,
-                ],
-            );
+            let out = &mut row[x as usize * 4..x as usize * 4 + 4];
+            out[0] = (acc[0] + bias).clamp(0.0, 1.0);
+            out[1] = (acc[1] + bias).clamp(0.0, 1.0);
+            out[2] = (acc[2] + bias).clamp(0.0, 1.0);
+            out[3] = a;
         }
-    }
+    });
 }
 
 /// A cheap, repeatable value-noise field.

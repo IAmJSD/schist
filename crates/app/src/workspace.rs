@@ -83,6 +83,12 @@ pub(crate) fn load_view_options() -> ViewOptions {
         .unwrap_or_default()
 }
 
+/// The most surrounding image a filter is handed beyond its selection.
+///
+/// A radius-250 blur on a four-pixel selection should not end up
+/// compositing the whole canvas.
+const MAX_FILTER_CONTEXT: u32 = 256;
+
 /// How often a dirty document is snapshotted for crash recovery.
 const AUTOSAVE_SECS: u64 = 30;
 
@@ -2692,6 +2698,7 @@ impl Workspace {
             .unwrap_or_else(|| "export".into());
         let dir = base.parent().unwrap_or(std::path::Path::new("."));
         let mut written = 0usize;
+        let mut failed: Vec<String> = Vec::new();
         for (name, rect) in regions {
             let rect = rect.intersect(&doc.canvas_rect());
             if rect.is_empty() {
@@ -2720,18 +2727,35 @@ impl Workspace {
                 .collect();
             let out = dir.join(format!("{stem}-{safe}.png"));
             let Some(codec) = self.registry.codecs().find(|c| c.id() == "png") else {
+                failed.push(format!("{name}: no png exporter"));
                 continue;
             };
-            match codec.export(&region_doc) {
-                Ok(bytes) => {
-                    if std::fs::write(&out, bytes).is_ok() {
-                        written += 1;
-                    }
+            // Both failure paths used to be silent -- a discarded
+            // `is_ok()` and a `log::error!` -- while the status bar
+            // reported however many had worked, so "Exported 3
+            // region(s)" out of five looked like success.
+            match codec
+                .export(&region_doc)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| std::fs::write(&out, bytes).map_err(|e| e.to_string()))
+            {
+                Ok(()) => written += 1,
+                Err(e) => {
+                    log::error!("export {name}: {e}");
+                    failed.push(format!("{name}: {e}"));
                 }
-                Err(e) => log::error!("export {name}: {e}"),
             }
         }
-        self.status = format!("Exported {written} region(s)").into();
+        self.status = if failed.is_empty() {
+            format!("Exported {written} region(s)").into()
+        } else {
+            format!(
+                "Exported {written} region(s); {} failed ({})",
+                failed.len(),
+                failed.join(", ")
+            )
+            .into()
+        };
         cx.notify();
     }
 
@@ -4754,20 +4778,38 @@ impl Workspace {
     /// selection, as one undoable edit.
     /// The pixels a filter would touch: the layer's content clipped to the
     /// canvas, or to the selection when there is one.
-    fn filter_region(&self, layer_id: schist_core::LayerId) -> IntRect {
+    /// The region a filter runs over, grown by how far it reads.
+    ///
+    /// With a selection active the buffer used to be exactly
+    /// `selection.bounds()`, and the kernels clamp at the buffer edge --
+    /// so blurring a selection repeated its boundary row outward instead
+    /// of pulling in the real pixels just outside it, leaving a visible
+    /// band along the selection edge. The write side masks by selection
+    /// coverage, so growing the region changes what the filter *sees*
+    /// without widening what it changes.
+    fn filter_region_with_context(&self, layer_id: schist_core::LayerId, context: u32) -> IntRect {
         let Some(doc) = self.doc.as_ref() else {
             return IntRect::EMPTY;
         };
         let canvas = doc.canvas_rect();
         if doc.selection.is_empty() {
-            doc.tree
+            return doc
+                .tree
                 .find(layer_id)
                 .map(|l| l.content_bounds())
                 .unwrap_or(IntRect::EMPTY)
-                .intersect(&canvas)
-        } else {
-            doc.selection.bounds().intersect(&canvas)
+                .intersect(&canvas);
         }
+        // Cap the growth: a radius-250 blur on a 4-pixel selection should
+        // not composite the whole canvas.
+        //
+        // The grown region is *not* intersected with the layer's content:
+        // a generator like Render > Clouds fills the selection on an
+        // empty layer, where `content_bounds()` is EMPTY, and intersecting
+        // refused the whole operation with "Nothing to filter". The canvas
+        // is the only bound that always applies.
+        let pad = context.min(MAX_FILTER_CONTEXT) as i32;
+        doc.selection.bounds().inflated(pad).intersect(&canvas)
     }
 
     /// Pull `region` out of a raster layer into a flat straight-alpha
@@ -4849,6 +4891,17 @@ impl Workspace {
     /// be re-run from the original on every slider tick and undone on
     /// cancel. Returns false when there is nothing to filter.
     pub fn begin_filter_preview(&mut self) -> bool {
+        self.begin_filter_preview_for(0)
+    }
+
+    /// As above, sized for a filter that reads `context` pixels outside
+    /// what it writes.
+    ///
+    /// The dialog's Apply reuses the preview's region, so growing it only
+    /// in `apply_filter` never reached any interactive path -- the
+    /// selection-edge band this is meant to remove stayed exactly where
+    /// it was.
+    pub fn begin_filter_preview_for(&mut self, context: u32) -> bool {
         self.filter_preview = None;
         let Some(layer_id) = self.doc.as_ref().and_then(|d| d.active_layer) else {
             self.status = "Select a layer first".into();
@@ -4864,7 +4917,7 @@ impl Workspace {
             self.status = "Filters need a pixel layer".into();
             return false;
         }
-        let region = self.filter_region(layer_id);
+        let region = self.filter_region_with_context(layer_id, context);
         if region.is_empty() {
             self.status = "Nothing to filter".into();
             return false;
@@ -4943,6 +4996,7 @@ impl Workspace {
             return;
         };
         let name = filter.name().to_string();
+        let context = filter.context(values);
         if self
             .doc
             .as_ref()
@@ -4957,7 +5011,7 @@ impl Workspace {
         let region = preview
             .filter(|p| p.layer == layer_id)
             .map(|p| p.region)
-            .unwrap_or_else(|| self.filter_region(layer_id));
+            .unwrap_or_else(|| self.filter_region_with_context(layer_id, context));
         if region.is_empty() {
             self.status = "Nothing to filter".into();
             return;
@@ -5213,7 +5267,17 @@ impl Workspace {
             self.apply_filter(id, &values, cx);
             return;
         }
-        if !self.begin_filter_preview() {
+        // Size the preview for the widest reach this filter can be given,
+        // so dragging its radius to the maximum still reads real
+        // surrounding pixels rather than a clamped edge.
+        let reach = filter
+            .params()
+            .iter()
+            .filter(|p| matches!(p.key, "radius" | "amount" | "size" | "distance"))
+            .map(|p| p.max.ceil().max(0.0) as u32)
+            .max()
+            .unwrap_or(0);
+        if !self.begin_filter_preview_for(reach) {
             cx.notify();
             return;
         }
@@ -5398,6 +5462,13 @@ impl Workspace {
             rgba
         };
         self.display_tiles.insert(coord, managed.clone());
+        // The colour-managed copy is a second 256 KiB per tile, and this
+        // map had no ceiling either. Keep it to what the composited cache
+        // still holds, so the two together stay inside one budget.
+        if self.display_tiles.len() > self.cache.len() {
+            let cache = &self.cache;
+            self.display_tiles.retain(|c, _| cache.contains(*c));
+        }
         Some(managed)
     }
 
@@ -5439,6 +5510,12 @@ impl Workspace {
             missing.push(((dx.max(dy), dx * dx + dy * dy), coord));
         }
         missing.sort_unstable_by_key(|(k, _)| *k);
+        // Nearest-first, capped. The cap is on the queue rather than on
+        // the cache being full: once a large document fills the byte
+        // budget the steady state *is* full, so refusing to prefetch
+        // there left every new viewport cold and lost the mid-gesture
+        // warming that makes the settle frame land instantly. LRU evicts
+        // the distant tiles instead.
         missing.truncate(PREFETCH_TILE_BUDGET);
         missing.reverse();
         self.prefetch_queue = missing.into_iter().map(|(_, c)| c).collect();
@@ -5483,6 +5560,7 @@ impl Workspace {
         if self.pointer_down {
             return true;
         }
+
         let stale = match self.doc.as_ref() {
             Some(doc) => (doc.revision, self.color_epoch) != self.prefetch_stamp,
             None => true,
@@ -6572,8 +6650,13 @@ fn fx_key(layer: &Layer) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
     // The style itself, via its debug form: these are small plain structs
-    // with float fields, so there is nothing cheaper that is also correct.
-    format!("{:?}", layer.style).hash(&mut h);
+    // with float fields, so there is nothing cheaper that is also correct
+    // -- and going through Debug means a field added later is covered
+    // without anyone remembering to update this. What it does not need is
+    // the String: `LayerStyle` holds nine effect structs, so formatting
+    // it built a multi-kilobyte allocation, hashed it and threw it away,
+    // on every pointer move and once per styled layer.
+    hash_debug(&layer.style, &mut h);
     layer.fill_opacity.to_bits().hash(&mut h);
     if let Some(r) = layer.as_raster() {
         r.tiles.fingerprint().hash(&mut h);
@@ -6587,13 +6670,27 @@ fn fx_key(layer: &Layer) -> u64 {
     h.finish()
 }
 
+/// Hash a value's `Debug` form without building a `String` for it.
+fn hash_debug(value: &impl std::fmt::Debug, h: &mut rustc_hash::FxHasher) {
+    use std::fmt::Write as _;
+    struct Sink<'a>(&'a mut rustc_hash::FxHasher);
+    impl std::fmt::Write for Sink<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            std::hash::Hasher::write(self.0, s.as_bytes());
+            Ok(())
+        }
+    }
+    // Writing into a hasher cannot fail.
+    let _ = write!(Sink(h), "{value:?}");
+}
+
 fn fx_key_children(layers: &[Layer], h: &mut rustc_hash::FxHasher) {
     use std::hash::Hash;
     for l in layers {
         l.visible.hash(h);
         l.opacity.to_bits().hash(h);
         l.fill_opacity.to_bits().hash(h);
-        format!("{:?}", l.blend).hash(h);
+        l.blend.hash(h);
         l.render_offset.hash(h);
         l.clipping.hash(h);
         if let Some(r) = l.as_raster() {

@@ -239,7 +239,22 @@ pub fn blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: usize,
     unpremultiply(px);
 }
 
-/// One separable box pass, clamping at the edges.
+/// One separable box pass over RGBA f32, clamping at the edges and
+/// carrying a running sum.
+///
+/// This re-summed the whole `2r+1` window for every output pixel, making
+/// the pass O(pixels * r) rather than O(pixels): a gaussian at radius 50
+/// on 2048x2048 took seconds. The window only gains and loses one sample
+/// per step, which is the formulation `layer-fx::blur` already used.
+///
+/// Rows are independent and could be parallel too, but the vertical pass
+/// walks columns, which are not contiguous in the buffer, so that needs a
+/// transpose rather than a `par_chunks_mut`. The algorithmic fix is the
+/// dominant one; threading is a separate change.
+///
+/// `fx_blur.wgsl` still sums each window itself, so the two differ by
+/// accumulation order and the drift grows with row length. The parity
+/// tests compare with a tolerance, at long rows as well as short ones.
 fn box_pass(src: &[f32], dst: &mut [f32], width: usize, height: usize, r: usize, vertical: bool) {
     let (outer, inner) = if vertical {
         (width, height)
@@ -251,18 +266,27 @@ fn box_pass(src: &[f32], dst: &mut [f32], width: usize, height: usize, r: usize,
     let window = (r * 2 + 1) as f32;
     for o in 0..outer {
         let base = o * step;
-        for i in 0..inner {
-            let mut acc = [0.0f32; 4];
-            for k in 0..=(r * 2) {
-                let s = (i + k).saturating_sub(r).min(inner - 1);
-                let at = base + s * stride;
-                for c in 0..4 {
-                    acc[c] += src[at + c];
-                }
+        // Seed the window: the edge sample repeated for the leading half,
+        // which is the same clamped edge handling as before.
+        let mut acc = [0.0f32; 4];
+        for c in 0..4 {
+            acc[c] = src[base + c] * r as f32;
+        }
+        for k in 0..=r {
+            let at = base + k.min(inner - 1) * stride;
+            for c in 0..4 {
+                acc[c] += src[at + c];
             }
+        }
+        for i in 0..inner {
             let at = base + i * stride;
             for c in 0..4 {
                 dst[at + c] = acc[c] / window;
+            }
+            let add = base + (i + r + 1).min(inner - 1) * stride;
+            let sub = base + i.saturating_sub(r) * stride;
+            for c in 0..4 {
+                acc[c] += src[add + c] - src[sub + c];
             }
         }
     }
@@ -296,15 +320,28 @@ pub fn lens_blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: i
     let r = radius;
     premultiply(px);
     let src = px.to_vec();
-    for y in 0..height as i32 {
-        for x in 0..width as i32 {
-            let mut acc = [0.0f32; 4];
-            let mut n = 0.0f32;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx * dx + dy * dy > r * r {
-                        continue;
-                    }
+    // The disc was rediscovered per pixel by testing `dx*dx + dy*dy > r*r`
+    // across the whole bounding square, so roughly a quarter of the taps
+    // were tested and thrown away every time. Build it once.
+    let mut offsets = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                offsets.push((dx, dy));
+            }
+        }
+    }
+    // Each row writes a disjoint slice and reads only the immutable `src`,
+    // so this is a plain parallel gather. It was single-threaded, which at
+    // radius 12 on 2048x2048 measured 5.62 s.
+    px.par_chunks_mut(width * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as i32;
+            for x in 0..width as i32 {
+                let mut acc = [0.0f32; 4];
+                let mut n = 0.0f32;
+                for &(dx, dy) in &offsets {
                     let p = at(&src, width, height, x + dx, y + dy);
                     // Weighting bright samples up spreads highlights into
                     // discs instead of smearing them away.
@@ -314,16 +351,14 @@ pub fn lens_blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: i
                     }
                     n += k;
                 }
-            }
-            if n > 0.0 {
-                for a in acc.iter_mut() {
-                    *a /= n;
+                if n > 0.0 {
+                    let i = x as usize * 4;
+                    for c in 0..4 {
+                        row[i + c] = acc[c] / n;
+                    }
                 }
-                let i = (y as usize * width + x as usize) * 4;
-                px[i..i + 4].copy_from_slice(&acc);
             }
-        }
-    }
+        });
     unpremultiply(px);
 }
 
@@ -456,7 +491,9 @@ pub fn carve_cpu(job: &CarveJob<'_>) -> Carved {
         height: job.height,
         px: job.px.to_vec(),
         protect: job.protect.to_vec(),
+        energy: Vec::new(),
     };
+    img.energy = img.compute_energy();
     // A one-pixel image has no seam to remove and nothing to interpolate
     // against, so both loops stop there.
     while img.width > job.target_width.max(1) {
@@ -478,6 +515,14 @@ struct Plane {
     height: usize,
     px: Vec<f32>,
     protect: Vec<f32>,
+    /// The energy field, kept across seams.
+    ///
+    /// It used to be rebuilt from scratch for every seam -- and there is
+    /// one seam per pixel of width change, so shrinking a 2000-pixel
+    /// image by a quarter rebuilt a two-megapixel field five hundred
+    /// times. Removing a seam only changes the energy within a pixel of
+    /// where it ran, so the rest carries over.
+    energy: Vec<f32>,
 }
 
 impl Plane {
@@ -487,22 +532,52 @@ impl Plane {
         0.299 * self.px[i] + 0.587 * self.px[i + 1] + 0.114 * self.px[i + 2]
     }
 
-    /// Gradient magnitude plus protection.
-    fn energy(&self) -> Vec<f32> {
+    /// Gradient magnitude plus protection, at one pixel.
+    #[inline]
+    fn energy_at(&self, x: usize, y: usize) -> f32 {
+        let (w, h) = (self.width, self.height);
+        let l = self.lum(x.saturating_sub(1), y);
+        let r = self.lum((x + 1).min(w - 1), y);
+        let u = self.lum(x, y.saturating_sub(1));
+        let d = self.lum(x, (y + 1).min(h - 1));
+        // Fully transparent pixels are free to remove.
+        let alpha = self.px[(y * w + x) * 4 + 3];
+        ((r - l).abs() + (d - u).abs()) * alpha + self.protect[y * w + x]
+    }
+
+    /// The whole energy field. Only the first seam pays for this.
+    fn compute_energy(&self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
         let mut out = vec![0.0f32; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let l = self.lum(x.saturating_sub(1), y);
-                let r = self.lum((x + 1).min(w - 1), y);
-                let u = self.lum(x, y.saturating_sub(1));
-                let d = self.lum(x, (y + 1).min(h - 1));
-                // Fully transparent pixels are free to remove.
-                let alpha = self.px[(y * w + x) * 4 + 3];
-                out[y * w + x] = ((r - l).abs() + (d - u).abs()) * alpha + self.protect[y * w + x];
+        out.par_chunks_mut(w.max(1))
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, v) in row.iter_mut().enumerate() {
+                    *v = self.energy_at(x, y);
+                }
+            });
+        out
+    }
+
+    /// Recompute energy in a band around `x` on rows `y - 1 ..= y + 1`.
+    ///
+    /// Energy reads one pixel each way, so removing or inserting a column
+    /// at `x` invalidates `x - 1 ..= x + 1` on that row, and the rows
+    /// either side through the vertical difference.
+    fn refresh_energy_near(&mut self, x: usize, y: usize) {
+        let (w, h) = (self.width, self.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        let x0 = x.saturating_sub(1);
+        let x1 = (x + 1).min(w - 1);
+        for yy in y0..=y1 {
+            for xx in x0..=x1 {
+                self.energy[yy * w + xx] = self.energy_at(xx, yy);
             }
         }
-        out
     }
 
     /// The lowest-energy top-to-bottom seam, as one x per row.
@@ -511,7 +586,7 @@ impl Plane {
         if w == 0 || h == 0 {
             return Vec::new();
         }
-        let energy = self.energy();
+        let energy = &self.energy;
         // Cumulative cost, and which of the three pixels above we came
         // from, so the seam can be walked back.
         let mut cost = energy.clone();
@@ -566,6 +641,21 @@ impl Plane {
         self.px = px;
         self.protect = prot;
         self.width = w - 1;
+        // Carry the field over, dropping the removed column from each
+        // row, then repair the band the removal disturbed.
+        let mut energy = Vec::with_capacity((w - 1) * h);
+        for (y, cut) in seam.iter().enumerate() {
+            for x in 0..w {
+                if x == *cut {
+                    continue;
+                }
+                energy.push(self.energy[y * w + x]);
+            }
+        }
+        self.energy = energy;
+        for (y, cut) in seam.iter().enumerate() {
+            self.refresh_energy_near((*cut).min(self.width.saturating_sub(1)), y);
+        }
     }
 
     /// Duplicate one vertical seam, widening the image by a pixel.
@@ -598,6 +688,20 @@ impl Plane {
         self.px = px;
         self.protect = prot;
         self.width = w + 1;
+        let mut energy = Vec::with_capacity((w + 1) * h);
+        for (y, cut) in seam.iter().enumerate() {
+            for x in 0..w {
+                energy.push(self.energy[y * w + x]);
+                if x == *cut {
+                    // Filled in by the repair pass below.
+                    energy.push(0.0);
+                }
+            }
+        }
+        self.energy = energy;
+        for (y, cut) in seam.iter().enumerate() {
+            self.refresh_energy_near((*cut + 1).min(self.width - 1), y);
+        }
     }
 }
 
@@ -729,5 +833,144 @@ mod tests {
             src_token: 0,
         };
         assert!(warp(&job, || src.clone()).iter().all(|v| *v == 0.0));
+    }
+    /// The window re-summed per pixel, as `box_pass` used to be.
+    fn naive_box_pass(
+        src: &[f32],
+        dst: &mut [f32],
+        width: usize,
+        height: usize,
+        r: usize,
+        vertical: bool,
+    ) {
+        let (outer, inner) = if vertical {
+            (width, height)
+        } else {
+            (height, width)
+        };
+        let stride = if vertical { width * 4 } else { 4 };
+        let step = if vertical { 4 } else { width * 4 };
+        let window = (r * 2 + 1) as f32;
+        for o in 0..outer {
+            let base = o * step;
+            for i in 0..inner {
+                let mut acc = [0.0f32; 4];
+                for k in 0..=(r * 2) {
+                    let s = (i + k).saturating_sub(r).min(inner - 1);
+                    let at = base + s * stride;
+                    for c in 0..4 {
+                        acc[c] += src[at + c];
+                    }
+                }
+                let at = base + i * stride;
+                for c in 0..4 {
+                    dst[at + c] = acc[c] / window;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_running_sum_matches_the_window_it_replaced() {
+        // The speed-up must not change the picture. Both edge handling and
+        // the sum have to agree with the naive version, on both axes.
+        let (w, h) = (64usize, 48usize);
+        let src: Vec<f32> = (0..w * h * 4)
+            .map(|i| ((i * 7919) % 997) as f32 / 997.0)
+            .collect();
+        for r in [0usize, 1, 3, 9, 20] {
+            for vertical in [false, true] {
+                let mut fast = vec![0.0; src.len()];
+                let mut slow = vec![0.0; src.len()];
+                box_pass(&src, &mut fast, w, h, r, vertical);
+                naive_box_pass(&src, &mut slow, w, h, r, vertical);
+                let worst = fast
+                    .iter()
+                    .zip(&slow)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst < 1e-4,
+                    "r={r} vertical={vertical} diverged by {worst}"
+                );
+            }
+        }
+    }
+
+    /// The energy field is carried across seams and repaired only where
+    /// the seam ran. It used to be rebuilt in full for every seam, and
+    /// there is one seam per pixel of width change — shrinking a
+    /// 2000-pixel image by a quarter rebuilt a two-megapixel field five
+    /// hundred times.
+    ///
+    /// A seam moves at most one column per row, so removing it can only
+    /// disturb the energy within one column of where it ran; this checks
+    /// that reasoning against a full rebuild, pixel for pixel.
+    #[test]
+    fn incremental_energy_carves_the_same_seams() {
+        let (w, h) = (48usize, 32usize);
+        // Structure the carve has to make choices about: a bright bar
+        // down the middle and a noisy background.
+        let mut px = vec![0f32; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let bar = (20..26).contains(&x);
+                let n = ((x * 37 + y * 17) % 23) as f32 / 23.0;
+                let v = if bar { 0.9 } else { 0.2 + n * 0.3 };
+                px[i] = v;
+                px[i + 1] = v * 0.8;
+                px[i + 2] = 1.0 - v;
+                px[i + 3] = 1.0;
+            }
+        }
+        let protect = vec![0f32; w * h];
+
+        for target in [w - 1, w - 5, w - 12, w + 1, w + 6] {
+            let job = CarveJob {
+                px: &px,
+                protect: &protect,
+                width: w,
+                height: h,
+                target_width: target,
+            };
+            let fast = carve_cpu(&job);
+            let slow = reference_carve(&job);
+            assert_eq!(fast.width, slow.width, "target {target}");
+            assert_eq!(fast.px.len(), slow.px.len(), "target {target}");
+            for i in 0..fast.px.len() {
+                assert!(
+                    (fast.px[i] - slow.px[i]).abs() < 1e-6,
+                    "target {target}, sample {i}: {} != {}",
+                    fast.px[i],
+                    slow.px[i]
+                );
+            }
+        }
+    }
+
+    /// `carve_cpu` with the energy field rebuilt from scratch per seam,
+    /// which is what it used to do.
+    fn reference_carve(job: &CarveJob<'_>) -> Carved {
+        let mut img = Plane {
+            width: job.width,
+            height: job.height,
+            px: job.px.to_vec(),
+            protect: job.protect.to_vec(),
+            energy: Vec::new(),
+        };
+        while img.width > job.target_width.max(1) {
+            img.energy = img.compute_energy();
+            img.carve_one();
+        }
+        while img.width < job.target_width {
+            img.energy = img.compute_energy();
+            img.grow_one();
+        }
+        Carved {
+            px: img.px,
+            protect: img.protect,
+            width: img.width,
+        }
     }
 }

@@ -1,10 +1,13 @@
 // Separable box blur, one axis per dispatch.
 //
 // Three rounds of this approximate a Gaussian, which is what every blur in
-// the filter set is built from. The loop mirrors `schist_fx::box_pass`
-// tap for tap and in the same order: each output pixel sums its own
-// window, so there is no running total whose float error would drift away
-// from the reference.
+// the filter set is built from.
+//
+// Each output pixel sums its own window here, while the CPU reference
+// (`schist_fx::box_pass`) now carries a running total. The two therefore
+// differ by float accumulation order, and the drift grows with row
+// length; `viewport_minify` and the fx tests pin the agreement at the
+// sizes that matter, so any tightening of that bound belongs there.
 
 struct Params {
     width: u32,
