@@ -595,33 +595,9 @@ impl Session {
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    // The parent has to exist already. Creating it meant a mistyped
-    // destination silently scattered empty directory trees instead of
-    // saying the path is wrong.
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.is_dir() {
-            bail!("{} is not a directory", parent.display());
-        }
-    }
-    // Append rather than replace the extension, and include the pid.
-    // `with_extension` *replaces* it, so saving `photo.psd` wrote and then
-    // renamed `photo.schist-tmp`, destroying any real file of that name;
-    // two processes saving at once would also collide.
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.schist-tmp", std::process::id()));
-    let tmp = path.with_file_name(name);
-    // Flush before the rename: `rename` is atomic against a process
-    // crash, but not against power loss, and it can otherwise reach the
-    // disk ahead of the data.
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err.into());
-    }
+    // One implementation, in `schist_core`: this had its own temp-name
+    // scheme, and the interactive save had a third with no flush.
+    schist_core::write_atomically(path, bytes)?;
     Ok(())
 }
 

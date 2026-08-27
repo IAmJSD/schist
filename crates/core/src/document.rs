@@ -1077,6 +1077,44 @@ pub fn temp_save_path(path: &std::path::Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Write `bytes` to a sibling temp file and rename it over `path`.
+///
+/// The one implementation of this: the interactive save, autosave and the
+/// MCP server each had their own, with two different temp-name schemes
+/// and only one of them flushing.
+///
+/// `rename` is atomic against a process crash but not against power
+/// loss, and it can otherwise reach the disk ahead of the data, so the
+/// file is synced first. The parent directory has to exist already:
+/// creating it meant a mistyped destination silently scattered empty
+/// trees instead of saying the path was wrong.
+pub fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{} is not a directory", parent.display()),
+            ));
+        }
+    }
+    let tmp = temp_save_path(path);
+    let write = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(err) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Fill a whole raster layer tilemap region from an RGBA8 buffer
 /// (importer/test convenience; not undoable).
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
@@ -1299,5 +1337,53 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("photo."));
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("schist-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_nothing_behind() {
+        let dir = scratch("atomic-ok");
+        let target = dir.join("doc.psd");
+        std::fs::write(&target, b"old").unwrap();
+        write_atomically(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "temp left");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_atomic_write_cleans_its_temp_file_up() {
+        // The rename cannot replace a directory, which is the one failure
+        // that is easy to induce. The half-written temp file must not be
+        // left sitting beside the user's work.
+        let dir = scratch("atomic-fail");
+        let target = dir.join("in-the-way");
+        std::fs::create_dir(&target).unwrap();
+        assert!(write_atomically(&target, b"x").is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains("schist-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_atomic_write_refuses_a_missing_directory() {
+        // Creating it meant a mistyped destination silently built the
+        // whole tree instead of saying the path was wrong.
+        let dir = scratch("atomic-missing");
+        let missing = dir.join("no/such/place/doc.psd");
+        assert!(write_atomically(&missing, b"x").is_err());
+        assert!(!dir.join("no").exists(), "nothing should have been created");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

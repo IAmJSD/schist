@@ -1441,9 +1441,7 @@ impl Workspace {
         let bytes = codec.export(doc)?;
         // Write to a sibling temp file and rename, so an interrupted save
         // can't truncate the user's existing file.
-        let tmp = schist_core::temp_save_path(path);
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
+        schist_core::write_atomically(path, &bytes)?;
         Ok(())
     }
 
@@ -1499,10 +1497,7 @@ impl Workspace {
         for (doc, path) in jobs {
             match schist_codec_psd::write_psd(&doc) {
                 Ok(bytes) => {
-                    let tmp = schist_core::temp_save_path(&path);
-                    if let Err(err) =
-                        std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path))
-                    {
+                    if let Err(err) = schist_core::write_atomically(&path, &bytes) {
                         log::warn!("autosave failed: {err:#}");
                         continue;
                     }
