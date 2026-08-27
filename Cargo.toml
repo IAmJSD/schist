@@ -19,6 +19,7 @@ members = [
     "crates/vector",
     "crates/text-engine",
     "crates/adjustments",
+    "crates/plugin-host-8bf",
     "crates/plugin-host-wasm",
     "crates/plugin-sdk",
     "crates/colormgmt",
@@ -67,6 +68,7 @@ ruzstd = "0.9"
 crc32fast = "1.5"
 schist-text-engine = { path = "crates/text-engine" }
 schist-adjustments = { path = "crates/adjustments" }
+schist-plugin-host-8bf = { path = "crates/plugin-host-8bf" }
 schist-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
 schist-plugin-sdk = { path = "crates/plugin-sdk" }
 schist-colormgmt = { path = "crates/colormgmt" }

@@ -1,0 +1,415 @@
+//! Host callback suites handed to the plug-in through `FilterRecord`.
+//!
+//! # Provenance and risk
+//!
+//! Adobe's API Guide documents each callback's *signature* (chapter 3
+//! prints them, e.g. `MACPASCAL OSErr (*AllocateBufferProc)(int32 size,
+//! BufferID *buffer)`) but does not print the suite structs themselves,
+//! so the **member order within each suite is UNVERIFIED** — it is the
+//! one thing here that cannot be derived from the published prose. A
+//! wrong order means the plug-in calls the wrong function pointer, which
+//! is why every suite carries its documented `version`/`count` header:
+//! a plug-in that checks those will refuse rather than misbehave.
+//! `docs/8bf-abi-provenance.md` tracks this as the top item to validate
+//! against a real plug-in.
+//!
+//! All allocation here is deliberately global-state-free. The ABI gives
+//! callbacks no user-data parameter, so the usual trick is a global
+//! registry; instead each block carries its own size in a header behind
+//! the pointer the plug-in sees, which keeps the callbacks re-entrant
+//! and thread-safe for free.
+
+use crate::abi::{Handle, MacBoolean, OSErr, NO_ERR};
+use std::alloc::{alloc, dealloc, Layout};
+use std::ffi::{c_char, c_void, CStr};
+
+/// Bytes reserved ahead of every block for its own size. Sixteen keeps
+/// the payload 16-byte aligned, which is at least as strict as anything
+/// a plug-in can ask of a `Ptr`.
+const HEADER: usize = 16;
+
+fn layout_for(size: usize) -> Layout {
+    Layout::from_size_align(size + HEADER, HEADER).expect("plausible allocation size")
+}
+
+/// Allocate `size` bytes, returning the payload pointer. The size is
+/// stashed in the header so the matching free needs no bookkeeping.
+unsafe fn block_alloc(size: usize) -> *mut u8 {
+    let base = alloc(layout_for(size));
+    if base.is_null() {
+        return std::ptr::null_mut();
+    }
+    (base as *mut usize).write(size);
+    base.add(HEADER)
+}
+
+unsafe fn block_size(payload: *mut u8) -> usize {
+    (payload.sub(HEADER) as *mut usize).read()
+}
+
+unsafe fn block_free(payload: *mut u8) {
+    if payload.is_null() {
+        return;
+    }
+    let size = block_size(payload);
+    dealloc(payload.sub(HEADER), layout_for(size));
+}
+
+// --- Handle suite -------------------------------------------------------
+//
+// A classic Mac `Handle` is a pointer to a *master pointer*, so `*h` is
+// the block's data. Plug-ins written against the Mac idiom dereference
+// directly instead of calling `lockProc`, so the master pointer has to
+// be real and stable, not a token.
+
+pub type NewPIHandleProc = unsafe extern "C" fn(size: i32) -> Handle;
+pub type DisposePIHandleProc = unsafe extern "C" fn(h: Handle);
+pub type GetPIHandleSizeProc = unsafe extern "C" fn(h: Handle) -> i32;
+pub type SetPIHandleSizeProc = unsafe extern "C" fn(h: Handle, size: i32) -> OSErr;
+pub type LockPIHandleProc = unsafe extern "C" fn(h: Handle, move_high: MacBoolean) -> *mut u8;
+pub type UnlockPIHandleProc = unsafe extern "C" fn(h: Handle);
+pub type RecoverSpaceProc = unsafe extern "C" fn(size: i32);
+
+#[repr(C)]
+pub struct HandleProcs {
+    pub handle_procs_version: i16,
+    pub num_handle_procs: i16,
+    pub new_proc: Option<NewPIHandleProc>,
+    pub dispose_proc: Option<DisposePIHandleProc>,
+    pub get_size_proc: Option<GetPIHandleSizeProc>,
+    pub set_size_proc: Option<SetPIHandleSizeProc>,
+    pub lock_proc: Option<LockPIHandleProc>,
+    pub unlock_proc: Option<UnlockPIHandleProc>,
+    pub recover_space_proc: Option<RecoverSpaceProc>,
+    pub dispose_regular_handle_proc: Option<DisposePIHandleProc>,
+}
+
+/// Allocate a handle whose master pointer the plug-in may dereference.
+pub(crate) unsafe extern "C" fn new_handle(size: i32) -> Handle {
+    let Ok(size) = usize::try_from(size) else {
+        return std::ptr::null_mut();
+    };
+    let data = block_alloc(size);
+    if data.is_null() {
+        return std::ptr::null_mut();
+    }
+    // The master pointer cell is itself a one-pointer block, so it can
+    // be freed by the same path.
+    let cell = block_alloc(std::mem::size_of::<*mut u8>()) as *mut *mut u8;
+    if cell.is_null() {
+        block_free(data);
+        return std::ptr::null_mut();
+    }
+    cell.write(data);
+    cell
+}
+
+pub(crate) unsafe extern "C" fn dispose_handle(h: Handle) {
+    if h.is_null() {
+        return;
+    }
+    block_free(h.read());
+    block_free(h as *mut u8);
+}
+
+pub(crate) unsafe extern "C" fn get_handle_size(h: Handle) -> i32 {
+    if h.is_null() {
+        return 0;
+    }
+    i32::try_from(block_size(h.read())).unwrap_or(i32::MAX)
+}
+
+pub(crate) unsafe extern "C" fn set_handle_size(h: Handle, size: i32) -> OSErr {
+    const MEM_FULL_ERR: OSErr = -108;
+    if h.is_null() {
+        return MEM_FULL_ERR;
+    }
+    let Ok(size) = usize::try_from(size) else {
+        return MEM_FULL_ERR;
+    };
+    let old = h.read();
+    let old_size = block_size(old);
+    if size == old_size {
+        return NO_ERR;
+    }
+    let new = block_alloc(size);
+    if new.is_null() {
+        return MEM_FULL_ERR;
+    }
+    std::ptr::copy_nonoverlapping(old, new, size.min(old_size));
+    block_free(old);
+    h.write(new);
+    NO_ERR
+}
+
+/// Locking is a no-op: nothing here relocates. The Mac `moveHigh` flag
+/// has no meaning off Mac OS, which the API Guide says explicitly.
+pub(crate) unsafe extern "C" fn lock_handle(h: Handle, _move_high: MacBoolean) -> *mut u8 {
+    if h.is_null() {
+        std::ptr::null_mut()
+    } else {
+        h.read()
+    }
+}
+
+pub(crate) unsafe extern "C" fn unlock_handle(_h: Handle) {}
+
+pub(crate) unsafe extern "C" fn recover_space(_size: i32) {}
+
+pub fn handle_procs() -> HandleProcs {
+    HandleProcs {
+        handle_procs_version: 1,
+        num_handle_procs: 8,
+        new_proc: Some(new_handle),
+        dispose_proc: Some(dispose_handle),
+        get_size_proc: Some(get_handle_size),
+        set_size_proc: Some(set_handle_size),
+        lock_proc: Some(lock_handle),
+        unlock_proc: Some(unlock_handle),
+        recover_space_proc: Some(recover_space),
+        dispose_regular_handle_proc: Some(dispose_handle),
+    }
+}
+
+// --- Buffer suite -------------------------------------------------------
+
+/// "Buffers are identified by pointers to an opaque type called
+/// `BufferID`" — API Guide chapter 3.
+pub type BufferID = *mut c_void;
+
+pub type AllocateBufferProc = unsafe extern "C" fn(size: i32, buffer: *mut BufferID) -> OSErr;
+pub type LockBufferProc = unsafe extern "C" fn(b: BufferID, move_high: MacBoolean) -> *mut u8;
+pub type UnlockBufferProc = unsafe extern "C" fn(b: BufferID);
+pub type FreeBufferProc = unsafe extern "C" fn(b: BufferID);
+pub type BufferSpaceProc = unsafe extern "C" fn() -> i32;
+
+#[repr(C)]
+pub struct BufferProcs {
+    pub buffer_procs_version: i16,
+    pub num_buffer_procs: i16,
+    pub allocate_proc: Option<AllocateBufferProc>,
+    pub lock_proc: Option<LockBufferProc>,
+    pub unlock_proc: Option<UnlockBufferProc>,
+    pub free_proc: Option<FreeBufferProc>,
+    pub space_proc: Option<BufferSpaceProc>,
+}
+
+/// What `BufferSpaceProc` reports. The suite exists so a plug-in can
+/// stop asking the host to account for its memory; there is no useful
+/// number to give it, and quoting a large one is what lets filters that
+/// scale their work to available space behave normally.
+const REPORTED_BUFFER_SPACE: i32 = 256 * 1024 * 1024;
+
+pub(crate) unsafe extern "C" fn allocate_buffer(size: i32, buffer: *mut BufferID) -> OSErr {
+    const MEM_FULL_ERR: OSErr = -108;
+    if buffer.is_null() {
+        return MEM_FULL_ERR;
+    }
+    let Ok(size) = usize::try_from(size) else {
+        return MEM_FULL_ERR;
+    };
+    let p = block_alloc(size);
+    if p.is_null() {
+        buffer.write(std::ptr::null_mut());
+        return MEM_FULL_ERR;
+    }
+    buffer.write(p as BufferID);
+    NO_ERR
+}
+
+pub(crate) unsafe extern "C" fn lock_buffer(b: BufferID, _move_high: MacBoolean) -> *mut u8 {
+    b as *mut u8
+}
+
+pub(crate) unsafe extern "C" fn unlock_buffer(_b: BufferID) {}
+
+pub(crate) unsafe extern "C" fn free_buffer(b: BufferID) {
+    block_free(b as *mut u8);
+}
+
+pub(crate) unsafe extern "C" fn buffer_space() -> i32 {
+    REPORTED_BUFFER_SPACE
+}
+
+pub fn buffer_procs() -> BufferProcs {
+    BufferProcs {
+        buffer_procs_version: 2,
+        num_buffer_procs: 5,
+        allocate_proc: Some(allocate_buffer),
+        lock_proc: Some(lock_buffer),
+        unlock_proc: Some(unlock_buffer),
+        free_proc: Some(free_buffer),
+        space_proc: Some(buffer_space),
+    }
+}
+
+// --- PICA basic suite ---------------------------------------------------
+
+pub type AcquireSuiteProc =
+    unsafe extern "C" fn(name: *const c_char, version: i32, suite: *mut *const c_void) -> i32;
+pub type ReleaseSuiteProc = unsafe extern "C" fn(name: *const c_char, version: i32) -> i32;
+pub type IsEqualProc = unsafe extern "C" fn(a: *const c_char, b: *const c_char) -> u8;
+pub type AllocateBlockProc = unsafe extern "C" fn(size: usize, block: *mut *mut c_void) -> i32;
+pub type FreeBlockProc = unsafe extern "C" fn(block: *mut c_void) -> i32;
+pub type ReallocateBlockProc =
+    unsafe extern "C" fn(block: *mut c_void, size: usize, out: *mut *mut c_void) -> i32;
+pub type UndefinedProc = unsafe extern "C" fn() -> i32;
+
+#[repr(C)]
+pub struct SPBasicSuite {
+    pub acquire_suite: Option<AcquireSuiteProc>,
+    pub release_suite: Option<ReleaseSuiteProc>,
+    pub is_equal: Option<IsEqualProc>,
+    pub allocate_block: Option<AllocateBlockProc>,
+    pub free_block: Option<FreeBlockProc>,
+    pub reallocate_block: Option<ReallocateBlockProc>,
+    pub undefined: Option<UndefinedProc>,
+}
+
+/// PICA's "no such suite". A plug-in that gets this is expected to fall
+/// back to the direct `FilterRecord` callbacks, which is exactly what
+/// this stage supports.
+const SP_SUITE_NOT_FOUND: i32 = -1;
+
+pub(crate) unsafe extern "C" fn acquire_suite(
+    _name: *const c_char,
+    _version: i32,
+    suite: *mut *const c_void,
+) -> i32 {
+    if !suite.is_null() {
+        suite.write(std::ptr::null());
+    }
+    SP_SUITE_NOT_FOUND
+}
+
+pub(crate) unsafe extern "C" fn release_suite(_name: *const c_char, _version: i32) -> i32 {
+    NO_ERR as i32
+}
+
+pub(crate) unsafe extern "C" fn is_equal(a: *const c_char, b: *const c_char) -> u8 {
+    if a.is_null() || b.is_null() {
+        return u8::from(a == b);
+    }
+    u8::from(CStr::from_ptr(a) == CStr::from_ptr(b))
+}
+
+pub(crate) unsafe extern "C" fn allocate_block(size: usize, block: *mut *mut c_void) -> i32 {
+    const SP_OUT_OF_MEMORY: i32 = -2;
+    if block.is_null() {
+        return SP_OUT_OF_MEMORY;
+    }
+    let p = block_alloc(size);
+    block.write(p as *mut c_void);
+    if p.is_null() {
+        SP_OUT_OF_MEMORY
+    } else {
+        NO_ERR as i32
+    }
+}
+
+pub(crate) unsafe extern "C" fn free_block(block: *mut c_void) -> i32 {
+    block_free(block as *mut u8);
+    NO_ERR as i32
+}
+
+pub(crate) unsafe extern "C" fn reallocate_block(
+    block: *mut c_void,
+    size: usize,
+    out: *mut *mut c_void,
+) -> i32 {
+    const SP_OUT_OF_MEMORY: i32 = -2;
+    if out.is_null() {
+        return SP_OUT_OF_MEMORY;
+    }
+    let fresh = block_alloc(size);
+    if fresh.is_null() {
+        out.write(std::ptr::null_mut());
+        return SP_OUT_OF_MEMORY;
+    }
+    if !block.is_null() {
+        let old = block as *mut u8;
+        let n = block_size(old).min(size);
+        std::ptr::copy_nonoverlapping(old, fresh, n);
+        block_free(old);
+    }
+    out.write(fresh as *mut c_void);
+    NO_ERR as i32
+}
+
+pub(crate) unsafe extern "C" fn undefined() -> i32 {
+    SP_SUITE_NOT_FOUND
+}
+
+pub fn sp_basic_suite() -> SPBasicSuite {
+    SPBasicSuite {
+        acquire_suite: Some(acquire_suite),
+        release_suite: Some(release_suite),
+        is_equal: Some(is_equal),
+        allocate_block: Some(allocate_block),
+        free_block: Some(free_block),
+        reallocate_block: Some(reallocate_block),
+        undefined: Some(undefined),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handles_round_trip_through_the_master_pointer() {
+        unsafe {
+            let h = new_handle(64);
+            assert!(!h.is_null());
+            assert_eq!(get_handle_size(h), 64);
+            // What a Mac-idiom plug-in does: dereference, don't lock.
+            let data = h.read();
+            assert_eq!(lock_handle(h, 0), data);
+            data.write_bytes(0xab, 64);
+
+            assert_eq!(set_handle_size(h, 128), NO_ERR);
+            assert_eq!(get_handle_size(h), 128);
+            let grown = h.read();
+            assert_eq!(std::slice::from_raw_parts(grown, 64), [0xab; 64]);
+
+            dispose_handle(h);
+        }
+    }
+
+    #[test]
+    fn buffers_allocate_lock_and_free() {
+        unsafe {
+            let mut id: BufferID = std::ptr::null_mut();
+            assert_eq!(allocate_buffer(1024, &mut id), NO_ERR);
+            assert!(!id.is_null());
+            let p = lock_buffer(id, 0);
+            p.write_bytes(7, 1024);
+            assert_eq!(*p.add(1023), 7);
+            unlock_buffer(id);
+            free_buffer(id);
+        }
+    }
+
+    #[test]
+    fn pica_blocks_grow_without_losing_their_contents() {
+        unsafe {
+            let mut b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(allocate_block(16, &mut b), 0);
+            (b as *mut u8).write_bytes(0x5a, 16);
+            let mut grown: *mut c_void = std::ptr::null_mut();
+            assert_eq!(reallocate_block(b, 64, &mut grown), 0);
+            assert_eq!(std::slice::from_raw_parts(grown as *mut u8, 16), [0x5a; 16]);
+            assert_eq!(free_block(grown), 0);
+        }
+    }
+
+    #[test]
+    fn acquire_suite_reports_not_found_and_nulls_the_out_pointer() {
+        unsafe {
+            let mut suite: *const c_void = std::ptr::dangling::<c_void>();
+            let name = c"Photoshop Action Descriptor Suite";
+            assert_eq!(acquire_suite(name.as_ptr(), 2, &mut suite), -1);
+            assert!(suite.is_null());
+        }
+    }
+}

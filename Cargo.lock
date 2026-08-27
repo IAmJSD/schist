@@ -5858,6 +5858,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "schist-plugin-host-8bf"
+version = "0.6.0"
+dependencies = [
+ "libloading",
+ "tempfile",
+]
+
+[[package]]
 name = "schist-plugin-host-wasm"
 version = "0.6.0"
 dependencies = [
