@@ -46,8 +46,18 @@ impl PluginRegistry {
         self.codecs.push(Arc::from(codec));
     }
 
+    /// Register a plugin's commands, ignoring any whose id is taken.
+    ///
+    /// The lookup takes the first match, so a duplicate could never be
+    /// dispatched -- it only ever showed as a second, dead menu entry.
     pub fn register_commands(&mut self, plugin: &dyn CommandPlugin) {
-        self.commands.extend(plugin.commands());
+        for command in plugin.commands() {
+            if self.commands.iter().any(|c| c.id == command.id) {
+                log::warn!("ignoring duplicate command id {}", command.id);
+                continue;
+            }
+            self.commands.push(command);
+        }
     }
 
     /// Register a filter, ignoring one whose id is already taken.

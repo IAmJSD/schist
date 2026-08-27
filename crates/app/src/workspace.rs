@@ -2555,7 +2555,9 @@ impl Workspace {
             let Some(filter) = self.registry.filters().find(|f| f.id() == entry.id) else {
                 continue;
             };
-            filter.apply(buf, w, h, &entry.values);
+            if let Err(err) = filter.try_apply(buf, w, h, &entry.values) {
+                log::warn!("gallery filter {} failed: {err}", entry.id);
+            }
         }
     }
 
@@ -4932,7 +4934,10 @@ impl Workspace {
             let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
                 return;
             };
-            filter.apply(&mut buf, w, h, values);
+            if let Err(err) = filter.try_apply(&mut buf, w, h, values) {
+                self.status = format!("{} failed: {err}", filter.name()).into();
+                return;
+            }
         }
         self.write_region(
             preview.layer,
@@ -4998,13 +5003,24 @@ impl Workspace {
             return;
         };
         let mut buf = original.clone();
-        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
-        filter.apply(
+        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            self.status = "Filter went away".into();
+            return;
+        };
+        // A sandboxed filter can trap or run out of fuel. Recording the
+        // edit anyway put the filter's name in the status bar, marked the
+        // document unsaved and added a no-op history step for pixels that
+        // never changed.
+        if let Err(err) = filter.try_apply(
             &mut buf,
             region.width() as usize,
             region.height() as usize,
             values,
-        );
+        ) {
+            self.status = format!("{name} failed: {err}").into();
+            cx.notify();
+            return;
+        }
         self.write_region(layer_id, region, &original, &buf, &name, true);
         self.status = name.into();
         self.after_change(cx);
@@ -5210,15 +5226,23 @@ impl Workspace {
     /// Enable or disable a third-party plugin.
     pub fn set_plugin_enabled(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
         let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
+            self.status = "No plugin directory to record the change in".into();
+            cx.notify();
             return;
         };
         self.plugins.set_enabled(&id, enabled, &dir);
-        self.status = format!(
-            "{} {} — restart to apply",
-            id,
-            if enabled { "enabled" } else { "disabled" }
-        )
-        .into();
+        // The write was a discarded `let _`, so a read-only or full config
+        // directory reported success and the choice was gone at the next
+        // launch.
+        self.status = match self.plugins.disabled_write_error() {
+            Some(err) => format!("{id}: could not record the change ({err})").into(),
+            None => format!(
+                "{} {} \u{2014} restart to apply",
+                id,
+                if enabled { "enabled" } else { "disabled" }
+            )
+            .into(),
+        };
         cx.notify();
     }
 

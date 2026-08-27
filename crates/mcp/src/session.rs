@@ -366,13 +366,21 @@ impl Session {
             .read_region(layer_id, region)
             .ok_or_else(|| anyhow!("layer pixels unreadable"))?;
         let mut buf = original.clone();
-        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
-        filter.apply(
-            &mut buf,
-            region.width() as usize,
-            region.height() as usize,
-            &resolved,
-        );
+        let filter = self
+            .registry
+            .filters()
+            .find(|f| f.id() == id)
+            .ok_or_else(|| anyhow!("no filter {id}"))?;
+        // A sandboxed filter can trap or run out of fuel; recording the
+        // edit anyway would report success over unchanged pixels.
+        filter
+            .try_apply(
+                &mut buf,
+                region.width() as usize,
+                region.height() as usize,
+                &resolved,
+            )
+            .map_err(|err| anyhow!("{name} failed: {err}"))?;
         self.write_region(layer_id, region, &original, &buf, &name);
         self.after_change();
         Ok(name)
@@ -587,9 +595,12 @@ impl Session {
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    // The parent has to exist already. Creating it meant a mistyped
+    // destination silently scattered empty directory trees instead of
+    // saying the path is wrong.
     if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            bail!("{} is not a directory", parent.display());
         }
     }
     // Append rather than replace the extension, and include the pid.
@@ -833,8 +844,22 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_leaves_no_temp_file() {
+    fn a_write_to_a_missing_directory_fails_without_creating_it() {
+        // `create_dir_all` here meant a mistyped destination silently
+        // built the whole tree instead of saying the path was wrong.
         let dir = std::env::temp_dir().join(format!("schist-atomic2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let missing = dir.join("no/such/place/doc.psd");
+        assert!(
+            write_atomically(&missing, b"x").is_err(),
+            "a missing parent must be refused"
+        );
+        assert!(!dir.exists(), "nothing should have been created");
+    }
+
+    #[test]
+    fn a_successful_write_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("schist-atomic3-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let target = dir.join("doc.psd");
         write_atomically(&target, b"x").unwrap();
@@ -845,15 +870,6 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_absurd_session_size_is_refused_before_allocating() {
-        // 30000x30000 passed both dimension checks and then asked for
-        // 3.6 GB in one `vec!`, aborting the server.
-        assert!(Session::new_blank("t", 30_000, 30_000, Depth::Eight).is_err());
-        // An ordinary document still works.
-        assert!(Session::new_blank("t", 1920, 1080, Depth::Eight).is_ok());
     }
 
     /// Per-dimension limits alone allowed 30000x30000, whose white fill
@@ -873,6 +889,8 @@ mod tests {
         // Each side is still individually allowed; it is the area that
         // is out of bounds.
         assert!(Session::new_blank("t", 30_000, 100, Depth::Eight).is_ok());
+        // And an ordinary document is untouched.
+        assert!(Session::new_blank("t", 1920, 1080, Depth::Eight).is_ok());
     }
 
     #[test]

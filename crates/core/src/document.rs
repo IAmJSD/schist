@@ -1066,8 +1066,6 @@ impl StrokeEdit {
     }
 }
 
-/// Fill a whole raster layer tilemap region from an RGBA8 buffer
-/// (importer/test convenience; not undoable).
 /// The temp path to write beside `path` for an atomic save.
 ///
 /// `path.with_extension("schist-tmp")` *replaces* the final extension, so
@@ -1079,6 +1077,8 @@ pub fn temp_save_path(path: &std::path::Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Fill a whole raster layer tilemap region from an RGBA8 buffer
+/// (importer/test convenience; not undoable).
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
     use crate::tile::TILE_SIZE;
     assert_eq!(

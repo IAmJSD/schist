@@ -30,13 +30,24 @@ use std::sync::Mutex;
 /// hang.
 const FUEL_PER_CALL: u64 = 500_000_000;
 
+/// Extra fuel per pixel handed to a filter.
+///
+/// A flat budget cannot fit both a thumbnail and a 24 MP photo: the sepia
+/// example alone lands near 5e8 on 12 MP, so a fixed 5e8 killed any real
+/// image while tests passed on tiny ones.
+const FUEL_PER_PIXEL: u64 = 400;
+
 /// Memory a plugin may commit, in bytes.
 ///
 /// There was no limit at all: `memory.grow` costs about one fuel unit, so
 /// the fuel budget did not bound allocation, and a module looping on it
 /// reached 4 GiB without trapping. That is an OOM kill of the editor with
 /// every unsaved document in it.
-const MAX_PLUGIN_MEMORY: usize = 256 * 1024 * 1024;
+/// A filter is handed the whole region as f32 RGBA -- 16 bytes a pixel --
+/// so this has to clear the largest image the rest of the app accepts. At
+/// 256 MiB anything over about 16 MP could not allocate its own input,
+/// which is under a stock phone photo.
+const MAX_PLUGIN_MEMORY: usize = 4 * 1024 * 1024 * 1024;
 
 /// Fuel for a codec probe.
 ///
@@ -240,34 +251,39 @@ impl LoadedPlugin {
         // open and needs far less than a decode.
         store.set_fuel(fuel).map_err(wasm_err)?;
         let mut linker = wasmtime::Linker::new(&self.engine);
-        // The entire host surface is one logging call, and even that is
-        // linked only when the manifest asked for it. `capabilities: []`
-        // used to get the import anyway, which made the documented
-        // "capabilities start empty and are granted per manifest request"
-        // untrue.
-        if self.manifest.capabilities.contains(&Capability::Log) {
-            linker
-                .func_wrap(
-                    "schist",
-                    "log",
-                    |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
-                        let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory")
-                        else {
-                            return;
-                        };
-                        let len = (len.max(0) as usize).min(4096);
-                        let mut buf = vec![0u8; len];
-                        if memory.read(&mut caller, ptr as usize, &mut buf).is_ok() {
-                            log::info!(
-                                "[plugin {}] {}",
-                                caller.data().plugin_name,
-                                String::from_utf8_lossy(&buf)
-                            );
-                        }
-                    },
-                )
-                .map_err(wasm_err)?;
-        }
+        // The entire host surface is one logging call. The import is
+        // always defined: wasmtime refuses to instantiate a
+        // module whose imports are missing, and `load` bootstraps with a
+        // placeholder manifest before it can read the real one, so gating
+        // the definition made every module that imports `schist::log`
+        // unloadable -- including the repo's own example, whose manifest
+        // does declare it. Gate the *behaviour* instead.
+        let logging =
+            self.manifest.capabilities.contains(&Capability::Log) || self.manifest.api_version == 0;
+        linker
+            .func_wrap(
+                "schist",
+                "log",
+                move |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
+                    if !logging {
+                        return;
+                    }
+                    let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
+                        return;
+                    };
+                    let len = (len.max(0) as usize).min(4096);
+                    let mut buf = vec![0u8; len];
+                    if memory.read(&mut caller, ptr as usize, &mut buf).is_ok() {
+                        log::info!(
+                            "[plugin {}] {}",
+                            caller.data().plugin_name,
+                            String::from_utf8_lossy(&buf)
+                        );
+                    }
+                },
+            )
+            .map_err(wasm_err)?;
+
         let instance = linker
             .instantiate(&mut store, &self.module)
             .map_err(wasm_err)
@@ -293,7 +309,11 @@ impl LoadedPlugin {
         if width == 0 || height == 0 || pixels.is_empty() {
             return Ok(());
         }
-        let mut inst = self.instantiate(&self.manifest.name)?;
+        // Scale the budget with the work: a flat allowance either starves
+        // a real photo or hands a thumbnail a licence to spin.
+        let fuel = FUEL_PER_CALL
+            .saturating_add((width as u64).saturating_mul(height as u64) * FUEL_PER_PIXEL);
+        let mut inst = self.instantiate_with_fuel(&self.manifest.name, fuel)?;
 
         let bytes: Vec<u8> = pixels.iter().flat_map(|v| v.to_le_bytes()).collect();
         let pixel_ptr = inst.call_alloc(bytes.len())?;
