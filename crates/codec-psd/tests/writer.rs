@@ -340,6 +340,45 @@ fn an_untagged_document_keeps_a_preserved_profile() {
 }
 
 #[test]
+fn a_round_trip_leaves_the_resource_section_where_it_was() {
+    // The reader always mirrors ICC into `doc.icc_profile`, so the
+    // substitution above fires on every round trip. Appending the tag at
+    // the end instead of writing it in the preserved block's own place
+    // rewrote the resource layout of a file nothing had changed.
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "l",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [1, 2, 3, 255],
+        Depth::Eight,
+    ));
+    doc.preserved_resources.push(PreservedResource {
+        id: 0x040F,
+        name: Vec::new(),
+        data: b"THE-PROFILE".to_vec(),
+    });
+    doc.preserved_resources.push(PreservedResource {
+        id: 0x0421,
+        name: Vec::new(),
+        data: b"after-the-profile".to_vec(),
+    });
+    doc.icc_profile = Some(b"THE-PROFILE".to_vec());
+
+    let once = write_psd(&doc).unwrap();
+    let twice = write_psd(&read_psd(&once).unwrap()).unwrap();
+    assert_eq!(once, twice, "saving again moved bytes around");
+
+    let back = read_psd(&once).unwrap();
+    let ids: Vec<u16> = back.preserved_resources.iter().map(|r| r.id).collect();
+    let icc = ids.iter().position(|id| *id == 0x040F).expect("icc kept");
+    let after = ids
+        .iter()
+        .position(|id| *id == 0x0421)
+        .expect("the block after it kept");
+    assert!(icc < after, "the profile moved to the end: {ids:?}");
+}
+
+#[test]
 fn preserves_image_resources_and_resolution() {
     let mut doc = base_doc();
     doc.resolution_dpi = 144.0;
