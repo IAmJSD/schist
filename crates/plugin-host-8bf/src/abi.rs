@@ -496,11 +496,20 @@ pub mod case_flags1 {
 
 /// Padding modes for `input_padding` / `output_padding` / `mask_padding`.
 ///
-/// UNVERIFIED numeric values. The API Guide names all four options and
-/// says the error case "is the default", which fixes only that
-/// `WANTS_ERROR_ON_BOUNDS_EXCEPTION` is what a zeroed-then-initialised
-/// host writes; 0..=255 are documented to mean a literal fill value, so
-/// the named modes have to be negative.
+/// The numeric values are UNVERIFIED — the API Guide names all four
+/// options and prints none of their numbers — but the host is built so
+/// that does not matter. Adobe documents 0..=255 as a literal fill
+/// value, so every named mode has to be negative; this host fills for
+/// 0..=255 and replicates the edge for anything else. Replication is the
+/// benign answer to all three named modes: it is what
+/// `plugInWantsEdgeReplication` asks for outright, it is a valid answer
+/// to `plugInDoesNotWantPadding` ("leave the data random"), and it is
+/// strictly more useful than the error `plugInWantsErrorOnBounds-
+/// Exception` requests, which exists only because older hosts could not
+/// serve the region at all.
+///
+/// So these constants are recorded for completeness and are not
+/// depended on. Guessing one wrong costs nothing.
 pub mod padding {
     pub const WANTS_EDGE_REPLICATION: i16 = -1;
     pub const DOES_NOT_WANT_PADDING: i16 = -2;

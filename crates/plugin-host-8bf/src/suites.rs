@@ -2,16 +2,19 @@
 //!
 //! # Provenance and risk
 //!
-//! Adobe's API Guide documents each callback's *signature* (chapter 3
-//! prints them, e.g. `MACPASCAL OSErr (*AllocateBufferProc)(int32 size,
-//! BufferID *buffer)`) but does not print the suite structs themselves,
-//! so the **member order within each suite is UNVERIFIED** — it is the
-//! one thing here that cannot be derived from the published prose. A
-//! wrong order means the plug-in calls the wrong function pointer, which
-//! is why every suite carries its documented `version`/`count` header:
-//! a plug-in that checks those will refuse rather than misbehave.
-//! `docs/8bf-abi-provenance.md` tracks this as the top item to validate
-//! against a real plug-in.
+//! Adobe's API Guide never prints the suite structs, only each
+//! routine's signature — but it documents the routines of a suite in a
+//! fixed narrative order and heads each suite with its version and
+//! routine count. For the Handle suite those are "version 1, routines 7"
+//! and the seven appear as New, Dispose, GetSize, SetSize, Lock, Unlock,
+//! RecoverSpace — which is exactly the order a real plug-in was observed
+//! calling them in. That match is what licenses reading the same order
+//! off the page for the Buffer suite, whose header reads "version 2,
+//! routines 5" over Space, Allocate, Free, Lock, Unlock.
+//!
+//! Getting this wrong means the plug-in calls the wrong function
+//! pointer, so every suite also carries its documented version/count
+//! header: a plug-in that checks refuses rather than misbehaves.
 //!
 //! All allocation here is deliberately global-state-free. The ABI gives
 //! callbacks no user-data parameter, so the usual trick is a global
@@ -101,6 +104,13 @@ pub type LockPIHandleProc = unsafe extern "C" fn(h: Handle, move_high: MacBoolea
 pub type UnlockPIHandleProc = unsafe extern "C" fn(h: Handle);
 pub type RecoverSpaceProc = unsafe extern "C" fn(size: i32);
 
+/// Member order and header values from API Guide chapter 3: "Handle
+/// suite. Current version: 1; Adobe Photoshop: 5.0; Routines: 7".
+///
+/// `dispose_regular_handle_proc` is an eighth slot past the documented
+/// seven, so the count stays at 7 and a plug-in that trusts it will
+/// never reach the extra one. It is populated anyway: harmless if the
+/// real struct has it, invisible if not.
 #[repr(C)]
 pub struct HandleProcs {
     pub handle_procs_version: i16,
@@ -199,7 +209,7 @@ pub(crate) unsafe extern "C" fn recover_space(size: i32) {
 pub fn handle_procs() -> HandleProcs {
     HandleProcs {
         handle_procs_version: 1,
-        num_handle_procs: 8,
+        num_handle_procs: 7,
         new_proc: Some(new_handle),
         dispose_proc: Some(dispose_handle),
         get_size_proc: Some(get_handle_size),
@@ -223,15 +233,19 @@ pub type UnlockBufferProc = unsafe extern "C" fn(b: BufferID);
 pub type FreeBufferProc = unsafe extern "C" fn(b: BufferID);
 pub type BufferSpaceProc = unsafe extern "C" fn() -> i32;
 
+/// Member order and header values from API Guide chapter 3: "Buffer
+/// suite. Current version: 2; Adobe Photoshop: 5.0; Routines: 5", over
+/// `BufferSpaceProc`, `AllocateBufferProc`, `FreeBufferProc`,
+/// `LockBufferProc`, `UnlockBufferProc` in that sequence.
 #[repr(C)]
 pub struct BufferProcs {
     pub buffer_procs_version: i16,
     pub num_buffer_procs: i16,
+    pub space_proc: Option<BufferSpaceProc>,
     pub allocate_proc: Option<AllocateBufferProc>,
+    pub free_proc: Option<FreeBufferProc>,
     pub lock_proc: Option<LockBufferProc>,
     pub unlock_proc: Option<UnlockBufferProc>,
-    pub free_proc: Option<FreeBufferProc>,
-    pub space_proc: Option<BufferSpaceProc>,
 }
 
 /// What `BufferSpaceProc` reports. The suite exists so a plug-in can
@@ -281,13 +295,83 @@ pub fn buffer_procs() -> BufferProcs {
     BufferProcs {
         buffer_procs_version: 2,
         num_buffer_procs: 5,
+        space_proc: Some(buffer_space),
         allocate_proc: Some(allocate_buffer),
+        free_proc: Some(free_buffer),
         lock_proc: Some(lock_buffer),
         unlock_proc: Some(unlock_buffer),
-        free_proc: Some(free_buffer),
-        space_proc: Some(buffer_space),
     }
 }
+
+// --- PICA handle suite --------------------------------------------------
+//
+// The PICA twin of `HandleProcs`, acquired by name rather than reached
+// through the record. Order and count from API Guide chapter 4: "Suite
+// PEA Handle suite. Current version: 1; Adobe Photoshop: 5.0; Routines:
+// 6", over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace.
+//
+// PICA suites carry no version/count header of their own — the version
+// is the one the plug-in passed to `AcquireSuite`.
+
+/// `MACPASCAL Ptr (*SetPIHandleLockProc)(Handle h, Boolean lock,
+/// Ptr *address, Boolean *oldLock)`.
+pub type SetPIHandleLockProc = unsafe extern "C" fn(
+    h: Handle,
+    lock: MacBoolean,
+    address: *mut *mut u8,
+    old_lock: *mut MacBoolean,
+) -> *mut u8;
+
+#[repr(C)]
+pub struct PicaHandleSuite {
+    pub new_proc: Option<NewPIHandleProc>,
+    pub dispose_proc: Option<DisposePIHandleProc>,
+    pub set_lock_proc: Option<SetPIHandleLockProc>,
+    pub get_size_proc: Option<GetPIHandleSizeProc>,
+    pub set_size_proc: Option<SetPIHandleSizeProc>,
+    pub recover_space_proc: Option<RecoverSpaceProc>,
+}
+
+// SAFETY: a struct of plain function pointers, immutable for the life of
+// the process.
+unsafe impl Sync for PicaHandleSuite {}
+
+/// Nothing here relocates, so locking only has to report the address.
+pub(crate) unsafe extern "C" fn set_handle_lock(
+    h: Handle,
+    lock: MacBoolean,
+    address: *mut *mut u8,
+    old_lock: *mut MacBoolean,
+) -> *mut u8 {
+    trace!("pica.handle.set_lock({h:p}, lock={lock})");
+    let p = if h.is_null() {
+        std::ptr::null_mut()
+    } else {
+        h.read()
+    };
+    if !address.is_null() {
+        address.write(p);
+    }
+    if !old_lock.is_null() {
+        // Always locked, because nothing here ever moves.
+        old_lock.write(1);
+    }
+    p
+}
+
+static PICA_HANDLE_SUITE: PicaHandleSuite = PicaHandleSuite {
+    new_proc: Some(new_handle),
+    dispose_proc: Some(dispose_handle),
+    set_lock_proc: Some(set_handle_lock),
+    get_size_proc: Some(get_handle_size),
+    set_size_proc: Some(set_handle_size),
+    recover_space_proc: Some(recover_space),
+};
+
+/// The name a plug-in passes to `AcquireSuite` to ask for it.
+pub const PICA_HANDLE_SUITE_NAME: &str = "Photoshop Handle Suite for Plug-ins";
+/// The only version documented, and so the only one served.
+pub const PICA_HANDLE_SUITE_VERSION: i32 = 1;
 
 // --- PICA basic suite ---------------------------------------------------
 
@@ -322,10 +406,19 @@ pub(crate) unsafe extern "C" fn acquire_suite(
     version: i32,
     suite: *mut *const c_void,
 ) -> i32 {
-    trace!("pica.acquire_suite({:?}, {version})", cstr(name));
-    if !suite.is_null() {
-        suite.write(std::ptr::null());
+    let wanted = cstr(name);
+    trace!("pica.acquire_suite({wanted:?}, {version})");
+    if suite.is_null() {
+        return SP_SUITE_NOT_FOUND;
     }
+    if wanted == PICA_HANDLE_SUITE_NAME && version == PICA_HANDLE_SUITE_VERSION {
+        suite.write(&PICA_HANDLE_SUITE as *const _ as *const c_void);
+        trace!("   -> served the handle suite");
+        return NO_ERR as i32;
+    }
+    // Everything else is genuinely absent, and saying so is what makes a
+    // plug-in take its compatible path instead of misreading a zero.
+    suite.write(std::ptr::null());
     SP_SUITE_NOT_FOUND
 }
 
@@ -469,6 +562,35 @@ mod tests {
             let name = c"Photoshop Action Descriptor Suite";
             assert_eq!(acquire_suite(name.as_ptr(), 2, &mut suite), -1);
             assert!(suite.is_null());
+        }
+    }
+
+    #[test]
+    fn the_pica_handle_suite_is_served_by_name_and_version() {
+        unsafe {
+            let name = c"Photoshop Handle Suite for Plug-ins";
+            let mut suite: *const c_void = std::ptr::null();
+            assert_eq!(acquire_suite(name.as_ptr(), 1, &mut suite), 0);
+            assert!(!suite.is_null());
+
+            // A version this host does not implement is refused rather
+            // than served something of the wrong shape.
+            let mut other: *const c_void = std::ptr::dangling::<c_void>();
+            assert_eq!(acquire_suite(name.as_ptr(), 2, &mut other), -1);
+            assert!(other.is_null());
+
+            let s = &*(suite as *const PicaHandleSuite);
+            let h = (s.new_proc.unwrap())(32);
+            assert!(!h.is_null());
+            assert_eq!((s.get_size_proc.unwrap())(h), 32);
+
+            let mut address: *mut u8 = std::ptr::null_mut();
+            let mut old_lock: MacBoolean = 0;
+            let p = (s.set_lock_proc.unwrap())(h, 1, &mut address, &mut old_lock);
+            assert_eq!(p, h.read());
+            assert_eq!(address, h.read());
+
+            (s.dispose_proc.unwrap())(h);
         }
     }
 }

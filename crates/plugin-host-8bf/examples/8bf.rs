@@ -17,11 +17,13 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("inspect") if args.len() == 2 => inspect(Path::new(&args[1])),
         Some("apply") if args.len() >= 4 => apply(&args[1..]),
+        Some("about") if args.len() >= 2 => about(&args[1..]),
         _ => {
             eprintln!(
                 "usage:\n  \
                  8bf inspect <plug-in or directory>\n  \
-                 8bf apply <plug-in> <in.ppm> <out.ppm> [--entry NAME] [--no-dialog]"
+                 8bf apply <plug-in> <in.ppm> <out.ppm> [--entry NAME] [--no-dialog]\n  \
+                 8bf about <plug-in> [--entry NAME]"
             );
             return ExitCode::FAILURE;
         }
@@ -67,6 +69,50 @@ fn inspect(path: &Path) -> Res {
         }
     }
     Ok(())
+}
+
+/// Raise the plug-in's about box. Separate from `apply` because the
+/// selector takes a different parameter block entirely.
+fn about(args: &[String]) -> Res {
+    let plugin = PathBuf::from(&args[0]);
+    let entry = match args.get(1).map(String::as_str) {
+        Some("--entry") => args.get(2).cloned(),
+        _ => None,
+    };
+    let mut filter = open_filter(&plugin, entry)?;
+    println!("about box for {}", filter.name());
+    filter.show_about(parent_window())?;
+    println!("returned cleanly");
+    Ok(())
+}
+
+/// Load a filter, either by an explicit entry point or through the
+/// PiPL's code descriptor.
+fn open_filter(
+    plugin: &Path,
+    entry_override: Option<String>,
+) -> Result<bf::Filter, Box<dyn std::error::Error>> {
+    match entry_override {
+        // An explicit entry point skips the PiPL's code descriptor,
+        // which is what rescues a plug-in whose PiPL is malformed — and
+        // what lets this example drive a bare shared library.
+        Some(entry) => {
+            let pipl = bf::inspect_file(plugin)
+                .ok()
+                .and_then(|f| f.into_iter().next())
+                .map(|f| f.pipl)
+                .unwrap_or_else(minimal_filter_pipl);
+            Ok(bf::Filter::open(plugin, pipl, &entry)?)
+        }
+        None => {
+            let found = bf::inspect_file(plugin)?;
+            let first = found.into_iter().next().ok_or("no filter in that file")?;
+            if let Some(b) = first.blocker() {
+                return Err(format!("{}: {b}", first.menu_name()).into());
+            }
+            Ok(first.load()?)
+        }
+    }
 }
 
 fn apply(args: &[String]) -> Res {

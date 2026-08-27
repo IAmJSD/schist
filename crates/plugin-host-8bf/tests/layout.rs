@@ -83,11 +83,20 @@ fn the_record_starts_where_the_declaration_says() {
     // of the monitor record and faults on the value it finds there.
     assert_eq!(offset_of!(FilterRecord, serial_number), 0);
     assert_eq!(offset_of!(FilterRecord, abort_proc), 4);
-    assert_eq!(offset_of!(FilterRecord, platform_data), 216);
-    assert_eq!(offset_of!(FilterRecord, buffer_procs), 224);
     assert_eq!(std::mem::align_of::<FilterRecord>(), 4);
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        assert_eq!(offset_of!(FilterRecord, platform_data), 216);
+        assert_eq!(offset_of!(FilterRecord, buffer_procs), 224);
+    }
 }
 
+/// The exact table is 64-bit. On a 32-bit target every pointer is four
+/// bytes and `packed(4)` coincides with natural alignment, so the
+/// offsets differ throughout and there is nothing to pin — the C
+/// cross-check below still runs there and is what matters.
+#[cfg(target_pointer_width = "64")]
 #[test]
 fn offsets_are_stable() {
     // Regenerate deliberately, never casually: a change here changes

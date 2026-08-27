@@ -72,21 +72,36 @@ input's red. Dialog, parameters, `Start`, the host-driven `Continue`
 loop, and `Finish` — all of it, through a plug-in that has never heard
 of Schist.
 
+### A second pass closed the rest
+
+The first pass left twelve gaps. A second — 32-bit Wine, the about
+selector, and a closer reading of the API Guide's suite headers — closed
+all but one.
+
+| Fact | How it was settled |
+|---|---|
+| **`BufferProcs` member order**, and its version/count | Chapter 3 heads each suite with a version and a routine count, then documents the routines in a fixed order. For the Handle suite that reads "version 1, routines 7" over New, Dispose, GetSize, SetSize, Lock, Unlock, RecoverSpace — **exactly the order a real plug-in was observed calling**. That match is what licenses reading the Buffer suite the same way: "version 2, routines 5" over Space, Allocate, Free, Lock, Unlock. The order this host shipped with was wrong, and any plug-in that had used the suite would have crashed |
+| **`handleProcsVersion` = 1, `numHandleProcs` = 7** | The same suite headers, printed in the prose. The host had been claiming 8 |
+| **The padding constants stopped mattering** | Rather than guess three numbers the prose never prints, the host fills for the documented 0..=255 and replicates the edge for anything else. Replication satisfies `plugInWantsEdgeReplication` outright, is a valid answer to `plugInDoesNotWantPadding` ("leave the data random"), and beats the error `plugInWantsErrorOnBoundsException` asks for, which exists only because older hosts could not serve the region. A fixture requests a rectangle overhanging every edge under a mode the host has never heard of and still gets usable pixels |
+| **`errReportString` stopped mattering** | The host reports whatever the plug-in wrote into `errorString` whatever result code came with it. A non-empty `Str255` only happens because the plug-in filled it, so the string is the signal and the code need not be known |
+| **The `AboutRecord` layout** | Filter Foundry's about box renders correctly and the selector returns 0, so `platformData` is at offset 0 and indirect there too |
+| **The 32-bit path** | The host cross-compiled to `i686-pc-windows-gnu` loads the 32-bit Filter Foundry through its `'wx86'` descriptor and produces byte-identical pixels to the 64-bit run. `packed(4)` is right on both: on 32-bit it simply coincides with natural alignment |
+| **`SPBasicSuite.ReleaseSuite` is the second member** | Serving the PICA handle suite made Filter Foundry call `ReleaseSuite` — which it never did while every `AcquireSuite` failed. Nothing else would have exercised that slot |
+| **The PICA handle suite layout** | Chapter 4: "Suite PEA Handle suite. Current version: 1; Routines: 6" over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace. Filter Foundry acquires it by name, calls `SetLock` with `lock=1` and later `lock=0`, and its pixels stay correct |
+| `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because stage 4 needs the descriptor block regardless |
+
 ## Still unverified
 
 | # | Fact | Why it is still open | Failure mode if wrong |
 |---|---|---|---|
-| 1 | **`BufferProcs` member order** | Neither plug-in tested allocates through the buffer suite, so nothing exercised it. The suite carries its documented `version`/`count` header, so a plug-in that checks refuses rather than misbehaves | Wrong function pointer called |
-| 2 | Padding constants `-1` / `-2` / `-3` | Nothing requested a region outside the image | Out-of-bounds requests padded wrongly, or refused when they should not be |
-| 3 | `errReportString` = -30902 | Neither plug-in reported a string | An error is reported as a different error |
-| 4 | The `AboutRecord` layout | The about box was never raised | Misbehaves; affects only that one selector |
-| 5 | `HostProc` signature | Passed as null, so unused | None while it stays null |
-| 6 | `handleProcsVersion` / `numHandleProcs` values | Both plug-ins used the suite without complaint, which means they did not check — so the values are untested, not confirmed | A plug-in that version-checks refuses to run |
-| 7 | Whether `bigDocumentData` and `descriptorParameters` must be non-null | This host provides both because Photoshop always does. Explicitly nulling either changed nothing for the plug-ins tested, so their necessity is unproven either way | A plug-in that dereferences them without checking would fault |
-| 8 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |
+| 1 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are both confirmed by position, but the API Guide documents no `SPBasicSuite` struct anywhere — only usage examples of those two. Neither plug-in called the rest | A plug-in that allocates through PICA calls the wrong slot. This is the last real gap |
+| 2 | `HostProc`'s signature | Named but never printed, and passed as null | None while it stays null |
+| 3 | The suites this host does not implement — PseudoResource, Property, Image Services, Channel Ports, and the descriptor sub-suites | All passed as null, which is the documented way to say "unavailable" | None; a plug-in that needs one declines |
+| 4 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |
 
 ## Reproducing
 
 `tools/verify-8bf.sh` downloads both plug-ins, cross-compiles the host to
-`x86_64-pc-windows-gnu`, and runs discovery and a filter under Wine. It
-needs `wine`, `Xvfb` and `xdotool`; it prints what it skips.
+both Windows targets, and runs discovery, the about box, a headless
+G'MIC run, and the Filter Foundry dialog on 64- and 32-bit under Wine.
+It needs `wine`, `Xvfb` and `xdotool`, and prints whatever it skips.

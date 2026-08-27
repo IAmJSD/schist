@@ -24,7 +24,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 
 | Stage | Scope | State |
 |---|---|---|
-| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog, Windows only, in-process | **this crate**, verified against two shipping plug-ins |
+| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog, Windows only, in-process | **this crate**, verified against two shipping plug-ins on 32- and 64-bit |
 | 2 | Out-of-process helper with shared-memory tiles, macOS, 16/32-bit, all modes, selections and transparency, buffer/handle/property suites | not started |
 | 3 | Wine helper on Linux, 32-bit Windows helper, Rosetta helper on Apple Silicon, packaging | not started |
 | 4 | ActionManager / descriptor recording, format plug-ins, big-document coordinates | not started |
@@ -94,6 +94,19 @@ host to `x86_64-pc-windows-gnu` and running it under Wine on a headless
 Xvfb display gets a real plug-in's real dialog on screen, and `xdotool`
 can drive it. `tools/verify-8bf.sh` does exactly that.
 
+### Padding
+
+A plug-in may ask for a region that overhangs the image, and says in
+`inputPadding` what it wants there: Adobe documents 0..=255 as a literal
+fill value and names three other modes without ever printing their
+numbers. Rather than guess, this host fills for 0..=255 and replicates
+the edge for anything else — which satisfies `plugInWantsEdgeReplication`
+outright, is a valid answer to `plugInDoesNotWantPadding` ("leave the
+data random"), and is more useful than the error the third mode asks for,
+which exists only because older hosts could not serve the region at all.
+So the constants are recorded and not depended on, and a mode the host
+has never seen still comes back with real pixels.
+
 ### Tracing
 
 `SCHIST_8BF_TRACE=1` logs every selector call and every host callback the
@@ -127,7 +140,23 @@ order shows up as a call whose arguments make no sense for the slot.
   for everything, which is what makes a plug-in take its compatible path
   instead of misreading a zero.
 - **Format, automation, selection and parser modules.** Filters only.
+- **Most callback suites.** See above.
 - **Crash isolation.** A plug-in fault kills the process.
+
+### Suites
+
+`handleProcs` and `bufferProcs` are implemented; `sSPBasic` serves the
+PICA handle suite by name and reports every other suite absent, which is
+what makes a plug-in take its compatible path instead of misreading a
+zero. Everything else — PseudoResource, Property, Image Services,
+Channel Ports, the descriptor sub-suites — is null, the documented way to
+say "unavailable".
+
+Member order inside a suite is the one thing Adobe never prints. But
+chapter 3 heads each suite with a version and a routine count and then
+documents its routines in a fixed order, and for the Handle suite that
+order is exactly what a real plug-in was observed calling. That is what
+licenses reading the Buffer suite off the page the same way.
 
 ### Packing
 
@@ -162,12 +191,20 @@ checks every byte, including the partial tiles at the right and bottom
 edges.
 
 None of that involves Adobe, so `tools/verify-8bf.sh` does: it downloads
-Filter Foundry and G'MIC-Qt, cross-compiles the host to Windows, and runs
-both under Wine. G'MIC has to get through `Prepare`, use the handle suite
-and call `advanceState`. Filter Foundry has to open its dialog, accept
-`255-r` typed into all three channel fields, and come back with every
-output channel equal to 255 minus the input's red. Only the shipped
-binaries are used; neither project's source is read.
+Filter Foundry and G'MIC-Qt, cross-compiles the host to both Windows
+targets, and runs them under Wine.
+
+- G'MIC has to get through `Prepare`, use the handle suite and call
+  `advanceState`.
+- The about selector has to return without faulting.
+- Filter Foundry has to open its dialog, accept `255-r` typed into all
+  three channel fields, and come back with every output channel equal to
+  255 minus the input's red — on the 64-bit host, and again with the
+  32-bit host driving the 32-bit build of the plug-in.
+- Serving the PICA handle suite has to make the plug-in acquire, use and
+  release it.
+
+Only the shipped binaries are used; neither project's source is read.
 
 Tests that need a toolchain skip with a printed reason rather than
 failing, but a toolchain that is *present and broken* is a hard failure:
@@ -180,12 +217,16 @@ from the Photoshop SDK headers, which are licensed and are not vendored
 here. [`8bf-abi-provenance.md`](8bf-abi-provenance.md) lists every ABI
 fact and where it came from.
 
-Twelve of them the prose did not pin down. Most are now settled — by
-running two real plug-ins as black boxes and watching where they read,
-what they called, and where they faulted. That closed the packing
-question, the suite member order, the selector numbers, the image-mode
-ordinals, the `'mode'` flag set's bit order (which was backwards, and was
-making this host refuse plug-ins that were willing to run), the
-`platformData` indirection, and the two-byte prelude on a Windows PiPL
-resource. What is still open is listed there too — chiefly `BufferProcs`,
-which neither plug-in happened to use.
+Twelve of them the prose did not pin down. All but one are now settled —
+by running two real plug-ins as black boxes and watching where they read,
+what they called and where they faulted, and by reading the suite headers
+in chapter 3 more carefully. That closed the packing question, the suite
+member orders, the selector numbers, the image-mode ordinals, the
+`'mode'` flag set's bit order (which was backwards, and was making this
+host refuse plug-ins that were willing to run), the `platformData`
+indirection, the `AboutRecord`, the 32-bit path, and the two-byte prelude
+on a Windows PiPL resource. Two more were closed by making a wrong guess
+harmless rather than by guessing better — see the padding note above.
+
+What remains is `SPBasicSuite` past its first two members, which the
+guide documents nowhere and neither plug-in called.

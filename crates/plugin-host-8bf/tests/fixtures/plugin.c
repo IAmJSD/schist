@@ -36,6 +36,22 @@ typedef struct {
     Fixed gamma, redX, redY, greenX, greenY, blueX, blueY, whiteX, whiteY, ambient;
 } PlugInMonitor;
 
+/* Buffer suite. Order and header values from API Guide chapter 3:
+ * "Current version: 2; Routines: 5", over BufferSpace, AllocateBuffer,
+ * FreeBuffer, LockBuffer, UnlockBuffer. Declared here independently so
+ * the host's own ordering is checked against the documentation rather
+ * than against itself. */
+typedef void *BufferID;
+typedef struct BufferProcs {
+    int16_t bufferProcsVersion;
+    int16_t numBufferProcs;
+    int32_t (*spaceProc)(void);
+    OSErr (*allocateProc)(int32_t size, BufferID *buffer);
+    void (*freeProc)(BufferID buffer);
+    void *(*lockProc)(BufferID buffer, MacBoolean moveHigh);
+    void (*unlockProc)(BufferID buffer);
+} BufferProcs;
+
 typedef struct PlatformData {
     void *hwnd;
 } PlatformData;
@@ -99,7 +115,7 @@ typedef struct FilterRecord {
     Point wholeSize;
     PlugInMonitor monitor;
     PlatformData *platformData;
-    void *bufferProcs;
+    BufferProcs *bufferProcs;
     void *resourceProcs;
     void *processEvent;
     void *displayPixels;
@@ -408,6 +424,115 @@ EXPORT void entry_advance(int16_t selector, void *pb, intptr_t *data, int16_t *r
 
 EXPORT void entry_continue(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
     run(selector, (FilterRecord *)pb, data, result, RUN_CONTINUE);
+}
+
+/* ---- padding ---------------------------------------------------------
+ *
+ * Ask for a rectangle that overhangs the image on every side, then copy
+ * the padded buffer straight through. Whatever the host put in the
+ * margin ends up in the output, where the test can check it.
+ */
+#define PAD 8
+
+static void run_padding(int16_t selector, FilterRecord *fr, intptr_t *data,
+                        int16_t *result, int16_t padval) {
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+    fr->inputPadding = padval;
+    fr->inRect.top = (int16_t)(fr->filterRect.top - PAD);
+    fr->inRect.left = (int16_t)(fr->filterRect.left - PAD);
+    fr->inRect.bottom = (int16_t)(fr->filterRect.bottom + PAD);
+    fr->inRect.right = (int16_t)(fr->filterRect.right + PAD);
+    fr->outRect = fr->filterRect;
+    fr->inLoPlane = fr->outLoPlane = 0;
+    fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+
+    int planes = fr->planes;
+    int w = fr->outRect.right - fr->outRect.left;
+    int h = fr->outRect.bottom - fr->outRect.top;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *src = (const unsigned char *)fr->inData + (size_t)y * fr->inRowBytes;
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        memcpy(dst, src, (size_t)w * planes);
+    }
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+EXPORT void entry_pad_replicate(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run_padding(selector, (FilterRecord *)pb, data, result, -1);
+}
+
+EXPORT void entry_pad_fill(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run_padding(selector, (FilterRecord *)pb, data, result, 200);
+}
+
+/* An undocumented negative: the host must still return usable pixels
+ * rather than whatever the buffer happened to contain. */
+EXPORT void entry_pad_unknown(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run_padding(selector, (FilterRecord *)pb, data, result, -77);
+}
+
+/* ---- buffer suite ---------------------------------------------------- */
+
+#define bufferBadVersion (-30110)
+#define bufferBadRoutine (-30111)
+#define bufferBadData    (-30112)
+
+EXPORT void entry_buffers(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+
+    BufferProcs *bp = fr->bufferProcs;
+    if (bp == NULL) { *result = bufferBadRoutine; return; }
+    if (bp->bufferProcsVersion != 2) { *result = bufferBadVersion; return; }
+    if (bp->numBufferProcs < 5) { *result = bufferBadVersion; return; }
+    if (!bp->spaceProc || !bp->allocateProc || !bp->freeProc ||
+        !bp->lockProc || !bp->unlockProc) { *result = bufferBadRoutine; return; }
+
+    if (bp->spaceProc() <= 0) { *result = bufferBadData; return; }
+
+    BufferID b = NULL;
+    if (bp->allocateProc(4096, &b) != 0 || b == NULL) { *result = bufferBadData; return; }
+    unsigned char *p = (unsigned char *)bp->lockProc(b, 0);
+    if (p == NULL) { *result = bufferBadData; return; }
+    memset(p, 0x5a, 4096);
+    for (int i = 0; i < 4096; i++)
+        if (p[i] != 0x5a) { *result = bufferBadData; return; }
+    bp->unlockProc(b);
+    bp->freeProc(b);
+
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+/* ---- error reporting -------------------------------------------------- */
+
+EXPORT void entry_error_string(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (fr->errorString == NULL) { *result = filterBadParameters; return; }
+    static const char msg[] = "the fixture declined on purpose";
+    unsigned char len = (unsigned char)(sizeof(msg) - 1);
+    fr->errorString[0] = len;
+    memcpy(&fr->errorString[1], msg, len);
+    *result = -30902; /* errReportString, whatever its real value */
 }
 
 EXPORT void entry_fail_midway(int16_t selector, void *pb, intptr_t *data, int16_t *result) {

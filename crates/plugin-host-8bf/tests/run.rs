@@ -327,3 +327,101 @@ fn a_missing_entry_point_is_a_load_error_not_a_crash() {
         Ok(_) => panic!("a missing entry point should not load"),
     }
 }
+
+/// The plug-in asks for a rectangle overhanging the image on all sides
+/// and copies the padded buffer straight through, so whatever the host
+/// put in the margin is what comes back out.
+fn padding_case(entry: &str, expect: impl Fn(&bf::Image, i32, i32, usize) -> u8) {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load(entry, dir.path()) else {
+        return;
+    };
+    let original = gradient(24, 20, 3);
+    let mut image = original.clone();
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap();
+
+    const PAD: i32 = 8;
+    for y in 0..image.height as i32 {
+        for x in 0..image.width as i32 {
+            for p in 0..3usize {
+                let got = image.data[(y as usize * 24 + x as usize) * 3 + p];
+                let want = expect(&original, x - PAD, y - PAD, p);
+                assert_eq!(
+                    got, want,
+                    "pixel ({x},{y}) plane {p}: got {got}, want {want}"
+                );
+            }
+        }
+    }
+}
+
+fn sample_clamped(img: &bf::Image, x: i32, y: i32, p: usize) -> u8 {
+    let cx = x.clamp(0, img.width as i32 - 1) as usize;
+    let cy = y.clamp(0, img.height as i32 - 1) as usize;
+    img.data[(cy * img.width as usize + cx) * img.planes as usize + p]
+}
+
+fn inside(img: &bf::Image, x: i32, y: i32) -> bool {
+    x >= 0 && y >= 0 && x < img.width as i32 && y < img.height as i32
+}
+
+#[test]
+fn out_of_bounds_requests_are_edge_replicated() {
+    padding_case("entry_pad_replicate", sample_clamped);
+}
+
+#[test]
+fn a_padding_value_in_0_to_255_is_a_literal_fill() {
+    padding_case("entry_pad_fill", |img, x, y, p| {
+        if inside(img, x, y) {
+            sample_clamped(img, x, y, p)
+        } else {
+            200
+        }
+    });
+}
+
+#[test]
+fn an_undocumented_padding_mode_still_yields_usable_pixels() {
+    // The numeric values of the named padding modes are not in Adobe's
+    // prose. Rather than guess, the host fills for 0..=255 and
+    // replicates otherwise, so a mode it has never heard of still comes
+    // back with real pixels instead of whatever the buffer held.
+    padding_case("entry_pad_unknown", sample_clamped);
+}
+
+#[test]
+fn the_buffer_suite_is_laid_out_the_way_the_guide_documents_it() {
+    // The fixture declares BufferProcs from the API Guide's own text —
+    // "version 2, routines 5" over Space, Allocate, Free, Lock, Unlock —
+    // and refuses with a distinct code if the header, any slot, or the
+    // memory it hands back is wrong.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_buffers", dir.path()) else {
+        return;
+    };
+    let mut image = gradient(16, 16, 3);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("the buffer suite should be usable");
+}
+
+#[test]
+fn a_plug_in_error_string_reaches_the_caller() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_error_string", dir.path()) else {
+        return;
+    };
+    let mut image = gradient(8, 8, 3);
+    let err = filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap_err();
+    match err {
+        bf::HostError::Plugin {
+            message: Some(m), ..
+        } => assert_eq!(m, "the fixture declined on purpose"),
+        other => panic!("expected the plug-in's own words, got: {other}"),
+    }
+}

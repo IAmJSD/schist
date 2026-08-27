@@ -197,7 +197,12 @@ impl Filter {
     /// parameter block is *not* a `FilterRecord` at this selector — an
     /// `AboutRecord` is passed instead — so the only field we can
     /// legitimately fill is the platform data the dialog parents to.
+    ///
+    /// `platformData` is indirect here for the same reason it is in
+    /// `FilterRecord`: it points at a [`PlatformData`], not at the
+    /// window handle.
     pub fn show_about(&mut self, parent_window: *mut c_void) -> Result<(), HostError> {
+        suites::trace_from_env();
         #[repr(C)]
         struct AboutRecord {
             platform_data: *mut c_void,
@@ -206,8 +211,11 @@ impl Filter {
             reserved: [u8; 216],
         }
         let mut basic = suites::sp_basic_suite();
+        let mut platform = PlatformData {
+            hwnd: parent_window,
+        };
         let mut about = AboutRecord {
-            platform_data: parent_window,
+            platform_data: &mut platform as *mut _ as *mut c_void,
             s_sp_basic: &mut basic as *mut _ as *mut c_void,
             plug_in_ref: std::ptr::null_mut(),
             reserved: [0; 216],
@@ -222,6 +230,7 @@ impl Filter {
                 &mut result,
             );
         }
+        crate::suites::trace!("<- selector about = {result}");
         check(selector::ABOUT, result, None)
     }
 
@@ -388,6 +397,9 @@ struct Session<'a> {
     /// An error raised inside `advanceState`, where the ABI only lets us
     /// return an `OSErr`, kept so the real cause survives.
     deferred_error: Option<HostError>,
+    /// Last seen padding request, so the trace reports only changes —
+    /// which is what shows whether a plug-in asked for anything.
+    declared_padding: (i16, i16, i16),
 
     // Owned for as long as the record points at them.
     _handle_procs: Box<suites::HandleProcs>,
@@ -559,6 +571,11 @@ impl<'a> Session<'a> {
             abort: Arc::clone(&opts.abort),
             progress: opts.progress.as_deref(),
             deferred_error: None,
+            declared_padding: (
+                abi::padding::WANTS_ERROR_ON_BOUNDS_EXCEPTION,
+                abi::padding::WANTS_ERROR_ON_BOUNDS_EXCEPTION,
+                abi::padding::WANTS_ERROR_ON_BOUNDS_EXCEPTION,
+            ),
             _handle_procs: handle_procs,
             _buffer_procs: buffer_procs,
             _sp_basic: sp_basic,
@@ -614,22 +631,47 @@ impl<'a> Session<'a> {
                 );
             }
         }
-        crate::suites::trace!("<- selector {sel} = {result}");
+        let message = self.error_message();
+        {
+            // Copying out of a packed record: these fields cannot be
+            // borrowed, only read.
+            let (ip, op, mp) = (
+                self.record.input_padding,
+                self.record.output_padding,
+                self.record.mask_padding,
+            );
+            crate::suites::trace!("<- selector {sel} = {result}");
+            if let Some(m) = &message {
+                crate::suites::trace!("   errorString = {m:?}");
+            }
+            if (ip, op, mp) != self.declared_padding {
+                crate::suites::trace!("   padding now in={ip} out={op} mask={mp}");
+                self.declared_padding = (ip, op, mp);
+            }
+        }
         if let Some(e) = self.deferred_error.take() {
             return Err(e);
         }
         if self.abort.load(Ordering::Relaxed) {
             return Err(HostError::Cancelled);
         }
-        let message = (result == err::REPORT_STRING).then(|| self.error_message());
         check(sel, result, message)
     }
 
     /// `errorString` is a `Str255`: a length byte then that many bytes.
-    fn error_message(&self) -> String {
+    ///
+    /// The API Guide ties this to a specific result code, `errReportString`,
+    /// but that code's numeric value is not printed anywhere in the prose.
+    /// Rather than guess it, this reports whatever the plug-in wrote —
+    /// a non-empty buffer only happens because the plug-in filled it, so
+    /// the string is the signal and the code does not need to be known.
+    fn error_message(&self) -> Option<String> {
         let s = &self.error_string;
         let len = s[0] as usize;
-        s[1..1 + len.min(255)].iter().map(|&b| b as char).collect()
+        if len == 0 || len > 255 {
+            return None;
+        }
+        Some(s[1..=len].iter().map(|&b| b as char).collect())
     }
 
     /// True once the plug-in has claimed the wide coordinate fields, at
@@ -690,7 +732,7 @@ impl<'a> Session<'a> {
                 hi,
                 padding,
                 &mut self.in_buf,
-            )?;
+            );
             self.record.in_data = self.in_buf.as_mut_ptr() as *mut c_void;
             self.record.in_row_bytes = row_bytes as i32;
             self.record.in_column_bytes = n as i32;
@@ -730,7 +772,7 @@ impl<'a> Session<'a> {
                     hi,
                     abi::padding::WANTS_EDGE_REPLICATION,
                     &mut self.out_buf,
-                )?;
+                );
             }
             self.record.out_data = self.out_buf.as_mut_ptr() as *mut c_void;
             self.record.out_row_bytes = row_bytes as i32;
@@ -801,21 +843,10 @@ fn read_rect(
     hi: i16,
     padding: i16,
     out: &mut [u8],
-) -> Result<(), HostError> {
+) {
     let n = (hi - lo + 1) as usize;
     let row_bytes = rect.width() as usize * n;
     let src_row = width as usize * planes as usize;
-
-    let out_of_bounds = rect.left < 0
-        || rect.top < 0
-        || rect.right as i64 > width as i64
-        || rect.bottom as i64 > height as i64;
-    if out_of_bounds && padding == abi::padding::WANTS_ERROR_ON_BOUNDS_EXCEPTION {
-        return Err(HostError::BadRequest(format!(
-            "input rectangle {rect:?} is outside the {width}x{height} image \
-             and the plug-in asked for an error rather than padding"
-        )));
-    }
 
     for y in 0..rect.height() {
         let sy = rect.top as i32 + y;
@@ -826,19 +857,19 @@ fn read_rect(
             if inside {
                 let si = sy as usize * src_row + sx as usize * planes as usize + lo as usize;
                 out[oi..oi + n].copy_from_slice(&src[si..si + n]);
-            } else if padding == abi::padding::WANTS_EDGE_REPLICATION {
+            } else if (0..=255).contains(&padding) {
+                // Adobe documents this range as a literal fill value.
+                out[oi..oi + n].fill(padding as u8);
+            } else {
+                // Every named mode is negative, and replicating the edge
+                // is a good answer to all of them. See `abi::padding`.
                 let cx = sx.clamp(0, width as i32 - 1) as usize;
                 let cy = sy.clamp(0, height as i32 - 1) as usize;
                 let si = cy * src_row + cx * planes as usize + lo as usize;
                 out[oi..oi + n].copy_from_slice(&src[si..si + n]);
-            } else if (0..=255).contains(&padding) {
-                out[oi..oi + n].fill(padding as u8);
             }
-            // plugInDoesNotWantPadding: "the data be left random", so
-            // whatever the buffer already holds is a valid answer.
         }
     }
-    Ok(())
 }
 
 fn to_rgb16(c: [u8; 4]) -> abi::RGBColor {
