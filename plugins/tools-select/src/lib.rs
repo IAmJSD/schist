@@ -62,7 +62,14 @@ fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &
                 }
             }
         }
-        sel.activate();
+        // An empty Replace means "no selection", not "a selection of
+        // nothing": `is_empty()` is just `!active`, so activating an
+        // all-zero mask made every paint, fill, gradient and retouch tool
+        // silently do nothing document-wide until the user deselected by
+        // hand.
+        if !pixels.is_empty() {
+            sel.activate();
+        }
         sel.recompute_bounds();
     });
     edit.commit();
@@ -299,11 +306,13 @@ impl ToolPlugin for MarqueeTool {
         }
         let shape = self.shape;
         let feather = self.feather;
-        // A drag that starts or ends off-canvas would otherwise put the
-        // selection's bounds outside the document, which Transform
-        // Selection then frames and `coverage_ratio` over-reports.
-        let rect = rect.intersect(&ctx.doc.canvas_rect());
-        if rect.is_empty() {
+        // The *shape* comes from the full drag; only the resulting mask
+        // is clipped to the canvas. Clipping the generating rect first
+        // inscribed the ellipse in the clipped box, so a partly
+        // off-canvas drag committed a different ellipse than the preview
+        // had drawn.
+        let canvas = ctx.doc.canvas_rect();
+        if rect.intersect(&canvas).is_empty() {
             return;
         }
         let mut edit = ctx.doc.begin_edit("Select");
@@ -311,7 +320,8 @@ impl ToolPlugin for MarqueeTool {
             commit_shape(sel, feather, op, |target, op| match shape {
                 MarqueeShape::Rect => target.select_rect(rect, op),
                 MarqueeShape::Ellipse => target.select_ellipse(rect, op),
-            })
+            });
+            sel.clip_to(canvas);
         });
         edit.commit();
     }
@@ -1368,6 +1378,37 @@ mod tests {
         drag(&mut tool, &mut ctx, (150.0, 10.0), (190.0, 50.0), plain);
         assert_eq!(ctx.doc.selection.coverage(20, 20), 0, "the old one is gone");
         assert_eq!(ctx.doc.selection.coverage(170, 30), 255);
+    }
+
+    #[test]
+    fn a_half_offscreen_ellipse_keeps_the_shape_it_previewed() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Ellipse);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        // A circle centred on the canvas edge: the drag runs from x=100
+        // out to x=300, so only its left half lands on the document.
+        drag(
+            &mut tool,
+            &mut ctx,
+            (100.0, 0.0),
+            (300.0, 200.0),
+            Modifiers::default(),
+        );
+
+        // The widest row of that circle is y=100, and it runs off the
+        // right edge.
+        assert_eq!(ctx.doc.selection.coverage(199, 100), 255);
+        // Near the bottom the circle has narrowed to x=157..243. Clipping
+        // the drag rect first would have inscribed a half-width ellipse
+        // spanning x=128..172 there instead, which gets both of these
+        // backwards.
+        assert_eq!(ctx.doc.selection.coverage(180, 190), 255);
+        assert_eq!(ctx.doc.selection.coverage(135, 190), 0);
     }
 
     #[test]

@@ -994,7 +994,6 @@ impl<'a> EditBuilder<'a> {
         });
     }
 
-    /// Replace the selection via closure; captures before/after.
     /// Move every piece of document-level geometry with the canvas.
     ///
     /// Guides, artboards, slices, notes, counts and stored paths are not
@@ -1052,6 +1051,7 @@ impl<'a> EditBuilder<'a> {
         }
     }
 
+    /// Replace the selection via closure; captures before/after.
     pub fn change_selection(&mut self, f: impl FnOnce(&mut Selection, IntRect)) {
         let canvas = self.doc.canvas_rect();
         let before = Box::new(self.doc.selection.clone());

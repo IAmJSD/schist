@@ -151,6 +151,32 @@ impl Selection {
     }
 
     /// Rectangular selection (hard edges).
+    /// Zero everything outside `bounds`, keeping the shape that was
+    /// generated from the full drag.
+    ///
+    /// Clipping the *generating* rect instead re-inscribes the shape in
+    /// the clipped box, so a partly off-canvas elliptical drag committed
+    /// a different ellipse than the preview had drawn.
+    pub fn clip_to(&mut self, bounds: IntRect) {
+        let coords: Vec<TileCoord> = self.mask.iter().map(|(c, _)| *c).collect();
+        for coord in coords {
+            let rect = coord.rect();
+            if bounds.intersect(&rect) == rect {
+                continue;
+            }
+            let buf = self.mask.get_mut_or_insert(coord);
+            for ly in 0..TILE_SIZE {
+                for lx in 0..TILE_SIZE {
+                    if !bounds.contains(rect.left + lx, rect.top + ly) {
+                        buf[(ly * TILE_SIZE + lx) as usize] = 0;
+                    }
+                }
+            }
+        }
+        self.mask.prune_blank();
+        self.recompute_bounds();
+    }
+
     pub fn select_rect(&mut self, rect: IntRect, op: SelectOp) {
         self.apply_shape(rect, op, |_, _| 255);
     }
@@ -567,43 +593,46 @@ impl Selection {
 /// 0-250 px range it could not deliver. The whole taps inside the radius
 /// count once; the pair just outside count `frac`, which makes the pass
 /// continuous in `r`.
+// Both passes carry a running sum of the integer window: one add and one
+// subtract per pixel, whatever the radius. Only the two fractional taps
+// are re-read, and those are O(1) too, so a 250px feather costs the same
+// per pixel as a 1px one.
 fn box_blur_h(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: f32) {
-    let ir = r.floor().max(0.0) as usize;
+    let ir = r.floor().max(0.0) as isize;
     let frac = r - r.floor();
     let norm = 1.0 / ((2 * ir + 1) as f32 + 2.0 * frac);
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
         let at = |i: isize| -> f32 { row[i.clamp(0, w as isize - 1) as usize] };
+        // f64 so a long row does not drift the running sum.
+        let mut acc: f64 = (-ir..=ir).map(|d| at(d) as f64).sum();
         for x in 0..w {
             let xi = x as isize;
-            let mut acc = 0.0;
-            for d in -(ir as isize)..=(ir as isize) {
-                acc += at(xi + d);
-            }
+            let mut v = acc as f32;
             if frac > 0.0 {
-                acc += frac * (at(xi - ir as isize - 1) + at(xi + ir as isize + 1));
+                v += frac * (at(xi - ir - 1) + at(xi + ir + 1));
             }
-            dst[y * w + x] = acc * norm;
+            dst[y * w + x] = v * norm;
+            acc += (at(xi + ir + 1) - at(xi - ir)) as f64;
         }
     }
 }
 
 fn box_blur_v(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: f32) {
-    let ir = r.floor().max(0.0) as usize;
+    let ir = r.floor().max(0.0) as isize;
     let frac = r - r.floor();
     let norm = 1.0 / ((2 * ir + 1) as f32 + 2.0 * frac);
     for x in 0..w {
         let at = |i: isize| -> f32 { src[i.clamp(0, h as isize - 1) as usize * w + x] };
+        let mut acc: f64 = (-ir..=ir).map(|d| at(d) as f64).sum();
         for y in 0..h {
             let yi = y as isize;
-            let mut acc = 0.0;
-            for d in -(ir as isize)..=(ir as isize) {
-                acc += at(yi + d);
-            }
+            let mut v = acc as f32;
             if frac > 0.0 {
-                acc += frac * (at(yi - ir as isize - 1) + at(yi + ir as isize + 1));
+                v += frac * (at(yi - ir - 1) + at(yi + ir + 1));
             }
-            dst[y * w + x] = acc * norm;
+            dst[y * w + x] = v * norm;
+            acc += (at(yi + ir + 1) - at(yi - ir)) as f64;
         }
     }
 }
@@ -711,6 +740,42 @@ mod tests {
         assert!(center > 240, "center = {center}");
         assert!(edge > 30 && edge < 220, "edge = {edge}");
         assert!(outside < 30, "outside = {outside}");
+    }
+
+    #[test]
+    fn the_sliding_window_blur_matches_a_direct_sum() {
+        // The running sum is only worth having if it agrees with the
+        // straightforward per-pixel loop it replaced.
+        let (w, h) = (23usize, 5usize);
+        let src: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 256) as f32).collect();
+        for r in [0.0f32, 0.5, 1.0, 2.75, 7.0, 40.0] {
+            let ir = r.floor().max(0.0) as isize;
+            let frac = r - r.floor();
+            let norm = 1.0 / ((2 * ir + 1) as f32 + 2.0 * frac);
+            let mut want = vec![0f32; w * h];
+            for y in 0..h {
+                let row = &src[y * w..(y + 1) * w];
+                let at = |i: isize| -> f32 { row[i.clamp(0, w as isize - 1) as usize] };
+                for x in 0..w {
+                    let xi = x as isize;
+                    let mut acc: f32 = (-ir..=ir).map(|d| at(xi + d)).sum();
+                    if frac > 0.0 {
+                        acc += frac * (at(xi - ir - 1) + at(xi + ir + 1));
+                    }
+                    want[y * w + x] = acc * norm;
+                }
+            }
+            let mut got = vec![0f32; w * h];
+            box_blur_h(&src, &mut got, w, h, r);
+            for i in 0..w * h {
+                assert!(
+                    (got[i] - want[i]).abs() < 0.01,
+                    "r={r} i={i}: {} vs {}",
+                    got[i],
+                    want[i]
+                );
+            }
+        }
     }
 
     #[test]

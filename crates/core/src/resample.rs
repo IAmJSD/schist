@@ -418,12 +418,17 @@ pub fn resize_tiles(
 /// `layer.mask` at its old size and place, so the mask clipped the
 /// artwork along the wrong edge afterwards. Bilinear throughout: a mask is
 /// coverage, and nearest-neighbour would alias its edge.
+///
+/// Sampling goes through `LayerMask::value`, not the tile map: a
+/// revealing mask is `default_value` everywhere outside its `bounds`, and
+/// reading the bare tiles there returned 0 instead, so every transform
+/// grew a hidden black border along the mask's edge.
 pub fn transform_mask(
-    src: &crate::tile::MaskTileMap,
-    default_value: u8,
+    mask: &crate::layer::LayerMask,
     m: &Affine,
     clip: IntRect,
 ) -> crate::tile::MaskTileMap {
+    let default_value = mask.default_value;
     let mut out = crate::tile::MaskTileMap::new();
     let Some(inv) = m.invert() else { return out };
     if clip.is_empty() {
@@ -445,7 +450,7 @@ pub fn transform_mask(
                 let (ix, iy) = (fx.floor(), fy.floor());
                 let (tx, ty) = (fx - ix, fy - iy);
                 let at =
-                    |ox: i32, oy: i32| -> f32 { src.value(ix as i32 + ox, iy as i32 + oy) as f32 };
+                    |ox: i32, oy: i32| -> f32 { mask.value(ix as i32 + ox, iy as i32 + oy) as f32 };
                 let top = at(0, 0) * (1.0 - tx) + at(1, 0) * tx;
                 let bottom = at(0, 1) * (1.0 - tx) + at(1, 1) * tx;
                 let v = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;

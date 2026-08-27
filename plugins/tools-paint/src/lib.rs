@@ -132,6 +132,12 @@ impl ToneRange {
 /// midtones move more than the extremes; sponge pulls colour toward or away
 /// from its own luminance.
 fn apply_tone(tone: Tone, range: ToneRange, px: Rgba, amount: f32) -> Rgba {
+    // Exposure runs to 100%, and the dab doubles it so that the slider's
+    // midpoint is a full-strength pass. Past that the blends run off the
+    // end of their range: Burn wrote negative channels and Dodge wrote
+    // over 1.0, both of which come back as garbage once the tile is
+    // stored.
+    let amount = amount.clamp(0.0, 1.0);
     let lum = 0.3 * px.r + 0.59 * px.g + 0.11 * px.b;
     match tone {
         Tone::Dodge => {
@@ -402,7 +408,10 @@ impl Stroke {
                         }
                         Ink::Convolve { snapshot, sharpen } => {
                             let out = convolve_at(snapshot, x, y, *sharpen);
-                            let a = a * strength * 2.0;
+                            // Same doubling, same clamp: a blend factor
+                            // above 1 extrapolates past the filtered
+                            // pixel instead of reaching it.
+                            let a = (a * strength * 2.0).clamp(0.0, 1.0);
                             Rgba {
                                 r: orig.r + (out.r - orig.r) * a,
                                 g: orig.g + (out.g - orig.g) * a,
@@ -660,8 +669,9 @@ impl Stroke {
 /// ignored `visible`, despite the doc comment claiming otherwise, so paint
 /// could go onto a hidden layer and appear to do nothing at all.
 ///
-/// Photoshop refuses and says why; refusing is the half we can do here,
-/// and the caller reports it.
+/// Photoshop refuses and says why. Refusing is the half that belongs
+/// here; there is no channel from a tool back to the status bar yet, so
+/// the stroke simply does nothing.
 fn paintable_layer(doc: &Document) -> Option<LayerId> {
     let id = doc.active_layer?;
     let layer = doc.tree.find(id)?;
@@ -1781,6 +1791,28 @@ mod tests {
         let mut doc = Document::new("t", 128, 128, Depth::Eight);
         doc.push_layer(Layer::new_raster("paint"));
         doc
+    }
+
+    #[test]
+    fn a_full_exposure_burn_stops_at_black() {
+        // Exposure is doubled inside the dab, so 100% asked for twice the
+        // blend the formula has room for: Burn went past black into
+        // negative channels and Dodge past white.
+        let px = Rgba {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let burn = apply_tone(Tone::Burn, ToneRange::Midtones, px, 2.0);
+        assert!(burn.r >= 0.0, "burn wrote {}", burn.r);
+        assert!(burn.r <= 0.5);
+        let dodge = apply_tone(Tone::Dodge, ToneRange::Midtones, px, 2.0);
+        assert!(dodge.r <= 1.0, "dodge wrote {}", dodge.r);
+        assert!(dodge.r >= 0.5);
+        // A sponge cannot overshoot the luminance it is pulling towards.
+        let sponge = apply_tone(Tone::Sponge, ToneRange::Midtones, px, 2.0);
+        assert!((0.0..=1.0).contains(&sponge.r));
     }
 
     fn input(x: f32, y: f32) -> PointerInput {

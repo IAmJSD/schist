@@ -38,6 +38,10 @@ struct Drag {
     /// the original stays put, as in Photoshop. Decided at press time so
     /// letting go of Alt mid-drag does not undo the duplicate.
     duplicated: bool,
+    /// The layer that was selected when the drag began. Cancelling an
+    /// Alt-drag deletes the copy, and the selection has to go back to
+    /// this rather than to a layer that no longer exists.
+    source: schist_core::LayerId,
 }
 
 impl MoveTool {
@@ -126,6 +130,38 @@ impl MoveTool {
         damage = damage.union(&layer.content_bounds());
         ctx.doc.add_damage(damage.inflated(1));
     }
+
+    fn finish(ctx: &mut ToolCtx, drag: Drag, dx: i32, dy: i32) {
+        // Put the layer back where its pixels actually are, then record the
+        // move as one edit so undo restores the original position.
+        Self::undo_preview(ctx, drag.layer);
+        if dx == 0 && dy == 0 && !drag.duplicated {
+            return;
+        }
+        let name = if drag.duplicated {
+            "Duplicate and Move"
+        } else {
+            "Move Layer"
+        };
+        // The copy was inserted straight into the tree so the drag could
+        // move it live. Take it back out and let the edit put it in, so
+        // one undo removes the copy and the move together.
+        let reinsert = drag
+            .duplicated
+            .then(|| ctx.doc.tree.remove(drag.layer))
+            .flatten();
+        let mut edit = ctx.doc.begin_edit(name);
+        if let Some((path, layer)) = reinsert {
+            edit.insert_layer(path, layer);
+        }
+        edit.translate_layer(drag.layer, dx, dy);
+        edit.commit();
+        if drag.duplicated {
+            // `remove_layer` clears the active layer, and the reinsert
+            // above does not know it was the one selected.
+            ctx.doc.active_layer = Some(drag.layer);
+        }
+    }
 }
 
 impl ToolPlugin for MoveTool {
@@ -193,6 +229,7 @@ impl ToolPlugin for MoveTool {
         }
         // Alt-drag duplicates: the copy is what moves and the original
         // is left where it was.
+        let source = id;
         let (id, duplicated) = if input.modifiers.alt {
             match Self::duplicate_for_drag(ctx, id) {
                 Some(copy) => (copy, true),
@@ -206,6 +243,7 @@ impl ToolPlugin for MoveTool {
             start: (input.x, input.y),
             offset: (0, 0),
             duplicated,
+            source,
         });
     }
 
@@ -242,45 +280,28 @@ impl ToolPlugin for MoveTool {
             input.y - drag.start.1,
             input.modifiers.shift,
         );
-        // Put the layer back where its pixels actually are, then record the
-        // move as one edit so undo restores the original position.
-        Self::undo_preview(ctx, drag.layer);
-        if dx == 0 && dy == 0 && !drag.duplicated {
-            return;
-        }
-        let name = if drag.duplicated {
-            "Duplicate and Move"
-        } else {
-            "Move Layer"
-        };
-        // The copy was inserted straight into the tree so the drag could
-        // move it live. Take it back out and let the edit put it in, so
-        // one undo removes the copy and the move together.
-        let reinsert = drag
-            .duplicated
-            .then(|| ctx.doc.tree.remove(drag.layer))
-            .flatten();
-        let mut edit = ctx.doc.begin_edit(name);
-        if let Some((path, layer)) = reinsert {
-            edit.insert_layer(path, layer);
-        }
-        edit.translate_layer(drag.layer, dx, dy);
-        edit.commit();
-        if drag.duplicated {
-            // `remove_layer` clears the active layer, and the reinsert
-            // above does not know it was the one selected.
-            ctx.doc.active_layer = Some(drag.layer);
-        }
+        Self::finish(ctx, drag, dx, dy);
     }
 
     fn on_cancel(&mut self, ctx: &mut ToolCtx) {
-        if let Some(drag) = self.drag.take() {
-            Self::undo_preview(ctx, drag.layer);
-            if drag.duplicated {
-                ctx.doc.tree.remove(drag.layer);
-                ctx.doc.damage_all();
-            }
+        let Some(drag) = self.drag.take() else { return };
+        Self::undo_preview(ctx, drag.layer);
+        if drag.duplicated {
+            ctx.doc.tree.remove(drag.layer);
+            // `remove` clears the active layer, and the copy it pointed
+            // at is gone: hand the selection back to the original.
+            ctx.doc.active_layer = Some(drag.source);
+            ctx.doc.damage_all();
         }
+    }
+
+    /// Switching tools mid-drag committed nothing and left the layer
+    /// sitting on its preview `render_offset`, which the next render
+    /// wrote nowhere.
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        let Some(drag) = self.drag.take() else { return };
+        let (dx, dy) = drag.offset;
+        Self::finish(ctx, drag, dx, dy);
     }
 
     // No overlay: the layer itself moves, so an outline would just be
@@ -966,6 +987,7 @@ mod tests {
     #[test]
     fn cancelling_an_alt_drag_removes_the_copy() {
         let mut doc = red_square_doc();
+        let original = doc.active_layer.unwrap();
         let before = doc.tree.len();
         let mut state = EditorState::default();
         let mut tool = MoveTool::new();
@@ -989,5 +1011,39 @@ mod tests {
         assert_eq!(ctx.doc.tree.len(), before + 1);
         tool.on_cancel(&mut ctx);
         assert_eq!(ctx.doc.tree.len(), before);
+        // And the selection goes back to the layer that is still there:
+        // it pointed at the deleted copy, so every later edit was dropped.
+        assert_eq!(ctx.doc.active_layer, Some(original));
+        assert!(ctx.doc.tree.find(original).is_some());
+    }
+
+    /// Switching tools mid-drag committed nothing and left the layer on
+    /// its preview offset.
+    #[test]
+    fn deactivating_mid_drag_commits_the_move() {
+        let mut doc = red_square_doc();
+        let id = doc.active_layer.unwrap();
+        let mut state = EditorState::default();
+        let mut tool = MoveTool::new();
+        let at = |x: f32, y: f32| PointerInput {
+            x,
+            y,
+            pressure: 1.0,
+            modifiers: Modifiers::default(),
+        };
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, at(60.0, 60.0));
+            tool.on_pointer_move(&mut ctx, at(120.0, 60.0));
+            tool.on_deactivate(&mut ctx);
+        }
+
+        assert_eq!(doc.tree.find(id).unwrap().render_offset, (0, 0));
+        assert_eq!(doc.history.undo_name(), Some("Move Layer"));
+        doc.undo();
+        assert_eq!(doc.history.undo_name(), None);
     }
 }

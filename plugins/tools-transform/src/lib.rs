@@ -90,6 +90,71 @@ pub enum TransformMode {
     Selection,
 }
 
+/// Split `tiles` into the selected pixels and everything else.
+///
+/// The floating half carries the selection's coverage in its alpha, and
+/// the residue has the same coverage taken out of it, so laying one back
+/// over the other reproduces the layer exactly while nothing has moved.
+fn lift(
+    tiles: &TileMap,
+    sel: &schist_core::Selection,
+    depth: schist_color::Depth,
+) -> (TileMap, TileMap) {
+    use schist_core::{TileCoord, TILE_PIXELS, TILE_SIZE};
+    let mut floating = TileMap::new();
+    let mut residue = tiles.clone();
+    let region = sel.bounds().intersect(&tiles.tile_bounds());
+    for coord in TileCoord::covering(&region) {
+        let Some(src) = tiles.get(coord).cloned() else {
+            continue;
+        };
+        let trect = coord.rect();
+        let mut cut = false;
+        let mut kept = (*src).clone();
+        let mut moved = schist_core::TileBuf::new(depth);
+        for i in 0..TILE_PIXELS {
+            let x = trect.left + (i as i32 % TILE_SIZE);
+            let y = trect.top + (i as i32 / TILE_SIZE);
+            let c = sel.coverage(x, y) as f32 / 255.0;
+            if c <= 0.0 {
+                continue;
+            }
+            cut = true;
+            let px = src.get(i);
+            moved.set(i, schist_color::Rgba { a: px.a * c, ..px });
+            kept.set(
+                i,
+                schist_color::Rgba {
+                    a: px.a * (1.0 - c),
+                    ..px
+                },
+            );
+        }
+        if cut {
+            floating.insert(coord, std::sync::Arc::new(moved));
+            residue.insert(coord, std::sync::Arc::new(kept));
+        }
+    }
+    (floating, residue)
+}
+
+/// `top` composited over `bottom`, tile by tile.
+fn over_tiles(bottom: &TileMap, top: &TileMap, depth: schist_color::Depth) -> TileMap {
+    use schist_core::TILE_PIXELS;
+    let mut out = bottom.clone();
+    for (coord, tile) in top.iter() {
+        let dst = out.get_mut_or_insert(*coord, depth);
+        for i in 0..TILE_PIXELS {
+            let src = tile.get(i);
+            if src.a <= 0.0 {
+                continue;
+            }
+            dst.set(i, src.over(dst.get(i)));
+        }
+    }
+    out
+}
+
 struct Session {
     mode: TransformMode,
     layer: LayerId,
@@ -97,6 +162,11 @@ struct Session {
     original: TileMap,
     /// Untransformed selection, for `TransformMode::Selection`.
     original_selection: schist_core::Selection,
+    /// With a selection up, Free Transform moves only what is selected:
+    /// the pixels are lifted off the layer and this holds the two halves,
+    /// the floating piece and what stays behind. `None` means the whole
+    /// layer moves.
+    lifted: Option<(TileMap, TileMap)>,
     /// Bounds of `original`, the box the handles frame.
     base: IntRect,
     /// Scale / rotation / skew accumulated so far.
@@ -130,6 +200,49 @@ impl Session {
             self.base.left as f32 + self.base.width() as f32 * self.pivot_anchor.0,
             self.base.top as f32 + self.base.height() as f32 * self.pivot_anchor.1,
         )
+    }
+
+    /// Move the pivot without moving the pixels.
+    ///
+    /// The matrix scales and rotates *about the pivot*, so changing the
+    /// pivot re-interprets everything accumulated so far. Compensating
+    /// the offset keeps the current matrix identical; without it, the
+    /// second press of a session jumped the layer by half its width.
+    ///
+    /// `offset` is composed ahead of the scale and rotation, so it lives
+    /// in pre-transform space: the correction has to go back through the
+    /// inverse linear map, or it lands scaled by however much the layer
+    /// has been scaled.
+    fn repivot(&mut self, anchor: (f32, f32)) {
+        if anchor == self.pivot_anchor {
+            return;
+        }
+        let before = self.matrix();
+        self.pivot_anchor = anchor;
+        let after = self.matrix();
+        // Both matrices share a linear part, so matching them at any one
+        // point matches them everywhere; the box centre will do.
+        let (cx, cy) = (
+            self.base.left as f32 + self.base.width() as f32 * 0.5,
+            self.base.top as f32 + self.base.height() as f32 * 0.5,
+        );
+        let (bx, by) = before.apply(cx, cy);
+        let (nx, ny) = after.apply(cx, cy);
+        let (dx, dy) = (bx - nx, by - ny);
+        // Undo the rotation, then the scale.
+        let (sin, cos) = (-self.rotation).sin_cos();
+        let (rx, ry) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        let sx = if self.scale.0.abs() < 1e-6 {
+            1.0
+        } else {
+            self.scale.0
+        };
+        let sy = if self.scale.1.abs() < 1e-6 {
+            1.0
+        } else {
+            self.scale.1
+        };
+        self.offset = (self.offset.0 + rx / sx, self.offset.1 + ry / sy);
     }
 
     /// Current matrix: scale, then rotate, both about the pivot, then
@@ -214,13 +327,18 @@ impl Session {
                 * self.scale.0.abs().max(self.scale.1.abs())) as i32,
         );
         let depth = doc.depth;
-        let tiles = schist_core::resample::transform_tiles(
-            &self.original,
-            &self.matrix(),
-            depth,
-            filter,
-            clip,
-        );
+        let source = match &self.lifted {
+            Some((floating, _)) => floating,
+            None => &self.original,
+        };
+        let tiles =
+            schist_core::resample::transform_tiles(source, &self.matrix(), depth, filter, clip);
+        // What was not selected never moved: put the floating piece back
+        // down on top of it.
+        let tiles = match &self.lifted {
+            Some((_, residue)) => over_tiles(residue, &tiles, depth),
+            None => tiles,
+        };
         let before = doc
             .tree
             .find(self.layer)
@@ -320,10 +438,20 @@ impl TransformTool {
         let LayerKind::Raster(raster) = &layer.kind else {
             return;
         };
-        let base = match self.mode {
-            TransformMode::Layer => raster.tiles.content_bounds(),
+        // Free Transform used to move the whole layer whatever was
+        // selected. With a selection up it moves only the selected
+        // pixels, as every other editor does.
+        // A smart object re-renders from its own source, so there is no
+        // half of it to lift: it transforms whole, as before.
+        let selected = self.mode == TransformMode::Layer
+            && layer.smart.is_none()
+            && !ctx.doc.selection.is_empty();
+        let lifted = selected.then(|| lift(&raster.tiles, &ctx.doc.selection, ctx.doc.depth));
+        let base = match (&lifted, self.mode) {
+            (Some((floating, _)), _) => floating.content_bounds(),
+            (None, TransformMode::Layer) => raster.tiles.content_bounds(),
             // The handles frame the selection, not the artwork.
-            TransformMode::Selection => ctx.doc.selection.bounds(),
+            (None, TransformMode::Selection) => ctx.doc.selection.bounds(),
         };
         if base.is_empty() {
             return;
@@ -333,6 +461,7 @@ impl TransformTool {
             layer: id,
             original: raster.tiles.clone(),
             original_selection: ctx.doc.selection.clone(),
+            lifted,
             base,
             scale: (1.0, 1.0),
             rotation: 0.0,
@@ -428,12 +557,18 @@ impl ToolPlugin for TransformTool {
                 // Pin the handle opposite the one being dragged, so the
                 // dragged one lands under the cursor. Alt asks for the
                 // centre, which is Photoshop's scale-from-centre.
+                // Moving the pivot re-interprets the transform already
+                // accumulated about the old one, so the offset has to
+                // absorb the difference. Without this, scaling with one
+                // handle and then clicking to move jumped the layer by
+                // half its width on the second press.
                 let (ax, ay) = handle.anchor();
-                session.pivot_anchor = if input.modifiers.alt {
+                let next = if input.modifiers.alt {
                     (0.5, 0.5)
                 } else {
                     (1.0 - ax, 1.0 - ay)
                 };
+                session.repivot(next);
                 session.drag = Some(Drag {
                     handle,
                     start: (input.x, input.y),
@@ -470,20 +605,35 @@ impl ToolPlugin for TransformTool {
                 session.rotation = drag.start_rotation + delta;
             }
             _ => {
-                // Scale about the opposite edge/corner: distance from the
-                // pivot along each axis grows with the drag.
-                let half_w = (session.base.width() as f32 / 2.0).max(1.0);
-                let half_h = (session.base.height() as f32 / 2.0).max(1.0);
+                // How far the handle sits from the pivot is what the
+                // scale multiplies, so it also sets how fast the handle
+                // follows the cursor. Deriving it from the live pivot
+                // covers Alt too: scale-from-centre halves the arm, and
+                // the fixed divisor left that handle moving at half the
+                // cursor's speed.
                 let (ax, ay) = handle.anchor();
-                let dir_x = (ax - 0.5) * 2.0;
-                let dir_y = (ay - 0.5) * 2.0;
+                let (pax, pay) = session.pivot_anchor;
+                // At least a pixel of arm, or a degenerate layer divides
+                // by ~0 and the scale explodes.
+                let arm = |a: f32, p: f32, extent: i32| -> f32 {
+                    let v = (a - p) * extent as f32;
+                    if v.abs() < 1.0 {
+                        if v < 0.0 {
+                            -1.0
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        v
+                    }
+                };
                 let mut sx = drag.start_scale.0;
                 let mut sy = drag.start_scale.1;
-                if handle.scales_x() && dir_x != 0.0 {
-                    sx = drag.start_scale.0 + dx * dir_x / half_w / 2.0;
+                if handle.scales_x() && ax != pax {
+                    sx = drag.start_scale.0 + dx / arm(ax, pax, session.base.width());
                 }
-                if handle.scales_y() && dir_y != 0.0 {
-                    sy = drag.start_scale.1 + dy * dir_y / half_h / 2.0;
+                if handle.scales_y() && ay != pay {
+                    sy = drag.start_scale.1 + dy / arm(ay, pay, session.base.height());
                 }
                 if input.modifiers.shift && handle.scales_x() && handle.scales_y() {
                     // Constrain proportions from the larger change.
@@ -500,14 +650,8 @@ impl ToolPlugin for TransformTool {
                 // empty map and the layer vanishes. A later Shift-drag
                 // divides by that 0 and produces NaN, which `det.abs() <
                 // 1e-9` does not catch, so the NaN matrix saturates the
-                // bounds to empty and the commit records the empty result.
-                // Keep at least one pixel on each axis. Scale 0 has no
-                // invertible matrix, so `transform_tiles` returned an
-                // empty map and the layer vanished; a later Shift-drag
-                // then divided by that 0 and produced NaN, which
-                // `det.abs() < 1e-9` does not catch, so the NaN matrix
-                // saturated the bounds to empty and the commit recorded
-                // the empty result.
+                // bounds to empty and the commit records the empty
+                // result. Keep at least one pixel on each axis.
                 let clamp = |v: f32, start: f32, extent: i32| {
                     if !v.is_finite() {
                         return start;
@@ -553,13 +697,10 @@ impl ToolPlugin for TransformTool {
             .canvas_rect()
             .inflated(session.base.width().max(session.base.height()));
         if session.mode == TransformMode::Selection {
-            // Only the mask moves; the pixels are untouched, so this is one
-            // selection edit rather than a tile rewrite. (`restore` already
-            // ran above; calling it twice was harmless but obscured the
-            // control flow.)
-            // selection edit rather than a tile rewrite. (`restore` above
-            // has already run; calling it a second time here was
-            // idempotent but obscured the flow.)
+            // Only the mask moves; the pixels are untouched, so this is
+            // one selection edit rather than a tile rewrite. (`restore`
+            // already ran above; calling it twice was harmless but
+            // obscured the control flow.)
             let canvas = ctx.doc.canvas_rect();
             let matrix = session.matrix();
             let base = session.original_selection.clone();
@@ -582,34 +723,48 @@ impl ToolPlugin for TransformTool {
                 next.apply(&session.matrix());
                 next
             });
+        let source = match &session.lifted {
+            Some((floating, _)) => floating,
+            None => &session.original,
+        };
         let tiles = match &smart {
             Some(so) => so.render(depth, clip),
             None => schist_core::resample::transform_tiles(
-                &session.original,
+                source,
                 &session.matrix(),
                 depth,
                 ctx.state.resample,
                 clip,
             ),
         };
+        // Only the selected pixels moved: they go back down over the ones
+        // that stayed.
+        let tiles = match &session.lifted {
+            Some((_, residue)) => over_tiles(residue, &tiles, depth),
+            None => tiles,
+        };
         // The mask moves with the artwork it clips. Leaving it behind cut
-        // the transformed layer along the mask's old outline.
+        // the transformed layer along the mask's old outline. When only
+        // the selected pixels moved the mask stays put: it still clips
+        // the same layer.
         let moved_mask = ctx
             .doc
             .tree
             .find(session.layer)
+            .filter(|_| session.lifted.is_none())
             .and_then(|l| l.mask.as_ref())
             .map(|mask| {
                 let mut next = mask.clone();
-                next.tiles = schist_core::resample::transform_mask(
-                    &mask.tiles,
-                    mask.default_value,
-                    &session.matrix(),
-                    clip,
-                );
+                next.tiles = schist_core::resample::transform_mask(mask, &session.matrix(), clip);
                 next.bounds = session.matrix().transform_bounds(mask.bounds);
                 next
             });
+        let canvas = ctx.doc.canvas_rect();
+        let moved_selection = session.lifted.is_some().then(|| {
+            session
+                .original_selection
+                .transformed(&session.matrix(), canvas)
+        });
         let mut edit = ctx.doc.begin_edit("Free Transform");
         edit.replace_layer_tiles(session.layer, tiles);
         if let Some(mask) = moved_mask {
@@ -617,6 +772,10 @@ impl ToolPlugin for TransformTool {
         }
         if let Some(so) = smart {
             edit.set_smart_object(session.layer, Some(Box::new(so)));
+        }
+        // The marching ants follow the pixels they were holding.
+        if let Some(sel) = moved_selection {
+            edit.change_selection(|s, _| *s = sel);
         }
         edit.commit();
     }
@@ -1166,8 +1325,7 @@ fn rescale_masks(edit: &mut schist_core::EditBuilder, from: (u32, u32), to: (u32
         let Some(mask) = edit.doc().tree.find(id).and_then(|l| l.mask.as_ref()) else {
             continue;
         };
-        let tiles =
-            schist_core::resample::transform_mask(&mask.tiles, mask.default_value, &m, clip);
+        let tiles = schist_core::resample::transform_mask(mask, &m, clip);
         let mut next = mask.clone();
         next.tiles = tiles;
         next.bounds = m.transform_bounds(mask.bounds).intersect(&clip);
@@ -1244,6 +1402,52 @@ mod tests {
             .tiles
             .pixel(x, y)
             .to_u8()
+    }
+
+    #[test]
+    fn free_transform_moves_only_the_selected_pixels() {
+        // It transformed the whole layer whatever was selected, so a
+        // selection was a suggestion rather than a boundary.
+        use schist_core::SelectOp;
+        let mut doc = doc_with_square();
+        doc.active_layer = Some(doc.tree.layers[0].id);
+        // The left half of the 20..60 square.
+        doc.selection
+            .select_rect(IntRect::from_xywh(20, 20, 20, 40), SelectOp::Replace);
+        let mut state = EditorState {
+            zoom: 1.0,
+            ..EditorState::default()
+        };
+        let mut tool = TransformTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_activate(&mut ctx);
+            // The handles frame the selected pixels, not the layer.
+            let base = tool.session.as_ref().unwrap().base;
+            assert!(base.right <= 41, "the box frames the selection: {base:?}");
+            // Drag the middle of the box 100 px right.
+            let (cx, cy) = (
+                base.left as f32 + base.width() as f32 / 2.0,
+                base.top as f32 + base.height() as f32 / 2.0,
+            );
+            tool.on_pointer_down(&mut ctx, input(cx, cy));
+            tool.on_pointer_move(&mut ctx, input(cx + 100.0, cy));
+            tool.on_pointer_up(&mut ctx, input(cx + 100.0, cy));
+            tool.on_commit(&mut ctx);
+        }
+
+        // The selected half moved...
+        assert_eq!(px(&doc, 30, 40)[3], 0, "the lifted pixels left a hole");
+        assert_eq!(px(&doc, 130, 40), [0, 128, 255, 255]);
+        // ...and the unselected half stayed exactly where it was.
+        assert_eq!(px(&doc, 50, 40), [0, 128, 255, 255]);
+        // One undo puts the layer back.
+        doc.undo();
+        assert_eq!(px(&doc, 30, 40), [0, 128, 255, 255]);
+        assert_eq!(px(&doc, 130, 40)[3], 0);
     }
 
     #[test]
@@ -1514,6 +1718,10 @@ mod tests {
         {
             let layer = doc.tree.find_mut(id).unwrap();
             let mut mask = LayerMask::new_revealing();
+            // Hidden outside `bounds`, so the mask really is "left half
+            // only" rather than "left half plus everything a revealing
+            // default lets through".
+            mask.default_value = 0;
             // Reveal the left half of the document.
             for coord in schist_core::TileCoord::covering(&IntRect::from_xywh(0, 0, 100, 200)) {
                 let trect = coord.rect();
@@ -1548,6 +1756,45 @@ mod tests {
             "mask bounds must be inside the new canvas: {:?}",
             mask.bounds
         );
+    }
+
+    #[test]
+    fn resampling_a_mask_keeps_what_lies_outside_its_bounds() {
+        // A revealing mask is 255 everywhere outside `bounds`. Resampling
+        // read the bare tile map instead, which is 0 out there, so every
+        // Image Size grew a hidden border along the mask's edge.
+        use schist_core::LayerMask;
+        let mut doc = doc_with_square();
+        let id = doc.tree.layers[0].id;
+        {
+            let layer = doc.tree.find_mut(id).unwrap();
+            let mut mask = LayerMask::new_revealing();
+            // A small hidden dot; everything else is revealed by default.
+            let coord = schist_core::TileCoord::containing(10, 10);
+            let trect = coord.rect();
+            let buf = mask.tiles.get_mut_or_insert(coord);
+            for ly in 0..schist_core::TILE_SIZE {
+                for lx in 0..schist_core::TILE_SIZE {
+                    let (x, y) = (trect.left + lx, trect.top + ly);
+                    if (0..20).contains(&x) && (0..20).contains(&y) {
+                        buf[(ly * schist_core::TILE_SIZE + lx) as usize] = 0;
+                    } else {
+                        buf[(ly * schist_core::TILE_SIZE + lx) as usize] = 255;
+                    }
+                }
+            }
+            mask.bounds = IntRect::from_xywh(0, 0, 20, 20);
+            layer.mask = Some(mask);
+        }
+
+        resize_image(&mut doc, 100, 100, Filter::Bilinear);
+
+        let mask = doc.tree.find(id).unwrap().mask.as_ref().expect("mask kept");
+        // The dot halved with the canvas...
+        assert!(mask.value(4, 4) < 55, "the hidden dot survives");
+        // ...and the rest of the layer is still revealed.
+        assert!(mask.value(50, 50) > 200, "outside the dot stays revealed");
+        assert!(mask.value(90, 12) > 200, "including past the old bounds");
     }
 
     #[test]
@@ -1587,6 +1834,61 @@ mod tests {
             assert!(
                 (moved.right - (base.right + 40)).abs() <= 1,
                 "the dragged edge must land under the cursor: {moved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alt_scale_handle_follows_the_cursor_too() {
+        // Alt scales from the centre, which halves the distance from the
+        // pivot to the handle. The divisor was fixed at the opposite-
+        // corner arm, so the Alt handle moved at half the cursor's speed
+        // -- the very lag this tool was meant to have lost.
+        let mut doc = doc_with_square();
+        let mut state = EditorState {
+            zoom: 1.0,
+            ..EditorState::default()
+        };
+        let mut tool = TransformTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_activate(&mut ctx);
+            let base = tool.session.as_ref().unwrap().base;
+            let (hx, hy) = (
+                base.right as f32,
+                base.top as f32 + base.height() as f32 / 2.0,
+            );
+            let alt = PointerInput {
+                x: hx,
+                y: hy,
+                pressure: 1.0,
+                modifiers: Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            };
+            tool.on_pointer_down(&mut ctx, alt);
+            tool.on_pointer_move(
+                &mut ctx,
+                PointerInput {
+                    x: hx + 40.0,
+                    ..alt
+                },
+            );
+
+            let session = tool.session.as_ref().unwrap();
+            let moved = session.matrix().transform_bounds(base);
+            assert!(
+                (moved.right - (base.right + 40)).abs() <= 1,
+                "the dragged edge must land under the cursor: {moved:?}"
+            );
+            // And the far edge mirrors it, because the centre is pinned.
+            assert!(
+                (moved.left - (base.left - 40)).abs() <= 1,
+                "the opposite edge must mirror: {moved:?}"
             );
         }
     }
@@ -1731,6 +2033,45 @@ mod tests {
                 session.hit(hx, hy, zoom),
                 Some(Handle::Rotate),
                 "at {zoom}x"
+            );
+        }
+    }
+
+    /// The pivot moves per drag, and the matrix scales about it, so a
+    /// second press re-interpreted everything already accumulated: scale
+    /// with the right handle, release, then just click inside the box and
+    /// the layer jumped by half its width.
+    #[test]
+    fn a_second_press_does_not_move_the_layer() {
+        let mut doc = doc_with_square();
+        let mut state = EditorState::default();
+        let mut tool = TransformTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_activate(&mut ctx);
+        let (rx, ry) = tool
+            .session
+            .as_ref()
+            .unwrap()
+            .handle_pos(Handle::Right, 1.0);
+
+        // Scale with the right handle.
+        tool.on_pointer_down(&mut ctx, input(rx, ry));
+        tool.on_pointer_move(&mut ctx, input(rx + 60.0, ry));
+        tool.on_pointer_up(&mut ctx, input(rx + 60.0, ry));
+        let after_scale = tool.session.as_ref().unwrap().corners();
+
+        // Press inside the box without moving: nothing should shift.
+        let (cx, cy) = tool.session.as_ref().unwrap().pivot();
+        tool.on_pointer_down(&mut ctx, input(cx, cy));
+        let after_press = tool.session.as_ref().unwrap().corners();
+
+        for (a, b) in after_scale.iter().zip(&after_press) {
+            assert!(
+                (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01,
+                "the box jumped on the second press: {a:?} -> {b:?}"
             );
         }
     }

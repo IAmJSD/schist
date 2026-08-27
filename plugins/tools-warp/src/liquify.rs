@@ -127,14 +127,6 @@ impl LiquifyTool {
         });
     }
 
-    /// Re-render `region` of the layer from the snapshot through the
-    /// current mesh.
-    ///
-    /// Only the pixels a dab could have changed are redone. Everywhere else
-    /// the layer already holds the right answer: a render always goes from
-    /// the frozen snapshot through the mesh, and a dab only moves the
-    /// vertices under the brush, so the rest of the layer was warped
-    /// through offsets that still stand.
     /// The region the live mesh covers, for tests and for anything that
     /// needs to know how far a warp can reach.
     pub fn mesh_rect(&self) -> Option<IntRect> {
@@ -151,6 +143,14 @@ impl LiquifyTool {
         })
     }
 
+    /// Re-render `region` of the layer from the snapshot through the
+    /// current mesh.
+    ///
+    /// Only the pixels a dab could have changed are redone. Everywhere else
+    /// the layer already holds the right answer: a render always goes from
+    /// the frozen snapshot through the mesh, and a dab only moves the
+    /// vertices under the brush, so the rest of the layer was warped
+    /// through offsets that still stand.
     fn render(&self, doc: &mut Document, region: IntRect) {
         let Some(session) = &self.session else { return };
         let region = region.intersect(&doc.canvas_rect());
