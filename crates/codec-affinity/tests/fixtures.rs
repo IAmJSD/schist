@@ -361,6 +361,19 @@ fn documents_import() {
     }
 }
 
+/// The app rebuilds styled rasters when a document opens; the probe
+/// comparison has to do the same for layer effects to composite.
+fn restyle(layers: &mut [schist_core::Layer]) {
+    for l in layers {
+        if let schist_core::LayerKind::Group(g) = &mut l.kind {
+            restyle(&mut g.children);
+        }
+        if !l.style.is_empty() {
+            l.styled = schist_compositor::render_styled(l).map(std::sync::Arc::new);
+        }
+    }
+}
+
 /// The adjustment fixtures in fixtures/affinity-probe were each drawn in
 /// Affinity itself — one document per adjustment type, distinctive
 /// slider values — and their embedded thumbnails are Affinity's own
@@ -383,9 +396,17 @@ fn probed_adjustments_match_affinitys_render() {
         ("exposure.af", 1.0),
         ("gradientmap.af", 0.5),
         ("hsl_hue.af", 1.0),
+        ("hsl_hue_neg.af", 0.5),
         ("hsl_lum.af", 0.5),
+        ("hsl_lum_neg.af", 0.5),
         ("hsl_probe.af", 0.5),
+        ("hsl_range_green_lum.af", 0.5),
+        ("hsl_range_green_lumneg.af", 0.5),
+        ("hsl_range_mix.af", 0.5),
+        ("hsl_range_red_hue.af", 0.5),
+        ("hsl_range_red_sat.af", 0.5),
         ("hsl_sat.af", 0.5),
+        ("hsl_sat_neg.af", 0.5),
         ("invert.af", 0.5),
         ("lensfilter.af", 8.0), // fitted density scale
         ("levels.af", 2.0),
@@ -394,11 +415,41 @@ fn probed_adjustments_match_affinitys_render() {
         ("selectivecolour.af", 4.0),
         ("splittoning.af", 8.0), // no-op layer keeping its native data
         ("threshold.af", 8.0),   // saturated-colour boundary differs
-        ("vibrance.af", 12.0),   // formula differs on saturated colour
-        ("wb_tint.af", 1.0),
-        ("wb_warm.af", 3.5),
-        ("wb_warm30.af", 2.5),
-        ("whitebalance.af", 2.5), // Bradford + calibrated grey gains
+        ("sat_only50.af", 2.0), // Lab chroma scale, gamut clipping aside
+        ("sat_only_neg50.af", 2.0),
+        ("vib_only100.af", 11.0), // Affinity's vibrance weighting is unmapped
+        ("vib_only50.af", 8.0),
+        ("vibrance.af", 6.0), // both sliders: the saturation half is exact
+        ("wb_cool100.af", 0.5),
+        ("wb_cool30.af", 0.5),
+        ("wb_cool50.af", 0.5),
+        ("wb_tint.af", 0.5),
+        ("wb_tint_neg.af", 0.5),
+        ("wb_warm.af", 0.5),
+        ("wb_warm30.af", 0.5),
+        // Both sliders at once: Affinity moves one white point in two
+        // dimensions, so the measured tables' product is a shade off.
+        ("whitebalance.af", 2.5),
+        // Layer effects, one probe document per panel setting: the
+        // mapping is exact, the residuals below are our own effect
+        // renderers' falloffs against Affinity's.
+        ("fx_bevel_emboss.af", 11.0),
+        ("fx_bevel_inner.af", 7.0),
+        ("fx_bevel_outer.af", 4.0),
+        ("fx_bevel_pillow.af", 16.0),
+        ("fx_glow_outer.af", 0.5),
+        ("fx_gradient_overlay.af", 0.5),
+        ("fx_inner_glow.af", 22.0), // Affinity's intensity ramp is harder
+        ("fx_inner_shadow.af", 4.0),
+        ("fx_shadow_spread.af", 11.0),
+        ("fx_stroke_centre.af", 11.0),
+        ("fx_stroke_inside.af", 6.0),
+        ("fx_stroke_outside.af", 10.0),
+        // Effects and filters we don't implement at all: the bound is
+        // the size of the gap, and drops when we do.
+        ("fx_3d.af", 11.0),             // PhgB, the 3D effect
+        ("fx_gaussian.af", 30.0),       // Gaus, no layer-style home
+        ("flrn_perspective.af", 100.0), // a live warp, not resampled
         // Shapes — each drawn once with its tool; the embedded
         // thumbnail is Affinity's own render of it.
         ("shp_arrow.af", 1.0),
@@ -431,7 +482,10 @@ fn probed_adjustments_match_affinitys_render() {
         let thumb = image::load_from_memory(archive.thumbnail().expect("thumb"))
             .expect("decode")
             .to_rgba8();
-        let (doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+        let (mut doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+        // The app rebuilds styled rasters when a document opens; without
+        // that the layer-effect fixtures would composite bare.
+        restyle(&mut doc.tree.layers);
         let region = schist_core::IntRect::from_size(doc.width, doc.height);
         let pixels = schist_compositor::composite_region_rgba8(&doc, region);
         let ours = image::RgbaImage::from_raw(doc.width, doc.height, pixels).expect("buffer");

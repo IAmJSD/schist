@@ -270,6 +270,47 @@ impl Curves {
     }
 }
 
+/// One of Affinity's six per-hue-range tweaks on an HSL adjustment.
+///
+/// The range is a trapezoid over the hue circle: weight 0 outside
+/// `bounds[0]`..`bounds[3]`, ramping up to 1 across `bounds[0]`..
+/// `bounds[1]`, flat until `bounds[2]`, ramping back down by
+/// `bounds[3]` (degrees, wrapping — reds are 315, 345, 15, 45). The
+/// six defaults overlap on their ramps, so the weights of the whole
+/// set sum to 1 at every hue. Each range's shifts are added to the
+/// master ones, weighted, before the sliders' transfer curves run.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HueRange {
+    /// Trapezoid corners in degrees, ascending around the circle.
+    pub bounds: [f32; 4],
+    /// -180..180 degrees.
+    pub hue: f32,
+    /// -100..100.
+    pub saturation: f32,
+    /// -100..100.
+    pub lightness: f32,
+}
+
+impl HueRange {
+    /// How much this range claims of a pixel at hue `h` (degrees).
+    pub fn weight(&self, h: f32) -> f32 {
+        let [b0, b1, b2, b3] = self.bounds;
+        let span = |a: f32, b: f32| (b - a).rem_euclid(360.0);
+        let (d, up, flat, down) = (span(b0, h), span(b0, b1), span(b0, b2), span(b0, b3));
+        if d >= down {
+            0.0
+        } else if d < up {
+            if up > 0.0 { d / up } else { 1.0 }
+        } else if d <= flat {
+            1.0
+        } else if down > flat {
+            (down - d) / (down - flat)
+        } else {
+            1.0
+        }
+    }
+}
+
 /// Everything an adjustment layer can do.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Params {
@@ -294,6 +335,11 @@ pub enum Params {
         /// Imports from Affinity set this too.
         #[serde(default)]
         reciprocal_saturation: bool,
+        /// Affinity's per-hue-range tweaks, added to the master
+        /// sliders in proportion to each range's weight at the
+        /// pixel's own hue. Empty for a master-only adjustment.
+        #[serde(default)]
+        ranges: Vec<HueRange>,
     },
     BrightnessContrast {
         /// -100..100.
@@ -405,6 +451,7 @@ impl Params {
                 colorize: false,
                 lightness_desaturates: false,
                 reciprocal_saturation: false,
+                ranges: Vec::new(),
             },
             AdjustmentKind::BrightnessContrast => Params::BrightnessContrast {
                 brightness: 0.0,
@@ -519,13 +566,30 @@ impl Params {
                 colorize,
                 lightness_desaturates,
                 reciprocal_saturation,
+                ranges,
             } => {
                 let (h, s, l) = rgb_to_hsl(px.r, px.g, px.b);
+                // Per-range hue and saturation tweaks simply add to the
+                // master sliders, weighted by the pixel's own
+                // (unshifted) hue. Per-range *lightness* does not: it is
+                // a separate, hue-preserving pull of every channel
+                // toward the brightest one, applied to the result below
+                // (fixtures/affinity-probe/hsl_range_green_lum.af).
                 let desat = if *lightness_desaturates {
                     (1.0 - lightness.abs() / 100.0).clamp(0.0, 1.0)
                 } else {
                     1.0
                 };
+                let (mut hue, mut saturation, mut range_lightness) = (*hue, *saturation, 0.0f32);
+                for range in ranges {
+                    let w = range.weight(h);
+                    if w > 0.0 {
+                        hue += w * range.hue;
+                        saturation += w * range.saturation;
+                        range_lightness += w * range.lightness;
+                    }
+                }
+                let (hue, saturation) = (&hue, &saturation);
                 let shifted = if *reciprocal_saturation && *saturation > 0.0 {
                     s / (1.0 - saturation / 100.0).max(0.02)
                 } else {
@@ -545,6 +609,7 @@ impl Params {
                     )
                 };
                 let (r, g, b) = hsl_to_rgb(nh, ns, nl);
+                let (r, g, b) = pull_to_extreme(r, g, b, range_lightness / 100.0);
                 Rgba { r, g, b, a: px.a }
             }
             Params::BrightnessContrast {
@@ -684,10 +749,17 @@ impl Params {
                 let max = px.r.max(px.g).max(px.b);
                 let min = px.r.min(px.g).min(px.b);
                 let sat = max - min;
-                // Vibrance leans on the least saturated pixels, which is
-                // what keeps skin tones from going lurid.
-                let amount = saturation / 100.0 + (vibrance / 100.0) * (1.0 - sat);
-                saturate(px, amount)
+                // Affinity's Saturation slider is a straight scale of
+                // CIELAB chroma: across the probe card, every pixel
+                // that stays in gamut comes back at exactly
+                // 1 + amount times its chroma (measured 1.500 for the
+                // 50 % fixture, sd 0.01, against 15 RMS for an HSL
+                // saturation scale and 11 for a luma push). Vibrance
+                // still leans on the least saturated pixels, which is
+                // what keeps skin tones from going lurid — Affinity's
+                // own weighting is subtler than that and unmapped.
+                let k = (1.0 + saturation / 100.0) * (1.0 + (vibrance / 100.0) * (1.0 - sat));
+                scale_chroma(px, k)
             }
             Params::Exposure {
                 exposure,
@@ -823,6 +895,27 @@ impl Params {
     pub fn display_name(&self) -> &'static str {
         self.kind().display_name()
     }
+}
+
+/// Affinity's per-hue-range luminosity shift: a hue-preserving pull of
+/// every channel toward the brightest one (`amount` > 0, lightening) or
+/// toward the darkest one (`amount` < 0), by `|amount|` of the way.
+/// Both extremes stay put, so the hue and the HSV value or saturation —
+/// whichever the move doesn't touch — survive exactly. Measured against
+/// hsl_range_green_lum.af and hsl_range_green_lumneg.af, which pin both
+/// directions to the last unit in 8 bits.
+fn pull_to_extreme(r: f32, g: f32, b: f32, amount: f32) -> (f32, f32, f32) {
+    if amount == 0.0 {
+        return (r, g, b);
+    }
+    let target = if amount > 0.0 {
+        r.max(g).max(b)
+    } else {
+        r.min(g).min(b)
+    };
+    let k = amount.abs().clamp(0.0, 1.0);
+    let pull = |c: f32| c + (target - c) * k;
+    (pull(r), pull(g), pull(b))
 }
 
 fn adjust_lightness(l: f32, amount: f32) -> f32 {
@@ -1111,6 +1204,7 @@ fn parse_hue_sat(raw: &[u8]) -> Params {
             colorize,
             lightness_desaturates: false,
             reciprocal_saturation: false,
+            ranges: Vec::new(),
         },
         _ => Params::Unsupported,
     }
@@ -1279,6 +1373,7 @@ mod tests {
             colorize: false,
             lightness_desaturates: false,
             reciprocal_saturation: false,
+            ranges: Vec::new(),
         };
         let out = params.apply(px(1.0, 0.0, 0.0));
         assert!(out.g > 0.9 && out.r < 0.1, "{out:?}");
@@ -1293,6 +1388,7 @@ mod tests {
             colorize: false,
             lightness_desaturates: false,
             reciprocal_saturation: false,
+            ranges: Vec::new(),
         };
         let out = params.apply(px(0.8, 0.2, 0.4));
         assert!(
@@ -2061,6 +2157,7 @@ mod prepared_tests {
             colorize: false,
             lightness_desaturates: false,
             reciprocal_saturation: false,
+            ranges: Vec::new(),
         };
         assert!(matches!(hue.prepare(), Prepared::Direct(_)));
         let px = Rgba::new(0.8, 0.2, 0.4, 1.0);
@@ -2087,16 +2184,88 @@ mod prepared_tests {
 /// Bradford chromatic adaptation for [`Params::WhiteBalance`]. The
 /// diagonal cone gains are chosen so the grey axis moves by the
 /// calibrated per-channel linear gains for this warmth/tint.
+/// Affinity's warmth slider, measured: the linear-light grey log-gains
+/// it applies at every tenth of its range, from -100 (cool) to +100
+/// (warm). Solved per fixture by fitting the gains of the Bradford
+/// adaptation below to Affinity's own render of the probe test card —
+/// each fit lands within 0.3/255 RMS, so the adaptation *is* the
+/// operation and only these gains were ever in question. The curve is
+/// markedly asymmetric (+10 moves nearly three times as far as -10, and
+/// warming saturates while cooling runs away), which is why the earlier
+/// mirrored-quadratic fit missed the cooling half.
+const WARMTH_LOG_GAINS: [[f32; 3]; 21] = [
+    [-1.066_140_8, 0.124_861_58, 1.085_302_5],
+    [-0.771_848_3, 0.101_186_51, 0.903_488_3],
+    [-0.579_433_7, 0.081_628_76, 0.747_089_0],
+    [-0.441_393_9, 0.064_658_24, 0.610_910_9],
+    [-0.335_628_2, 0.051_187_27, 0.491_378_4],
+    [-0.251_684_2, 0.038_791_68, 0.385_404_0],
+    [-0.182_746_1, 0.028_956_54, 0.291_194_9],
+    [-0.126_031_4, 0.019_863_86, 0.207_869_5],
+    [-0.078_470_71, 0.011_565_35, 0.131_245_83],
+    [-0.036_664_08, 0.005_242_18, 0.062_403_7],
+    [0.0, 0.0, 0.0],
+    [0.115_865_47, -0.017_772_31, -0.221_109_92],
+    [0.188_446_02, -0.028_601_73, -0.377_630_32],
+    [0.238_142_49, -0.034_957_6, -0.494_250_24],
+    [0.273_799_57, -0.038_461_82, -0.584_949_92],
+    [0.300_928_86, -0.040_617_4, -0.655_367_08],
+    [0.321_281_37, -0.042_763_06, -0.713_570_89],
+    [0.337_165_49, -0.043_341_38, -0.763_241_73],
+    [0.349_603_6, -0.044_069_05, -0.803_047_2],
+    [0.359_788_22, -0.043_880_67, -0.838_493_23],
+    [0.369_014_0, -0.043_403_02, -0.867_859_34],
+];
+
+/// The tint slider's grey log-gains, measured the same way at every
+/// fifth of its range. Note the sign: `WBTi` on disk is the *negation*
+/// of the Tint field Affinity shows, so this table is indexed by the
+/// stored value (positive = the UI's green direction), matching what
+/// the importer hands us. Like warmth, it is neither linear nor
+/// symmetric.
+const TINT_LOG_GAINS: [[f32; 3]; 11] = [
+    [0.188_686_56, -0.094_765_3, 0.348_664_35],
+    [0.154_797_69, -0.076_550_72, 0.272_947_68],
+    [0.119_324_28, -0.056_674_22, 0.200_040_82],
+    [0.082_791_54, -0.037_263_72, 0.131_661_3],
+    [0.041_722_29, -0.019_361_82, 0.064_003_38],
+    [0.0, 0.0, 0.0],
+    [-0.044_928_24, 0.020_042_06, -0.062_391_93],
+    [-0.094_376_62, 0.039_050_96, -0.123_218_58],
+    [-0.145_803_22, 0.059_505_64, -0.182_253_42],
+    [-0.203_076_29, 0.078_741_57, -0.240_934_16],
+    [-0.263_430_94, 0.100_587_59, -0.298_225_23],
+];
+
+/// Read one of the measured tables at `pos` in -1..=1, interpolating
+/// linearly between its knots.
+fn slider_log_gains(table: &[[f32; 3]], pos: f32) -> [f32; 3] {
+    let last = table.len() - 1;
+    let x = ((pos.clamp(-1.0, 1.0) + 1.0) / 2.0) * last as f32;
+    let i = (x.floor() as usize).min(last - 1);
+    let f = x - i as f32;
+    let (a, b) = (table[i], table[i + 1]);
+    [
+        a[0] + (b[0] - a[0]) * f,
+        a[1] + (b[1] - a[1]) * f,
+        a[2] + (b[2] - a[2]) * f,
+    ]
+}
+
 fn white_balance(px: Rgba, warmth: f32, tint: f32) -> Rgba {
-    let (w, t) = (warmth / 100.0, tint / 100.0);
-    // Calibrated linear-light grey gains: warmth log-gains are
-    // quadratic (fitted at warmth 30 and 50, extended oddly so cooling
-    // mirrors warming), tint linear (fitted at tint 60).
-    let ww = w * w.abs();
+    // Each slider's measured grey gains, multiplied together. The two
+    // are not quite independent — Affinity moves one white point in two
+    // dimensions rather than adapting twice — so a document using both
+    // lands a little short of the product (about 0.7/255 RMS on the
+    // probe card at warmth 30, tint 40); either slider alone is exact.
+    let (kw, kt) = (
+        slider_log_gains(&WARMTH_LOG_GAINS, warmth / 100.0),
+        slider_log_gains(&TINT_LOG_GAINS, tint / 100.0),
+    );
     let g = [
-        (1.0095 * w - 0.975 * ww - 0.245 * t).exp(),
-        (-0.1845 * w + 0.2307 * ww + 0.100 * t).exp(),
-        (-2.1415 * w + 1.645 * ww - 0.306 * t).exp(),
+        (kw[0] + kt[0]).exp(),
+        (kw[1] + kt[1]).exp(),
+        (kw[2] + kt[2]).exp(),
     ];
     // Bradford cone matrix times sRGB->XYZ (D65), and its inverse.
     const B: [[f32; 3]; 3] = [
@@ -2197,6 +2366,85 @@ fn relight(px: Rgba, target: f32) -> Rgba {
         r: (px.r * k).clamp(0.0, 1.0),
         g: (px.g * k).clamp(0.0, 1.0),
         b: (px.b * k).clamp(0.0, 1.0),
+        a: px.a,
+    }
+}
+
+/// Scale a pixel's CIELAB chroma about its own lightness, keeping hue,
+/// and clip back into sRGB. Affinity saturates this way.
+fn scale_chroma(px: Rgba, k: f32) -> Rgba {
+    const M: [[f32; 3]; 3] = [
+        [0.4124, 0.3576, 0.1805],
+        [0.2126, 0.7152, 0.0722],
+        [0.0193, 0.1192, 0.9505],
+    ];
+    const MI: [[f32; 3]; 3] = [
+        [3.240_97, -1.537_383, -0.498_611],
+        [-0.969_244, 1.875_968, 0.041_555],
+        [0.055_63, -0.203_977, 1.056_972],
+    ];
+    let dec = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let enc = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let mul = |m: &[[f32; 3]; 3], v: [f32; 3]| {
+        [
+            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+        ]
+    };
+    const D: f32 = 6.0 / 29.0;
+    let f = |t: f32| {
+        if t > D * D * D {
+            t.cbrt()
+        } else {
+            t / (3.0 * D * D) + 4.0 / 29.0
+        }
+    };
+    let fi = |t: f32| {
+        if t > D {
+            t * t * t
+        } else {
+            3.0 * D * D * (t - 4.0 / 29.0)
+        }
+    };
+    let white = mul(&M, [1.0, 1.0, 1.0]);
+    let xyz = mul(&M, [dec(px.r), dec(px.g), dec(px.b)]);
+    let fv = [
+        f(xyz[0] / white[0]),
+        f(xyz[1] / white[1]),
+        f(xyz[2] / white[2]),
+    ];
+    let (l, a, b) = (
+        116.0 * fv[1] - 16.0,
+        500.0 * (fv[0] - fv[1]),
+        200.0 * (fv[1] - fv[2]),
+    );
+    let (a, b) = (a * k, b * k);
+    let fy = (l + 16.0) / 116.0;
+    let back = [
+        fi(fy + a / 500.0) * white[0],
+        fi(fy) * white[1],
+        fi(fy - b / 200.0) * white[2],
+    ];
+    let rgb = mul(&MI, back);
+    Rgba {
+        r: enc(rgb[0]),
+        g: enc(rgb[1]),
+        b: enc(rgb[2]),
         a: px.a,
     }
 }
@@ -2709,6 +2957,10 @@ mod curve_editing_tests {
                     colorize: true,
                     lightness_desaturates: false,
                     reciprocal_saturation: false,
+                    // PSD's own per-range tweaks are a separate slot we
+                    // don't parse, so an Affinity import's `ranges`
+                    // simply don't survive a PSD round-trip.
+                    ranges: Vec::new(),
                 },
             ),
             (

@@ -414,7 +414,8 @@ impl Exporter {
                         0x0a,
                         Value::F64(((180.0 - s.angle) as f64).to_radians()),
                     ),
-                    f(b"Comp", 0x0a, Value::F64(1.0)),
+                    // The panel's Intensity slider, stored inverted.
+                    f(b"Comp", 0x0a, Value::F64(1.0 - s.spread.clamp(0.0, 1.0) as f64)),
                     f_aux(b"Knck", 0x29, 1, Value::Bool(s.knockout)),
                     f(b"Colr", 0x31, Self::class(colr)),
                 ],
@@ -425,7 +426,8 @@ impl Exporter {
             out.push(shadow(self, b"Shad", &style.drop_shadow.settings));
         }
         if style.inner_shadow.enabled {
-            out.push(shadow(self, b"InSh", &style.inner_shadow.settings));
+            // "InnS", not the "InSh" an earlier reading assumed.
+            out.push(shadow(self, b"InnS", &style.inner_shadow.settings));
         }
 
         let glow = |ex: &mut Self, tag: &[u8; 4], s: &schist_core::style::GlowStyle| {
@@ -446,7 +448,7 @@ impl Exporter {
                     f(b"Opac", 0x0a, Value::F64(s.opacity as f64)),
                     f(b"SclO", 0x29, Value::Bool(false)),
                     f(b"Radi", 0x0a, Value::F64(s.size as f64)),
-                    f(b"Comp", 0x0a, Value::F64(0.5)),
+                    f(b"Comp", 0x0a, Value::F64(1.0 - s.spread.clamp(0.0, 1.0) as f64)),
                     f(b"Colr", 0x31, Self::class(colr)),
                 ],
             );
@@ -487,10 +489,12 @@ impl Exporter {
             let s = &style.stroke.settings;
             let colr = self.rgba_node(s.color);
             let (bid, bver) = blend_enum(s.blend).unwrap_or((0, 0));
+            // Probed one fixture per setting: 0 outside, 1 centre,
+            // 2 inside.
             let align = match s.position {
-                schist_core::style::StrokePosition::Inside => 1,
-                schist_core::style::StrokePosition::Center => 0,
-                schist_core::style::StrokePosition::Outside => 2,
+                schist_core::style::StrokePosition::Outside => 0,
+                schist_core::style::StrokePosition::Center => 1,
+                schist_core::style::StrokePosition::Inside => 2,
             };
             let idx = self.push_node(
                 &[(b"Strk", 1), (b"FilE", 0)],
