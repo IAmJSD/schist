@@ -214,6 +214,50 @@ impl Document {
         }
     }
 
+    /// A copy of everything a codec reads, for encoding somewhere else.
+    ///
+    /// Tile maps are copy-on-write, so this is a handful of `Arc` bumps
+    /// rather than a pixel copy. History, the history-brush source and
+    /// the damage list are dropped: nothing exports them, and the first
+    /// is the one part of a document that is genuinely large.
+    ///
+    /// `Document` deliberately does not derive `Clone` -- an accidental
+    /// copy with a duplicate `DocumentId` would be a bad day -- so this
+    /// spells out what a snapshot is for.
+    pub fn snapshot_for_export(&self) -> Document {
+        Document {
+            id: self.id,
+            title: self.title.clone(),
+            path: self.path.clone(),
+            width: self.width,
+            height: self.height,
+            resolution_dpi: self.resolution_dpi,
+            mode: self.mode,
+            depth: self.depth,
+            icc_profile: self.icc_profile.clone(),
+            tree: self.tree.clone(),
+            selection: self.selection.clone(),
+            active_layer: self.active_layer,
+            selected: self.selected.clone(),
+            history: History::new(),
+            preserved_resources: self.preserved_resources.clone(),
+            revision: self.revision,
+            guides: self.guides.clone(),
+            last_selection: self.last_selection.clone(),
+            artboards: self.artboards.clone(),
+            slices: self.slices.clone(),
+            notes: self.notes.clone(),
+            counts: self.counts.clone(),
+            layer_comps: self.layer_comps.clone(),
+            paths: self.paths.clone(),
+            active_path: self.active_path,
+            history_source: Default::default(),
+            saved_selections: self.saved_selections.clone(),
+            damage: Vec::new(),
+            dirty: self.dirty,
+        }
+    }
+
     pub fn undo(&mut self) -> Option<String> {
         let edit = self.history.pop_undo()?;
         for op in edit.ops.iter().rev() {
@@ -1022,6 +1066,55 @@ impl StrokeEdit {
     }
 }
 
+/// The temp path to write beside `path` for an atomic save.
+///
+/// `path.with_extension("schist-tmp")` *replaces* the final extension, so
+/// saving `photo.psd` wrote and renamed `photo.schist-tmp`, destroying any
+/// pre-existing file of that name.
+pub fn temp_save_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".schist-tmp-{}", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Write `bytes` to a sibling temp file and rename it over `path`.
+///
+/// The one implementation of this: the interactive save, autosave and the
+/// MCP server each had their own, with two different temp-name schemes
+/// and only one of them flushing.
+///
+/// `rename` is atomic against a process crash but not against power
+/// loss, and it can otherwise reach the disk ahead of the data, so the
+/// file is synced first. The parent directory has to exist already:
+/// creating it meant a mistyped destination silently scattered empty
+/// trees instead of saying the path was wrong.
+pub fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{} is not a directory", parent.display()),
+            ));
+        }
+    }
+    let tmp = temp_save_path(path);
+    let write = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(err) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Fill a whole raster layer tilemap region from an RGBA8 buffer
 /// (importer/test convenience; not undoable).
 pub fn blit_rgba8(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[u8]) {
@@ -1220,5 +1313,77 @@ mod tests {
         doc.damage_all();
         assert!(doc.revision > 0, "repaint was requested");
         assert!(!doc.dirty, "but nothing was actually changed");
+    }
+
+    #[test]
+    fn the_temp_save_path_does_not_clobber_a_sibling() {
+        use std::path::Path;
+        // `with_extension` *replaces* the final extension, so saving
+        // photo.psd wrote and renamed photo.schist-tmp -- destroying any
+        // pre-existing file of that name.
+        let tmp = temp_save_path(Path::new("/tmp/photos/photo.psd"));
+        let name = tmp.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("photo.psd."), "{name}");
+        assert!(name.contains("schist-tmp"), "{name}");
+        assert_eq!(tmp.parent(), Path::new("/tmp/photos/photo.psd").parent());
+        // Two files that differ only in extension get different temps.
+        let other = temp_save_path(Path::new("/tmp/photos/photo.png"));
+        assert_ne!(tmp, other);
+        // A file with no extension still works.
+        let bare = temp_save_path(Path::new("/tmp/photos/photo"));
+        assert!(bare
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("photo."));
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("schist-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_nothing_behind() {
+        let dir = scratch("atomic-ok");
+        let target = dir.join("doc.psd");
+        std::fs::write(&target, b"old").unwrap();
+        write_atomically(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "temp left");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_atomic_write_cleans_its_temp_file_up() {
+        // The rename cannot replace a directory, which is the one failure
+        // that is easy to induce. The half-written temp file must not be
+        // left sitting beside the user's work.
+        let dir = scratch("atomic-fail");
+        let target = dir.join("in-the-way");
+        std::fs::create_dir(&target).unwrap();
+        assert!(write_atomically(&target, b"x").is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains("schist-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_atomic_write_refuses_a_missing_directory() {
+        // Creating it meant a mistyped destination silently built the
+        // whole tree instead of saying the path was wrong.
+        let dir = scratch("atomic-missing");
+        let missing = dir.join("no/such/place/doc.psd");
+        assert!(write_atomically(&missing, b"x").is_err());
+        assert!(!dir.join("no").exists(), "nothing should have been created");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

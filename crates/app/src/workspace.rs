@@ -836,9 +836,21 @@ impl Workspace {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(AUTOSAVE_SECS))
                 .await;
-            if this.update(cx, |ws, _| ws.autosave()).is_err() {
+            // Only the snapshot is taken on the main thread -- a handful
+            // of Arc bumps. The encode itself is a full PSD
+            // serialization, composite included, of every dirty tab; it
+            // used to run inside `Entity::update`, which is a hard hitch
+            // every thirty seconds on any large document, seconds of
+            // frozen ui mid-brushstroke.
+            let Ok(jobs) = this.update(cx, |ws, _| ws.autosave_jobs()) else {
                 break;
+            };
+            if jobs.is_empty() {
+                continue;
             }
+            cx.background_executor()
+                .spawn(async move { Workspace::write_autosave_jobs(jobs) })
+                .await;
         })
         .detach();
         // March the selection ants. Eight steps a second is what
@@ -1429,9 +1441,7 @@ impl Workspace {
         let bytes = codec.export(doc)?;
         // Write to a sibling temp file and rename, so an interrupted save
         // can't truncate the user's existing file.
-        let tmp = path.with_extension("schist-tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
+        schist_core::write_atomically(path, &bytes)?;
         Ok(())
     }
 
@@ -1445,12 +1455,18 @@ impl Workspace {
     /// One snapshot file per open document, so every dirty tab survives a
     /// crash, not just the frontmost one.
     fn recovery_path(&self, id: schist_core::DocumentId) -> Option<PathBuf> {
+        Self::recovery_path_for(id)
+    }
+
+    fn recovery_path_for(id: schist_core::DocumentId) -> Option<PathBuf> {
         Some(Self::recovery_dir()?.join(format!("session-{}-{}.psd", std::process::id(), id.0)))
     }
 
-    /// Write a recovery snapshot for every document with unsaved changes.
-    /// Returns true when at least one snapshot was written.
-    pub fn autosave(&mut self) -> bool {
+    /// What the next autosave has to write: one cheap snapshot per dirty
+    /// document, paired with where it goes.
+    ///
+    /// Taken on the main thread; encoded and written off it.
+    pub fn autosave_jobs(&mut self) -> Vec<(Document, PathBuf)> {
         let dirty: Vec<&Document> = self
             .doc
             .iter()
@@ -1458,22 +1474,33 @@ impl Workspace {
             .filter(|d| d.dirty)
             .collect();
         if dirty.is_empty() {
-            return false;
+            return Vec::new();
         }
         let Some(dir) = Self::recovery_dir() else {
-            return false;
+            return Vec::new();
         };
         if let Err(err) = std::fs::create_dir_all(&dir) {
             log::warn!("autosave: cannot create {dir:?}: {err}");
-            return false;
+            return Vec::new();
         }
+        dirty
+            .into_iter()
+            .filter_map(|doc| Some((doc.snapshot_for_export(), Self::recovery_path_for(doc.id)?)))
+            .collect()
+    }
+
+    /// Encode and write the snapshots. Runs on a background thread, so it
+    /// uses the codec directly rather than the registry the workspace
+    /// owns; recovery snapshots are always PSD.
+    pub fn write_autosave_jobs(jobs: Vec<(Document, PathBuf)>) -> bool {
         let mut wrote = false;
-        for doc in dirty {
-            let Some(path) = self.recovery_path(doc.id) else {
-                continue;
-            };
-            match self.write_doc_to(doc, &path) {
-                Ok(()) => {
+        for (doc, path) in jobs {
+            match schist_codec_psd::write_psd(&doc) {
+                Ok(bytes) => {
+                    if let Err(err) = schist_core::write_atomically(&path, &bytes) {
+                        log::warn!("autosave failed: {err:#}");
+                        continue;
+                    }
                     log::debug!("autosaved recovery snapshot to {path:?}");
                     wrote = true;
                 }
@@ -2523,7 +2550,9 @@ impl Workspace {
             let Some(filter) = self.registry.filters().find(|f| f.id() == entry.id) else {
                 continue;
             };
-            filter.apply(buf, w, h, &entry.values);
+            if let Err(err) = filter.try_apply(buf, w, h, &entry.values) {
+                log::warn!("gallery filter {} failed: {err}", entry.id);
+            }
         }
     }
 
@@ -4900,7 +4929,10 @@ impl Workspace {
             let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
                 return;
             };
-            filter.apply(&mut buf, w, h, values);
+            if let Err(err) = filter.try_apply(&mut buf, w, h, values) {
+                self.status = format!("{} failed: {err}", filter.name()).into();
+                return;
+            }
         }
         self.write_region(
             preview.layer,
@@ -4966,13 +4998,24 @@ impl Workspace {
             return;
         };
         let mut buf = original.clone();
-        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
-        filter.apply(
+        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            self.status = "Filter went away".into();
+            return;
+        };
+        // A sandboxed filter can trap or run out of fuel. Recording the
+        // edit anyway put the filter's name in the status bar, marked the
+        // document unsaved and added a no-op history step for pixels that
+        // never changed.
+        if let Err(err) = filter.try_apply(
             &mut buf,
             region.width() as usize,
             region.height() as usize,
             values,
-        );
+        ) {
+            self.status = format!("{name} failed: {err}").into();
+            cx.notify();
+            return;
+        }
         self.write_region(layer_id, region, &original, &buf, &name, true);
         self.status = name.into();
         self.after_change(cx);
@@ -5178,15 +5221,23 @@ impl Workspace {
     /// Enable or disable a third-party plugin.
     pub fn set_plugin_enabled(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
         let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
+            self.status = "No plugin directory to record the change in".into();
+            cx.notify();
             return;
         };
         self.plugins.set_enabled(&id, enabled, &dir);
-        self.status = format!(
-            "{} {} — restart to apply",
-            id,
-            if enabled { "enabled" } else { "disabled" }
-        )
-        .into();
+        // The write was a discarded `let _`, so a read-only or full config
+        // directory reported success and the choice was gone at the next
+        // launch.
+        self.status = match self.plugins.disabled_write_error() {
+            Some(err) => format!("{id}: could not record the change ({err})").into(),
+            None => format!(
+                "{} {} \u{2014} restart to apply",
+                id,
+                if enabled { "enabled" } else { "disabled" }
+            )
+            .into(),
+        };
         cx.notify();
     }
 

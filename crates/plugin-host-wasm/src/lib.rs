@@ -21,8 +21,42 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Instructions a plugin may execute per call before it is unwound.
-/// Generous for image work, still bounded.
-const FUEL_PER_CALL: u64 = 20_000_000_000;
+///
+/// This was 2e10, which at roughly one unit per instruction is tens of
+/// billions: a runaway plugin froze the window for about four seconds per
+/// call, and `preview_filter` re-runs on every slider tick. 5e8 is still
+/// hundreds of millions of instructions, ample for per-pixel work on a
+/// large image, while keeping a wedged plugin to a hitch rather than a
+/// hang.
+const FUEL_PER_CALL: u64 = 500_000_000;
+
+/// Extra fuel per pixel handed to a filter.
+///
+/// A flat budget cannot fit both a thumbnail and a 24 MP photo: the sepia
+/// example alone lands near 5e8 on 12 MP, so a fixed 5e8 killed any real
+/// image while tests passed on tiny ones.
+const FUEL_PER_PIXEL: u64 = 400;
+
+/// Memory a plugin may commit, in bytes.
+///
+/// There was no limit at all: `memory.grow` costs about one fuel unit, so
+/// the fuel budget did not bound allocation, and a module looping on it
+/// reached 4 GiB without trapping. That is an OOM kill of the editor with
+/// every unsaved document in it.
+/// A filter is handed the whole region as f32 RGBA -- 16 bytes a pixel --
+/// so this has to clear the largest image the rest of the app accepts. At
+/// 256 MiB anything over about 16 MP could not allocate its own input,
+/// which is under a stock phone photo.
+const MAX_PLUGIN_MEMORY: usize = 4 * 1024 * 1024 * 1024;
+
+/// Fuel for a codec probe.
+///
+/// `codec_for` probes every registered codec on every file open, so this
+/// runs on the interactive path -- with the full decode budget a hostile
+/// or merely broken plugin stalled every open of a file the built-in
+/// codecs did not recognise. Deciding whether a few magic bytes match is
+/// a tiny amount of work; a thousandth of a decode is generous.
+const FUEL_PER_PROBE: u64 = 20_000_000;
 
 /// wasmtime carries its own error type; funnel it into `anyhow` at the
 /// boundary so the rest of the host reads uniformly.
@@ -36,6 +70,8 @@ const MAX_RETURN_BYTES: usize = 512 * 1024 * 1024;
 
 struct HostState {
     plugin_name: String,
+    /// Enforced by wasmtime through the `limiter` below.
+    limits: wasmtime::StoreLimits,
 }
 
 /// A loaded plugin: its manifest plus a ready-to-instantiate module.
@@ -88,6 +124,17 @@ impl Instance {
         let len = len.max(0) as usize;
         if len > MAX_RETURN_BYTES {
             return Err(anyhow!("plugin returned an implausible {len} bytes"));
+        }
+        // Range-check before allocating. `memory.read` validates the
+        // range too, but only after `vec![0u8; len]` has already
+        // committed up to 512 MiB of host memory for a result that is
+        // about to be rejected.
+        let size = self.memory.data_size(&self.store);
+        let end = (ptr.max(0) as usize).checked_add(len);
+        if ptr < 0 || end.is_none_or(|e| e > size) {
+            return Err(anyhow!(
+                "plugin returned {len} bytes at {ptr}, outside its {size}-byte memory"
+            ));
         }
         let mut out = vec![0u8; len];
         self.memory
@@ -167,8 +214,12 @@ impl LoadedPlugin {
                 abi::ABI_VERSION
             ));
         }
-        if manifest.id.trim().is_empty() {
-            return Err(anyhow!("plugin manifest has an empty id"));
+        if !is_valid_plugin_id(&manifest.id) {
+            return Err(anyhow!(
+                "plugin manifest id {:?} is not a valid id (letters, digits, '.', '_' and '-', \
+                 1..={MAX_PLUGIN_ID_LEN} characters)",
+                manifest.id
+            ));
         }
         drop(instance);
 
@@ -181,20 +232,42 @@ impl LoadedPlugin {
     }
 
     fn instantiate(&self, name: &str) -> Result<Instance> {
+        self.instantiate_with_fuel(name, FUEL_PER_CALL)
+    }
+
+    fn instantiate_with_fuel(&self, name: &str, fuel: u64) -> Result<Instance> {
         let mut store = wasmtime::Store::new(
             &self.engine,
             HostState {
                 plugin_name: name.to_string(),
+                limits: wasmtime::StoreLimitsBuilder::new()
+                    .memory_size(MAX_PLUGIN_MEMORY)
+                    .instances(1)
+                    .build(),
             },
         );
-        store.set_fuel(FUEL_PER_CALL).map_err(wasm_err)?;
+        store.limiter(|state| &mut state.limits);
+        // The caller decides the budget: a codec probe runs on every file
+        // open and needs far less than a decode.
+        store.set_fuel(fuel).map_err(wasm_err)?;
         let mut linker = wasmtime::Linker::new(&self.engine);
-        // The entire host surface: one logging call.
+        // The entire host surface is one logging call. The import is
+        // always defined: wasmtime refuses to instantiate a
+        // module whose imports are missing, and `load` bootstraps with a
+        // placeholder manifest before it can read the real one, so gating
+        // the definition made every module that imports `schist::log`
+        // unloadable -- including the repo's own example, whose manifest
+        // does declare it. Gate the *behaviour* instead.
+        let logging =
+            self.manifest.capabilities.contains(&Capability::Log) || self.manifest.api_version == 0;
         linker
             .func_wrap(
                 "schist",
                 "log",
-                |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
+                move |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| {
+                    if !logging {
+                        return;
+                    }
                     let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
                         return;
                     };
@@ -210,6 +283,7 @@ impl LoadedPlugin {
                 },
             )
             .map_err(wasm_err)?;
+
         let instance = linker
             .instantiate(&mut store, &self.module)
             .map_err(wasm_err)
@@ -235,7 +309,11 @@ impl LoadedPlugin {
         if width == 0 || height == 0 || pixels.is_empty() {
             return Ok(());
         }
-        let mut inst = self.instantiate(&self.manifest.name)?;
+        // Scale the budget with the work: a flat allowance either starves
+        // a real photo or hands a thumbnail a licence to spin.
+        let fuel = FUEL_PER_CALL
+            .saturating_add((width as u64).saturating_mul(height as u64) * FUEL_PER_PIXEL);
+        let mut inst = self.instantiate_with_fuel(&self.manifest.name, fuel)?;
 
         let bytes: Vec<u8> = pixels.iter().flat_map(|v| v.to_le_bytes()).collect();
         let pixel_ptr = inst.call_alloc(bytes.len())?;
@@ -287,7 +365,7 @@ impl LoadedPlugin {
 
     /// Ask a codec plugin whether it recognises these bytes.
     pub fn probe(&self, bytes: &[u8]) -> Result<bool> {
-        let mut inst = self.instantiate(&self.manifest.name)?;
+        let mut inst = self.instantiate_with_fuel(&self.manifest.name, FUEL_PER_PROBE)?;
         let ptr = inst.call_alloc(bytes.len().max(1))?;
         inst.write(ptr, bytes)?;
         let verdict = inst
@@ -410,9 +488,27 @@ impl FilterPlugin for WasmFilter {
     }
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues) {
         // A misbehaving plugin must not take the editor down with it.
-        if let Err(err) = self.plugin.run_filter(pixels, width, height, values) {
-            log::error!("plugin {} failed: {err:#}", self.plugin.manifest.id);
-        }
+        let _ = self.try_apply(pixels, width, height, values);
+    }
+
+    fn try_apply(
+        &self,
+        pixels: &mut [f32],
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) -> Result<(), String> {
+        // A trap or a fuel exhaustion used to be swallowed into
+        // `log::error!` and returned as though nothing had happened, so
+        // the status bar read the filter's name, the image was unchanged,
+        // the title showed unsaved changes and History gained a no-op
+        // step -- with the real reason only on stderr.
+        self.plugin
+            .run_filter(pixels, width, height, values)
+            .map_err(|err| {
+                log::error!("plugin {} failed: {err:#}", self.plugin.manifest.id);
+                format!("{err:#}")
+            })
     }
 }
 
@@ -454,7 +550,16 @@ impl CodecPlugin for WasmCodec {
         self.extensions
     }
     fn probe(&self, bytes: &[u8]) -> bool {
-        self.plugin.probe(bytes).unwrap_or(false)
+        // A trap, a fuel exhaustion or a missing export used to become a
+        // silent `false`, so a broken codec plugin looked exactly like
+        // "no codec for foo.xyz".
+        match self.plugin.probe(bytes) {
+            Ok(verdict) => verdict,
+            Err(err) => {
+                log::warn!("codec plugin {} failed to probe: {err:#}", self.id);
+                false
+            }
+        }
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
         let (width, height, rgba) = self.plugin.decode(bytes)?;
@@ -489,6 +594,8 @@ pub struct PluginEntry {
 pub struct PluginManager {
     pub entries: Vec<PluginEntry>,
     disabled: Mutex<Vec<String>>,
+    /// Why the last enable/disable could not be written, if it could not.
+    disabled_write_error: Option<String>,
 }
 
 impl PluginManager {
@@ -580,8 +687,35 @@ impl PluginManager {
         if !enabled {
             disabled.push(id.to_string());
         }
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(dir.join("disabled.txt"), disabled.join("\n"));
+        let path = dir.join(DISABLED_FILE);
+        // JSON, not newline-separated ids. An id is plugin-controlled
+        // text, so one containing a newline used to write extra lines --
+        // each read back as a separate disabled id, disabling an
+        // unrelated plugin as a side effect, and `retain(|d| d != id)`
+        // could never remove the injected entry. Ids are validated at
+        // load now as well, so this is belt and braces.
+        let written = serde_json::to_vec_pretty(&*disabled)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            });
+        // Saying nothing meant the UI reported success while the choice
+        // was silently lost on the next launch.
+        if let Err(err) = written {
+            log::error!(
+                "could not record disabled plugins in {}: {err}",
+                path.display()
+            );
+            self.disabled_write_error = Some(err);
+        } else {
+            self.disabled_write_error = None;
+        }
+    }
+
+    /// Why the last enable/disable could not be persisted, if it could not.
+    pub fn disabled_write_error(&self) -> Option<&str> {
+        self.disabled_write_error.as_deref()
     }
 
     /// Copy a plugin file into the plugin directory.
@@ -600,13 +734,65 @@ impl PluginManager {
 }
 
 fn read_disabled_list(dir: &Path) -> Vec<String> {
-    std::fs::read_to_string(dir.join("disabled.txt"))
-        .map(|s| {
-            s.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+    let Ok(text) = std::fs::read_to_string(dir.join(DISABLED_FILE)) else {
+        // The pre-JSON file, so an existing install keeps its choices.
+        return std::fs::read_to_string(dir.join("disabled.txt"))
+            .map(|s| {
+                s.lines()
+                    .map(str::trim)
+                    .filter(|l| is_valid_plugin_id(l))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
         .unwrap_or_default()
+        .into_iter()
+        .filter(|id| is_valid_plugin_id(id))
+        .collect()
+}
+
+/// Where the disabled set lives.
+const DISABLED_FILE: &str = "disabled.json";
+
+/// Longest plugin id we will load.
+const MAX_PLUGIN_ID_LEN: usize = 128;
+
+/// Whether a plugin id is one we are willing to store and compare.
+///
+/// Ids are arbitrary plugin-controlled text and were checked only for
+/// non-emptiness, which let one containing a newline inject entries into
+/// the disabled list.
+fn is_valid_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_PLUGIN_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::{is_valid_plugin_id, MAX_PLUGIN_ID_LEN};
+
+    /// Plugin ids are arbitrary plugin-controlled text, checked only for
+    /// non-emptiness before. The disabled list was newline-separated, so
+    /// an id containing a newline wrote extra lines -- each read back as
+    /// a separate disabled id, disabling an unrelated plugin as a side
+    /// effect of being disabled, and `retain(|d| d != id)` could never
+    /// remove the injected entry.
+    #[test]
+    fn an_id_cannot_smuggle_a_newline() {
+        assert!(is_valid_plugin_id("com.vendor.filter-1"));
+        assert!(is_valid_plugin_id("schist.codec_psd"));
+
+        assert!(!is_valid_plugin_id("evil\ncom.vendor.trusted"));
+        assert!(!is_valid_plugin_id("evil\r\ntrusted"));
+        assert!(!is_valid_plugin_id(""));
+        assert!(!is_valid_plugin_id(" leading-space"));
+        assert!(!is_valid_plugin_id("has/slash"));
+        assert!(!is_valid_plugin_id(&"x".repeat(MAX_PLUGIN_ID_LEN + 1)));
+        assert!(is_valid_plugin_id(&"x".repeat(MAX_PLUGIN_ID_LEN)));
+    }
 }

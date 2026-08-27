@@ -43,14 +43,23 @@ fn main() {
             }
         };
         let id = message.get("id").cloned();
-        let Some(method) = message.get("method").and_then(|m| m.as_str()) else {
-            continue;
-        };
-        let params = message.get("params").cloned().unwrap_or(Value::Null);
-        // Notifications get no reply.
+        let method = message.get("method").and_then(|m| m.as_str());
+        // Notifications carry no id and get no reply.
         let Some(id) = id else {
             continue;
         };
+        // A request *with* an id and no usable method still needs an
+        // answer, or the client blocks forever waiting for one. This used
+        // to `continue` before the id was even considered.
+        let Some(method) = method else {
+            let reply = json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": {"code": -32600, "message": "Invalid Request: missing or non-string method"}
+            });
+            respond(&reply);
+            continue;
+        };
+        let params = message.get("params").cloned().unwrap_or(Value::Null);
         let reply = match server.handle(method, &params) {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(e) => json!({
@@ -78,6 +87,46 @@ struct Server {
     next_id: u64,
 }
 
+/// Protocol revisions this server implements, newest first.
+const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26"];
+
+/// Reject arguments the handler does not understand.
+///
+/// Every field used to be read with `get(k).and_then(as_TYPE)`, so an
+/// absent, misspelled or wrongly-typed key yielded `None` and was
+/// skipped -- and the handler then reported success regardless. A model
+/// sending `{"brushsize": 40}` was told the editor state was updated and
+/// went on to reason over state it believed it had set.
+fn reject_unknown_keys(args: &Value, known: &[&str]) -> Result<()> {
+    let Some(object) = args.as_object() else {
+        return Ok(());
+    };
+    for key in object.keys() {
+        // `session` addresses the call rather than the state it changes,
+        // and every handler accepts it.
+        if key == "session" || known.contains(&key.as_str()) {
+            continue;
+        }
+        bail!("unknown argument {key:?} (accepts: {})", known.join(", "));
+    }
+    Ok(())
+}
+
+/// A typed argument, or an error naming what was wrong with it.
+fn typed<'a, T>(
+    args: &'a Value,
+    key: &str,
+    kind: &str,
+    f: impl Fn(&'a Value) -> Option<T>,
+) -> Result<Option<T>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => f(value)
+            .map(Some)
+            .ok_or_else(|| anyhow!("{key} must be {kind}, not {value}")),
+    }
+}
+
 impl Server {
     fn handle(&mut self, method: &str, params: &Value) -> Result<Value, RpcError> {
         match method {
@@ -85,9 +134,18 @@ impl Server {
                 let requested = params
                     .get("protocolVersion")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("2025-03-26");
+                    .unwrap_or(SUPPORTED_PROTOCOLS[0]);
+                // Echoing the request back told a client speaking a
+                // future or bogus revision that the server speaks it too,
+                // so the mismatch surfaced later as confusing tool-level
+                // failures instead of at the handshake.
+                let agreed = if SUPPORTED_PROTOCOLS.contains(&requested) {
+                    requested
+                } else {
+                    SUPPORTED_PROTOCOLS[0]
+                };
                 Ok(json!({
-                    "protocolVersion": requested,
+                    "protocolVersion": agreed,
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "schist-mcp",
@@ -365,25 +423,32 @@ impl Server {
     }
 
     fn set_layer_props(&mut self, args: &Value) -> Result<Value> {
+        reject_unknown_keys(
+            args,
+            &[
+                "id",
+                "name",
+                "visible",
+                "locked",
+                "clipping",
+                "opacity",
+                "fill_opacity",
+                "blend",
+            ],
+        )?;
         let id = args
             .get("id")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow!("missing layer id"))?;
-        let name = args.get("name").and_then(|v| v.as_str()).map(String::from);
-        let visible = args.get("visible").and_then(|v| v.as_bool());
-        let locked = args.get("locked").and_then(|v| v.as_bool());
-        let clipping = args.get("clipping").and_then(|v| v.as_bool());
-        let opacity = args
-            .get("opacity")
-            .and_then(|v| v.as_f64())
+        let name = typed(args, "name", "a string", |v| v.as_str())?.map(String::from);
+        let visible = typed(args, "visible", "a boolean", |v| v.as_bool())?;
+        let locked = typed(args, "locked", "a boolean", |v| v.as_bool())?;
+        let clipping = typed(args, "clipping", "a boolean", |v| v.as_bool())?;
+        let opacity = typed(args, "opacity", "a number 0..=1", |v| v.as_f64())?
             .map(|v| v.clamp(0.0, 1.0) as f32);
-        let fill_opacity = args
-            .get("fill_opacity")
-            .and_then(|v| v.as_f64())
+        let fill_opacity = typed(args, "fill_opacity", "a number 0..=1", |v| v.as_f64())?
             .map(|v| v.clamp(0.0, 1.0) as f32);
-        let blend = args
-            .get("blend")
-            .and_then(|v| v.as_str())
+        let blend = typed(args, "blend", "a blend-mode name", |v| v.as_str())?
             .map(parse_blend_mode)
             .transpose()?;
         let sess = self.session(args)?;
@@ -421,19 +486,25 @@ impl Server {
     }
 
     fn set_editor(&mut self, args: &Value) -> Result<Value> {
-        let foreground = args
-            .get("foreground")
-            .and_then(|v| v.as_str())
+        reject_unknown_keys(
+            args,
+            &[
+                "foreground",
+                "background",
+                "resample",
+                "brush_size",
+                "brush_hardness",
+                "tool_opacity",
+                "tolerance",
+            ],
+        )?;
+        let foreground = typed(args, "foreground", "a colour string", |v| v.as_str())?
             .map(parse_color)
             .transpose()?;
-        let background = args
-            .get("background")
-            .and_then(|v| v.as_str())
+        let background = typed(args, "background", "a colour string", |v| v.as_str())?
             .map(parse_color)
             .transpose()?;
-        let resample = args
-            .get("resample")
-            .and_then(|v| v.as_str())
+        let resample = typed(args, "resample", "a string", |v| v.as_str())?
             .map(|s| match s.to_ascii_lowercase().as_str() {
                 "nearest" => Ok(schist_core::Filter::Nearest),
                 "bilinear" => Ok(schist_core::Filter::Bilinear),
@@ -443,6 +514,10 @@ impl Server {
                 )),
             })
             .transpose()?;
+        let brush_size = typed(args, "brush_size", "a number", |v| v.as_f64())?;
+        let brush_hardness = typed(args, "brush_hardness", "a number", |v| v.as_f64())?;
+        let tool_opacity = typed(args, "tool_opacity", "a number", |v| v.as_f64())?;
+        let tolerance = typed(args, "tolerance", "an integer 0..=255", |v| v.as_u64())?;
         let sess = self.session(args)?;
         if let Some(c) = foreground {
             sess.state.foreground = c;
@@ -450,16 +525,16 @@ impl Server {
         if let Some(c) = background {
             sess.state.background = c;
         }
-        if let Some(v) = args.get("brush_size").and_then(|v| v.as_f64()) {
+        if let Some(v) = brush_size {
             sess.state.brush_size = (v as f32).max(1.0);
         }
-        if let Some(v) = args.get("brush_hardness").and_then(|v| v.as_f64()) {
+        if let Some(v) = brush_hardness {
             sess.state.brush_hardness = (v as f32).clamp(0.0, 1.0);
         }
-        if let Some(v) = args.get("tool_opacity").and_then(|v| v.as_f64()) {
+        if let Some(v) = tool_opacity {
             sess.state.tool_opacity = (v as f32).clamp(0.0, 1.0);
         }
-        if let Some(v) = args.get("tolerance").and_then(|v| v.as_u64()) {
+        if let Some(v) = tolerance {
             sess.state.tolerance = v.min(255) as u8;
         }
         if let Some(f) = resample {
@@ -1018,7 +1093,9 @@ fn tool_defs() -> Value {
         def(
             "run_command",
             "Run a menu command by id (see describe): edit.undo, edit.redo, select.all, \
-             layer.new, layer.duplicate, image.crop and everything else in the menus.",
+             layer.new, layer.duplicate and everything else the registry declares. \
+             Note that image sizing, canvas sizing, transforms and adjustment layers \
+             are not registry commands and cannot be reached this way.",
             json!({
                 "session": session_prop,
                 "id": {"type": "string", "description": "Command id, e.g. \"layer.duplicate\""},
@@ -1100,8 +1177,9 @@ fn tool_defs() -> Value {
         def(
             "apply_adjustment",
             "Image ▸ Adjustments: apply an adjustment destructively to the active layer's \
-             pixels. For a non-destructive adjustment layer use the layer.adjustment.* commands \
-             instead. params follows the shape shown by describe(adjustments); omit for defaults.",
+             pixels. Non-destructive adjustment layers live only in the gui and cannot \
+             be created from here. params follows the shape shown by \
+             describe(adjustments); omit for defaults.",
             json!({
                 "session": session_prop,
                 "kind": {"type": "string", "description": "e.g. \"Levels\", \"Hue/Saturation\", \"Brightness/Contrast\""},
@@ -1269,5 +1347,63 @@ mod tests {
             coerce_option(&json!(true), OptionKind::Toggle).unwrap(),
             OptionValue::Bool(true)
         );
+    }
+
+    /// Every field used to be read with `get(k).and_then(as_TYPE)`, so a
+    /// misspelled or wrongly-typed key was skipped and the handler
+    /// reported success anyway — and the model went on reasoning over
+    /// state it believed it had set.
+    #[test]
+    fn misspelled_and_mistyped_arguments_are_rejected() {
+        let known = ["brush_size", "tolerance"];
+        assert!(reject_unknown_keys(&json!({"brush_size": 40}), &known).is_ok());
+        // The session key addresses the call, not the state.
+        assert!(reject_unknown_keys(&json!({"session": "a", "tolerance": 3}), &known).is_ok());
+
+        let err = reject_unknown_keys(&json!({"brushsize": 40}), &known).unwrap_err();
+        assert!(err.to_string().contains("brushsize"), "{err}");
+
+        // Wrong types are named rather than silently dropped.
+        let args = json!({"brush_size": "forty"});
+        let err = typed(&args, "brush_size", "a number", |v| v.as_f64()).unwrap_err();
+        assert!(err.to_string().contains("must be a number"), "{err}");
+
+        // Absent and explicitly null both mean "leave it alone".
+        let args = json!({"tolerance": null});
+        assert!(typed(&args, "tolerance", "an integer", |v| v.as_u64())
+            .unwrap()
+            .is_none());
+        assert!(typed(&json!({}), "tolerance", "an integer", |v| v.as_u64())
+            .unwrap()
+            .is_none());
+    }
+
+    /// Echoing the requested revision back told a client speaking a
+    /// future or bogus one that the server speaks it too, so the mismatch
+    /// surfaced later as confusing tool-level failures.
+    #[test]
+    fn an_unsupported_protocol_version_is_negotiated_down() {
+        fn agreed(asked: &str) -> &'static str {
+            SUPPORTED_PROTOCOLS
+                .iter()
+                .copied()
+                .find(|v| *v == asked)
+                .unwrap_or(SUPPORTED_PROTOCOLS[0])
+        }
+        assert_eq!(agreed("2025-03-26"), "2025-03-26");
+        assert_eq!(agreed("2099-01-01"), SUPPORTED_PROTOCOLS[0]);
+        assert_eq!(agreed("nonsense"), SUPPORTED_PROTOCOLS[0]);
+    }
+
+    /// The tool descriptions named commands the registry has never had.
+    #[test]
+    fn the_tool_descriptions_do_not_promise_missing_commands() {
+        let text = serde_json::to_string(&tool_defs()).unwrap();
+        for missing in ["image.crop", "layer.adjustment."] {
+            assert!(
+                !text.contains(missing),
+                "the descriptions still advertise {missing}"
+            );
+        }
     }
 }

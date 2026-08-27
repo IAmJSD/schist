@@ -15,7 +15,7 @@ use schist_plugin_api::{
     CodecPlugin, CommandCtx, EditorState, ExportOptions, FilterValues, Modifiers, OptionValue,
     PluginManifest, PluginRegistry, PointerInput, ToolCtx,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// PSD/PSB import and export via `schist-codec-psd` — the same wrapper the
 /// app shell registers.
@@ -94,21 +94,46 @@ pub struct Session {
     _wasm: schist_plugin_host_wasm::PluginManager,
 }
 
+/// Largest side a new document may have.
+const MAX_DIMENSION: u32 = 30_000;
+
+/// Largest total area, which is the limit that actually bounds memory:
+/// 200 megapixels is 800 MB of RGBA8 and comfortably past any real
+/// document.
+const MAX_PIXELS: u64 = 200_000_000;
+
 impl Session {
     /// A blank document with a white Background layer, like File ▸ New.
     pub fn new_blank(title: &str, width: u32, height: u32, depth: Depth) -> Result<Session> {
-        if width == 0 || height == 0 || width > 30_000 || height > 30_000 {
-            bail!("document size must be 1..=30000 in each dimension");
+        if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+            bail!("document size must be 1..={MAX_DIMENSION} in each dimension");
+        }
+        // Per-dimension limits alone allowed 30000x30000, and the white
+        // fill below is one `vec![255u8; w * h * 4]` -- 3.6 GB in a single
+        // allocation, before any tiling. `create_session
+        // {"width":30000,"height":30000}` is a plausible typo for
+        // 3000x3000 and it aborted the process, taking every other
+        // session's unsaved work with it.
+        let pixels = width as u64 * height as u64;
+        if pixels > MAX_PIXELS {
+            bail!(
+                "document is {pixels} pixels, over the {MAX_PIXELS} limit \
+                 ({width}x{height})"
+            );
         }
         let mut doc = Document::new(title, width, height, depth);
         let mut bg = Layer::new_raster("Background");
-        let white = vec![255u8; width as usize * height as usize * 4];
-        blit_rgba8(
-            &mut bg.as_raster_mut().unwrap().tiles,
-            depth,
-            IntRect::from_size(width, height),
-            &white,
-        );
+        // A row at a time rather than the whole canvas at once, so the
+        // peak allocation is bounded by the width.
+        let row = vec![255u8; width as usize * 4];
+        for y in 0..height {
+            blit_rgba8(
+                &mut bg.as_raster_mut().unwrap().tiles,
+                depth,
+                IntRect::from_xywh(0, y as i32, width, 1),
+                &row,
+            );
+        }
         doc.push_layer(bg);
         doc.dirty = false;
         Ok(Session::install(doc))
@@ -341,13 +366,21 @@ impl Session {
             .read_region(layer_id, region)
             .ok_or_else(|| anyhow!("layer pixels unreadable"))?;
         let mut buf = original.clone();
-        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
-        filter.apply(
-            &mut buf,
-            region.width() as usize,
-            region.height() as usize,
-            &resolved,
-        );
+        let filter = self
+            .registry
+            .filters()
+            .find(|f| f.id() == id)
+            .ok_or_else(|| anyhow!("no filter {id}"))?;
+        // A sandboxed filter can trap or run out of fuel; recording the
+        // edit anyway would report success over unchanged pixels.
+        filter
+            .try_apply(
+                &mut buf,
+                region.width() as usize,
+                region.height() as usize,
+                &resolved,
+            )
+            .map_err(|err| anyhow!("{name} failed: {err}"))?;
         self.write_region(layer_id, region, &original, &buf, &name);
         self.after_change();
         Ok(name)
@@ -562,14 +595,9 @@ impl Session {
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let tmp: PathBuf = path.with_extension("schist-tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
+    // One implementation, in `schist_core`: this had its own temp-name
+    // scheme, and the interactive save had a third with no flush.
+    schist_core::write_atomically(path, bytes)?;
     Ok(())
 }
 
@@ -768,5 +796,90 @@ mod tests {
         let px = |x: usize, y: usize| &pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
         assert!(px(10, 24)[0] < 15, "inside the selection stays white");
         assert!(px(50, 24)[0] > 240, "outside the selection went dark");
+    }
+    #[test]
+    fn an_atomic_write_does_not_clobber_a_sibling() {
+        // `with_extension` *replaces* the extension, so saving `photo.psd`
+        // wrote and renamed `photo.schist-tmp`, destroying any real file
+        // of that name.
+        let dir = std::env::temp_dir().join(format!("schist-atomic-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let victim = dir.join("photo.schist-tmp");
+        std::fs::write(&victim, b"precious").unwrap();
+
+        let target = dir.join("photo.psd");
+        write_atomically(&target, b"new contents").unwrap();
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"precious",
+            "the sibling file must survive"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_to_a_missing_directory_fails_without_creating_it() {
+        // `create_dir_all` here meant a mistyped destination silently
+        // built the whole tree instead of saying the path was wrong.
+        let dir = std::env::temp_dir().join(format!("schist-atomic2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let missing = dir.join("no/such/place/doc.psd");
+        assert!(
+            write_atomically(&missing, b"x").is_err(),
+            "a missing parent must be refused"
+        );
+        assert!(!dir.exists(), "nothing should have been created");
+    }
+
+    #[test]
+    fn a_successful_write_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("schist-atomic3-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("doc.psd");
+        write_atomically(&target, b"x").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("schist-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Per-dimension limits alone allowed 30000x30000, whose white fill
+    /// was one 3.6 GB allocation — a plausible typo for 3000x3000 that
+    /// aborted the process and took every other session's unsaved work
+    /// with it.
+    #[test]
+    fn an_absurd_canvas_is_refused_rather_than_allocated() {
+        let err = match Session::new_blank("t", 30_000, 30_000, Depth::Eight) {
+            Ok(_) => panic!("30000x30000 must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("pixels"),
+            "unexpected message: {err}"
+        );
+        // Each side is still individually allowed; it is the area that
+        // is out of bounds.
+        assert!(Session::new_blank("t", 30_000, 100, Depth::Eight).is_ok());
+        // And an ordinary document is untouched.
+        assert!(Session::new_blank("t", 1920, 1080, Depth::Eight).is_ok());
+    }
+
+    #[test]
+    fn a_reasonable_canvas_is_white_all_the_way_across() {
+        // The fill is per-row now, so check both ends and the far corner.
+        let sess = Session::new_blank("t", 600, 400, Depth::Eight).unwrap();
+        let tiles = &sess.doc.tree.layers[0].as_raster().unwrap().tiles;
+        for (x, y) in [(0, 0), (599, 0), (0, 399), (599, 399), (300, 200)] {
+            assert_eq!(
+                tiles.pixel(x, y).to_u8(),
+                [255, 255, 255, 255],
+                "at ({x}, {y})"
+            );
+        }
     }
 }
