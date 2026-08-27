@@ -137,6 +137,15 @@ pub fn refresh() {
     if let Ok(mut cache) = font_cache().lock() {
         cache.clear();
     }
+    // Both fallback caches too: installing a CJK font is exactly when a
+    // remembered "nothing covers this" stops being true, and that is the
+    // flow this exists for.
+    if let Ok(mut cache) = fallback_cache().lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = uncovered_cache().lock() {
+        cache.clear();
+    }
     if let Ok(mut names) = family_name_cache().write() {
         *names = leak_family_names();
     }
@@ -449,8 +458,22 @@ fn fallback_for(ch: char, primary: &LoadedFace, bold: bool, italic: bool) -> Opt
         return None;
     }
     let key = (fallback_key(ch), bold, italic);
-    if let Some(hit) = fallback_cache().lock().ok()?.get(&key) {
-        return hit.clone();
+    // A bucket is a hint about where to look first, not a promise that
+    // one face serves the whole range -- and bucket 0 is a catch-all for
+    // every script without an entry. Taking a hit unverified meant one
+    // symbols-only face cached for an arrow rendered Cyrillic as that
+    // face's tofu, and a cached miss for a single Private Use codepoint
+    // blacked the whole bucket out for the session.
+    if let Some(Some(face)) = fallback_cache().lock().ok()?.get(&key) {
+        if face.font.has_glyph(ch) {
+            return Some(face.clone());
+        }
+    }
+    // Misses are remembered per character, for the same reason.
+    if let Ok(c) = uncovered_cache().lock() {
+        if c.contains(&(ch, bold, italic)) {
+            return None;
+        }
     }
     // Named preferences first -- they are what a person would pick, and
     // they avoid a scan in the cases that actually come up.
@@ -492,8 +515,17 @@ fn fallback_for(ch: char, primary: &LoadedFace, bold: bool, italic: bool) -> Opt
     if found.is_none() {
         log::debug!("text-engine: no installed face covers U+{:04X}", ch as u32);
     }
-    if let Ok(mut c) = fallback_cache().lock() {
-        c.insert(key, found.clone());
+    match &found {
+        Some(_) => {
+            if let Ok(mut c) = fallback_cache().lock() {
+                c.insert(key, found.clone());
+            }
+        }
+        None => {
+            if let Ok(mut c) = uncovered_cache().lock() {
+                c.insert((ch, bold, italic));
+            }
+        }
     }
     found
 }
@@ -518,6 +550,11 @@ fn fallback_key(ch: char) -> u32 {
 /// Families worth trying for a character before scanning everything.
 fn preferred_families(ch: char) -> &'static [&'static str] {
     match fallback_key(ch) {
+        // Emoji land here for their *metrics*: fontdue rasterizes
+        // outlines, and the colour emoji faces are bitmap (CBDT/sbix) or
+        // COLR, so a matched face advances correctly but draws nothing.
+        // Better than a row of tofu at the wrong widths, and the place to
+        // start from when colour glyphs get a renderer.
         1 => &["Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"],
         2 | 3 => &[
             "Noto Sans CJK JP",
@@ -544,6 +581,14 @@ fn fallback_cache(
         std::sync::Mutex<std::collections::HashMap<FallbackKey, Option<LoadedFace>>>,
     > = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Characters no installed face covers, so the whole-database scan runs
+/// once each rather than once per layout.
+fn uncovered_cache() -> &'static std::sync::Mutex<std::collections::HashSet<(char, bool, bool)>> {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashSet<(char, bool, bool)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 /// The GPOS `kern`-feature pair adjustments of a face, resolved once per
@@ -781,10 +826,6 @@ fn layout(spec: &TextSpec, face: &LoadedFace) -> Layout {
         line_start = at + 1;
     }
 
-    // Alignment measures the *visible* line. `split_inclusive(' ')` keeps
-    // each word's trailing space, so a line ending in one measured wider
-    // than its ink and right- and centre-aligned text hung short of the
-    // edge by exactly that space.
     // Alignment measures the *visible* line. `split_inclusive(' ')` keeps
     // each word's trailing space, so a line ending in one measured wider
     // than its ink and right- and centre-aligned text hung short of the
@@ -1047,6 +1088,20 @@ mod tests {
 
     fn ink(r: &TextRaster) -> usize {
         r.coverage.iter().filter(|&&v| v > 0).count()
+    }
+
+    /// Whether this machine can actually draw `ch` at all.
+    ///
+    /// A face with no coverage still rasterizes `.notdef`, and that box
+    /// has ink, so "the raster is empty" never became true on a runner
+    /// with no CJK font -- the fallback tests failed there instead of
+    /// skipping. Ask the resolver the question directly.
+    fn resolvable(ch: char) -> bool {
+        let spec = spec("");
+        let Some(primary) = load_font(&spec.family, spec.bold, spec.italic) else {
+            return false;
+        };
+        primary.font.has_glyph(ch) || fallback_for(ch, &primary, spec.bold, spec.italic).is_some()
     }
 
     #[test]
@@ -1356,13 +1411,13 @@ mod tests {
     /// the same empty rectangle repeated.
     #[test]
     fn characters_outside_the_chosen_face_are_not_all_the_same_box() {
-        let hiragana = rasterize(&spec("\u{3053}\u{3093}\u{306b}")).expect("font loads");
-        let han = rasterize(&spec("\u{4e2d}\u{6587}\u{5b57}")).expect("font loads");
-        if hiragana.is_empty() || han.is_empty() {
-            // A machine with no CJK face installed has nothing to fall
-            // back to, and drawing tofu is then the honest answer.
+        // A machine with no CJK face installed has nothing to fall back
+        // to, and drawing tofu is then the honest answer.
+        if !resolvable('\u{3053}') || !resolvable('\u{4e2d}') {
             return;
         }
+        let hiragana = rasterize(&spec("\u{3053}\u{3093}\u{306b}")).expect("font loads");
+        let han = rasterize(&spec("\u{4e2d}\u{6587}\u{5b57}")).expect("font loads");
         let per_glyph = |r: &TextRaster| ink(r) as f32 / 3.0;
         let (a, b) = (per_glyph(&hiragana), per_glyph(&han));
         assert!(
@@ -1372,16 +1427,56 @@ mod tests {
         );
     }
 
+    /// The cache is keyed by script bucket, and bucket 0 is a catch-all:
+    /// the face found for one of its characters need not cover the next,
+    /// and a character nothing covers must not answer for the rest.
+    #[test]
+    fn one_bucket_zero_character_does_not_answer_for_another() {
+        let spec = spec("");
+        let Some(primary) = load_font(&spec.family, spec.bold, spec.italic) else {
+            return;
+        };
+        // Cyrillic, an arrow and a Private Use codepoint all land in
+        // bucket 0.
+        let cyrillic = '\u{0416}';
+        let before = fallback_for(cyrillic, &primary, false, false);
+        if let Some(face) = &before {
+            assert!(face.font.has_glyph(cyrillic), "a face that cannot draw it");
+        }
+        // Nothing covers this, so it caches a miss.
+        let pua = fallback_for('\u{E000}', &primary, false, false);
+        assert!(pua.is_none() || pua.unwrap().font.has_glyph('\u{E000}'));
+        // Which must not have blanked the bucket.
+        let after = fallback_for(cyrillic, &primary, false, false);
+        assert_eq!(
+            before.is_some(),
+            after.is_some(),
+            "a cached miss for one character swallowed another"
+        );
+        // Nor may a face cached for the arrow answer for Cyrillic.
+        let arrow = '\u{2192}';
+        if let Some(face) = fallback_for(arrow, &primary, false, false) {
+            assert!(face.font.has_glyph(arrow));
+        }
+        if let Some(face) = fallback_for(cyrillic, &primary, false, false) {
+            assert!(
+                face.font.has_glyph(cyrillic),
+                "the arrow's face was handed back for Cyrillic"
+            );
+        }
+    }
+
     /// And the fallback's advance is used, so the layout is not measured
     /// against the box it is not drawing.
     #[test]
     fn a_fallback_glyph_advances_by_its_own_width() {
-        let narrow = rasterize(&spec("AA")).expect("font loads");
-        let cjk = rasterize(&spec("\u{4e2d}\u{6587}"));
-        let Some(cjk) = cjk else { return };
-        if cjk.is_empty() {
+        if !resolvable('\u{4e2d}') {
             return;
         }
+        let narrow = rasterize(&spec("AA")).expect("font loads");
+        let Some(cjk) = rasterize(&spec("\u{4e2d}\u{6587}")) else {
+            return;
+        };
         // Han glyphs are full-width; two of them are wider than two
         // latin capitals at the same size.
         assert!(

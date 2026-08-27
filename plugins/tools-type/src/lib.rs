@@ -245,6 +245,14 @@ pub struct TypeTool {
     /// nothing in the ui could set it, so every layer was point text and
     /// paragraph text was unreachable.
     pending: Option<(f32, f32)>,
+    /// The Wrap slider's own value, and the only thing a fresh click
+    /// inherits.
+    ///
+    /// `spec.wrap_width` also picks up the width of whatever layer is
+    /// being edited, so it cannot double as the default for the next
+    /// one: after a single area-text drag -- or just clicking into an
+    /// existing box -- every later click made a box of that width.
+    wrap_default: Option<f32>,
 }
 
 impl Default for TypeTool {
@@ -254,11 +262,36 @@ impl Default for TypeTool {
             spec: TextSpec::default(),
             follow_foreground: true,
             pending: None,
+            wrap_default: None,
         }
     }
 }
 
 impl TypeTool {
+    /// Take the current foreground swatch, if the text is set to follow
+    /// it.
+    ///
+    /// This used to run only from `on_option_changed`, so the swatch
+    /// could be changed and the text kept its old colour until some
+    /// unrelated control was nudged -- and nudging one then recoloured a
+    /// layer the user had only meant to resize. Every moment the tool
+    /// touches a layer goes through here instead.
+    fn adopt_foreground(&mut self, ctx: &mut ToolCtx) {
+        if !self.follow_foreground {
+            return;
+        }
+        let fg = ctx.state.foreground.to_u8();
+        let Some(session) = &mut self.editing else {
+            return;
+        };
+        if session.stored.color == fg {
+            return;
+        }
+        session.stored.color = fg;
+        session.dirty = true;
+        self.refresh(ctx.doc);
+    }
+
     /// Live-render the session's text into its layer without touching
     /// history (the whole session commits as one edit).
     fn refresh(&mut self, doc: &mut Document) {
@@ -292,6 +325,7 @@ impl TypeTool {
         let stored = StoredText {
             spec: TextSpec {
                 text: String::new(),
+                wrap_width: self.wrap_default,
                 ..self.spec.clone()
             },
             origin: (x.round() as i32, y.round() as i32),
@@ -436,6 +470,10 @@ impl ToolPlugin for TypeTool {
                 self.start_new(ctx, input.x, input.y);
             }
         }
+        // Clicking into a layer is when the swatch takes effect: set the
+        // foreground to red, place text, switch to blue and click back
+        // in, and it turns blue.
+        self.adopt_foreground(ctx);
     }
 
     fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
@@ -451,6 +489,8 @@ impl ToolPlugin for TypeTool {
             return;
         }
         let wrap = width.min(MAX_AREA_WIDTH);
+        // The bar shows the box that was just drawn, but this width
+        // belongs to this layer: it is not what the next click makes.
         self.spec.wrap_width = Some(wrap);
         if let Some(session) = &mut self.editing {
             session.stored.spec.wrap_width = Some(wrap);
@@ -471,6 +511,15 @@ impl ToolPlugin for TypeTool {
         }
         let shift = modifiers.shift;
         let word = modifiers.ctrl_or_cmd;
+        // What is typed next comes out in the current colour. Only for
+        // keystrokes that actually put something in: an arrow key has no
+        // business recolouring the layer.
+        let inserts = !modifiers.ctrl_or_cmd
+            && (matches!(key, "enter" | "tab" | "space")
+                || text.is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control)));
+        if inserts {
+            self.adopt_foreground(ctx);
+        }
         let mut changed = false;
         let mut handled = true;
         {
@@ -662,6 +711,9 @@ impl ToolPlugin for TypeTool {
             "type-wrap" => {
                 let w = value.num();
                 self.spec.wrap_width = (w >= MIN_AREA_WIDTH).then_some(w.min(MAX_AREA_WIDTH));
+                // Asked for by hand, so it is what the next new layer
+                // starts as too.
+                self.wrap_default = self.spec.wrap_width;
             }
             _ => {}
         }
@@ -670,20 +722,19 @@ impl ToolPlugin for TypeTool {
     /// Push the bar's settings onto the text being edited, so a font or
     /// size change shows up immediately rather than on the next click.
     fn on_option_changed(&mut self, ctx: &mut ToolCtx, _key: &str) {
-        let foreground = ctx.state.foreground.to_u8();
-        let Some(session) = &mut self.editing else {
-            return;
-        };
-        let text = std::mem::take(&mut session.stored.spec.text);
-        session.stored.spec = TextSpec {
-            text,
-            ..self.spec.clone()
-        };
-        if self.follow_foreground {
-            session.stored.color = foreground;
+        {
+            let Some(session) = &mut self.editing else {
+                return;
+            };
+            let text = std::mem::take(&mut session.stored.spec.text);
+            session.stored.spec = TextSpec {
+                text,
+                ..self.spec.clone()
+            };
+            session.dirty = true;
         }
-        session.dirty = true;
         self.refresh(ctx.doc);
+        self.adopt_foreground(ctx);
     }
 
     fn on_commit(&mut self, ctx: &mut ToolCtx) {
@@ -1069,10 +1120,12 @@ pub fn insert_text(tool: &mut TypeTool, doc: &mut Document, text: &str) -> bool 
     if text.is_empty() {
         return false;
     }
-    // Newlines are meaningful; other control characters are not.
+    // Newlines and tabs are meaningful -- tabs advance to the next stop,
+    // so stripping them collapsed the columns of anything pasted out of
+    // a PSD-imported layer. Other control characters are not.
     let cleaned: String = text
         .chars()
-        .filter(|c| *c == '\n' || !c.is_control())
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
         .collect();
     if cleaned.is_empty() {
         return false;
@@ -1947,6 +2000,107 @@ mod tests {
         // A jitter of a pixel or two is a click, not a drag.
         tool.on_pointer_up(&mut ctx, input(22.0, 61.0));
         assert_eq!(tool.editing.as_ref().unwrap().stored.spec.wrap_width, None);
+    }
+
+    /// The width a drag defined belongs to that layer, not to the tool:
+    /// after one area-text box, every later click made a box of the same
+    /// width and there was no way back to point text.
+    #[test]
+    fn a_drag_does_not_make_every_later_click_a_box() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(140.0, 100.0));
+        type_text(&mut tool, &mut ctx, "box");
+        assert_eq!(
+            tool.editing.as_ref().unwrap().stored.spec.wrap_width,
+            Some(120.0)
+        );
+
+        // A plain click somewhere else is point text again.
+        tool.on_pointer_down(&mut ctx, input(20.0, 160.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 160.0));
+        assert_eq!(tool.editing.as_ref().unwrap().stored.spec.wrap_width, None);
+
+        // And so is a click after editing an existing box.
+        tool.on_pointer_down(&mut ctx, input(30.0, 65.0));
+        assert_eq!(
+            tool.editing.as_ref().unwrap().stored.spec.wrap_width,
+            Some(120.0),
+            "clicking into the box should re-open it as a box"
+        );
+        tool.on_pointer_up(&mut ctx, input(30.0, 65.0));
+        tool.on_pointer_down(&mut ctx, input(250.0, 180.0));
+        tool.on_pointer_up(&mut ctx, input(250.0, 180.0));
+        assert_eq!(tool.editing.as_ref().unwrap().stored.spec.wrap_width, None);
+
+        // Dialling the Wrap slider in by hand is the way to ask for a box
+        // up front, and that does carry to the next click.
+        tool.set_option("type-wrap", OptionValue::Num(90.0));
+        tool.on_option_changed(&mut ctx, "type-wrap");
+        tool.on_pointer_down(&mut ctx, input(40.0, 20.0));
+        tool.on_pointer_up(&mut ctx, input(40.0, 20.0));
+        assert_eq!(
+            tool.editing.as_ref().unwrap().stored.spec.wrap_width,
+            Some(90.0)
+        );
+    }
+
+    /// The swatch reaches the text when the tool touches a layer, not
+    /// only when an options-bar control happens to move.
+    #[test]
+    fn clicking_back_in_takes_the_current_foreground() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState {
+            foreground: schist_color::Rgba::new(1.0, 0.0, 0.0, 1.0),
+            ..Default::default()
+        };
+        let mut tool = TypeTool::default();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "Hi");
+            assert_eq!(tool.editing.as_ref().unwrap().stored.color[0], 255);
+            tool.on_commit(&mut ctx);
+        }
+
+        // Switch to blue and click back into the same text.
+        state.foreground = schist_color::Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(22.0, 55.0));
+        let color = tool.editing.as_ref().expect("re-opened").stored.color;
+        assert_eq!(color[2], 255, "the text stayed its old colour: {color:?}");
+        assert_eq!(color[0], 0);
+    }
+
+    /// Tabs are layout characters here, so pasting a tabbed table keeps
+    /// its columns.
+    #[test]
+    fn pasting_keeps_tabs() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 60.0));
+        assert!(tool.insert_text(&mut ctx, "a\tb\nc\td"));
+        assert_eq!(tool.editing_text(), Some("a\tb\nc\td"));
     }
 
     fn layer_height(doc: &Document) -> i32 {

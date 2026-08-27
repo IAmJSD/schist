@@ -3027,8 +3027,14 @@ impl Workspace {
                 _ => None,
             },
         };
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        match text.filter(|t| !t.is_empty()) {
+            Some(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
+            // A type session with nothing in it has nothing to copy. It
+            // used to claim the keystroke anyway, so clicking to place
+            // text and then pressing copy silently did nothing instead of
+            // copying the selection.
+            None if matches!(sink, Sink::Tool) => return false,
+            None => {}
         }
         self.after_change(cx);
         true
@@ -4013,11 +4019,6 @@ impl Workspace {
             "backspace" => {
                 self.field_buffer.pop();
             }
-            // Escape is handled in `cancel_gesture`, which runs first:
-            // it is bound to `CancelGesture` in the always-matching
-            // "Workspace" context, so nothing escape-shaped ever reaches
-            // here. Kept as a fallback for a build with that binding
-            // removed rather than left as a dead arm that looks live.
             "escape" => {
                 self.focused_field = None;
                 self.field_buffer.clear();
@@ -4241,17 +4242,6 @@ impl Workspace {
         }
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
-            return;
-        }
-        // A focused field takes the escape first: it drops focus and
-        // leaves the dialog up, which is what `field_key`'s "escape" arm
-        // meant to do before `CancelGesture` -- bound in the
-        // always-matching "Workspace" context -- got there ahead of it
-        // and closed the whole dialog instead.
-        if self.modal.is_some() && self.focused_field.is_some() {
-            self.focused_field = None;
-            self.field_buffer.clear();
-            cx.notify();
             return;
         }
         if self.modal.is_some() {
