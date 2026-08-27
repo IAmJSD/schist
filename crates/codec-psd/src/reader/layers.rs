@@ -21,6 +21,12 @@ const MAX_LAYER_DIM: i32 = 400_000;
 
 pub struct ParsedLayers {
     pub layers: Vec<Layer>,
+    /// Global Layer Mask Info, verbatim.
+    pub global_layer_mask: Vec<u8>,
+    /// Document-level additional layer information blocks, verbatim.
+    /// `Lr16`/`Lr32`/`Layr` are excluded: the writer regenerates the
+    /// layer tree, so echoing the old copy back would emit it twice.
+    pub preserved_layer_info: Vec<RawBlock>,
     /// The layer count was negative: the first alpha channel of the merged
     /// composite is real transparency (matters only for flattened files).
     pub merged_alpha: bool,
@@ -39,6 +45,10 @@ struct Rec {
     name: String,
     lsct: Option<Lsct>,
     adjustment: Option<AdjustmentData>,
+    /// The layer's blending-ranges block, verbatim.
+    blending_ranges: Vec<u8>,
+    /// 'iOpa': fill opacity, 0..=255. Absent means fully filled.
+    fill_opacity: Option<u8>,
     extras: Vec<RawBlock>,
 }
 
@@ -66,6 +76,8 @@ pub fn parse_layer_and_mask_info(
     if sec_len == 0 {
         return Ok(ParsedLayers {
             layers: Vec::new(),
+            global_layer_mask: Vec::new(),
+            preserved_layer_info: Vec::new(),
             merged_alpha: false,
         });
     }
@@ -80,21 +92,27 @@ pub fn parse_layer_and_mask_info(
         (Vec::new(), false)
     };
 
-    // Global Layer Mask Info: u32 length + data.
-    // TODO: preserve this block for round-trip; the writer will need it.
+    // Global Layer Mask Info: u32 length + data. Kept verbatim; the
+    // writer used to emit a zero length here, dropping it.
+    let mut global_layer_mask = Vec::new();
     if sec.remaining() >= 4 {
         let gl = sec.u32()? as usize;
-        sec.skip(gl.min(sec.remaining()))?;
+        let gl = gl.min(sec.remaining());
+        global_layer_mask = sec.take(gl)?.to_vec();
     }
 
     // Trailing document-level "additional layer information" blocks
     // ('Patt', 'FMsk', 'Txt2', ...). Spec quirk: at document level these are
     // padded to 4-byte boundaries (layer-record-level blocks pad to 2).
     //
-    // TODO: preserve these verbatim for round-trip. For now we only
-    // *interpret* 'Lr16'/'Lr32'/'Layr', which is where Photoshop actually
-    // stores the layer tree for 16/32-bit documents (Layer Info above is
-    // empty in those files).
+    // 'Lr16'/'Lr32'/'Layr' are where Photoshop stores the layer tree for
+    // 16/32-bit documents (Layer Info above is empty in those files), so
+    // they are interpreted rather than preserved -- the writer builds
+    // them from the tree. Everything else rides through untouched:
+    // pattern definitions, linked smart objects and the rest used to be
+    // read and thrown away, so opening such a file and saving it lost
+    // them, while the README promised the opposite.
+    let mut preserved_layer_info: Vec<RawBlock> = Vec::new();
     while sec.remaining() >= 12 {
         let sig = sec.sig4()?;
         if &sig != b"8BIM" && &sig != b"8B64" {
@@ -112,15 +130,24 @@ pub fn parse_layer_and_mask_info(
         let pad = (4 - len % 4) % 4;
         sec.skip(pad.min(sec.remaining()))?;
 
-        if layers.is_empty() && matches!(&key, b"Lr16" | b"Lr32" | b"Layr") {
-            let (l, ma) = parse_layer_info(&mut block, header)?;
-            layers = l;
-            merged_alpha |= ma;
+        if matches!(&key, b"Lr16" | b"Lr32" | b"Layr") {
+            if layers.is_empty() {
+                let (l, ma) = parse_layer_info(&mut block, header)?;
+                layers = l;
+                merged_alpha |= ma;
+            }
+            continue;
         }
+        preserved_layer_info.push(RawBlock {
+            key,
+            data: block.take(block.remaining())?.to_vec(),
+        });
     }
 
     Ok(ParsedLayers {
         layers,
+        global_layer_mask,
+        preserved_layer_info,
         merged_alpha,
     })
 }
@@ -224,11 +251,13 @@ fn parse_layer_record(cur: &mut Cursor, header: &Header) -> Result<Rec, PsdError
     // --- Layer mask / adjustment layer data block ---
     let mask = parse_mask_block(&mut extra)?;
 
-    // --- Layer blending ranges ---
-    // TODO: regenerated as defaults by the writer for now; revisit if a
-    // fixture shows customized ranges mattering.
+    // --- Layer blending ranges ("Blend If") ---
+    // Nothing here interprets them, but they were skipped on read and
+    // written back as a zero length, so a file with custom ranges lost
+    // them on the first save. Carried verbatim instead.
     let ranges_len = extra.u32()? as usize;
-    extra.skip(ranges_len)?;
+    let ranges_len = ranges_len.min(extra.remaining());
+    let blending_ranges = extra.take(ranges_len)?.to_vec();
 
     // --- Pascal layer name, padded to a multiple of 4 (incl. length byte) ---
     let name_len = extra.u8()? as usize;
@@ -247,6 +276,8 @@ fn parse_layer_record(cur: &mut Cursor, header: &Header) -> Result<Rec, PsdError
         name,
         lsct: None,
         adjustment: None,
+        blending_ranges,
+        fill_opacity: None,
         extras: Vec::new(),
     };
 
@@ -329,6 +360,15 @@ fn parse_additional_blocks(
                     None
                 };
                 rec.lsct = Some(Lsct { divider, blend });
+            }
+            // Fill opacity, which is what makes "Fill 0% plus a drop
+            // shadow" show only the shadow. It was left in `extras` and
+            // never read, so such a layer opened fully opaque -- and the
+            // stale block was written straight back out, so changing Fill
+            // in Schist saved the file's original value. Regenerated by
+            // the writer from `Layer::fill_opacity`, like 'lfx2'.
+            b"iOpa" => {
+                rec.fill_opacity = data.first().copied();
             }
             _ => {
                 // Adjustment layers: interpret the kind, keep the raw
@@ -609,12 +649,24 @@ fn make_layer(
         default_value: m.default_value,
         bounds: m.rect,
     });
+    // Our own smart-object block, if the file was written by Schist.
+    // Without this the layer came back as a plain raster of its last
+    // rasterization, and every further transform degraded it -- the
+    // opposite of what smart objects are for.
+    let smart = rec
+        .extras
+        .iter()
+        .find(|b| b.key == crate::smart::SMART_BLOCK_KEY)
+        .and_then(|b| crate::smart::read_smart(&b.data, header.depth))
+        .map(Box::new);
+
     Layer {
         id: LayerId::next(),
         name: rec.name,
         visible: rec.visible,
         opacity: rec.opacity as f32 / 255.0,
-        fill_opacity: 1.0,
+        fill_opacity: rec.fill_opacity.map_or(1.0, |v| v as f32 / 255.0),
+        blending_ranges: rec.blending_ranges,
         blend: BlendMode::Normal, // callers overwrite
         clipping: rec.clipping,
         locked: false,
@@ -635,7 +687,11 @@ fn make_layer(
         shape,
         shape_key: 0,
         is_frame: false,
-        smart: None,
+        // Our own smart-object block, if the file was written by Schist.
+        // Without this the layer came back as a plain raster of its last
+        // rasterization, and every further transform degraded it -- the
+        // opposite of what smart objects are for.
+        smart,
         styled: None,
         render_offset: (0, 0),
     }

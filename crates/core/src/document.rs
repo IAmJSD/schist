@@ -55,6 +55,18 @@ pub struct Document {
     pub history: History,
     /// PSD image resources we preserve for round-trip fidelity.
     pub preserved_resources: Vec<PreservedResource>,
+    /// The PSD Global Layer Mask Info payload, verbatim.
+    ///
+    /// Read and discarded, then written back as a zero length -- so the
+    /// block was silently dropped on every save.
+    pub global_layer_mask: Vec<u8>,
+    /// Document-level additional layer information blocks, verbatim:
+    /// `Patt` pattern definitions, `lnk2` linked smart objects, `Txt2`,
+    /// `FMsk` and anything else a writer put there. Also read and
+    /// discarded before; open a file with pattern definitions or linked
+    /// smart objects, save, and all of it was gone -- while the README
+    /// promised every block preserved byte-for-byte.
+    pub preserved_layer_info: Vec<crate::layer::RawBlock>,
     /// Monotonic counter bumped on every visible change; views compare it
     /// to decide whether to recomposite.
     pub revision: u64,
@@ -108,6 +120,8 @@ impl Document {
             selected: Vec::new(),
             history: History::new(),
             preserved_resources: Vec::new(),
+            global_layer_mask: Vec::new(),
+            preserved_layer_info: Vec::new(),
             revision: 0,
             guides: Vec::new(),
             last_selection: None,
@@ -1020,6 +1034,40 @@ impl StrokeEdit {
             doc.add_damage(coord.rect());
         }
     }
+}
+
+/// Blit straight-alpha f32 RGBA into a tile map at the map's own depth.
+///
+/// The u8 form below is the common path, but it caps everything that goes
+/// through it at 8 bits per channel -- which is why every non-PSD import
+/// used to collapse a 16-bit scan to half its precision on the way in.
+pub fn blit_rgba_f32(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[f32]) {
+    use crate::tile::TILE_SIZE;
+    assert_eq!(
+        rgba.len(),
+        rect.width() as usize * rect.height() as usize * 4
+    );
+    let w = rect.width() as usize;
+    for coord in TileCoord::covering(&rect) {
+        let trect = coord.rect();
+        let clip = trect.intersect(&rect);
+        if clip.is_empty() {
+            continue;
+        }
+        let buf = tiles.get_mut_or_insert(coord, depth);
+        for y in clip.top..clip.bottom {
+            let sy = (y - rect.top) as usize;
+            let ly = (y - trect.top) as usize;
+            for x in clip.left..clip.right {
+                let sx = (x - rect.left) as usize;
+                let lx = (x - trect.left) as usize;
+                let s = (sy * w + sx) * 4;
+                let px = schist_color::Rgba::new(rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]);
+                buf.set(ly * TILE_SIZE as usize + lx, px);
+            }
+        }
+    }
+    tiles.prune_blank();
 }
 
 /// Fill a whole raster layer tilemap region from an RGBA8 buffer

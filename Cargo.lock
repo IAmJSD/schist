@@ -5655,11 +5655,13 @@ dependencies = [
  "log",
  "miniz_oxide",
  "rayon",
+ "schist-adjustments",
  "schist-codec-affinity",
  "schist-color",
  "schist-compositor",
  "schist-core",
  "schist-psd-descriptor",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

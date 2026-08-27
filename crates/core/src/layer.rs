@@ -114,6 +114,34 @@ impl AdjustmentKind {
         })
     }
 
+    /// The 4-char PSD block key for this kind, the inverse of
+    /// [`Self::from_psd_key`].
+    pub fn psd_key(&self) -> [u8; 4] {
+        use AdjustmentKind::*;
+        match self {
+            Levels => *b"levl",
+            Curves => *b"curv",
+            HueSaturation => *b"hue2",
+            BrightnessContrast => *b"brit",
+            BlackWhite => *b"blwh",
+            SolidColor => *b"SoCo",
+            GradientFill => *b"GdFl",
+            PatternFill => *b"PtFl",
+            Invert => *b"nvrt",
+            Posterize => *b"post",
+            Threshold => *b"thrs",
+            ColorBalance => *b"blnc",
+            Vibrance => *b"vibA",
+            Exposure => *b"expA",
+            PhotoFilter => *b"phfl",
+            GradientMap => *b"grdm",
+            SelectiveColor => *b"selc",
+            ChannelMixer => *b"mixr",
+            // A kind we do not model, carrying the key it arrived with.
+            Other(key) => *key,
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         use AdjustmentKind::*;
         match self {
@@ -209,6 +237,13 @@ pub struct Layer {
     pub kind: LayerKind,
     /// Preserved PSD blocks (text engine data, effects, smart object refs…).
     pub extras: Vec<RawBlock>,
+    /// The layer's PSD blending-ranges block, verbatim.
+    ///
+    /// Photoshop's "Blend If" sliders live here. The reader skipped the
+    /// block and the writer emitted a zero length, so a file with custom
+    /// ranges lost them on the first save. Nothing in Schist interprets
+    /// them yet; they ride through so the round trip is honest.
+    pub blending_ranges: Vec<u8>,
     /// Layer effects. Empty by default, so a layer costs nothing extra.
     pub style: crate::style::LayerStyle,
     /// Set when this layer is a vector shape: its pixels are generated
@@ -251,6 +286,7 @@ impl Layer {
             mask: None,
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
+            blending_ranges: Vec::new(),
             style: crate::style::LayerStyle::default(),
             shape: None,
             shape_key: 0,
