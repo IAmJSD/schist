@@ -11,10 +11,18 @@ use gpui::{Context, KeyBinding, PathPromptOptions, Window};
 use schist_plugin_api::PluginRegistry;
 use std::path::PathBuf;
 
-const CONTEXT: Option<&str> = Some("Workspace");
-/// Context for bindings without modifiers: suppressed while a tool is
-/// capturing typing (see `Workspace::tool_captures_keys`).
+/// Commands that act on the document. Suppressed while typing and while a
+/// modal is open: GPUI dispatches a matching binding *before* the
+/// element's `on_key_down`, and actions stop propagation by default, so a
+/// bound keystroke never reaches the text-entry code at all. Excluding the
+/// binding is the only way to let the keystroke through.
+const CONTEXT: Option<&str> = Some("Workspace && !text_entry && !modal");
+/// Context for bindings without modifiers, i.e. the single-letter tool
+/// shortcuts. `editable` is present only in the ordinary state.
 const TYPING_SAFE: Option<&str> = Some("Workspace && editable");
+/// Bindings that must stay live in every state. Escape is how you leave a
+/// text session or a dialog, so it cannot be suppressed by either.
+const ALWAYS: Option<&str> = Some("Workspace");
 
 fn translate(binding: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -82,7 +90,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         KeyBinding::new("]", BrushLarger, TYPING_SAFE),
         KeyBinding::new("x", SwapColors, TYPING_SAFE),
         KeyBinding::new("d", DefaultColors, TYPING_SAFE),
-        KeyBinding::new("escape", CancelGesture, CONTEXT),
+        KeyBinding::new("escape", CancelGesture, ALWAYS),
         KeyBinding::new("enter", CommitGesture, TYPING_SAFE),
         KeyBinding::new(
             &translate("cmd-t"),
@@ -270,4 +278,77 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ALWAYS, CONTEXT, TYPING_SAFE};
+    use gpui::{KeyBindingContextPredicate, KeyContext};
+
+    /// Does a binding registered with `predicate` fire in `state`?
+    fn fires(predicate: Option<&str>, state: &str) -> bool {
+        let context = [KeyContext::parse(state).expect("context parses")];
+        KeyBindingContextPredicate::parse(predicate.unwrap())
+            .expect("predicate parses")
+            .eval_inner(&context, &context)
+    }
+
+    const ORDINARY: &str = "Workspace editable";
+    const TYPING: &str = "Workspace text_entry";
+    const MODAL: &str = "Workspace modal";
+
+    #[test]
+    fn document_commands_do_not_fire_while_typing_or_in_a_modal() {
+        // The reported bug: ctrl+a ran the canvas Select All while the
+        // caret was in a text layer, because every command was bound
+        // against plain "Workspace", which matched in all three states.
+        assert!(fires(CONTEXT, ORDINARY), "must work normally");
+        assert!(!fires(CONTEXT, TYPING), "ctrl+a must reach the text");
+        assert!(
+            !fires(CONTEXT, MODAL),
+            "ctrl+z must not undo under a dialog"
+        );
+    }
+
+    #[test]
+    fn single_letter_shortcuts_stay_suppressed_while_typing() {
+        // These were already correct; the fix must not regress them.
+        assert!(fires(TYPING_SAFE, ORDINARY));
+        assert!(!fires(TYPING_SAFE, TYPING));
+        assert!(!fires(TYPING_SAFE, MODAL));
+    }
+
+    #[test]
+    fn escape_survives_every_state() {
+        // Escape is the way out of a text session and out of a dialog, so
+        // suppressing it would trap the user in both.
+        assert!(fires(ALWAYS, ORDINARY));
+        assert!(fires(ALWAYS, TYPING));
+        assert!(fires(ALWAYS, MODAL));
+    }
+
+    #[test]
+    fn the_three_states_are_mutually_exclusive() {
+        // Exactly one of the three tokens is present at a time, which is
+        // what lets a predicate name a state by excluding the others.
+        for (state, expected) in [
+            (ORDINARY, ["editable"].as_slice()),
+            (TYPING, ["text_entry"].as_slice()),
+            (MODAL, ["modal"].as_slice()),
+        ] {
+            for token in ["editable", "text_entry", "modal"] {
+                let present = fires(Some(token), state);
+                assert_eq!(
+                    present,
+                    expected.contains(&token),
+                    "{state:?} should{} carry {token:?}",
+                    if expected.contains(&token) {
+                        ""
+                    } else {
+                        " not"
+                    }
+                );
+            }
+        }
+    }
 }

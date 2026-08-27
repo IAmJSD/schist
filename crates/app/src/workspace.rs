@@ -6296,8 +6296,17 @@ impl Render for Workspace {
         if let Some((id, enabled)) = self.pending_plugin_toggle.take() {
             self.set_plugin_enabled(id, enabled, cx);
         }
-        let captures_keys =
-            self.tool_captures_keys() || self.modal.is_some() || self.layer_rename.is_some();
+        // Three mutually exclusive input states. A single "is something
+        // capturing keys" flag was not enough: the document commands were
+        // bound against plain "Workspace", which matches in every state, so
+        // only the unmodified single-letter bindings were ever suppressed.
+        let key_context = if self.modal.is_some() {
+            "Workspace modal"
+        } else if self.tool_captures_keys() || self.layer_rename.is_some() {
+            "Workspace text_entry"
+        } else {
+            "Workspace editable"
+        };
         let chrome = self.screen_mode == ScreenMode::Standard;
         // On macOS the menus live in the system bar, not in the window.
         crate::native_menu::sync(self, cx);
@@ -6315,11 +6324,7 @@ impl Render for Workspace {
             // While a tool is capturing typing the context loses "editable",
             // which is what single-letter shortcuts are bound against — so
             // letters reach the tool instead of switching tools.
-            .key_context(if captures_keys {
-                "Workspace"
-            } else {
-                "Workspace editable"
-            })
+            .key_context(key_context)
             // Files dragged in from the OS: anywhere in the window works.
             .on_drop(cx.listener(|ws, paths: &ExternalPaths, _w, cx| {
                 ws.handle_dropped_paths(paths.paths().to_vec(), cx);
