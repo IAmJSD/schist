@@ -34,7 +34,7 @@ pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
 pub use smart::SmartObject;
 pub use style::{
-    BevelStyle, BevelStyle_, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
+    BevelStyle, BevelStyle_, BlurStyle, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
     GradientShape, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, Technique,
 };
 pub use tile::{MaskTileMap, TileBuf, TileCoord, TileMap, TILE_PIXELS, TILE_SIZE};

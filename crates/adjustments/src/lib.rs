@@ -741,7 +741,7 @@ impl Params {
                     a: px.a,
                 };
                 if *preserve_luminosity {
-                    relight(out, lum)
+                    set_lum(out, lum)
                 } else {
                     out
                 }
@@ -750,20 +750,11 @@ impl Params {
                 vibrance,
                 saturation,
             } => {
-                let max = px.r.max(px.g).max(px.b);
-                let min = px.r.min(px.g).min(px.b);
-                let sat = max - min;
-                // Affinity's Saturation slider is a straight scale of
-                // CIELAB chroma: across the probe card, every pixel
-                // that stays in gamut comes back at exactly
-                // 1 + amount times its chroma (measured 1.500 for the
-                // 50 % fixture, sd 0.01, against 15 RMS for an HSL
-                // saturation scale and 11 for a luma push). Vibrance
-                // still leans on the least saturated pixels, which is
-                // what keeps skin tones from going lurid — Affinity's
-                // own weighting is subtler than that and unmapped.
-                let k = (1.0 + saturation / 100.0) * (1.0 + (vibrance / 100.0) * (1.0 - sat));
-                scale_chroma(px, k)
+                // Both sliders scale CIELAB chroma; Saturation does it
+                // flat, Vibrance through the weighting measured below.
+                let sat_k = 1.0 + saturation / 100.0;
+                let t = (vibrance / 100.0).clamp(-1.0, 1.0);
+                scale_chroma_by(px, |chroma, hue| sat_k * vibrance_gain(t, chroma, hue))
             }
             Params::Exposure {
                 exposure,
@@ -785,13 +776,20 @@ impl Params {
                 density,
                 preserve_luminosity,
             } => {
+                // Probed with the RGB cube at density 50 and 100, with
+                // Preserve Luminosity both ways
+                // (fixtures/affinity-probe/cube_lens*.af): the filter
+                // is a per-channel multiply in *encoded* sRGB towards
+                // the filter colour, and the panel's density is not the
+                // blend fraction — that is 0.9 x density squared, which
+                // reproduces all four probes to under 1/255 RMS.
                 let d = (density / 100.0).clamp(0.0, 1.0);
-                // Multiply towards the filter colour, which is what a real
-                // filter does to the light passing through it.
+                let k = 0.9 * d * d;
+                let mix = |v: f32, c: f32| v * (1.0 - k + k * c);
                 let out = Rgba {
-                    r: px.r * (1.0 - d + d * color[0] * 2.0).min(2.0),
-                    g: px.g * (1.0 - d + d * color[1] * 2.0).min(2.0),
-                    b: px.b * (1.0 - d + d * color[2] * 2.0).min(2.0),
+                    r: mix(px.r, color[0]),
+                    g: mix(px.g, color[1]),
+                    b: mix(px.b, color[2]),
                     a: px.a,
                 };
                 let out = Rgba {
@@ -801,7 +799,7 @@ impl Params {
                     a: out.a,
                 };
                 if *preserve_luminosity {
-                    relight(out, luma(px))
+                    set_lum(out, luma(px))
                 } else {
                     out
                 }
@@ -2256,12 +2254,77 @@ fn slider_log_gains(table: &[[f32; 3]], pos: f32) -> [f32; 3] {
 /// Bradford chromatic adaptation for [`Params::WhiteBalance`]. The
 /// diagonal cone gains are chosen so the grey axis moves by the
 /// calibrated per-channel linear gains for this warmth/tint.
+/// How much the two White Balance sliders pull each other, as log
+/// cone-gain corrections on a 5x5 grid of (warmth, tint) at -100, -50,
+/// 0, 50, 100 — measured from `wbgrid` probes over a full grey and
+/// primary ramp, one document per cell, with the clipped samples
+/// dropped so the extreme gains are not dragged in.
+///
+/// Zero all along both axes, which is where the one-dimensional tables
+/// above were calibrated and are exact. The corner that matters is
+/// cool-and-magenta: at (-100, +100) Affinity's S-cone gain is over
+/// three times the product of the two sliders taken separately.
+const WB_INTERACTION: [[[f32; 3]; 5]; 5] = [
+    [
+        [-0.028_16, -0.020_48, -0.330_81],
+        [-0.011_48, -0.009_38, -0.200_25],
+        [0.0, 0.0, 0.0],
+        [0.005_43, 0.006_48, 0.339_99],
+        [0.003_97, 0.009_83, 1.129_74],
+    ],
+    [
+        [-0.002_86, -0.011_16, -0.089_41],
+        [-0.000_30, -0.005_07, -0.052_52],
+        [0.0, 0.0, 0.0],
+        [-0.001_05, 0.004_63, 0.073_44],
+        [-0.004_17, 0.007_44, 0.179_94],
+    ],
+    [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ],
+    [
+        [-0.016_25, 0.025_91, 0.107_43],
+        [-0.010_82, 0.010_77, 0.057_62],
+        [0.0, 0.0, 0.0],
+        [0.013_21, -0.011_90, -0.072_17],
+        [0.030_10, -0.021_23, -0.160_45],
+    ],
+    [
+        [-0.027_59, 0.035_72, 0.137_72],
+        [-0.016_19, 0.017_59, 0.073_46],
+        [0.0, 0.0, 0.0],
+        [0.022_30, -0.015_61, -0.089_02],
+        [0.049_94, -0.028_37, -0.194_16],
+    ],
+];
+
+/// Read [`WB_INTERACTION`] at an arbitrary warmth and tint, bilinearly.
+/// The table's tint axis is the *panel's*, and the file (so our
+/// parameter) stores that negated, hence the flip.
+fn white_balance_interaction(warmth: f32, tint: f32) -> [f32; 3] {
+    let tint = -tint;
+    let at = |v: f32| {
+        let x = ((v.clamp(-100.0, 100.0) + 100.0) / 50.0).clamp(0.0, 4.0);
+        let i = (x.floor() as usize).min(3);
+        (i, x - i as f32)
+    };
+    let ((iw, fw), (it, ft)) = (at(warmth), at(tint));
+    let mut out = [0.0f32; 3];
+    for (k, o) in out.iter_mut().enumerate() {
+        let a = WB_INTERACTION[iw][it][k] * (1.0 - ft) + WB_INTERACTION[iw][it + 1][k] * ft;
+        let b =
+            WB_INTERACTION[iw + 1][it][k] * (1.0 - ft) + WB_INTERACTION[iw + 1][it + 1][k] * ft;
+        *o = a * (1.0 - fw) + b * fw;
+    }
+    out
+}
+
 fn white_balance(px: Rgba, warmth: f32, tint: f32) -> Rgba {
-    // Each slider's measured grey gains, multiplied together. The two
-    // are not quite independent — Affinity moves one white point in two
-    // dimensions rather than adapting twice — so a document using both
-    // lands a little short of the product (about 0.7/255 RMS on the
-    // probe card at warmth 30, tint 40); either slider alone is exact.
+    // Each slider's measured grey gains, multiplied together.
     let (kw, kt) = (
         slider_log_gains(&WARMTH_LOG_GAINS, warmth / 100.0),
         slider_log_gains(&TINT_LOG_GAINS, tint / 100.0),
@@ -2325,7 +2388,17 @@ fn white_balance(px: Rgba, warmth: f32, tint: f32) -> Rgba {
     let bm = matmul(&B, &R2X);
     let u = matvec(&bm, [1.0, 1.0, 1.0]);
     let bg = matvec(&bm, g);
-    let d = [bg[0] / u[0], bg[1] / u[1], bg[2] / u[2]];
+    // The two sliders are not independent: Affinity moves one white
+    // point in two dimensions rather than adapting twice, so the
+    // product of the two tables is only right on the axes. Correct it
+    // by the measured interaction (zero along both axes by
+    // construction).
+    let c = white_balance_interaction(warmth, tint);
+    let d = [
+        bg[0] / u[0] * c[0].exp(),
+        bg[1] / u[1] * c[1].exp(),
+        bg[2] / u[2] * c[2].exp(),
+    ];
     let dec = |v: f32| {
         let v = v.clamp(0.0, 1.0);
         if v <= 0.04045 {
@@ -2358,25 +2431,45 @@ fn luma(px: Rgba) -> f32 {
     0.299 * px.r + 0.587 * px.g + 0.114 * px.b
 }
 
-/// Scale a pixel back to a target luminance, so a hue move does not also
-/// change how bright the pixel looks ("Preserve Luminosity").
-fn relight(px: Rgba, target: f32) -> Rgba {
-    let now = luma(px);
-    if now <= 1e-4 {
-        return px;
+/// Move a pixel onto a target luma without changing its colour, the way
+/// Photoshop's `SetLum`/`ClipColor` pair does — and, as the lens-filter
+/// probes show, the way Affinity's "Preserve Luminosity" does too.
+///
+/// Adding the luma difference to all three channels keeps the hue and
+/// saturation exactly; where that pushes a channel out of range the
+/// triple is pulled back towards its own luma instead of being clipped
+/// per channel, which is what stops a filtered white from turning
+/// orange (a straight rescale gets that pixel badly wrong).
+fn set_lum(px: Rgba, target: f32) -> Rgba {
+    let d = target - luma(px);
+    let mut c = [px.r + d, px.g + d, px.b + d];
+    let l = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let lo = c[0].min(c[1]).min(c[2]);
+    if lo < 0.0 && l - lo > 1e-6 {
+        for v in c.iter_mut() {
+            *v = l + (*v - l) * l / (l - lo);
+        }
     }
-    let k = target / now;
+    let hi = c[0].max(c[1]).max(c[2]);
+    if hi > 1.0 && hi - l > 1e-6 {
+        for v in c.iter_mut() {
+            *v = l + (*v - l) * (1.0 - l) / (hi - l);
+        }
+    }
     Rgba {
-        r: (px.r * k).clamp(0.0, 1.0),
-        g: (px.g * k).clamp(0.0, 1.0),
-        b: (px.b * k).clamp(0.0, 1.0),
+        r: c[0].clamp(0.0, 1.0),
+        g: c[1].clamp(0.0, 1.0),
+        b: c[2].clamp(0.0, 1.0),
         a: px.a,
     }
 }
 
+
 /// Scale a pixel's CIELAB chroma about its own lightness, keeping hue,
 /// and clip back into sRGB. Affinity saturates this way.
-fn scale_chroma(px: Rgba, k: f32) -> Rgba {
+/// Scale a pixel's CIELAB chroma by a factor the caller picks from that
+/// chroma and the Lab hue angle in degrees, keeping L* and the hue.
+fn scale_chroma_by(px: Rgba, gain: impl Fn(f32, f32) -> f32) -> Rgba {
     const M: [[f32; 3]; 3] = [
         [0.4124, 0.3576, 0.1805],
         [0.2126, 0.7152, 0.0722],
@@ -2437,6 +2530,7 @@ fn scale_chroma(px: Rgba, k: f32) -> Rgba {
         500.0 * (fv[0] - fv[1]),
         200.0 * (fv[1] - fv[2]),
     );
+    let k = gain(a.hypot(b), b.atan2(a).to_degrees().rem_euclid(360.0));
     let (a, b) = (a * k, b * k);
     let fy = (l + 16.0) / 116.0;
     let back = [
@@ -2451,6 +2545,71 @@ fn scale_chroma(px: Rgba, k: f32) -> Rgba {
         b: enc(rgb[2]),
         a: px.a,
     }
+}
+
+/// Affinity's Vibrance weighting, as probed with the 64^3 RGB cube in
+/// fixtures/affinity-probe/cube_vib100.af, cube_vib50.af and
+/// cube_vibneg100.af (whose embedded thumbnails are byte-exact renders,
+/// so each file is a complete transfer function).
+///
+/// Turned *down* it is nothing but a weaker Saturation: at -100 every
+/// pixel comes back at exactly half its chroma, whatever its hue, so
+/// the gain there is a flat `1 + t/2`.
+///
+/// Turned *up* it is a chroma gain shaped in two independent ways:
+///
+/// * by hue, a protection window over the skin tones — the gain is
+///   exactly 1 between Lab hue 30 deg and 45 deg, and ramps to full
+///   over the next 45 deg either side, so oranges and reds stay put
+///   while everything else moves;
+/// * by chroma, [`VIBRANCE_BOOST`], rising from nothing at grey to
+///   +47 % near chroma 58 and easing off again past it.
+///
+/// The slider does not simply scale the result: at half strength the
+/// curve is read at a *lower* chroma as well, which is what makes the
+/// 50 % fixture land where it does (residual 1.4 % of the gain, against
+/// 2.4 % for a plain `1 + t*A(C)`). The 0.7 exponent on that is fitted.
+fn vibrance_gain(t: f32, chroma: f32, hue: f32) -> f32 {
+    if t <= 0.0 {
+        return 1.0 + t * 0.5;
+    }
+    // The window straddles 0 deg, so measure hue on (-135, 225].
+    let h = if hue > 225.0 { hue - 360.0 } else { hue };
+    let protect = if h < 30.0 {
+        ((30.0 - h) / 45.0).clamp(0.0, 1.0)
+    } else if h > 45.0 {
+        ((h - 45.0) / 45.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if protect <= 0.0 {
+        return 1.0;
+    }
+    1.0 + t * protect * vibrance_boost(t.powf(0.7) * chroma)
+}
+
+/// The full-strength Vibrance boost against CIELAB chroma, on 5-unit
+/// centres; grey is untouched and the tail holds at the last measurement.
+const VIBRANCE_BOOST: [f32; 20] = [
+    0.0, 0.0424, 0.1367, 0.2183, 0.2804, 0.3330, 0.3748, 0.4061, 0.4294, 0.4468, 0.4587, 0.4657,
+    0.4684, 0.4676, 0.4639, 0.4559, 0.4410, 0.4163, 0.3934, 0.3670,
+];
+
+fn vibrance_boost(chroma: f32) -> f32 {
+    // Knots at chroma 0, then 2.5 and every 5 after it.
+    if chroma <= 0.0 {
+        return 0.0;
+    }
+    if chroma <= 2.5 {
+        return VIBRANCE_BOOST[1] * (chroma / 2.5);
+    }
+    let x = (chroma - 2.5) / 5.0;
+    let i = x.floor() as usize + 1;
+    if i + 1 >= VIBRANCE_BOOST.len() {
+        return VIBRANCE_BOOST[VIBRANCE_BOOST.len() - 1];
+    }
+    let f = x - x.floor();
+    VIBRANCE_BOOST[i] * (1.0 - f) + VIBRANCE_BOOST[i + 1] * f
 }
 
 /// The colour ranges Selective Color works on, in `ranges` order.

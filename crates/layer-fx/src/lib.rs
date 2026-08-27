@@ -13,9 +13,9 @@
 
 use schist_color::Rgba;
 use schist_core::{
-    blend::BlendMode, BevelStyle, BevelStyle_, GlowStyle, GradientOverlayStyle, GradientShape,
-    IntRect, Layer, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, StyledRaster,
-    Technique, TileCoord, TileMap,
+    blend::BlendMode, BevelStyle, BevelStyle_, BlurStyle, GlowStyle, GradientOverlayStyle,
+    GradientShape, IntRect, Layer, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle,
+    StyledRaster, Technique, TileCoord, TileMap,
 };
 
 mod blur;
@@ -153,6 +153,13 @@ pub fn render_content(
         }
     }
 
+    // Affinity's Gaussian Blur effect softens the layer itself, and it
+    // sits at the bottom of the panel's list, so everything below works
+    // from the blurred shape rather than the original one.
+    if let Some(b) = style.blur.on() {
+        blur_content(&mut base, &mut alpha, w, h, b);
+    }
+
     let mut out = Plane::blank(rect);
 
     // Bottom of the stack: effects that sit behind the layer.
@@ -205,6 +212,50 @@ pub fn render_content(
     })
 }
 
+/// Blur the layer's own pixels in place, and the alpha the rest of the
+/// stack derives from with them.
+///
+/// Colour is blurred premultiplied so transparent neighbours cannot drag
+/// their (undefined) colour in. `preserve_alpha` puts the original alpha
+/// back afterwards, which smears the contents inside an unchanged shape.
+fn blur_content(base: &mut Plane, alpha: &mut [f32], w: usize, h: usize, b: &BlurStyle) {
+    if b.radius < 0.5 {
+        return;
+    }
+    let n = w * h;
+    let mut chan = vec![0.0f32; n];
+    let kept: Vec<f32> = base.px.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    for c in 0..4 {
+        for i in 0..n {
+            let a = base.px[i * 4 + 3];
+            chan[i] = if c == 3 {
+                a
+            } else {
+                base.px[i * 4 + c] * a
+            };
+        }
+        gaussian_alpha(&mut chan, w, h, b.radius);
+        for i in 0..n {
+            base.px[i * 4 + c] = chan[i];
+        }
+    }
+    for i in 0..n {
+        let a = base.px[i * 4 + 3];
+        if a > f32::EPSILON {
+            let unpremul = 1.0 / a;
+            for c in 0..3 {
+                base.px[i * 4 + c] *= unpremul;
+            }
+        }
+        if b.preserve_alpha {
+            base.px[i * 4 + 3] = kept[i];
+        }
+    }
+    if !b.preserve_alpha {
+        gaussian_alpha(alpha, w, h, b.radius);
+    }
+}
+
 /// Put `src` behind whatever is already in `dst`, optionally hiding it
 /// where `knockout` is opaque (a drop shadow does not show through its own
 /// layer, which matters once the layer is partly transparent).
@@ -238,8 +289,8 @@ fn shadow_plane(
             *v = 1.0 - *v;
         }
     }
-    apply_spread(&mut a, s.spread);
     blur::gaussian_alpha(&mut a, w, h, s.size);
+    apply_spread(&mut a, s.spread);
     Plane::from_alpha(rect, &a, s.color)
 }
 
@@ -249,11 +300,11 @@ fn inner_shadow_plane(alpha: &[f32], w: usize, h: usize, rect: IntRect, s: &Shad
 
 fn outer_glow_plane(alpha: &[f32], w: usize, h: usize, rect: IntRect, g: &GlowStyle) -> Plane {
     let mut a = alpha.to_vec();
-    apply_spread(&mut a, g.spread);
     match g.technique {
         Technique::Softer => blur::gaussian_alpha(&mut a, w, h, g.size),
         Technique::Precise => precise_grow(&mut a, w, h, g.size),
     }
+    apply_spread(&mut a, g.spread);
     Plane::from_alpha(rect, &a, g.color)
 }
 
@@ -268,11 +319,11 @@ fn inner_glow_plane(alpha: &[f32], w: usize, h: usize, rect: IntRect, g: &GlowSt
         blur::gaussian_alpha(&mut inv, w, h, g.size);
         inv.iter().map(|v| 1.0 - v).collect()
     };
-    apply_spread(&mut a, g.spread);
     match g.technique {
         Technique::Softer => blur::gaussian_alpha(&mut a, w, h, g.size),
         Technique::Precise => precise_grow(&mut a, w, h, g.size),
     }
+    apply_spread(&mut a, g.spread);
     Plane::from_alpha(rect, &a, g.color)
 }
 
@@ -415,11 +466,19 @@ fn bevel(out: &mut Plane, alpha: &[f32], w: usize, h: usize, rect: IntRect, b: &
 
 /// Push alpha towards fully on or fully off, which is what Photoshop's
 /// Spread/Choke sliders do before the blur.
+/// Harden a blurred matte, which is what Affinity's Intensity slider
+/// does: probed at radius 40 with intensity 0, 50, 80 and 100 % on a
+/// hard-edged square (`ig_r*_i*.af`), the glow comes back as the plain
+/// blurred step scaled by exactly `1 / (1 - intensity)` and clipped —
+/// 50 % doubles it to within 1/255, 80 % quintuples it.
+///
+/// This runs *after* the blur. Photoshop's Spread/Choke is a dilation
+/// before it instead, but running this before the blur made it a no-op
+/// on any hard-edged layer, which is most of them.
 fn apply_spread(a: &mut [f32], spread: f32) {
     if spread <= 0.0 {
         return;
     }
-    // At spread 1.0 the ramp collapses to a hard edge.
     let k = (1.0 - spread.clamp(0.0, 0.99)).max(0.01);
     for v in a.iter_mut() {
         *v = (*v / k).min(1.0);
@@ -469,6 +528,15 @@ fn signed_distance(alpha: &[f32], w: usize, h: usize, limit: f32) -> Vec<f32> {
                     }
                 }
             }
+            // `best` is the distance to the nearest pixel of the other
+            // class; the edge itself lies half a pixel before that one,
+            // so the geometric distance from this pixel's centre is
+            // half a pixel less. Without the correction an outside
+            // stroke's own edge lands exactly on a pixel centre and
+            // comes back half covered, where Affinity's is solid — a
+            // one-pixel seam all the way round the shape, and on the
+            // stroke probes the whole of the residual.
+            let best = (best - 0.5).max(0.0);
             out[i] = if inside { -best } else { best };
         }
     }

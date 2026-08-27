@@ -794,23 +794,12 @@ impl Walker<'_> {
         let Some(filt) = self.graph.child(node, b"Filt") else {
             return false;
         };
-        // A quad's corners are its eight F64 fields, in file order.
-        let corners = |name: &[u8; 4]| -> Option<Vec<f64>> {
-            let q = self.graph.child(filt, name)?;
-            let out: Vec<f64> = q
-                .fields
-                .iter()
-                .filter_map(|(_, v)| match v {
-                    Value::F64(f) => Some(*f),
-                    _ => None,
-                })
-                .collect();
-            (out.len() >= 8).then_some(out)
-        };
         for (src, dst) in [(b"DSrA", b"DDsA"), (b"DSrB", b"DDsB"), (b"Src ", b"Dst ")] {
-            match (corners(src), corners(dst)) {
+            match (self.quad(filt, src), self.quad(filt, dst)) {
                 (Some(a), Some(b)) => {
-                    if a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-6) {
+                    if a.iter().zip(&b).any(|(p, q)| {
+                        (p.0 - q.0).abs() > 1e-6 || (p.1 - q.1).abs() > 1e-6
+                    }) {
                         return false;
                     }
                 }
@@ -819,6 +808,65 @@ impl Walker<'_> {
             }
         }
         true
+    }
+
+    /// One of a filter's corner quads. `Quad` stores its corners as
+    /// eight `F64` fields in file order — the four xs, then the four ys
+    /// — going top-left, bottom-left, bottom-right, top-right.
+    fn quad(&self, filt: &Node, name: &[u8; 4]) -> Option<[(f64, f64); 4]> {
+        let q = self.graph.child(filt, name)?;
+        let v: Vec<f64> = q
+            .fields
+            .iter()
+            .filter_map(|(_, v)| match v {
+                Value::F64(f) => Some(*f),
+                _ => None,
+            })
+            .collect();
+        if v.len() < 8 || !v[..8].iter().all(|f| f.is_finite()) {
+            return None;
+        }
+        Some([
+            (v[0], v[4]),
+            (v[1], v[5]),
+            (v[2], v[6]),
+            (v[3], v[7]),
+        ])
+    }
+
+    /// The projective map one live filter applies to the pixels it sits
+    /// on, in their own bitmap space. `None` means we cannot reproduce
+    /// this filter — either it is not a warp at all, or it is Live
+    /// Perspective in its two-plane mode (`DMod`), which folds two
+    /// homographies over halves of the layer.
+    fn warp_of(&self, flrn: &Node) -> Option<Homography> {
+        let filt = self.graph.child(flrn, b"Filt")?;
+        if bool_of(filt, b"DMod") == Some(true) {
+            return None;
+        }
+        let (src, dst) = (self.quad(filt, b"Src ")?, self.quad(filt, b"Dst ")?);
+        let h = Homography::from_quads(&src, &dst)?;
+        (!h.is_identity()).then_some(h)
+    }
+
+    /// Every warp on a node, composed into one map. Filters apply in
+    /// `AdCh` order, so a later one maps the earlier one's output.
+    fn live_warp(&self, node: &Node) -> Option<Homography> {
+        let mut out: Option<Homography> = None;
+        for f in self.graph.children(node, b"AdCh") {
+            if !f.types.iter().any(|(t, _)| *t == graph::tag(b"FlRN")) {
+                continue;
+            }
+            if bool_of(f, b"Visi") == Some(false) {
+                continue;
+            }
+            let Some(h) = self.warp_of(f) else { continue };
+            out = Some(match out {
+                None => h,
+                Some(prev) => h.compose(&prev),
+            });
+        }
+        out
     }
 
     /// Rebuild a curves adjustment layer ("CrRA").
@@ -1254,10 +1302,7 @@ impl Walker<'_> {
                     schist_core::AdjustmentKind::PhotoFilter,
                     Params::PhotoFilter {
                         color,
-                        // Affinity's filter tints far more gently per
-                        // percent than our multiply-toward-the-colour
-                        // (fit against the probe fixture's thumbnail).
-                        density: (f(b"Dens") * 100.0 * 0.2).clamp(0.0, 100.0),
+                        density: (f(b"Dens") * 100.0).clamp(0.0, 100.0),
                         preserve_luminosity: matches!(adj.field(b"Pres"), Some(Value::Bool(true))),
                     },
                     "Lens Filter",
@@ -1322,8 +1367,8 @@ impl Walker<'_> {
     /// gradient overlay (`GrFl`, a fill descriptor); `Strk` outline
     /// stroke (`Radi` width, `Alig` position); `BevE` bevel
     /// (`Azim`/`Elev` light direction in radians, `Dept`, `Sftn`);
-    /// `Gaus` gaussian blur and `PhgB` (the 3D effect), which have no
-    /// equivalent and are reported.
+    /// `Gaus` gaussian blur (`Radi` radius, `PrAl` preserve alpha); and
+    /// `PhgB` (the 3D effect), which has no equivalent and is reported.
     ///
     /// Shadows and glows share `Comp`, the panel's Intensity slider
     /// stored *inverted* — 0% intensity writes 1.0 and 100% writes 0.0
@@ -1355,6 +1400,18 @@ impl Walker<'_> {
                 1.0
             };
             let radius = f64_of(fx, b"Radi").unwrap_or(0.0) as f32 * s;
+            // For the effects whose `Radi` is a *blur*, it means the
+            // same thing it does on `Gaus`: a standard deviation of
+            // about 0.35 x Radi, probed on a hard-edged square at
+            // radius 20, 40 and 80 (`ig_r*_i0.af`, sigma 8.02, 13.16
+            // and 27.49). Our own radius is one where sigma =
+            // radius/sqrt(3), so the conversion is sqrt(3) x that. The
+            // hard-square probes put it at 0.57-0.60 and the test-card
+            // ones a little higher, which says a residual remains in
+            // the falloff *shape*; 0.58 is where the two sets agree
+            // best. A stroke's `Radi` is a width, not a blur, and keeps
+            // its pixels.
+            let blur_radius = radius * crate::BLUR_RADI;
             fn on<T>(settings: T) -> style::Effect<T> {
                 style::Effect {
                     enabled: true,
@@ -1380,7 +1437,7 @@ impl Walker<'_> {
                                 .to_degrees() as f32,
                         distance: f64_of(fx, b"Offs").unwrap_or(0.0) as f32 * s,
                         spread: intensity(fx),
-                        size: radius,
+                        size: blur_radius,
                         knockout: bool_of(fx, b"Knck").unwrap_or(true),
                     };
                     if &tag == b"Shad" {
@@ -1395,7 +1452,7 @@ impl Walker<'_> {
                         blend: blend.unwrap_or(schist_core::BlendMode::Screen),
                         opacity,
                         spread: intensity(fx),
-                        size: radius,
+                        size: blur_radius,
                         technique: style::Technique::Softer,
                         from_edge: true,
                     };
@@ -1474,7 +1531,7 @@ impl Walker<'_> {
                         },
                         angle: f64_of(fx, b"Azim").unwrap_or(2.356).to_degrees() as f32,
                         altitude: f64_of(fx, b"Elev").unwrap_or(0.785).to_degrees() as f32,
-                        size: radius,
+                        size: blur_radius,
                         soften: f64_of(fx, b"Sftn").unwrap_or(0.0) as f32 * s,
                         depth: sign * (depth / radius.max(1e-3)).clamp(0.0, 1.0),
                         highlight: self
@@ -1535,8 +1592,27 @@ impl Walker<'_> {
                         ..style::GradientOverlayStyle::default()
                     });
                 }
+                b"Gaus" => {
+                    layer.style.blur = on(style::BlurStyle {
+                        // `Radi` is not a pixel radius: probed against
+                        // blur_r10/r30/r60.af (a hard-edged square whose
+                        // blurred alpha fits an error function almost
+                        // exactly), Affinity's Gaussian has a standard
+                        // deviation of 0.373 x Radi (Radi 90 comes out 6%
+                        // under that line, the rest are on it). Our own
+                        // radius is one where sigma = radius / sqrt(3),
+                        // putting the conversion at 0.646; the three box
+                        // passes approximating it run a few percent wide
+                        // and quantise to an integer box, and 0.60 is
+                        // where the three probes actually agree best.
+                        radius: radius * 0.60,
+                        // `PrAl`, the panel's "Preserve alpha": blur the
+                        // colour inside an unchanged silhouette.
+                        preserve_alpha: bool_of(fx, b"PrAl").unwrap_or(false),
+                    });
+                }
                 _ => {
-                    // Gaussian blur and anything else we can't restyle
+                    // The 3D effect and anything else we can't restyle
                     // changes what the layer looks like — record the gap.
                     self.report
                         .skipped
@@ -1572,6 +1648,9 @@ impl Walker<'_> {
             .filter(|n| !self.filter_is_identity(n))
             .collect();
         for f in filters {
+            if self.warp_of(f).is_some() {
+                continue; // resampled through in place_raster
+            }
             let name = self
                 .graph
                 .child(f, b"Filt")
@@ -2077,7 +2156,22 @@ impl Walker<'_> {
     /// scale bilinearly (identity is free); rotated or sheared ones go
     /// through a full affine resample.
     fn place_raster(&self, node: &Node, img: RgbaImage) -> Option<(IntRect, RgbaImage)> {
-        let map = self.raster_map(node);
+        let mut map = self.raster_map(node);
+        // A live warp filter reshapes the layer's own pixels before the
+        // layer transform places them, so resample here and slide the
+        // transform by wherever the destination quad ended up.
+        let mut img = img;
+        if let Some(h) = self.live_warp(node) {
+            // A degenerate map is not worth losing the layer over: draw
+            // it where it would have been instead.
+            if let Some((ox, oy, warped)) = perspective_resample(&img, &h) {
+                map = map.then(&Mat::translation(ox as f64, oy as f64));
+                img = warped;
+            } else {
+                log::warn!("affinity: live warp is degenerate; placing the layer unwarped");
+            }
+        }
+        let img = img;
         if !map.axis_aligned() {
             return affine_resample(&img, &map);
         }
@@ -3892,6 +3986,230 @@ fn blit_mask(tiles: &mut schist_core::MaskTileMap, rect: IntRect, gray: &[u8]) {
 /// Scale an image to the placement rect's size (bilinear). Identity is
 /// free; import-time quality matches what a one-off resample costs.
 /// Flip an image in place about either axis.
+/// A projective (3x3, `h8` = 1) map, as Affinity's Live Perspective
+/// filter stores it: four source corners onto four destination corners.
+#[derive(Clone, Copy, Debug)]
+struct Homography([f64; 9]);
+
+impl Homography {
+    /// The map taking `src[i]` to `dst[i]`, by the usual eight-equation
+    /// direct linear solve. `None` if the quads are degenerate.
+    fn from_quads(src: &[(f64, f64); 4], dst: &[(f64, f64); 4]) -> Option<Homography> {
+        // Two rows per corner: x' (h6 h7 scaled by -x') and y'.
+        let mut a = [[0.0f64; 9]; 8];
+        for i in 0..4 {
+            let (x, y) = src[i];
+            let (u, v) = dst[i];
+            a[2 * i] = [x, y, 1.0, 0.0, 0.0, 0.0, -u * x, -u * y, u];
+            a[2 * i + 1] = [0.0, 0.0, 0.0, x, y, 1.0, -v * x, -v * y, v];
+        }
+        // Gaussian elimination with partial pivoting.
+        for col in 0..8 {
+            let mut pivot = col;
+            for row in col + 1..8 {
+                if a[row][col].abs() > a[pivot][col].abs() {
+                    pivot = row;
+                }
+            }
+            if a[pivot][col].abs() < 1e-12 {
+                return None;
+            }
+            a.swap(col, pivot);
+            let d = a[col][col];
+            for v in a[col].iter_mut() {
+                *v /= d;
+            }
+            for row in 0..8 {
+                if row == col {
+                    continue;
+                }
+                let f = a[row][col];
+                if f == 0.0 {
+                    continue;
+                }
+                for k in col..9 {
+                    a[row][k] -= f * a[col][k];
+                }
+            }
+        }
+        let mut h = [0.0f64; 9];
+        for (i, row) in a.iter().enumerate() {
+            h[i] = row[8];
+            if !h[i].is_finite() {
+                return None;
+            }
+        }
+        h[8] = 1.0;
+        Some(Homography(h))
+    }
+
+    fn apply(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let h = &self.0;
+        let w = h[6] * x + h[7] * y + h[8];
+        if w.abs() < 1e-12 {
+            return None;
+        }
+        let p = (
+            (h[0] * x + h[1] * y + h[2]) / w,
+            (h[3] * x + h[4] * y + h[5]) / w,
+        );
+        (p.0.is_finite() && p.1.is_finite()).then_some(p)
+    }
+
+    /// The inverse map, from the adjugate of the 3x3 (scale is free, so
+    /// no determinant division is needed beyond renormalising `h8`).
+    fn invert(&self) -> Option<Homography> {
+        let h = &self.0;
+        let mut inv = [
+            h[4] * h[8] - h[5] * h[7],
+            h[2] * h[7] - h[1] * h[8],
+            h[1] * h[5] - h[2] * h[4],
+            h[5] * h[6] - h[3] * h[8],
+            h[0] * h[8] - h[2] * h[6],
+            h[2] * h[3] - h[0] * h[5],
+            h[3] * h[7] - h[4] * h[6],
+            h[1] * h[6] - h[0] * h[7],
+            h[0] * h[4] - h[1] * h[3],
+        ];
+        if inv[8].abs() < 1e-12 || !inv.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let s = inv[8];
+        for v in inv.iter_mut() {
+            *v /= s;
+        }
+        Some(Homography(inv))
+    }
+
+    /// `self` applied after `other` (the matrix product self * other).
+    fn compose(&self, other: &Homography) -> Homography {
+        let (a, b) = (&self.0, &other.0);
+        let mut out = [0.0f64; 9];
+        for r in 0..3 {
+            for c in 0..3 {
+                out[r * 3 + c] =
+                    a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+            }
+        }
+        if out[8].abs() > 1e-12 {
+            let s = out[8];
+            for v in out.iter_mut() {
+                *v /= s;
+            }
+        }
+        Homography(out)
+    }
+
+    fn is_identity(&self) -> bool {
+        const I: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        self.0.iter().zip(I).all(|(a, b)| (a - b).abs() < 1e-9)
+    }
+}
+
+/// Resample an image through a projective map, in the image's own pixel
+/// space. Returns the integer offset of the result within that space
+/// (the destination quad can leave the source's box in any direction)
+/// alongside the warped pixels; the caller folds the offset into the
+/// layer transform.
+fn perspective_resample(img: &RgbaImage, h: &Homography) -> Option<(i32, i32, RgbaImage)> {
+    let inv = h.invert()?;
+    let (sw, sh) = (img.width as f64, img.height as f64);
+    let mut lo = (f64::INFINITY, f64::INFINITY);
+    let mut hi = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for (x, y) in [(0.0, 0.0), (sw, 0.0), (0.0, sh), (sw, sh)] {
+        let (x, y) = h.apply(x, y)?;
+        lo = (lo.0.min(x), lo.1.min(y));
+        hi = (hi.0.max(x), hi.1.max(y));
+    }
+    if lo.0.abs().max(lo.1.abs()).max(hi.0.abs()).max(hi.1.abs()) > (1 << 24) as f64 {
+        return None;
+    }
+    let rect = IntRect::new(
+        lo.0.floor() as i32,
+        lo.1.floor() as i32,
+        hi.0.ceil() as i32,
+        hi.1.ceil() as i32,
+    );
+    let (dw, dh) = (rect.width() as usize, rect.height() as usize);
+    if rect.is_empty() || dw * dh > (1 << 28) {
+        return None;
+    }
+
+    let (iw, ih) = (img.width as i64, img.height as i64);
+    let fetch = |x: i64, y: i64| -> [f32; 4] {
+        if x < 0 || y < 0 || x >= iw || y >= ih {
+            return [0.0; 4];
+        }
+        let at = ((y as usize * iw as usize) + x as usize) * 4;
+        let p = &img.pixels[at..at + 4];
+        let a = p[3] as f32;
+        [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a, a]
+    };
+    let m = &inv.0;
+    let mut pixels = vec![0u8; dw * dh * 4];
+    pixels
+        .par_chunks_exact_mut(dw * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            // Unlike an affine map the source point does not advance by
+            // a constant along the row, but the three linear forms do,
+            // so only the divide is per-pixel.
+            let py = rect.top as f64 + y as f64 + 0.5;
+            let px0 = rect.left as f64 + 0.5;
+            let (mut nx, mut ny, mut nw) = (
+                m[0] * px0 + m[1] * py + m[2],
+                m[3] * px0 + m[4] * py + m[5],
+                m[6] * px0 + m[7] * py + m[8],
+            );
+            for out in row.as_chunks_mut::<4>().0.iter_mut() {
+                let (cx, cy, cw) = (nx, ny, nw);
+                nx += m[0];
+                ny += m[3];
+                nw += m[6];
+                if cw.abs() < 1e-12 {
+                    continue;
+                }
+                let (sx, sy) = (cx / cw, cy / cw);
+                let (fx, fy) = (sx - 0.5, sy - 0.5);
+                if !(fx >= -1.0 && fy >= -1.0 && fx <= sw && fy <= sh) {
+                    continue;
+                }
+                let (tx, ty) = (fx as i64, fy as i64);
+                let x0 = tx - (tx as f64 > fx) as i64;
+                let y0 = ty - (ty as f64 > fy) as i64;
+                let (wx, wy) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
+                let mut acc = [0.0f32; 4];
+                for (dxy, wgt) in [
+                    ((0, 0), (1.0 - wx) * (1.0 - wy)),
+                    ((1, 0), wx * (1.0 - wy)),
+                    ((0, 1), (1.0 - wx) * wy),
+                    ((1, 1), wx * wy),
+                ] {
+                    let p = fetch(x0 + dxy.0, y0 + dxy.1);
+                    for (a, v) in acc.iter_mut().zip(p) {
+                        *a += v * wgt;
+                    }
+                }
+                if acc[3] > f32::EPSILON {
+                    let unpremul = 1.0 / acc[3];
+                    for i in 0..3 {
+                        out[i] = (acc[i] * unpremul + 0.5).clamp(0.0, 255.0) as u8;
+                    }
+                    out[3] = (acc[3] + 0.5).clamp(0.0, 255.0) as u8;
+                }
+            }
+        });
+    Some((
+        rect.left,
+        rect.top,
+        RgbaImage {
+            width: dw as u32,
+            height: dh as u32,
+            pixels,
+        },
+    ))
+}
+
 fn mirror(img: &mut RgbaImage, horizontal: bool, vertical: bool) {
     let (w, h) = (img.width as usize, img.height as usize);
     if horizontal {

@@ -245,6 +245,28 @@ impl Default for BevelStyle {
     }
 }
 
+/// Affinity's Gaussian Blur layer effect (`Gaus`): unlike every other
+/// slot this one does not draw anything, it softens the layer's own
+/// pixels before the rest of the stack sees them — so a shadow or
+/// stroke follows the blurred shape, exactly as the app renders it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BlurStyle {
+    /// Gaussian radius in pixels.
+    pub radius: f32,
+    /// Blur the colour but keep the layer's own alpha (`PrAl`), so the
+    /// shape stays crisp and only its contents smear.
+    pub preserve_alpha: bool,
+}
+
+impl Default for BlurStyle {
+    fn default() -> Self {
+        BlurStyle {
+            radius: 5.0,
+            preserve_alpha: false,
+        }
+    }
+}
+
 /// Everything Photoshop's Layer Style dialog can turn on for one layer.
 ///
 /// `None` means the effect is absent; `Some` with `enabled == false` in the
@@ -252,6 +274,7 @@ impl Default for BevelStyle {
 /// how the dialog remembers settings across a tick of the checkbox.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct LayerStyle {
+    pub blur: Effect<BlurStyle>,
     pub drop_shadow: Effect<ShadowStyle>,
     pub inner_shadow: Effect<ShadowStyle>,
     pub outer_glow: Effect<GlowStyle>,
@@ -289,7 +312,8 @@ impl<T> Effect<T> {
 impl LayerStyle {
     /// True when nothing is switched on, i.e. the layer renders as-is.
     pub fn is_empty(&self) -> bool {
-        !(self.drop_shadow.enabled
+        !(self.blur.enabled
+            || self.drop_shadow.enabled
             || self.inner_shadow.enabled
             || self.outer_glow.enabled
             || self.inner_glow.enabled
@@ -304,6 +328,13 @@ impl LayerStyle {
     /// styled raster has to be grown by this much or shadows get clipped.
     pub fn outset(&self) -> i32 {
         let mut out = 0.0f32;
+        // A blur is the one effect that grows the layer's own pixels,
+        // and every later effect works off the grown alpha, so its
+        // reach adds to the others rather than competing with them.
+        // Three box passes of radius/sqrt(3) reach sqrt(3) times the
+        // nominal radius, so a blur needs that much room, not its
+        // radius, or the soft edge is clipped square.
+        let blur = self.blur.on().map_or(0.0, |b| b.radius * 1.7321);
         if let Some(s) = self.drop_shadow.on() {
             out = out.max(s.distance + s.size + s.spread * s.size);
         }
@@ -317,6 +348,21 @@ impl LayerStyle {
                 StrokePosition::Inside => 0.0,
             });
         }
+        // The inner glow and inner shadow blur the *outside* of the
+        // shape inwards. They draw nothing beyond the layer, but the
+        // buffer still has to hold that exterior out to the blur's
+        // reach: with only the pixel of slack below, the first pass
+        // smears a one-pixel border into nothing and the glow comes
+        // back at two thirds strength along its own edge.
+        for reach in [
+            self.inner_glow.on().map(|g| g.size),
+            self.inner_shadow.on().map(|s| s.size + s.distance),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            out = out.max(reach * 1.7321);
+        }
         if let Some(b) = self.bevel.on() {
             if matches!(
                 b.style,
@@ -326,6 +372,6 @@ impl LayerStyle {
             }
         }
         // A pixel of slack so antialiased edges are not clipped.
-        out.ceil() as i32 + 1
+        (out + blur).ceil() as i32 + 1
     }
 }

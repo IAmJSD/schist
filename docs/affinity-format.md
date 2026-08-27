@@ -381,11 +381,23 @@ per-type accuracy against Affinity's own renders is pinned by
   towards +100 while cooling runs away (log-gain −1.07 on red at −100
   against −0.44 at −70) — which is why the earlier mirrored-quadratic
   fit was 2.5–3.5 RMS out on the cooling half. Single-slider documents
-  now import at 0.1–0.2 RMS. The two sliders are *not* quite
-  independent: Affinity moves one white point in two dimensions rather
-  than adapting twice, so a document using both lands about 0.7/255
-  short of the product of the two tables (whitebalance.af, warmth 30
-  with tint 40, is our only sample of the interior).
+  now import at 0.1–0.2 RMS. The two sliders are **not** independent:
+  Affinity moves one white point in two dimensions rather than adapting
+  twice, so the product of the two tables is right only on the axes.
+  Fitting a 3×3 in linear light to a probe's whole cube comes back with
+  0.0012 residual and, taken into Bradford cone space, is diagonal to
+  0.001 — so the model really is a chromatic adaptation, and all a
+  combined setting changes is the cone gains. A 5×5 grid of probes
+  (`wbgrid`, warmth × tint at −100, −50, 0, 50, 100, each read off a
+  full grey and primary ramp with the clipped samples dropped)
+  measures those; the residual over the two axis tables is
+  `WB_INTERACTION`, zero along both axes and small in most of the
+  interior, but very large in the cool-magenta corner — at (−100,
+  +100) Affinity's S-cone gain is 11.97 against the 3.79 the two
+  sliders separately predict, and a mid grey comes back (9, 59, 215)
+  where the product model says blue ≈ 129. With that correction
+  interpolated bilinearly, every combined probe lands at 0.1–0.2 RMS,
+  and `whitebalance.af` (warmth 30, tint 40) at 0.6.
 - `CoBP` colour balance: `Sh/Mi/Hi` × `CR/MG/YB` + `PeLu`. Affinity
   moves ~0.11× our step per percent (fitted).
 - `VibP` vibrance: `Satu` is a plain fraction, but **`Vibr` is an i32
@@ -396,12 +408,26 @@ per-type accuracy against Affinity's own renders is pinned by
   fixture (sd 0.01) and 0.499× for −50 %, against 15 RMS for an HSL
   saturation scale, 16 for HSV and 11 for a luma push. Clipping back
   into sRGB leaves ~1.3 RMS, so Affinity's gamut mapping is a little
-  gentler than a hard clip. Vibrance itself is *also* a chroma scale,
-  but its weighting is unmapped: it peaks around 0.5 HSV saturation
-  (chroma ×1.45 at Vibrance 100) and falls to nothing above ~0.7,
-  and the gain does not scale linearly with the slider (50 % already
-  buys most of 100 %'s effect), so neither our "lean on the least
-  saturated pixels" heuristic nor a one-dimensional table of it fits.
+  gentler than a hard clip. Vibrance is a chroma scale too, in the same
+  space (the cube probes hold L\* to 0.11 and Lab hue to 0.3° on
+  average), with two separable weightings on the gain — measured from
+  `cube_vib100.af`, `cube_vib50.af` and `cube_vibneg100.af`:
+  - **Turned down it is just a weaker Saturation.** At −100 every
+    pixel comes back at exactly 0.500× its chroma, hue irrelevant, so
+    the gain is a flat 1 + t/2.
+  - **By hue, a skin-tone protection window.** The gain is exactly 1
+    between Lab hue 30° and 45° and ramps linearly to full over the
+    next 45° either side, so reds and oranges hold still while
+    everything from about 90° round to 345° gets the whole boost.
+  - **By chroma, a rise-and-ease curve**: nothing at grey, +47 % near
+    chroma 58, easing back to +37 % by chroma 92 (and the distribution
+    inside each chroma bin is tight, so that easing is real and not
+    gamut clipping).
+  - **The slider is not a scale on that.** Half strength also reads
+    the curve at a *lower* chroma: 1 + t·A(t^0.7·C) tracks the 50 %
+    probe to 1.4 % of the gain, against 2.4 % for a plain 1 + t·A(C).
+  Together those take the three vibrance fixtures from 5–10 RMS to
+  1.4–2.0.
 - `InRA` invert: no parameters at all — no `AdjP`. *(exact)*
 - `PosP` posterise: `Post` i32 levels. Both apps quantize
   floor(v·n)/(n−1) — equal input bands, outputs over the full range
@@ -418,14 +444,38 @@ per-type accuracy against Affinity's own renders is pinned by
   ramp over Rec.601 luma. *(exact)*
 - `LeFP` lens filter: the colour as three u16 Lab components (their
   field tags carry unprintable bytes; they are the node's first three
-  u16 fields in L, a, b order), `Dens` density, `Pres` preserve
-  luminosity. Density imported ×0.2 (fitted — Affinity tints far more
-  gently than our multiply-toward-the-colour).
+  u16 fields in L, a, b order, L over 0..100 and a/b over −128..127),
+  `Dens` density, `Pres` preserve luminosity. The cube probes pin all
+  three parts *(exact)*:
+  - it is a **per-channel multiply in encoded sRGB**, not in linear
+    light — with Preserve Luminosity off the whole cube collapses to
+    three 1-D ramps with zero residual;
+  - the multiplier is `1 − k + k·colour` where **k = 0.9 · density²**,
+    which lands the same k on all three channels to four decimals at
+    density 0.35, 0.5 and 1.0 — and only if the Lab is decoded
+    against **D50** and Bradford-adapted to sRGB, which is what makes
+    the blue channel come out at 0.100 rather than 0.012;
+  - Preserve Luminosity is Photoshop's `SetLum`/`ClipColor`: add the
+    Rec.601 luma difference to all three channels, then, if that
+    leaves the range, pull the triple back towards its own luma
+    instead of clipping per channel. A straight rescale gets filtered
+    white badly wrong (it stays white in Affinity); this does not.
 - `RecP` recolour: `RecH` hue as a fraction of the turn, `RecS`
   saturation, `RecL` lightness — our colorize, whose positive
   lightness offset l + (1−l)·L matches Affinity exactly. *(exact)*
-- `STPa` split toning (`HlHu`/`HlSa`/`ShHu`/`ShSa`/`Bala`): parsed but
-  reported — no equivalent adjustment yet. Soft Proof, LUT, OCIO,
+- `STPa` split toning (`HlHu`/`HlSa`/`ShHu`/`ShSa`/`Bala`, hues as a
+  fraction of the turn): parsed but reported — no equivalent
+  adjustment yet. The cube probes say most of what an implementation
+  would need: the tonal key is **Rec.601 luma in encoded sRGB** (it
+  cuts the changed pixels off at exactly the balance point, where
+  Rec.709 and HSL lightness both smear), that luma is preserved
+  exactly, the two halves act only on their own side of `Bala`, and
+  the strength is a bump — zero at black, at the balance point and at
+  white, peaking half way through each half. On the grey ramp
+  `SetLum(src + w·(tint − luma(tint)), luma)` with
+  w = sat · 0.23 · (4p(1−p))^1.2 lands inside 1/255; over the whole
+  cube it only halves the error, so how the tint combines with a
+  pixel's *own* colour is still open. Soft Proof, LUT, OCIO,
   Normals and Tone Compression/Stretch are likewise reported when
   seen.
 
@@ -447,7 +497,7 @@ document per row and per enum setting, in `fixtures/affinity-probe/fx_*.af`
 | `Strk` | Outline | `Alig` · `Ftyp` · `Colr` · `GrFl` |
 | `BevE` | Bevel / Emboss | `Beve` · `Azim` · `Elev` · `Dept` · `Disr` · `Sftn` · `Prof` · `Invt` · `ShBM` · `ShOp` · `ShCl` · `HiCl` |
 | `PhgB` | 3D | `Ambi` · `Diff` · `Spec` · `Expo` · `AmbC` · `SpeC` · `Lits` |
-| `Gaus` | Gaussian Blur | `PrAl` |
+| `Gaus` | Gaussian Blur | `Radi` · `PrAl` |
 
 The inner shadow's tag is **`InnS`**, not the `InSh` an earlier reading
 assumed — nothing in any corpus or probe file spells it `InSh`, so
@@ -459,7 +509,61 @@ points down-right. `Knck` is "fill knocks out shadow".
 
 **`Comp` is the Intensity slider, stored inverted**: 0 % writes 1.0 and
 100 % writes 0.0, on shadows and glows alike (probed at 40, 60, 70 and
-80 %). It is our `spread`, taken as 1 − `Comp`.
+80 %). It is our `spread`, taken as 1 − `Comp` — but it is **a gain
+applied after the blur, not a choke before it**. An inner glow on a
+hard-edged square at radius 40 (`ig_r40_i*.af`) comes back as the plain
+blurred step multiplied by exactly `1 / (1 − intensity)` and clipped:
+50 % doubles it to within 1/255 and 80 % quintuples it. Photoshop's
+Spread/Choke is the other thing — a dilation before the blur — and
+running it that way made it a no-op on any hard-edged layer, which is
+most of them; that alone was most of the inner glow's old 21 RMS.
+
+**Every `Radi` that is a blur means what it means on `Gaus`.** Fitting
+an error function to the same square's glow gives sigma 8.02, 13.16 and
+27.49 px for `Radi` 20, 40 and 80 — the same ~0.34 × `Radi` the
+Gaussian Blur effect uses, so shadows, glows and the bevel's height map
+all convert through it. (A stroke's `Radi` is a width, not a blur, and
+stays as it is.) The hard-square probes put the conversion at
+0.57–0.60 of our own radius and the test-card ones a little higher,
+which says a residual remains in the falloff *shape*; 0.58 is where the
+two sets agree best.
+
+**The bevel's `Radi` sets the ramp's *width*, not its steepness.**
+Probed on a mid-grey square at `Radi` 10 and 30 with `Dept` 5
+(`bv_pillow_*.af`), the shading is the same curve in both, stretched:
+reading the highlight back out of its Screen-75 % blend gives 0.50,
+0.52, 0.52, 0.37, 0.16, 0.01 at 0, 0.2, 0.4, 0.6, 0.8 and 1.0 of the
+way in, and it reaches flat at exactly `Radi` pixels from the edge. So
+the peak is 0.535 whichever radius is used — the surface slope does
+*not* fall off as the bevel widens, which means the height field is a
+ramp over `Radi` px built from a distance field, not a blurred alpha,
+and `Dept` acts on the slope rather than as a height in pixels.
+
+Ours does the opposite: it takes the gradient of an alpha blurred by
+`Radi`, so the slope goes as 1/`Radi` and a wide bevel comes out nearly
+flat (at `Radi` 30 our profile never leaves 128/255 where Affinity's
+runs 175 down to 53). That is the whole of the bevel residual, and it
+is a re-implementation rather than a constant: a distance-field ramp,
+the profile above, and one more probe at a second `Dept` to pin what
+`Dept` scales.
+
+Export divides by the same factor (`BLUR_RADI`, shared so the two
+directions cannot drift), or a shadow we write would come back nearly
+twice the size we meant — which is what the round-trip test caught. The
+exporter still writes no `Gaus` or `BevE` node at all, so a Gaussian
+blur or bevel is reported and dropped on the way out.
+
+Two of our own bugs fell out of these probes and are worth recording,
+because both flatter the numbers above. The **inner** glow and inner
+shadow blur the *outside* of the shape inwards, so the buffer has to
+hold that exterior out to the blur's reach — the styled raster was
+grown only for the effects that draw beyond the layer, leaving a
+one-pixel border that the first blur pass smeared into nothing and a
+glow at two thirds strength along its own edge. And the blur itself
+used one integer box width for all three passes, whose achievable
+sigmas step by a whole pixel around r = 8; mixing two adjacent widths
+across the passes hits the target sigma instead, which is what stopped
+two probes of the same effect disagreeing about the scale factor.
 
 `Strk`'s `Alig` is **0 outside · 1 centre · 2 inside**, and `BevE`'s
 `Beve` subtype is **0 inner · 1 outer · 2 emboss · 3 pillow** (pillow
@@ -480,12 +584,30 @@ Enabled effects import onto our layer style — on any layer kind,
 groups included: the corpus hangs sticker outlines and drop shadows on
 whole groups, so the compositor flattens a styled group's children and
 runs the same fx pipeline over the result
-(`schist_compositor::render_styled`). `Gaus` and `PhgB` have no
-layer-style home and are reported. The field mapping is exact for
-everything else; what the probe fixtures' bounds still record is our
-own effect renderers' falloff against Affinity's — closest on the
-inner shadow (3.6 RMS), furthest on the inner glow (21), whose
-intensity ramp saturates far harder than ours.
+(`schist_compositor::render_styled`). `PhgB` has no layer-style home
+and is reported. The field mapping is exact for everything else; what
+the probe fixtures' bounds still record is our own effect renderers'
+falloff against Affinity's. With the intensity and radius conventions
+below in place the shadows and glows are close (0.5-3.3 RMS); what is
+left is the bevel (1.8-15, worst on pillow emboss) and the stroke
+(5-10), neither of which has been probed at two radii yet.
+
+**`Gaus`'s `Radi` is not a pixel radius.** Blurring a hard-edged
+square (`blur_r10.af`, `blur_r30.af`, `blur_r60.af`) and fitting an
+error function to the resulting alpha gives σ = 11.29, 31.88 and 67.11
+px for `Radi` 30, 90 and 180 — a standard deviation of **0.373 ×
+`Radi`**, with the middle probe 6 % under that line and the other two
+on it. (The panel's own "px" figure is a third of `Radi` again; the
+stored value is in some finer internal unit.) The residual against a
+true Gaussian is under 1/255, so it really is one. Import maps it onto
+our blur radius — a parameter where σ = radius/√3 — through 0.60,
+which is where the three probes agree once our three-box
+approximation's own few-percent width and integer box quantisation are
+in play. `PrAl` is "preserve alpha": blur the colour inside an
+unchanged silhouette. Because the effect softens the layer itself, it
+sits at the bottom of the panel's list and everything else works from
+the blurred shape; its reach is √3 times the radius, which the styled
+raster has to be grown by or the soft edge comes back square.
 
 **Live filter nodes** (`FlRN`): a `Filt` pipeline warping the content
 below between source and destination `Quad`s. The node hangs off a
@@ -502,7 +624,47 @@ defaults they split the layer down the middle and map onto
 themselves), `AClp` is autoclip and `Live` marks it live. Every
 *corpus* sighting maps each quad onto itself — configured but inert —
 and imports as nothing. A genuine warp (`flrn_perspective.af`) is
-detected and reported by name; we don't resample through it yet.
+resampled through: import solves the eight-equation homography taking
+`Src` to `Dst`, warps the layer's bitmap in its own space, and slides
+the layer transform by wherever the destination box landed (0.01 RMS
+against Affinity's own render). Two-plane mode is still reported
+rather than applied.
+
+The other live filters hang their own class off `Filt`, all deriving
+from `RDPF<RasC<SCBa<DcCm`, one per menu entry under Pixel ▸ New Live
+Filter Layer. Only Live Perspective warps between quads; the rest
+carry plain parameter fields, and every one of them shares `OlCm`,
+`NwCm`, `Live`, `AbrP`, `IRec` and (mostly) `PMin`/`PMax` after the
+fields below. None are applied yet, but the layouts are decoded:
+
+| Menu | Class | Fields |
+| --- | --- | --- |
+| Distort ▸ Perspective | `Pers` | quads, above |
+| Distort ▸ Twirl | `RTwC` | `Angl`, `Radi`, `Orin` (centre) |
+| Distort ▸ Pinch / Punch | `RPPC` | `Inte`, `Radi`, `Orig` |
+| Distort ▸ Spherical | `RSpC` | `Inte`, `Radi`, `Orig` |
+| Distort ▸ Ripple | `RRiC` | `Inte`, `Orig` |
+| Distort ▸ Lens Distortion | `RLdC` | `Inte`, `Orig`, `RadX`, `RadY` |
+| Distort ▸ Pixelate | `RPxC` | `Quan` |
+| Distort ▸ Glitch | `RGlC` | `GlSt`, `GMtd`, `GChn`, `GCns`, `Orig`, `RadX`, `RadY`, `Angl`, `DspH`, `DspV`, `GlAS`, `GlSP`, `GlIM`, `GlID` |
+| Blur ▸ Gaussian | `RGBC` | `Radi` |
+| Blur ▸ Box | `RBBC` | `Radi` |
+| Blur ▸ Motion | `RMoB` | `Radi`, `Angl` |
+| Blur ▸ Radial | `RRaB` | `Cent`, `Angl` |
+| Blur ▸ Lens | `RLbC` | `Radi`, `Blad`, `FSto`, `BlmT`, `BlmF`, `BlmC` |
+| Blur ▸ Maximum | `RMBC` | `Radi`, `Circ` |
+| Blur ▸ Median | `RMeB` | `Radi` |
+| Sharpen ▸ Unsharp Mask | `RUSC` | `Radi`, `Fact`, `Thrs` |
+| Sharpen ▸ Clarity | `Clrt` | `Strn` |
+| Sharpen ▸ High Pass | `RHPC` | `Radi`, `Mono` |
+| Noise ▸ Add Noise | `RANC` | `Inte`, `Mono`, `Gaus` |
+| Noise ▸ Denoise | `RNRC` | `LumS`, `LumD`, `LumB`, `ColS`, `ColB` |
+| Noise ▸ Dust & Scratches | `D&SC` | `Radi`, `Tole`, `Chan` |
+| Lighting ▸ Lighting | `RLig` | `lpar` → `LigP` (`Ambi`, `Diff`, `Spec`, `Expo`, `AmbC`, `SpeC`, `Dept`, `BMap`, `ScaX`, `ScaY`, `BMOp`, `Lits` → `LigS` lights with `Type`, `Colo`, `Spin`, `Tilt`, `Cent`, `Dist`, `OCon`, `ICon`) |
+| Lighting ▸ Shadows / Highlights | `RNSH` | `SStr`, `SRng`, `HStr`, `HRng` |
+| Colours ▸ Vignette | `RVgC` | `Expo`, `Hard`, `Scal`, `Shap` |
+| Colours ▸ Halftone | `RHtC` | `Size`, `Cont`, `ScrT`, `DotT`, `Angl`, `Gcre`, `Ucre` |
+| Colours ▸ Voronoi | `RVoC` | `Size`, `Widt` |
 
 **Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
 a full layer node with its own `Xfrm` and a single-channel bitmap
@@ -683,15 +845,39 @@ type, a curved-edge star, a rotated text layer, one per layer-effect
 row and per effect enum setting (`fx_*.af`, drawn on the same card
 shrunk to 300² so outer effects have room), and a live perspective
 warp — drawn in the unified Affinity 3.1/3.2 on a synthetic test card
-(hue ramp, grey ramp, saturated patches), saved as `.af`. They serve
+(hue ramp, grey ramp, saturated patches), saved as `.af`; plus the
+`cube_*.af` and `blur_r*.af` probes on the cards below. They serve
 two purposes: the field layouts above were decoded by reading the
 typed values back out of them with afdump, and their embedded
 thumbnails — Affinity's own renders — pin each importer's accuracy in
 `probed_adjustments_match_affinitys_render`. The same technique
 (create → read back → compare to the file's own thumbnail) is how to
-attack anything left in the list below; the transfer-curve forensics
-work best when the document contains a grey ramp, which separates
-per-channel behaviour from channel-mixing behaviour at a glance.
+attack anything left in the list below.
+
+The single most useful thing to know about that comparison: **for a
+512×512 document the embedded thumbnail is a byte-exact render**. It
+is a lossless PNG at 1:1, and Affinity's Invert over the test card
+comes back bit-identical to `255 - card`. So a document whose canvas
+*is* a colour cube hands back the adjustment's entire transfer
+function in one file: 512×512 = 262144 pixels is exactly 64³, so
+laying the cube out as 64 tiles of 64×64 (tile index = blue, x = red,
+y = green) samples every 4th value of every channel, and reading the
+thumbnail back gives the complete 3-D LUT with nothing to fit. That
+is how vibrance, the lens filter and the white-balance grid below were
+solved after per-channel ramps had stalled on them; `cube_*.af` are
+those probes. Two cautions: the document really must be 512×512 (a
+256² one is thumbnailed at 512² through an interpolating upscale, and
+the exactness is gone), and the comparison must not resample — the
+`image` crate's `resize` is a convolution even at matching sizes, and
+quietly blurs a cube card into a mush the importer then gets blamed
+for.
+
+A plain grey ramp is still the right card for anything that is
+per-channel or where 8-bit precision along one axis matters more than
+coverage (a full 0–255 ramp in grey and in each primary, doubled to
+512 wide), and an opaque square on transparency is the card for
+fitting a blur's radius convention off its alpha edge.
+`python3 tools/probecards.py <dir>` writes all three.
 
 Driving the app from a terminal, since much of the above was found
 that way: `System Events` menu clicks work, but a *nested* submenu
@@ -706,40 +892,57 @@ Balance panel's Tint is one) — paste from the clipboard instead. A
 popup menu anchors its current selection under the cursor, so item
 positions move after every pick; rescreenshot between them. Save As
 over an existing file raises a replace sheet the scripted flow will
-not answer, so delete the target first.
+not answer, so delete the target first. Two more, both learned the
+hard way while probing a grid: never *close and reopen* an adjustment
+panel between saves — double-clicking a layer row is the one step that
+misfires, and once it does, the keystrokes meant for a panel field
+land on the canvas (a stray text layer, a Move/Duplicate sheet, a
+Layer Effects dialog) and every probe after it silently records the
+previous values. Leave the panel open, Save As straight over it, and
+**read the parameters back out of each saved file** before trusting
+the batch.
 
 ## What's still unknown / to do
 
-- Warmth and tint interact: each slider alone is measured exactly, but
-  a document using both lands about 0.7/255 short of the two tables'
-  product, and `whitebalance.af` (warmth 30, tint 40) is the only
-  sample of the interior. A grid of combined probes would give the
-  real two-dimensional white-point map.
-- Vibrance's own weighting (see `VibP` above): a chroma scale whose
-  gain rises with saturation to a peak near 0.5 and collapses beyond
-  0.7, and saturates rather than scaling with the slider. It depends
-  on more than the pixel's saturation — binning by chroma, HSV
-  saturation or lightness all leave 5–15 % scatter — so the next step
-  is probing a smooth swatch grid rather than the test card. The lens
-  filter's density curve is likewise still a fitted ×0.2 (grey-exact).
-- `FlRN` warps are decoded and reported but not applied: resampling a
-  layer — and whatever the filter's scope covers below it — through
-  the `Src`→`Dst` homography is the work. Only Live Perspective
-  (`Pers`) has been probed; the other Distort filters presumably hang
-  their own classes off `Filt`.
+Resolved since the last pass, all with the RGB-cube probes described
+above: the warmth/tint interaction, vibrance's weighting, the lens
+filter's density curve and colour decode, `Gaus`'s radius convention,
+and applying single-plane `FlRN` perspective warps. What is left:
+
+- Live filters other than Live Perspective: every class and its fields
+  are decoded (table above) but none are applied — Twirl, Pinch/Punch,
+  Spherical, Ripple, Lens Distortion, Pixelate, Glitch, the blurs, the
+  sharpeners, the noise filters, Lighting, Shadows/Highlights,
+  Vignette, Halftone and Voronoi all import as nothing but a line in
+  the report. Perspective's own "Two planes" mode (`DMod`, the
+  `DSrA`/`DDsA` + `DSrB`/`DDsB` quad pairs) is likewise decoded and
+  not applied. A live filter standing as a *layer* — rather than
+  hanging off one layer's `AdCh` — would also have to warp everything
+  its scope covers below it, which our compositor has no notion of.
+- Split toning: the key, the balance split and the grey-ramp strength
+  are measured (see `STPa` above), but how the tint combines with a
+  pixel's own colour is not, so the layer still imports as a no-op
+  that keeps its native parameters. Soft Proof, LUT, OCIO, Normals and
+  Tone Compression/Stretch have not been probed at all.
+- Vibrance is a fit, not a derivation: the hue window and the chroma
+  curve are tables read off one probe each, and the 0.7 exponent on
+  the slider is fitted. 2–3 RMS over the whole cube is what that
+  costs; a closed form would presumably be exact.
 - Spirals (`ShSp` — stroke-only, not normalised into `ShpB`) and QR
   codes are reported, not rebuilt; the curved-star bow and the tear
   profile are single-fixture fits.
 - Text: single style per layer (first run wins), no per-run styling.
-- Layer effects: the field mapping is settled, but two effects have no
-  home in our layer style — `Gaus` (a per-layer gaussian blur) and
-  `PhgB` (the 3D effect: `Ambi`/`Diff`/`Spec`/`Expo` over a `Lits`
-  array of `PLig` lights) — and our shadow, glow, bevel and stroke
-  renderers still differ from Affinity's in falloff, worst on the
-  inner glow, whose Intensity ramp saturates much harder than our
-  spread does (ours only bites on soft-edged alpha, since it runs
-  *before* the blur). The bevel's `Prof` contour profile is always
-  null so far.
+- Layer effects: the field mapping is settled, `Gaus` has a home, and
+  the Intensity ramp, the blur radius, the stroke's edge and the
+  bevel's ramp have all been probed at two radii. Shadows, glows and
+  strokes now land at 0.1-3.3 RMS. What is left:
+  - the **bevel**, which needs re-implementing rather than
+    recalibrating (see the ramp measurements above): a distance-field
+    ramp `Radi` wide, the measured profile, and one more probe at a
+    second `Dept` to pin what `Dept` scales. Its `Prof` contour
+    profile is also always null so far, so that encoding is unknown.
+  - `PhgB`, the 3D effect (`Ambi`/`Diff`/`Spec`/`Expo` over a `Lits`
+    array of `PLig` lights), which has no home in our layer style.
 - ICC profiles: `ICCP` nodes carry the profile name and blob; every
   corpus sighting is sRGB, so no conversion has been needed yet.
 - One corpus file (a thought-bubble collage) still renders its

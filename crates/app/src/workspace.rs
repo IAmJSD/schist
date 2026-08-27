@@ -6889,6 +6889,7 @@ fn style_enabled(style: &schist_core::LayerStyle, key: &str) -> bool {
         "gradient_overlay" => style.gradient_overlay.enabled,
         "outer_glow" => style.outer_glow.enabled,
         "drop_shadow" => style.drop_shadow.enabled,
+        "blur" => style.blur.enabled,
         _ => false,
     }
 }
