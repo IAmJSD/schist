@@ -82,6 +82,10 @@ fn blur_matches_the_cpu_reference() {
         (129, 3, 9, 3),
         (7, 7, 20, 3),
         (256, 200, 12, 3),
+        // The CPU pass carries a running sum and the shader re-sums each
+        // window, so their float error diverges with row length. A long
+        // row is where that shows up.
+        (4096, 3, 40, 3),
     ] {
         let px = noise(w, h, 100 + w as u64);
         let out = ctx

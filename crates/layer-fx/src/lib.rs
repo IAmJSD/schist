@@ -452,7 +452,9 @@ fn precise_grow(a: &mut [f32], w: usize, h: usize, size: f32) {
 /// was looking for. Clamping at `limit` afterwards matches the old
 /// bound, since any true nearest within `limit` also lay inside the
 /// square window.
-fn signed_distance(alpha: &[f32], w: usize, h: usize, limit: f32) -> Vec<f32> {
+/// Public so `examples/strokebench.rs` can time it against the window
+/// search it replaced.
+pub fn signed_distance(alpha: &[f32], w: usize, h: usize, limit: f32) -> Vec<f32> {
     let inside: Vec<bool> = alpha.iter().map(|&a| a >= 0.5).collect();
     let to_inside = squared_edt(&inside, w, h, false);
     let to_outside = squared_edt(&inside, w, h, true);

@@ -239,8 +239,8 @@ pub fn blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: usize,
     unpremultiply(px);
 }
 
-/// One separable box pass, clamping at the edges.
-/// One box-blur pass over RGBA f32, using a running sum.
+/// One separable box pass over RGBA f32, clamping at the edges and
+/// carrying a running sum.
 ///
 /// This re-summed the whole `2r+1` window for every output pixel, making
 /// the pass O(pixels * r) rather than O(pixels): a gaussian at radius 50
@@ -252,9 +252,9 @@ pub fn blur_rgba_cpu(px: &mut [f32], width: usize, height: usize, radius: usize,
 /// transpose rather than a `par_chunks_mut`. The algorithmic fix is the
 /// dominant one; threading is a separate change.
 ///
-/// Note `fx_blur.wgsl` deliberately mirrors the naive loop "so there is no
-/// running total whose float error would drift". The parity tests compare
-/// with a tolerance, which this stays inside.
+/// `fx_blur.wgsl` still sums each window itself, so the two differ by
+/// accumulation order and the drift grows with row length. The parity
+/// tests compare with a tolerance, at long rows as well as short ones.
 fn box_pass(src: &[f32], dst: &mut [f32], width: usize, height: usize, r: usize, vertical: bool) {
     let (outer, inner) = if vertical {
         (width, height)

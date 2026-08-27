@@ -111,8 +111,12 @@ fn horizontal_morph(src: &[f32], w: usize, h: usize, half: i32, take_max: bool) 
     let half = half.max(0) as usize;
     out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         let base = y * w * 4;
-        // Indices into the row, kept so their values are monotonic.
-        let mut deque: Vec<usize> = Vec::with_capacity(2 * half + 2);
+        // Indices into the row, kept so their values are monotonic. A
+        // `VecDeque`, not a `Vec`: dropping from the front is what makes
+        // the window slide, and `Vec::remove(0)` shifts the whole thing
+        // each time, which is the O(window) cost this is here to avoid.
+        let mut deque: std::collections::VecDeque<usize> =
+            std::collections::VecDeque::with_capacity(2 * half + 2);
         for c in 0..4 {
             deque.clear();
             let value = |x: usize| src[base + x * 4 + c];
@@ -124,18 +128,18 @@ fn horizontal_morph(src: &[f32], w: usize, h: usize, half: i32, take_max: bool) 
                 let right = (x + half).min(w - 1);
                 while next <= right {
                     while deque
-                        .last()
+                        .back()
                         .is_some_and(|&i| !better(value(i), value(next)))
                     {
-                        deque.pop();
+                        deque.pop_back();
                     }
-                    deque.push(next);
+                    deque.push_back(next);
                     next += 1;
                 }
                 // Drop anything that has fallen off the left edge.
                 let left = x.saturating_sub(half);
-                while deque.first().is_some_and(|&i| i < left) {
-                    deque.remove(0);
+                while deque.front().is_some_and(|&i| i < left) {
+                    deque.pop_front();
                 }
                 row[x * 4 + c] = value(deque[0]);
             }

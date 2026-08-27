@@ -81,9 +81,9 @@ macro_rules! simple_filter {
             fn params(&self) -> Vec<FilterParam> {
                 vec![$($param),*]
             }
-            /// A filter with a "radius" or "amount" parameter reads that
-            /// far outside the pixel it writes, so the shell knows to
-            /// hand it that much surrounding image.
+            /// A filter with a spatial parameter reads that far outside
+            /// the pixel it writes, so the shell knows to hand it that
+            /// much surrounding image.
             fn context(&self, values: &FilterValues) -> u32 {
                 let params = self.params();
                 // Only genuinely spatial parameters. "amount" is
