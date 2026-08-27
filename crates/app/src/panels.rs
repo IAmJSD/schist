@@ -624,15 +624,21 @@ pub(crate) fn run_app_item(
         AppItem::ResetView => ws.reset_view_rotation(cx),
         AppItem::ClearNotes => {
             if let Some(doc) = ws.doc.as_mut() {
-                doc.notes.clear();
-                doc.damage_all();
+                if !doc.notes.is_empty() {
+                    doc.notes.clear();
+                    doc.mark_dirty();
+                    doc.damage_all();
+                }
             }
             ws.after_change(cx);
         }
         AppItem::ClearCounts => {
             if let Some(doc) = ws.doc.as_mut() {
-                doc.counts.clear();
-                doc.damage_all();
+                if !doc.counts.is_empty() {
+                    doc.counts.clear();
+                    doc.mark_dirty();
+                    doc.damage_all();
+                }
             }
             ws.after_change(cx);
         }

@@ -650,6 +650,7 @@ impl CommandPlugin for CoreCommandsPlugin {
                 let n = ctx.doc.saved_selections.len() + 1;
                 let sel = ctx.doc.selection.clone();
                 ctx.doc.saved_selections.push((format!("Alpha {n}"), sel));
+                ctx.doc.mark_dirty();
             }),
             cmd("select.load", "Load Selection", None, |ctx| {
                 // Loads the most recently saved one; the dialog picks by
@@ -1057,6 +1058,26 @@ mod tests {
         assert!(group.is_group());
         assert_eq!(group.children().unwrap().len(), 1);
         assert_eq!(group.children().unwrap()[0].name, "bg");
+    }
+    #[test]
+    fn saving_a_selection_marks_the_document_unsaved() {
+        // `select.save` mutates `saved_selections` directly rather than
+        // through `begin_edit`, so nothing set `dirty`: the tab closed
+        // with no prompt and autosave skipped the document, taking every
+        // saved selection with it.
+        let reg = registry();
+        let mut doc = doc_with_pixels();
+        let mut state = EditorState::default();
+        doc.selection.select_rect(
+            schist_core::IntRect::from_xywh(0, 0, 10, 10),
+            SelectOp::Replace,
+        );
+        doc.dirty = false;
+
+        run(&reg, "select.save", &mut doc, &mut state);
+
+        assert_eq!(doc.saved_selections.len(), 1, "selection was saved");
+        assert!(doc.dirty, "and the document must count as unsaved");
     }
 }
 
