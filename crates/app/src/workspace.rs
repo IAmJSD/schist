@@ -4251,6 +4251,7 @@ impl Workspace {
 
     /// Jump in history: negative = undo n steps, positive = redo n steps.
     pub fn history_jump(&mut self, steps: i32, cx: &mut Context<Self>) {
+        let profile_before = self.doc.as_ref().and_then(|d| d.icc_profile.clone());
         if let Some(doc) = &mut self.doc {
             if steps < 0 {
                 for _ in 0..(-steps) {
@@ -4265,6 +4266,13 @@ impl Workspace {
                     }
                 }
             }
+        }
+        // The display transform is cached per document and only rebuilt
+        // where a profile is *set*, so undoing an Assign or Convert left
+        // the canvas rendering through the transform for the profile that
+        // was just undone away.
+        if self.doc.as_ref().and_then(|d| d.icc_profile.clone()) != profile_before {
+            self.rebuild_color_transforms();
         }
         self.after_change(cx);
     }
@@ -4738,11 +4746,14 @@ impl Workspace {
     pub fn toggle_proof(&mut self, profile: schist_colormgmt::Profile, cx: &mut Context<Self>) {
         // Picking a different proof profile while one is active switches
         // to it; picking the active one turns proofing off.
-        let already_proofing_this = self
-            .color
-            .proof
-            .as_ref()
-            .is_some_and(|p| p.name() == profile.name());
+        // Compare the profiles themselves, not their names: every
+        // embedded profile parses back as "Embedded profile", so two
+        // different device profiles would look identical and switching
+        // between them would turn proofing off instead.
+        let already_proofing_this =
+            self.color.proof.as_ref().is_some_and(|p| {
+                p.icc_bytes() == profile.icc_bytes() && p.name() == profile.name()
+            });
         self.color.proof = (!already_proofing_this).then_some(profile);
         self.status = if self.color.proof.is_some() {
             "Proof colors on".into()
