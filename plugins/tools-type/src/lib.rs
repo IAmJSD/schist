@@ -465,11 +465,20 @@ impl ToolPlugin for TypeTool {
                 let mut edit = ctx.doc.begin_edit("Discard Empty Text");
                 edit.remove_layer(session.layer);
                 edit.commit();
-                // The insert and this removal cancel out; drop both.
-                ctx.doc.undo();
-                ctx.doc.undo();
-                ctx.doc.history.pop_redo();
-                ctx.doc.history.pop_redo();
+                // The insert and this removal cancel out, so collapse the
+                // pair rather than leaving two no-op steps in the panel.
+                //
+                // This used to call `undo()` twice and then `pop_redo()`
+                // twice. Both were wrong: `undo()` unwinds whatever is on
+                // top, which is only this layer's insert when nothing else
+                // was committed in between, and `pop_redo()` is the redo
+                // primitive, so it pushed the junk straight back onto the
+                // undo stack. Clicking with the type tool and not typing
+                // therefore reverted the user's last two real edits, with
+                // the History panel still listing them as applied.
+                ctx.doc
+                    .history
+                    .drop_cancelling_pair("Discard Empty Text", "New Text Layer");
             }
             return;
         }
@@ -885,5 +894,76 @@ mod tests {
         type_text(&mut tool, &mut ctx, "B");
         let two_lines = doc.tree.layers[1].tight_bounds().height();
         assert!(two_lines > one_line + 10, "{two_lines} vs {one_line}");
+    }
+    #[test]
+    fn clicking_without_typing_leaves_earlier_edits_alone() {
+        // The data loss. `on_commit` on an untouched session called
+        // `undo()` twice, which unwinds whatever is on top rather than
+        // this layer's own insert. The two only line up when nothing was
+        // committed in between; a command run mid-session (which is
+        // exactly what a shortcut does, since running one does not commit
+        // the pending tool session) puts a real edit on top instead.
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        }
+
+        // A real edit committed while the empty session is still open.
+        {
+            let mut edit = d.begin_edit("Important Edit");
+            edit.insert_layer(LayerPath(vec![0]), Layer::new_raster("important"));
+            edit.commit();
+        }
+        assert!(d.tree.iter().any(|l| l.name == "important"));
+
+        // Now click away without having typed anything.
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_commit(&mut ctx);
+        }
+
+        let after: Vec<String> = d.tree.iter().map(|l| l.name.clone()).collect();
+        assert!(
+            after.iter().any(|n| n == "important"),
+            "the edit made during the session must survive: {after:?}"
+        );
+        assert!(
+            d.history
+                .entries()
+                .iter()
+                .any(|e| e.name == "Important Edit"),
+            "and it must still be in history"
+        );
+    }
+
+    #[test]
+    fn discarding_an_empty_layer_leaves_no_junk_history() {
+        let mut d = doc();
+        let mut state = schist_plugin_api::EditorState::default();
+        let mut tool = TypeTool::default();
+        let before = d.history.entries().len();
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut d,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            tool.on_commit(&mut ctx);
+        }
+        assert_eq!(
+            d.history.entries().len(),
+            before,
+            "the insert and its removal should collapse"
+        );
     }
 }
