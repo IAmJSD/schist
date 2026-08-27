@@ -239,7 +239,7 @@ fn build(archive: &Archive, graph: &Graph) -> Result<(Document, ImportReport), A
     }
 
     doc.damage_all();
-    doc.dirty = false;
+    doc.mark_saved();
     Ok((doc, report))
 }
 

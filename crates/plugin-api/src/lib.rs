@@ -342,6 +342,21 @@ pub trait CodecPlugin: Send + Sync {
 pub struct CommandCtx<'a> {
     pub doc: &'a mut Document,
     pub state: &'a mut EditorState,
+    /// Why the command did nothing, when it did nothing.
+    ///
+    /// The command layer had no way to say anything: it is full of bare
+    /// `return`s and the shell then set the status line to the command's
+    /// own title regardless, so Grow with no selection, Clipping Mask on
+    /// the bottom layer, Paste with an empty clipboard and a dozen others
+    /// all reported themselves as having worked.
+    pub refusal: Option<String>,
+}
+
+impl CommandCtx<'_> {
+    /// Decline to act, with a reason the user will see.
+    pub fn refuse(&mut self, why: impl Into<String>) {
+        self.refusal = Some(why.into());
+    }
 }
 
 /// A named, keybindable command. `id` is namespaced like "layer.duplicate".

@@ -83,7 +83,7 @@ pub fn read_psd(bytes: &[u8]) -> Result<Document, PsdError> {
     // Topmost layer starts active (children are stored bottom-to-top).
     doc.active_layer = doc.tree.layers.last().map(|l| l.id);
     doc.damage_all();
-    doc.dirty = false;
+    doc.mark_saved();
     Ok(doc)
 }
 

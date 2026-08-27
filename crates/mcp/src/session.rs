@@ -110,7 +110,7 @@ impl Session {
             &white,
         );
         doc.push_layer(bg);
-        doc.dirty = false;
+        doc.mark_saved();
         Ok(Session::install(doc))
     }
 
@@ -163,8 +163,14 @@ impl Session {
         let mut ctx = CommandCtx {
             doc: &mut self.doc,
             state: &mut self.state,
+            refusal: None,
         };
         (command.run)(&mut ctx);
+        // A command that declined has to say so: reporting its own title
+        // told the caller it had worked.
+        if let Some(why) = ctx.refusal {
+            bail!("{why}");
+        }
         let title = command.title.to_string();
         self.after_change();
         Ok(title)
@@ -512,7 +518,7 @@ impl Session {
         })?;
         let bytes = codec.export(&self.doc)?;
         write_atomically(path, &bytes)?;
-        self.doc.dirty = false;
+        self.doc.mark_saved();
         self.doc.path = Some(path.to_path_buf());
         if let Some(name) = path.file_name() {
             self.doc.title = name.to_string_lossy().into_owned();

@@ -7,9 +7,11 @@
 
 use crate::workspace::{Popup, Workspace};
 use gpui::{
-    div, px, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _,
+    div, px, AppContext as _, Context, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The chrome colours for one theme. Everything that isn't document
 /// content draws from here; the active set is swapped by [`set_light`].
@@ -120,12 +122,94 @@ pub fn palette() -> &'static Palette {
 }
 
 /// A labelled push button.
+/// What a dialog does when the user presses Enter.
+pub type DialogAction = Rc<dyn Fn(&mut Workspace, &mut gpui::Window, &mut Context<Workspace>)>;
+
+thread_local! {
+    /// The primary button built most recently.
+    ///
+    /// A dialog's default action is, by definition, whatever its primary
+    /// button does, and the buttons are built as plain closures deep
+    /// inside each dialog body with no path back to the workspace. Rather
+    /// than thread an out-parameter through every dialog function, the
+    /// primary button leaves its handler here and `dialogs::render` --
+    /// which brackets the whole build and does hold `&mut Workspace` --
+    /// picks it up. GPUI renders on one thread, synchronously, so the
+    /// slot is only ever live for the duration of one dialog build.
+    static DEFAULT_ACTION: RefCell<Option<DialogAction>> = const { RefCell::new(None) };
+}
+
+/// Start a dialog build: forget any previous dialog's default action.
+pub fn reset_default_action() {
+    DEFAULT_ACTION.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// End a dialog build: take whatever its primary button registered.
+pub fn take_default_action() -> Option<DialogAction> {
+    DEFAULT_ACTION.with(|slot| slot.borrow_mut().take())
+}
+
+/// A hover label for an icon-only control.
+///
+/// `grep -rn "tooltip" crates/app/` returned nothing: every icon in the
+/// window was a bare SVG with no hover label and no shortcut hint, and
+/// the only place a tool's name and key appeared was inside the flyout,
+/// which most slots do not have. The toolbar slots use this; the panel
+/// buttons, visibility eyes and tab close are still unlabelled, and want
+/// an `id` each before they can be.
+pub struct Tooltip {
+    label: SharedString,
+    /// A keyboard shortcut, shown dimmed after the label.
+    hint: Option<SharedString>,
+}
+
+impl gpui::Render for Tooltip {
+    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(gpui::rgb(palette().popup_bg))
+            .border_1()
+            .border_color(gpui::rgb(palette().panel_edge))
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(palette().text))
+            .child(self.label.clone());
+        if let Some(hint) = self.hint.clone() {
+            row = row.child(div().text_color(gpui::rgb(palette().text_dim)).child(hint));
+        }
+        row
+    }
+}
+
+/// Build a tooltip callback for [`StatefulInteractiveElement::tooltip`].
+pub fn tip(
+    label: impl Into<SharedString>,
+    hint: Option<SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let label = label.into();
+    move |_window, cx| {
+        let label = label.clone();
+        let hint = hint.clone();
+        cx.new(|_| Tooltip { label, hint }).into()
+    }
+}
+
 pub fn button(
     label: impl Into<SharedString>,
     primary: bool,
     on_click: impl Fn(&mut Workspace, &mut gpui::Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let on_click: DialogAction = Rc::new(on_click);
+    if primary {
+        let action = on_click.clone();
+        DEFAULT_ACTION.with(|slot| *slot.borrow_mut() = Some(action));
+    }
     div()
         .flex()
         .items_center()
@@ -134,6 +218,7 @@ pub fn button(
         .px_3()
         .rounded_sm()
         .text_size(px(12.0))
+        .cursor_pointer()
         .bg(gpui::rgb(if primary {
             palette().accent
         } else {
@@ -186,12 +271,15 @@ pub fn num_field(
         focused,
         buffer,
     } = field;
-    let shown = if focused && !buffer.is_empty() {
-        buffer
-    } else if value.fract().abs() < 0.01 {
+    let committed = if value.fract().abs() < 0.01 {
         format!("{value:.0}")
     } else {
         format!("{value:.2}")
+    };
+    let shown = if focused && !buffer.is_empty() {
+        buffer
+    } else {
+        committed.clone()
     };
     let dec = on_change.clone();
     let inc = on_change.clone();
@@ -220,7 +308,7 @@ pub fn num_field(
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |ws, _e, _w, cx| {
-                        ws.focus_field(id);
+                        ws.focus_field(id, committed.clone());
                         cx.notify();
                     }),
                 )

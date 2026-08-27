@@ -212,6 +212,12 @@ pub struct Workspace {
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
+    /// True until the first keystroke after a field takes focus, so that
+    /// one can replace the seeded value rather than append to it.
+    field_fresh: bool,
+    /// What Enter does in the open dialog: the primary button's action,
+    /// captured while the dialog rendered.
+    pub default_action: Option<crate::ui::DialogAction>,
     /// Third-party plugin registry state.
     pub plugins: schist_plugin_host_wasm::PluginManager,
     /// Plugin enable/disable requested from the manager UI, applied on the
@@ -219,6 +225,21 @@ pub struct Workspace {
     pub pending_plugin_toggle: Option<(String, bool)>,
     /// View toggles (rulers, grid, guides, snapping, theme).
     pub view: ViewOptions,
+    /// View options and rendering intent as they stood when Preferences
+    /// opened, so Cancel can put them back.
+    ///
+    /// Every control in that dialog applied and persisted on change and
+    /// the only action was "Done" -- flipping the GPU compositing
+    /// checkbox to see what it did tore the backend down, rebuilt it and
+    /// wrote the preference file, with no way to back out.
+    preferences_snapshot: Option<Box<(ViewOptions, schist_colormgmt::Intent)>>,
+    /// Close *this* document's tab once its in-flight save finishes.
+    ///
+    /// "Save…" on an Untitled document falls through to the *async* Save
+    /// As prompt and returns immediately with `dirty` still true, so the
+    /// close was skipped: the user asked to close the tab, the file was
+    /// written, and the tab stayed open.
+    close_after_save: Option<schist_core::DocumentId>,
     pub screen_mode: ScreenMode,
     /// A guide being dragged out of a ruler.
     dragging_guide: Option<schist_core::Guide>,
@@ -810,9 +831,13 @@ impl Workspace {
             modal_stack: Vec::new(),
             focused_field: None,
             field_buffer: String::new(),
+            field_fresh: false,
+            default_action: None,
             plugins,
             pending_plugin_toggle: None,
             view: load_view_options(),
+            preferences_snapshot: None,
+            close_after_save: None,
             screen_mode: ScreenMode::default(),
             dragging_guide: None,
             layer_drag: None,
@@ -943,7 +968,7 @@ impl Workspace {
             );
         }
         doc.push_layer(layer);
-        doc.dirty = false;
+        doc.mark_saved();
         self.open_in_tab(doc, false);
     }
 
@@ -1377,7 +1402,7 @@ impl Workspace {
         match self.write_document_to(&path) {
             Ok(()) => {
                 if let Some(doc) = &mut self.doc {
-                    doc.dirty = false;
+                    doc.mark_saved();
                     doc.path = Some(path.clone());
                     if let Some(name) = path.file_name() {
                         doc.title = name.to_string_lossy().into_owned();
@@ -1385,13 +1410,43 @@ impl Workspace {
                 }
                 self.clear_recovery();
                 self.status = format!("Saved {}", path.display()).into();
+                // Only if this is the document the close was asked for.
+                // The Save As portal does not block the window on Linux,
+                // so the user can switch tabs and save another one while
+                // it is up, and a bare flag closed the wrong tab.
+                let saved = self.doc.as_ref().map(|d| d.id);
+                if self.close_after_save.take() == saved && saved.is_some() {
+                    let index = self.active_tab();
+                    self.close_tab(index, cx);
+                }
             }
             Err(err) => {
+                // The tab stays open on a failed save, whatever was asked.
+                self.close_after_save = None;
                 log::error!("save failed: {err:#}");
                 self.status = format!("Save failed: {err}").into();
             }
         }
         cx.notify();
+    }
+
+    /// Ask for the active tab to close as soon as its save lands.
+    pub fn close_tab_after_save(&mut self) {
+        self.close_after_save = self.doc.as_ref().map(|d| d.id);
+    }
+
+    /// Whether a save is still outstanding with a close waiting on it.
+    ///
+    /// Save As is asynchronous: `save_current` returns before the file
+    /// prompt resolves, so this is how a caller tells a synchronous save
+    /// (already done, tab already closed) from one still in flight.
+    pub fn has_pending_save(&self) -> bool {
+        self.close_after_save.is_some()
+    }
+
+    /// The save never happened, so nothing is waiting on it.
+    pub fn cancel_pending_save(&mut self) {
+        self.close_after_save = None;
     }
 
     /// ⌘S: save over the document's existing path, or fall back to Save As
@@ -1997,6 +2052,36 @@ impl Workspace {
             lo = [l; 3];
             hi = [h; 3];
         }
+        // Auto Color additionally pulls each channel's midtone to neutral
+        // grey, which is the only thing distinguishing it from Auto Tone.
+        // This used to be `v.powf(1.0)`, the identity, so the two menu
+        // items produced byte-identical results.
+        let mut gamma = [1.0f32; 3];
+        if mode == AutoMode::Color {
+            let mut sum = [0.0f64; 3];
+            let mut n = 0u64;
+            for p in buf.as_chunks::<4>().0 {
+                if p[3] <= 0.0 {
+                    continue;
+                }
+                for ch in 0..3 {
+                    let span = (hi[ch] - lo[ch]).max(1e-4);
+                    sum[ch] += f64::from(((p[ch] - lo[ch]) / span).clamp(0.0, 1.0));
+                }
+                n += 1;
+            }
+            if n > 0 {
+                for ch in 0..3 {
+                    let mean = (sum[ch] / n as f64) as f32;
+                    // Solve mean^gamma = 0.5 for gamma, so the channel's
+                    // midtone lands on neutral grey. Clamped so a nearly
+                    // black or white channel cannot explode.
+                    if mean > 1e-3 && mean < 1.0 - 1e-3 {
+                        gamma[ch] = (0.5f32.ln() / mean.ln()).clamp(0.2, 5.0);
+                    }
+                }
+            }
+        }
         for p in buf.as_chunks_mut::<4>().0 {
             if p[3] <= 0.0 {
                 continue;
@@ -2004,9 +2089,8 @@ impl Workspace {
             for ch in 0..3 {
                 let span = (hi[ch] - lo[ch]).max(1e-4);
                 let mut v = ((p[ch] - lo[ch]) / span).clamp(0.0, 1.0);
-                if mode == AutoMode::Color {
-                    // Auto Color also pulls the midtones to neutral grey.
-                    v = v.powf(1.0);
+                if gamma[ch] != 1.0 {
+                    v = v.powf(gamma[ch]);
                 }
                 p[ch] = v;
             }
@@ -2117,7 +2201,16 @@ impl Workspace {
         if doc.mode == mode {
             return;
         }
-        if mode == schist_color::ColorMode::Grayscale || mode == schist_color::ColorMode::Indexed {
+        // Indexed Color needs palette quantisation, which does not exist.
+        // It used to fall into the greyscale branch below, desaturating
+        // the image and labelling the history entry "Grayscale", so the
+        // menu item claimed to do something it had never implemented.
+        if mode == schist_color::ColorMode::Indexed {
+            self.status = "Indexed Color is not supported yet".into();
+            cx.notify();
+            return;
+        }
+        if mode == schist_color::ColorMode::Grayscale {
             // Flatten colour out of every layer, which is what the mode
             // change actually means for the pixels.
             let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
@@ -2143,10 +2236,16 @@ impl Workspace {
                     }
                 }
             }
+            edit.set_color_mode(mode);
+            edit.commit();
+        } else {
+            // CMYK/Lab/RGB change nothing but the mode, which still has
+            // to be undoable: it used to produce no history entry at all.
+            let mut edit = doc.begin_edit(mode.display_name().to_string());
+            edit.set_color_mode(mode);
             edit.commit();
         }
         if let Some(doc) = self.doc.as_mut() {
-            doc.mode = mode;
             doc.damage_all();
         }
         self.status = mode.display_name().into();
@@ -2903,9 +3002,15 @@ impl Workspace {
             let mut ctx = CommandCtx {
                 doc,
                 state: &mut self.editor,
+                refusal: None,
             };
             (command.run)(&mut ctx);
-            self.status = command.title.into();
+            // Reporting the command's own title regardless meant every
+            // silent no-op looked like it had worked.
+            self.status = match ctx.refusal {
+                Some(why) => why.into(),
+                None => command.title.into(),
+            };
             // ...and copying makes the pixels available everywhere else.
             if id.starts_with("edit.copy") || id == "edit.cut" {
                 self.sync_clipboard_out(cx);
@@ -3847,8 +3952,13 @@ impl Workspace {
         // Same for a cancelled Layer Style session: OK clears the modal
         // itself before it gets here, so reaching this means Cancel.
         self.revert_layer_style();
+        // Escape out of Preferences is a cancel, like the button.
+        if matches!(self.modal, Some(Modal::Preferences)) {
+            self.revert_preferences(cx);
+        }
         // Closing the picker uncovers the dialog it was opened from.
         self.modal = self.modal_stack.pop();
+        self.default_action = None;
         self.focused_field = None;
         self.field_buffer.clear();
         self.open_popup = None;
@@ -3862,9 +3972,33 @@ impl Workspace {
         }
     }
 
-    pub fn focus_field(&mut self, id: &'static str) {
+    /// Focus a field, seeded with the text it is currently showing.
+    ///
+    /// The buffer used to be cleared, and the field falls back to
+    /// rendering its committed value while the buffer is empty, so a
+    /// freshly clicked field looked full but behaved empty: backspace
+    /// popped nothing, and changing 1920 to 1820 meant retyping all four
+    /// digits.
+    pub fn focus_field(&mut self, id: &'static str, current: impl Into<String>) {
         self.focused_field = Some(id);
-        self.field_buffer.clear();
+        self.field_buffer = current.into();
+        self.field_fresh = true;
+    }
+
+    /// Fire the open dialog's primary button, as Enter should.
+    pub fn confirm_modal(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> bool {
+        let Some(action) = self.default_action.clone() else {
+            return false;
+        };
+        action(self, window, cx);
+        true
+    }
+
+    /// Push whatever is in the focused field into the modal and unfocus.
+    pub fn commit_focused_field(&mut self) {
+        if let Some(id) = self.focused_field {
+            self.commit_field(id);
+        }
     }
 
     /// Feed a keystroke to the focused numeric field. Returns true when the
@@ -3873,6 +4007,7 @@ impl Workspace {
         let Some(id) = self.focused_field else {
             return false;
         };
+        let fresh = std::mem::take(&mut self.field_fresh);
         // Text fields (layer and document names) take any printable
         // character; the picker's hex field takes hex digits up to a full
         // triplet; numeric fields only digits.
@@ -3883,6 +4018,11 @@ impl Workspace {
             "backspace" => {
                 self.field_buffer.pop();
             }
+            // Escape is handled in `cancel_gesture`, which runs first:
+            // it is bound to `CancelGesture` in the always-matching
+            // "Workspace" context, so nothing escape-shaped ever reaches
+            // here. Kept as a fallback for a build with that binding
+            // removed rather than left as a dead arm that looks live.
             "escape" => {
                 self.focused_field = None;
                 self.field_buffer.clear();
@@ -3892,15 +4032,15 @@ impl Workspace {
                 self.commit_field(id);
                 return true;
             }
+            _ if hex => match hex_field_after(&self.field_buffer, fresh, text.unwrap_or("")) {
+                Some(next) => self.field_buffer = next,
+                None => return false,
+            },
             _ => match text {
                 Some(t)
                     if !t.is_empty()
                         && !t.chars().any(char::is_control)
-                        && (textual
-                            || (hex
-                                && self.field_buffer.len() + t.len() <= 6
-                                && t.chars().all(|c| c.is_ascii_hexdigit()))
-                            || (!hex && t.chars().all(|c| c.is_ascii_digit()))) =>
+                        && (textual || numeric_accepts(&self.field_buffer, t)) =>
                 {
                     self.field_buffer.push_str(t)
                 }
@@ -4106,6 +4246,17 @@ impl Workspace {
         }
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
+            return;
+        }
+        // A focused field takes the escape first: it drops focus and
+        // leaves the dialog up, which is what `field_key`'s "escape" arm
+        // meant to do before `CancelGesture` -- bound in the
+        // always-matching "Workspace" context -- got there ahead of it
+        // and closed the whole dialog on the first press.
+        if self.modal.is_some() && self.focused_field.is_some() {
+            self.focused_field = None;
+            self.field_buffer.clear();
+            cx.notify();
             return;
         }
         if self.modal.is_some() {
@@ -4430,6 +4581,41 @@ impl Workspace {
 
     // ----- view options, guides and snapping -----
 
+    /// Remember the current preferences so Cancel can restore them.
+    pub fn snapshot_preferences(&mut self) {
+        self.preferences_snapshot = Some(Box::new((self.view, self.color.intent)));
+    }
+
+    /// Accept whatever Preferences changed.
+    pub fn keep_preferences(&mut self) {
+        self.preferences_snapshot = None;
+        self.save_view_options();
+    }
+
+    /// Put back the preferences as they were when the dialog opened.
+    pub fn revert_preferences(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.preferences_snapshot.take() else {
+            return;
+        };
+        let (view, intent) = *snapshot;
+        let gpu_changed = view.gpu_compositing != self.view.gpu_compositing;
+        let theme_changed = view.theme != self.view.theme;
+        self.view = view;
+        self.color.intent = intent;
+        if gpu_changed {
+            init_compositor_backend(self.view.gpu_compositing);
+            // The caches hold tiles composited by the other backend; the
+            // dialog's own toggle drops them and reverting has to as well.
+            self.rebuild_after_backend_change(cx);
+        }
+        if theme_changed {
+            self.set_theme_quiet(self.view.theme);
+        }
+        self.rebuild_color_transforms();
+        self.save_view_options();
+        cx.notify();
+    }
+
     /// Persist view options so they survive a restart.
     pub fn save_view_options(&self) {
         let Some(path) = prefs_path() else { return };
@@ -4675,6 +4861,28 @@ impl Workspace {
 
     fn color_managed(&self) -> bool {
         self.display_transform.is_some() || self.proof_transform.is_some()
+    }
+
+    /// Which built-in the document's profile matches, for the Assign /
+    /// Convert dialogs to open on.
+    ///
+    /// Both used to open on index 0 -- sRGB -- whatever the document was
+    /// actually in, so the dialog described a conversion the user had not
+    /// asked for and OK applied it.
+    pub fn current_profile_index(&self) -> usize {
+        let Some(name) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.icc_profile.as_ref())
+            .and_then(|bytes| schist_colormgmt::Profile::from_bytes(bytes).ok())
+            .map(|p| p.name().to_string())
+        else {
+            // No embedded profile means the working space, which is what
+            // the document is being shown in.
+            let working = self.color.working.name().to_string();
+            return builtin_index(&working);
+        };
+        builtin_index(&name)
     }
 
     /// Assign a profile: same numbers, new interpretation.
@@ -4966,7 +5174,13 @@ impl Workspace {
             return;
         };
         let mut buf = original.clone();
-        let filter = self.registry.filters().find(|f| f.id() == id).unwrap();
+        // Looked up a second time because the first borrow ended; an
+        // `unwrap` on registry state in a UI path is a panic waiting for
+        // someone to add an early return between the two lookups.
+        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            self.status = "Filter went away".into();
+            return;
+        };
         filter.apply(
             &mut buf,
             region.width() as usize,
@@ -6057,6 +6271,33 @@ impl Workspace {
         job
     }
 
+    /// The pointer shape for the active tool, so the canvas says what a
+    /// click will do before it happens.
+    fn canvas_cursor(&self) -> gpui::CursorStyle {
+        use gpui::CursorStyle;
+        // Space-to-pan overrides whatever tool is active, and a pan in
+        // progress grabs.
+        if self.space_held || self.pan_last.is_some() {
+            return if self.pan_last.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            };
+        }
+        match self.editor.active_tool {
+            "hand" => CursorStyle::OpenHand,
+            "zoom" => CursorStyle::Crosshair,
+            "type" => CursorStyle::IBeam,
+            // Everything that targets a point rather than a region: a
+            // crosshair is what Photoshop shows for these.
+            "eyedropper" | "crop" | "marquee.rect" | "marquee.ellipse" | "lasso.free"
+            | "lasso.polygonal" | "lasso.magnetic" | "wand" | "quick_select" | "object_select"
+            | "gradient" | "shape.rect" | "shape.ellipse" | "shape.line" | "shape.polygon"
+            | "pen" | "pen.freeform" | "pen.curvature" => CursorStyle::Crosshair,
+            _ => CursorStyle::Arrow,
+        }
+    }
+
     pub fn render_canvas(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         div()
@@ -6065,6 +6306,10 @@ impl Workspace {
             .size_full()
             .overflow_hidden()
             .bg(gpui::rgb(crate::ui::palette().canvas_bg))
+            // The pointer never changed shape anywhere in the app: the
+            // canvas showed an arrow whether the active tool was the
+            // hand, the zoom, the eyedropper, a brush or the crop.
+            .cursor(self.canvas_cursor())
             .track_focus(&self.focus)
             .on_mouse_down(
                 MouseButton::Left,
@@ -6091,8 +6336,28 @@ impl Workspace {
             )
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
-            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
+            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
                 if ws.layer_rename_key(ev, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                // A modal owns the keyboard while it is up. Without this
+                // the key fell through to `tool_key` whenever no field
+                // was focused, so opening a dialog on top of a text
+                // session typed into the layer behind it.
+                if ws.modal.is_some() {
+                    match ev.keystroke.key.as_str() {
+                        // Enter is the dialog's primary button, which is
+                        // the only way to reach OK without the mouse.
+                        "enter" => {
+                            ws.commit_focused_field();
+                            ws.confirm_modal(window, cx);
+                        }
+                        key => {
+                            ws.field_key(key, ev.keystroke.key_char.as_deref());
+                        }
+                    }
+                    cx.notify();
                     cx.stop_propagation();
                     return;
                 }
@@ -6451,6 +6716,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|ws, _: &ShowPreferences, _w, cx| {
+                ws.snapshot_preferences();
                 ws.open_modal(Modal::Preferences, cx);
             }))
             .on_action(cx.listener(|ws, _: &ShowCanvasSize, _w, cx| {
@@ -6739,9 +7005,96 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Whether `t` can be appended to a numeric field holding `buffer`.
+///
+/// Digits alone used to be accepted, yet every one of these fields is
+/// read back with `parse::<f32>()`, so fractional and negative values
+/// were unreachable from the keyboard -- the only way to a non-integer
+/// was the +/- step buttons. A leading `-` and a single `.` go through
+/// now; `parse` still rejects whatever is malformed.
+/// The colour picker's hex field after a keystroke, or `None` when it
+/// refuses one.
+///
+/// The field is seeded with the committed value and capped at a full
+/// triplet, so typing into a freshly clicked one did nothing at all until
+/// the user backspaced six times. The first character replaces what is
+/// there, the way it would if the text were selected.
+fn hex_field_after(buffer: &str, fresh: bool, typed: &str) -> Option<String> {
+    let base = if fresh { "" } else { buffer };
+    if typed.is_empty()
+        || base.len() + typed.len() > 6
+        || !typed.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(format!("{base}{typed}"))
+}
+
+fn numeric_accepts(buffer: &str, t: &str) -> bool {
+    let mut len = buffer.len();
+    let mut dot = buffer.contains('.');
+    for c in t.chars() {
+        match c {
+            '0'..='9' => {}
+            '-' if len == 0 => {}
+            '.' if !dot => dot = true,
+            _ => return false,
+        }
+        len += c.len_utf8();
+    }
+    true
+}
+
+/// The built-in profile list position for a profile name, defaulting to
+/// the first entry when nothing matches (an embedded profile that is not
+/// one of ours).
+fn builtin_index(name: &str) -> usize {
+    schist_colormgmt::Profile::builtins()
+        .iter()
+        .position(|(n, _)| n.eq_ignore_ascii_case(name))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{builtin_index, hex_field_after, numeric_accepts};
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn numeric_fields_take_fractions_and_negatives() {
+        // These fields are all read back with `parse::<f32>()`, but only
+        // ASCII digits were let through, so no fractional or negative
+        // value could be typed at all.
+        assert!(numeric_accepts("", "-"));
+        assert!(numeric_accepts("1", "."));
+        assert!(numeric_accepts("1.", "5"));
+        assert!(numeric_accepts("-1.", "5"));
+        assert!(numeric_accepts("", "12.5"));
+        // A minus only leads, and there is only one decimal point.
+        assert!(!numeric_accepts("1", "-"));
+        assert!(!numeric_accepts("1.5", "."));
+        assert!(!numeric_accepts("", "1.2.3"));
+        assert!(!numeric_accepts("", "e"));
+    }
+
+    #[test]
+    fn the_first_keystroke_replaces_a_freshly_clicked_hex_field() {
+        // Seeded with the committed value and capped at six digits, so
+        // every keystroke was refused until the field was emptied by
+        // hand.
+        assert_eq!(hex_field_after("ff8800", true, "a").as_deref(), Some("a"));
+        // After that it appends, up to the cap.
+        assert_eq!(hex_field_after("a", false, "b").as_deref(), Some("ab"));
+        assert_eq!(hex_field_after("ffaa11", false, "b"), None);
+        // And it is still hex only.
+        assert_eq!(hex_field_after("ff", false, "z"), None);
+        assert_eq!(hex_field_after("ff", true, ""), None);
+        // A pasted triplet lands whole.
+        assert_eq!(
+            hex_field_after("112233", true, "aabbcc").as_deref(),
+            Some("aabbcc")
+        );
+    }
 
     fn snap(secs: u64, name: &str) -> (SystemTime, std::path::PathBuf) {
         (
@@ -6823,5 +7176,22 @@ mod tests {
                 zoom * texel * scale_factor
             );
         }
+    }
+
+    /// Assign / Convert Profile both opened on index 0 -- sRGB -- however
+    /// the document was actually tagged, so the dialog described a
+    /// conversion the user had not asked for and OK applied it.
+    #[test]
+    fn the_profile_dialog_opens_on_the_documents_own_profile() {
+        let builtins = schist_colormgmt::Profile::builtins();
+        for (i, (name, _)) in builtins.iter().enumerate() {
+            assert_eq!(builtin_index(name), i, "{name}");
+            // Names arrive from a parsed profile, whose casing we do not
+            // control.
+            assert_eq!(builtin_index(&name.to_lowercase()), i, "{name}");
+        }
+        // Anything we do not ship falls back to the first entry rather
+        // than to a wrong one.
+        assert_eq!(builtin_index("Some Scanner Profile"), 0);
     }
 }

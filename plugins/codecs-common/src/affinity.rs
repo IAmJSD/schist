@@ -80,7 +80,7 @@ impl CodecPlugin for AffinityCodec {
                     reference.visible = false;
                     doc.tree.layers.insert(0, reference);
                     doc.damage_all();
-                    doc.dirty = false;
+                    doc.mark_saved();
                 }
                 return Ok(doc);
             }
@@ -188,7 +188,7 @@ impl AffinityCodec {
             );
             doc.push_layer(layer);
             doc.damage_all();
-            doc.dirty = false;
+            doc.mark_saved();
             return Ok(doc);
         }
         anyhow::bail!(

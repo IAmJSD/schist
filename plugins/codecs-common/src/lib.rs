@@ -35,7 +35,7 @@ fn flat_document(
     );
     doc.push_layer(layer);
     doc.damage_all();
-    doc.dirty = false;
+    doc.mark_saved();
     Ok(doc)
 }
 

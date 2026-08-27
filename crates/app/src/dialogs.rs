@@ -37,7 +37,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         focused_field: ws.focused_field,
         field_buffer: ws.field_buffer.clone(),
     };
-    Some(match modal {
+    // Each dialog's primary button registers itself as the default
+    // action while it builds, so Enter can fire it.
+    ui::reset_default_action();
+    let body = match modal {
         Modal::ImageSize {
             width,
             height,
@@ -114,7 +117,9 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             profile_dialog(&state, convert, selected, cx).into_any_element()
         }
         m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
-    })
+    };
+    ws.default_action = ui::take_default_action();
+    Some(body)
 }
 
 /// An image was dropped on the window while a document is open: its own
@@ -277,17 +282,21 @@ fn confirm_close_tab(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl In
                 true,
                 |ws, window, cx| {
                     ws.close_modal(cx);
+                    // The Save As prompt is async: it returns with the
+                    // document still dirty and finishes later, so the
+                    // close has to be pending rather than conditional.
+                    // Answering "Save…" used to save an Untitled document
+                    // and leave its tab open.
+                    ws.close_tab_after_save();
                     ws.save_current(window, cx);
-                    // The synchronous path (a known, writable path) leaves
-                    // the document clean; only then is closing safe.
-                    if ws.doc.as_ref().is_some_and(|d| !d.dirty) {
-                        let index = ws.active_tab();
-                        ws.close_tab(index, cx);
-                        ws.resume_quit(cx);
-                    } else {
-                        // Save As is asynchronous; do not hold a quit open
-                        // across a file prompt.
+                    if ws.has_pending_save() {
+                        // Still waiting on a file prompt. Do not hold a
+                        // quit open across it; the tab closes when the
+                        // save lands.
                         ws.cancel_quit();
+                    } else {
+                        // Saved synchronously, so the tab has gone.
+                        ws.resume_quit(cx);
                     }
                 },
                 cx,
@@ -2094,15 +2103,28 @@ fn preferences(
                 .child(format!("Version {}", crate::crash::current_version())),
         );
 
-    let actions = div().flex().flex_row().gap_2().child(ui::button(
-        "Done",
-        true,
-        |ws, _w, cx| {
-            ws.save_view_options();
-            ws.close_modal(cx);
-        },
-        cx,
-    ));
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| {
+                ws.revert_preferences(cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ))
+        .child(ui::button(
+            "Done",
+            true,
+            |ws, _w, cx| {
+                ws.keep_preferences();
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
     ui::modal_frame("Preferences", 400.0, body, actions)
 }
 
@@ -2114,6 +2136,7 @@ fn layer_properties(
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let focused = state.focused_field == Some("layer-name");
+    let committed = name.clone();
     let shown = if focused && !state.field_buffer.is_empty() {
         state.field_buffer.clone()
     } else {
@@ -2138,8 +2161,8 @@ fn layer_properties(
             .text_size(px(12.0))
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|ws, _e, _w, cx| {
-                    ws.focus_field("layer-name");
+                cx.listener(move |ws, _e, _w, cx| {
+                    ws.focus_field("layer-name", committed.clone());
                     cx.notify();
                 }),
             )
@@ -2210,6 +2233,7 @@ fn new_document_dialog(
     };
 
     let name_focused = state.focused_field == Some("new-doc-name");
+    let committed = name.clone();
     let shown_name = if name_focused && !state.field_buffer.is_empty() {
         state.field_buffer.clone()
     } else {
@@ -2288,8 +2312,8 @@ fn new_document_dialog(
                 .text_size(px(12.0))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(|ws, _e, _w, cx| {
-                        ws.focus_field("new-doc-name");
+                    cx.listener(move |ws, _e, _w, cx| {
+                        ws.focus_field("new-doc-name", committed.clone());
                         cx.notify();
                     }),
                 )

@@ -33,6 +33,7 @@ fn cmd(
 /// tolerance, which is what `state.tolerance` carries.
 fn grow_selection(ctx: &mut CommandCtx, contiguous: bool) {
     if ctx.doc.selection.is_empty() {
+        ctx.refuse("Select something first");
         return;
     }
     let canvas = ctx.doc.canvas_rect();
@@ -248,7 +249,8 @@ fn merge_down(ctx: &mut CommandCtx) {
     };
     let ix = *path.0.last().unwrap();
     if ix == 0 {
-        return; // nothing below
+        ctx.refuse("No layer below to merge into");
+        return;
     }
     let mut below_path = path.clone();
     *below_path.0.last_mut().unwrap() = ix - 1;
@@ -306,9 +308,37 @@ fn merge_down(ctx: &mut CommandCtx) {
 }
 
 fn merge_visible(ctx: &mut CommandCtx) {
+    merge_all(ctx, false)
+}
+
+/// Flatten: like Merge Visible, but hidden layers are discarded and the
+/// result is opaque, named Background.
+///
+/// `layer.flatten` used to call `merge_visible` verbatim, so Flatten Image
+/// left every hidden layer in place, kept transparency, and named the
+/// result "Merged". Someone flattening before export still shipped a
+/// multi-layer file with holes in it.
+fn flatten_image(ctx: &mut CommandCtx) {
+    merge_all(ctx, true)
+}
+
+fn merge_all(ctx: &mut CommandCtx, flatten: bool) {
     let canvas = ctx.doc.canvas_rect();
-    let rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
-    let mut merged = Layer::new_raster("Merged");
+    let mut rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
+    if flatten {
+        // Flattening composites onto an opaque white background, the way
+        // Photoshop does, so the result has no transparency left.
+        for px in rgba.as_chunks_mut::<4>().0 {
+            let a = px[3] as u32;
+            let inv = 255 - a;
+            for c in px[..3].iter_mut() {
+                *c = ((*c as u32 * a + 255 * inv) / 255) as u8;
+            }
+            px[3] = 255;
+        }
+    }
+    let name = if flatten { "Background" } else { "Merged" };
+    let mut merged = Layer::new_raster(name);
     blit_rgba8(
         &mut merged.as_raster_mut().unwrap().tiles,
         ctx.doc.depth,
@@ -317,17 +347,23 @@ fn merge_visible(ctx: &mut CommandCtx) {
     );
     let merged_id = merged.id;
 
-    let visible_ids: Vec<LayerId> = ctx
+    // Flatten removes every layer; Merge Visible leaves the hidden ones.
+    let doomed: Vec<LayerId> = ctx
         .doc
         .tree
         .layers
         .iter()
-        .filter(|l| l.visible)
+        .filter(|l| flatten || l.visible)
         .map(|l| l.id)
         .collect();
-    let mut edit = ctx.doc.begin_edit("Merge Visible");
-    for vid in visible_ids {
-        edit.remove_layer(vid);
+    let title = if flatten {
+        "Flatten Image"
+    } else {
+        "Merge Visible"
+    };
+    let mut edit = ctx.doc.begin_edit(title);
+    for id in doomed {
+        edit.remove_layer(id);
     }
     let top = LayerPath(vec![edit.doc().tree.layers.len()]);
     edit.insert_layer(top, merged);
@@ -337,6 +373,7 @@ fn merge_visible(ctx: &mut CommandCtx) {
 
 fn paste(ctx: &mut CommandCtx, in_place: bool) {
     let Some(clip) = ctx.state.clipboard.clone() else {
+        ctx.refuse("Nothing on the clipboard");
         return;
     };
     let rect = if in_place {
@@ -626,6 +663,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             }),
             cmd("select.reselect", "Reselect", Some("cmd-shift-d"), |ctx| {
                 let Some(previous) = ctx.doc.last_selection.clone() else {
+                    ctx.refuse("Nothing to reselect");
                     return;
                 };
                 let mut edit = ctx.doc.begin_edit("Reselect");
@@ -645,6 +683,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             }),
             cmd("select.save", "Save Selection", None, |ctx| {
                 if ctx.doc.selection.is_empty() {
+                    ctx.refuse("Select something first");
                     return;
                 }
                 let n = ctx.doc.saved_selections.len() + 1;
@@ -758,9 +797,7 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.set_mask(id, Some(mask));
                 edit.commit();
             }),
-            cmd("layer.flatten", "Flatten Image", None, |ctx| {
-                merge_visible(ctx);
-            }),
+            cmd("layer.flatten", "Flatten Image", None, flatten_image),
             cmd("layer.merge_down", "Merge Down", Some("cmd-e"), merge_down),
             cmd(
                 "layer.merge_visible",
@@ -905,7 +942,11 @@ mod tests {
     }
 
     fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
-        let mut ctx = CommandCtx { doc, state };
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
         (reg.command(id).expect(id).run)(&mut ctx);
     }
 
@@ -1059,6 +1100,7 @@ mod tests {
         assert_eq!(group.children().unwrap().len(), 1);
         assert_eq!(group.children().unwrap()[0].name, "bg");
     }
+
     #[test]
     fn saving_a_selection_marks_the_document_unsaved() {
         // `select.save` mutates `saved_selections` directly rather than
@@ -1079,6 +1121,127 @@ mod tests {
         assert_eq!(doc.saved_selections.len(), 1, "selection was saved");
         assert!(doc.dirty, "and the document must count as unsaved");
     }
+
+    /// Run a command and return the refusal it recorded, if any.
+    fn run_for_refusal(
+        reg: &PluginRegistry,
+        id: &str,
+        doc: &mut Document,
+        state: &mut EditorState,
+    ) -> Option<String> {
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
+        (reg.command(id).expect(id).run)(&mut ctx);
+        ctx.refusal
+    }
+
+    #[test]
+    fn a_command_that_does_nothing_says_why() {
+        // The command layer is full of bare `return`s and the shell then
+        // set the status line to the command's own title regardless, so
+        // every silent no-op reported itself as having worked.
+        let reg = registry();
+        let mut state = EditorState::default();
+
+        let mut doc = doc_with_pixels();
+        assert_eq!(
+            run_for_refusal(&reg, "select.grow", &mut doc, &mut state).as_deref(),
+            Some("Select something first"),
+            "Grow with no selection"
+        );
+
+        let mut doc = doc_with_pixels();
+        assert_eq!(
+            run_for_refusal(&reg, "select.reselect", &mut doc, &mut state).as_deref(),
+            Some("Nothing to reselect"),
+            "Reselect with no previous selection"
+        );
+
+        let mut doc = doc_with_pixels();
+        state.clipboard = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.paste", &mut doc, &mut state).as_deref(),
+            Some("Nothing on the clipboard"),
+            "Paste with an empty clipboard"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = Some(doc.tree.layers[0].id);
+        assert_eq!(
+            run_for_refusal(&reg, "layer.merge_down", &mut doc, &mut state).as_deref(),
+            Some("No layer below to merge into"),
+            "Merge Down on the bottom layer"
+        );
+    }
+
+    #[test]
+    fn a_command_that_works_refuses_nothing() {
+        let reg = registry();
+        let mut state = EditorState::default();
+        let mut doc = doc_with_pixels();
+        doc.selection.select_rect(
+            schist_core::IntRect::from_xywh(0, 0, 10, 10),
+            SelectOp::Replace,
+        );
+        assert_eq!(
+            run_for_refusal(&reg, "select.save", &mut doc, &mut state),
+            None,
+            "saving a real selection must not refuse"
+        );
+    }
+
+    #[test]
+    fn flatten_is_not_merge_visible() {
+        // `layer.flatten` called `merge_visible` verbatim, so Flatten
+        // Image left hidden layers in place, kept transparency and named
+        // the result "Merged".
+        let reg = registry();
+        let mut state = EditorState::default();
+
+        let build = || {
+            let mut doc = doc_with_pixels();
+            let mut hidden = Layer::new_raster("hidden");
+            hidden.visible = false;
+            doc.push_layer(hidden);
+            doc
+        };
+
+        let mut doc = build();
+        run(&reg, "layer.merge_visible", &mut doc, &mut state);
+        assert_eq!(doc.tree.len(), 2, "merge visible keeps the hidden layer");
+        assert!(doc.tree.iter().any(|l| l.name == "Merged"));
+
+        let mut doc = build();
+        run(&reg, "layer.flatten", &mut doc, &mut state);
+        assert_eq!(doc.tree.len(), 1, "flatten discards hidden layers");
+        assert_eq!(doc.tree.layers[0].name, "Background");
+    }
+
+    #[test]
+    fn flatten_leaves_no_transparency() {
+        let reg = registry();
+        let mut state = EditorState::default();
+        // A document whose only layer covers part of the canvas, so the
+        // rest is transparent.
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        let mut layer = Layer::new_raster("part");
+        let buf = [10u8, 20, 30, 255].repeat(8 * 8);
+        schist_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            schist_core::IntRect::from_xywh(0, 0, 8, 8),
+            &buf,
+        );
+        doc.push_layer(layer);
+
+        run(&reg, "layer.flatten", &mut doc, &mut state);
+        let px = doc.tree.layers[0].as_raster().unwrap().tiles.pixel(20, 20);
+        assert!(px.a >= 0.99, "flattened pixels must be opaque: {px:?}");
+        assert!(px.r > 0.9, "and matted onto white: {px:?}");
+    }
 }
 
 #[cfg(test)]
@@ -1094,7 +1257,11 @@ mod m11_tests {
     }
 
     fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
-        let mut ctx = CommandCtx { doc, state };
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
         (reg.command(id)
             .unwrap_or_else(|| panic!("missing {id}"))
             .run)(&mut ctx);

@@ -117,6 +117,16 @@ pub enum EditOp {
         before: Box<Selection>,
         after: Box<Selection>,
     },
+    /// The document's colour mode changed (Image > Mode).
+    ///
+    /// Set outside the edit, so undo restored the pixels and left the new
+    /// mode: a document converted to greyscale and undone still reported
+    /// (and saved as) greyscale. The CMYK/Lab/RGB cases changed nothing
+    /// else at all, so they produced no history entry whatsoever.
+    ColorModeSet {
+        before: schist_color::ColorMode,
+        after: schist_color::ColorMode,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +142,11 @@ pub struct History {
     redo_stack: Vec<Edit>,
     /// Cap on retained edits; oldest are dropped past this.
     pub limit: usize,
+    /// How deep the undo stack was when the document was last saved, so
+    /// undoing back to that point can clear the dirty flag again. `None`
+    /// once that edit has aged out past `limit`, since we can no longer
+    /// tell whether we are standing on it.
+    saved_depth: Option<usize>,
 }
 
 impl History {
@@ -140,16 +155,39 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             limit: 200,
+            saved_depth: Some(0),
         }
     }
 
     pub fn push(&mut self, edit: Edit) {
+        // A new edit discards the redo branch. If the save point was in
+        // that branch it can never be reached again, so it has to go:
+        // otherwise draw A, save, undo A, draw B, undo B, redo B leaves
+        // `undo_stack.len() == saved_depth` and redo clears `dirty` while
+        // the document holds B and the disk holds A. With the quit
+        // confirmation in front of it, that loses B silently.
+        if self.saved_depth.is_some_and(|d| d > self.undo_stack.len()) {
+            self.saved_depth = None;
+        }
         self.redo_stack.clear();
         self.undo_stack.push(edit);
         if self.undo_stack.len() > self.limit {
             let excess = self.undo_stack.len() - self.limit;
             self.undo_stack.drain(0..excess);
+            // Dropping the oldest edits shifts every depth down; a save
+            // point that falls off the bottom is gone for good.
+            self.saved_depth = self.saved_depth.and_then(|d| d.checked_sub(excess));
         }
+    }
+
+    /// Record that the document as it stands right now is what is on disk.
+    pub fn mark_saved(&mut self) {
+        self.saved_depth = Some(self.undo_stack.len());
+    }
+
+    /// True when the current state is the one that was last saved.
+    pub fn at_saved(&self) -> bool {
+        self.saved_depth == Some(self.undo_stack.len())
     }
 
     pub fn pop_undo(&mut self) -> Option<Edit> {
