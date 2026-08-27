@@ -415,7 +415,7 @@ fn probed_adjustments_match_affinitys_render() {
         ("selectivecolour.af", 4.0),
         ("splittoning.af", 8.0), // no-op layer keeping its native data
         ("threshold.af", 8.0),   // saturated-colour boundary differs
-        ("sat_only50.af", 2.0), // Lab chroma scale, gamut clipping aside
+        ("sat_only50.af", 2.0),  // Lab chroma scale, gamut clipping aside
         ("sat_only_neg50.af", 2.0),
         ("vib_only100.af", 11.0), // Affinity's vibrance weighting is unmapped
         ("vib_only50.af", 8.0),

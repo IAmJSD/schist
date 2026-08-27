@@ -415,7 +415,11 @@ impl Exporter {
                         Value::F64(((180.0 - s.angle) as f64).to_radians()),
                     ),
                     // The panel's Intensity slider, stored inverted.
-                    f(b"Comp", 0x0a, Value::F64(1.0 - s.spread.clamp(0.0, 1.0) as f64)),
+                    f(
+                        b"Comp",
+                        0x0a,
+                        Value::F64(1.0 - s.spread.clamp(0.0, 1.0) as f64),
+                    ),
                     f_aux(b"Knck", 0x29, 1, Value::Bool(s.knockout)),
                     f(b"Colr", 0x31, Self::class(colr)),
                 ],
@@ -448,7 +452,11 @@ impl Exporter {
                     f(b"Opac", 0x0a, Value::F64(s.opacity as f64)),
                     f(b"SclO", 0x29, Value::Bool(false)),
                     f(b"Radi", 0x0a, Value::F64(s.size as f64)),
-                    f(b"Comp", 0x0a, Value::F64(1.0 - s.spread.clamp(0.0, 1.0) as f64)),
+                    f(
+                        b"Comp",
+                        0x0a,
+                        Value::F64(1.0 - s.spread.clamp(0.0, 1.0) as f64),
+                    ),
                     f(b"Colr", 0x31, Self::class(colr)),
                 ],
             );

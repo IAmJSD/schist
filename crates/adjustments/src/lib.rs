@@ -300,7 +300,11 @@ impl HueRange {
         if d >= down {
             0.0
         } else if d < up {
-            if up > 0.0 { d / up } else { 1.0 }
+            if up > 0.0 {
+                d / up
+            } else {
+                1.0
+            }
         } else if d <= flat {
             1.0
         } else if down > flat {
@@ -2180,10 +2184,6 @@ mod prepared_tests {
     }
 }
 
-/// Rec. 601 luminance, which is what Photoshop's adjustments weight by.
-/// Bradford chromatic adaptation for [`Params::WhiteBalance`]. The
-/// diagonal cone gains are chosen so the grey axis moves by the
-/// calibrated per-channel linear gains for this warmth/tint.
 /// Affinity's warmth slider, measured: the linear-light grey log-gains
 /// it applies at every tenth of its range, from -100 (cool) to +100
 /// (warm). Solved per fixture by fitting the gains of the Bradford
@@ -2196,25 +2196,25 @@ mod prepared_tests {
 const WARMTH_LOG_GAINS: [[f32; 3]; 21] = [
     [-1.066_140_8, 0.124_861_58, 1.085_302_5],
     [-0.771_848_3, 0.101_186_51, 0.903_488_3],
-    [-0.579_433_7, 0.081_628_76, 0.747_089_0],
+    [-0.579_433_7, 0.081_628_76, 0.747_089],
     [-0.441_393_9, 0.064_658_24, 0.610_910_9],
     [-0.335_628_2, 0.051_187_27, 0.491_378_4],
-    [-0.251_684_2, 0.038_791_68, 0.385_404_0],
+    [-0.251_684_2, 0.038_791_68, 0.385_404],
     [-0.182_746_1, 0.028_956_54, 0.291_194_9],
     [-0.126_031_4, 0.019_863_86, 0.207_869_5],
-    [-0.078_470_71, 0.011_565_35, 0.131_245_83],
+    [-0.078_470_71, 0.011_565_35, 0.131_245_84],
     [-0.036_664_08, 0.005_242_18, 0.062_403_7],
     [0.0, 0.0, 0.0],
-    [0.115_865_47, -0.017_772_31, -0.221_109_92],
+    [0.115_865_47, -0.017_772_31, -0.221_109_93],
     [0.188_446_02, -0.028_601_73, -0.377_630_32],
     [0.238_142_49, -0.034_957_6, -0.494_250_24],
-    [0.273_799_57, -0.038_461_82, -0.584_949_92],
-    [0.300_928_86, -0.040_617_4, -0.655_367_08],
-    [0.321_281_37, -0.042_763_06, -0.713_570_89],
-    [0.337_165_49, -0.043_341_38, -0.763_241_73],
+    [0.273_799_57, -0.038_461_82, -0.584_949_9],
+    [0.300_928_86, -0.040_617_4, -0.655_367_1],
+    [0.321_281_37, -0.042_763_06, -0.713_570_9],
+    [0.337_165_5, -0.043_341_38, -0.763_241_7],
     [0.349_603_6, -0.044_069_05, -0.803_047_2],
-    [0.359_788_22, -0.043_880_67, -0.838_493_23],
-    [0.369_014_0, -0.043_403_02, -0.867_859_34],
+    [0.359_788_2, -0.043_880_67, -0.838_493_2],
+    [0.369_014, -0.043_403_02, -0.867_859_36],
 ];
 
 /// The tint slider's grey log-gains, measured the same way at every
@@ -2224,17 +2224,17 @@ const WARMTH_LOG_GAINS: [[f32; 3]; 21] = [
 /// the importer hands us. Like warmth, it is neither linear nor
 /// symmetric.
 const TINT_LOG_GAINS: [[f32; 3]; 11] = [
-    [0.188_686_56, -0.094_765_3, 0.348_664_35],
-    [0.154_797_69, -0.076_550_72, 0.272_947_68],
+    [0.188_686_56, -0.094_765_3, 0.348_664_34],
+    [0.154_797_69, -0.076_550_72, 0.272_947_67],
     [0.119_324_28, -0.056_674_22, 0.200_040_82],
     [0.082_791_54, -0.037_263_72, 0.131_661_3],
     [0.041_722_29, -0.019_361_82, 0.064_003_38],
     [0.0, 0.0, 0.0],
     [-0.044_928_24, 0.020_042_06, -0.062_391_93],
     [-0.094_376_62, 0.039_050_96, -0.123_218_58],
-    [-0.145_803_22, 0.059_505_64, -0.182_253_42],
+    [-0.145_803_21, 0.059_505_64, -0.182_253_42],
     [-0.203_076_29, 0.078_741_57, -0.240_934_16],
-    [-0.263_430_94, 0.100_587_59, -0.298_225_23],
+    [-0.263_430_95, 0.100_587_59, -0.298_225_22],
 ];
 
 /// Read one of the measured tables at `pos` in -1..=1, interpolating
@@ -2252,6 +2252,10 @@ fn slider_log_gains(table: &[[f32; 3]], pos: f32) -> [f32; 3] {
     ]
 }
 
+/// Rec. 601 luminance, which is what Photoshop's adjustments weight by.
+/// Bradford chromatic adaptation for [`Params::WhiteBalance`]. The
+/// diagonal cone gains are chosen so the grey axis moves by the
+/// calibrated per-channel linear gains for this warmth/tint.
 fn white_balance(px: Rgba, warmth: f32, tint: f32) -> Rgba {
     // Each slider's measured grey gains, multiplied together. The two
     // are not quite independent — Affinity moves one white point in two
@@ -2445,18 +2449,6 @@ fn scale_chroma(px: Rgba, k: f32) -> Rgba {
         r: enc(rgb[0]),
         g: enc(rgb[1]),
         b: enc(rgb[2]),
-        a: px.a,
-    }
-}
-
-/// Push a pixel away from (or towards) its own luminance.
-fn saturate(px: Rgba, amount: f32) -> Rgba {
-    let l = luma(px);
-    let k = 1.0 + amount;
-    Rgba {
-        r: (l + (px.r - l) * k).clamp(0.0, 1.0),
-        g: (l + (px.g - l) * k).clamp(0.0, 1.0),
-        b: (l + (px.b - l) * k).clamp(0.0, 1.0),
         a: px.a,
     }
 }
