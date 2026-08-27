@@ -212,6 +212,9 @@ pub struct Workspace {
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
+    /// True until the first keystroke after a field takes focus, so that
+    /// one can replace the seeded value rather than append to it.
+    field_fresh: bool,
     /// What Enter does in the open dialog: the primary button's action,
     /// captured while the dialog rendered.
     pub default_action: Option<crate::ui::DialogAction>,
@@ -828,6 +831,7 @@ impl Workspace {
             modal_stack: Vec::new(),
             focused_field: None,
             field_buffer: String::new(),
+            field_fresh: false,
             default_action: None,
             plugins,
             pending_plugin_toggle: None,
@@ -3978,6 +3982,7 @@ impl Workspace {
     pub fn focus_field(&mut self, id: &'static str, current: impl Into<String>) {
         self.focused_field = Some(id);
         self.field_buffer = current.into();
+        self.field_fresh = true;
     }
 
     /// Fire the open dialog's primary button, as Enter should.
@@ -4002,6 +4007,7 @@ impl Workspace {
         let Some(id) = self.focused_field else {
             return false;
         };
+        let fresh = std::mem::take(&mut self.field_fresh);
         // Text fields (layer and document names) take any printable
         // character; the picker's hex field takes hex digits up to a full
         // triplet; numeric fields only digits.
@@ -4026,15 +4032,15 @@ impl Workspace {
                 self.commit_field(id);
                 return true;
             }
+            _ if hex => match hex_field_after(&self.field_buffer, fresh, text.unwrap_or("")) {
+                Some(next) => self.field_buffer = next,
+                None => return false,
+            },
             _ => match text {
                 Some(t)
                     if !t.is_empty()
                         && !t.chars().any(char::is_control)
-                        && (textual
-                            || (hex
-                                && self.field_buffer.len() + t.len() <= 6
-                                && t.chars().all(|c| c.is_ascii_hexdigit()))
-                            || (!hex && numeric_accepts(&self.field_buffer, t))) =>
+                        && (textual || numeric_accepts(&self.field_buffer, t)) =>
                 {
                     self.field_buffer.push_str(t)
                 }
@@ -7006,6 +7012,24 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
 /// were unreachable from the keyboard -- the only way to a non-integer
 /// was the +/- step buttons. A leading `-` and a single `.` go through
 /// now; `parse` still rejects whatever is malformed.
+/// The colour picker's hex field after a keystroke, or `None` when it
+/// refuses one.
+///
+/// The field is seeded with the committed value and capped at a full
+/// triplet, so typing into a freshly clicked one did nothing at all until
+/// the user backspaced six times. The first character replaces what is
+/// there, the way it would if the text were selected.
+fn hex_field_after(buffer: &str, fresh: bool, typed: &str) -> Option<String> {
+    let base = if fresh { "" } else { buffer };
+    if typed.is_empty()
+        || base.len() + typed.len() > 6
+        || !typed.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(format!("{base}{typed}"))
+}
+
 fn numeric_accepts(buffer: &str, t: &str) -> bool {
     let mut len = buffer.len();
     let mut dot = buffer.contains('.');
@@ -7033,7 +7057,7 @@ fn builtin_index(name: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_index, numeric_accepts};
+    use super::{builtin_index, hex_field_after, numeric_accepts};
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -7051,6 +7075,25 @@ mod tests {
         assert!(!numeric_accepts("1.5", "."));
         assert!(!numeric_accepts("", "1.2.3"));
         assert!(!numeric_accepts("", "e"));
+    }
+
+    #[test]
+    fn the_first_keystroke_replaces_a_freshly_clicked_hex_field() {
+        // Seeded with the committed value and capped at six digits, so
+        // every keystroke was refused until the field was emptied by
+        // hand.
+        assert_eq!(hex_field_after("ff8800", true, "a").as_deref(), Some("a"));
+        // After that it appends, up to the cap.
+        assert_eq!(hex_field_after("a", false, "b").as_deref(), Some("ab"));
+        assert_eq!(hex_field_after("ffaa11", false, "b"), None);
+        // And it is still hex only.
+        assert_eq!(hex_field_after("ff", false, "z"), None);
+        assert_eq!(hex_field_after("ff", true, ""), None);
+        // A pasted triplet lands whole.
+        assert_eq!(
+            hex_field_after("112233", true, "aabbcc").as_deref(),
+            Some("aabbcc")
+        );
     }
 
     fn snap(secs: u64, name: &str) -> (SystemTime, std::path::PathBuf) {

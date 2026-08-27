@@ -151,11 +151,12 @@ pub fn take_default_action() -> Option<DialogAction> {
 
 /// A hover label for an icon-only control.
 ///
-/// `grep -rn "tooltip" crates/app/` returned nothing: the sixteen toolbar
-/// slots, the layers-panel buttons, the history buttons, the visibility
-/// eyes, the swap-colours arrows and the tab close were all bare SVGs
-/// with no hover label and no shortcut hint. The only place a tool's name
-/// and key appeared was inside the flyout, which most slots do not have.
+/// `grep -rn "tooltip" crates/app/` returned nothing: every icon in the
+/// window was a bare SVG with no hover label and no shortcut hint, and
+/// the only place a tool's name and key appeared was inside the flyout,
+/// which most slots do not have. The toolbar slots use this; the panel
+/// buttons, visibility eyes and tab close are still unlabelled, and want
+/// an `id` each before they can be.
 pub struct Tooltip {
     label: SharedString,
     /// A keyboard shortcut, shown dimmed after the label.
