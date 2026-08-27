@@ -18,8 +18,9 @@ fn sample_builder() -> PiplBuilder {
         .ostype(key::REQUIRED_HOST, fourcc(b"8BIM"))
         .pstring(key::NAME, "Invert Test")
         .pstring(key::CATEGORY, "Schist")
-        // Bitmap off, grayscale on, indexed off, RGB on: 0b0000_1010.
-        .raw(key::SUPPORTED_MODES, vec![0b0000_1010, 0])
+        // Grayscale and RGB, most significant bit first: 0b0101_0000.
+        // This is byte-for-byte what G'MIC-Qt's own PiPL carries.
+        .raw(key::SUPPORTED_MODES, vec![0b0101_0000, 0])
         .cstring(key::CODE_WIN64_X86, "entry_advance")
         .raw(
             key::FILTER_CASE_INFO,
@@ -50,7 +51,7 @@ fn parses_the_documented_container() {
 }
 
 #[test]
-fn mode_flags_run_least_significant_bit_first() {
+fn mode_flags_run_most_significant_bit_first() {
     let p = Pipl::parse(&sample(), Endian::Little).unwrap();
     use schist_plugin_host_8bf::abi::mode;
     assert_eq!(p.supports_mode(mode::BITMAP), Some(false));
@@ -58,8 +59,10 @@ fn mode_flags_run_least_significant_bit_first() {
     assert_eq!(p.supports_mode(mode::INDEXED_COLOR), Some(false));
     assert_eq!(p.supports_mode(mode::RGB_COLOR), Some(true));
     assert_eq!(p.supports_mode(mode::CMYK_COLOR), Some(false));
+    assert_eq!(p.supports_mode(mode::HSL_COLOR), Some(false));
     // Past the end of the flag set is "not declared", not a panic.
     assert_eq!(p.supports_mode(mode::RGB_48), Some(false));
+    assert_eq!(p.supports_mode(mode::GRAY_32), Some(false));
 }
 
 #[test]

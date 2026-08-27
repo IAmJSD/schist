@@ -107,6 +107,7 @@ fn apply(args: &[String]) -> Res {
     };
 
     let mut image = read_ppm(&input)?;
+    let parent = parent_window();
     println!(
         "running {} over {}x{}",
         filter.name(),
@@ -114,6 +115,7 @@ fn apply(args: &[String]) -> Res {
         image.height
     );
     let opts = bf::RunOptions {
+        parent_window: parent,
         show_dialog,
         progress: Some(Box::new(|done, total| {
             if total > 0 {
@@ -141,6 +143,23 @@ fn minimal_filter_pipl() -> bf::Pipl {
             data: bf::pipl::kind::FILTER.to_le_bytes().to_vec(),
         }],
     }
+}
+
+/// A window for the plug-in to parent its dialog to. Photoshop hands
+/// over its own main window; a console host has none, so the desktop
+/// window is the nearest honest answer.
+#[cfg(windows)]
+fn parent_window() -> *mut std::ffi::c_void {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDesktopWindow() -> *mut std::ffi::c_void;
+    }
+    unsafe { GetDesktopWindow() }
+}
+
+#[cfg(not(windows))]
+fn parent_window() -> *mut std::ffi::c_void {
+    std::ptr::null_mut()
 }
 
 /// Binary PPM (P6), 8 bits per channel.

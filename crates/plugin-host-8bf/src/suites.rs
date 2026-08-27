@@ -22,6 +22,37 @@
 use crate::abi::{Handle, MacBoolean, OSErr, NO_ERR};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set from `SCHIST_8BF_TRACE`. Every host callback logs its arguments,
+/// which is how you find out what an uncooperative plug-in is actually
+/// asking for — and the only way to check, from the outside, that a
+/// suite's function pointers are in the order the plug-in expects.
+static TRACE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_trace(on: bool) {
+    TRACE.store(on, Ordering::Relaxed);
+}
+
+pub fn trace_enabled() -> bool {
+    TRACE.load(Ordering::Relaxed)
+}
+
+/// Enable tracing if `SCHIST_8BF_TRACE` is set to anything but "0".
+pub fn trace_from_env() {
+    if let Ok(v) = std::env::var("SCHIST_8BF_TRACE") {
+        set_trace(v != "0");
+    }
+}
+
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        if $crate::suites::trace_enabled() {
+            eprintln!("[8bf] {}", format_args!($($arg)*));
+        }
+    };
+}
+pub(crate) use trace;
 
 /// Bytes reserved ahead of every block for its own size. Sixteen keeps
 /// the payload 16-byte aligned, which is at least as strict as anything
@@ -86,6 +117,7 @@ pub struct HandleProcs {
 
 /// Allocate a handle whose master pointer the plug-in may dereference.
 pub(crate) unsafe extern "C" fn new_handle(size: i32) -> Handle {
+    trace!("handle.new({size})");
     let Ok(size) = usize::try_from(size) else {
         return std::ptr::null_mut();
     };
@@ -105,6 +137,7 @@ pub(crate) unsafe extern "C" fn new_handle(size: i32) -> Handle {
 }
 
 pub(crate) unsafe extern "C" fn dispose_handle(h: Handle) {
+    trace!("handle.dispose({h:p})");
     if h.is_null() {
         return;
     }
@@ -113,6 +146,7 @@ pub(crate) unsafe extern "C" fn dispose_handle(h: Handle) {
 }
 
 pub(crate) unsafe extern "C" fn get_handle_size(h: Handle) -> i32 {
+    trace!("handle.get_size({h:p})");
     if h.is_null() {
         return 0;
     }
@@ -121,6 +155,7 @@ pub(crate) unsafe extern "C" fn get_handle_size(h: Handle) -> i32 {
 
 pub(crate) unsafe extern "C" fn set_handle_size(h: Handle, size: i32) -> OSErr {
     const MEM_FULL_ERR: OSErr = -108;
+    trace!("handle.set_size({h:p}, {size})");
     if h.is_null() {
         return MEM_FULL_ERR;
     }
@@ -145,6 +180,7 @@ pub(crate) unsafe extern "C" fn set_handle_size(h: Handle, size: i32) -> OSErr {
 /// Locking is a no-op: nothing here relocates. The Mac `moveHigh` flag
 /// has no meaning off Mac OS, which the API Guide says explicitly.
 pub(crate) unsafe extern "C" fn lock_handle(h: Handle, _move_high: MacBoolean) -> *mut u8 {
+    trace!("handle.lock({h:p})");
     if h.is_null() {
         std::ptr::null_mut()
     } else {
@@ -152,9 +188,13 @@ pub(crate) unsafe extern "C" fn lock_handle(h: Handle, _move_high: MacBoolean) -
     }
 }
 
-pub(crate) unsafe extern "C" fn unlock_handle(_h: Handle) {}
+pub(crate) unsafe extern "C" fn unlock_handle(h: Handle) {
+    trace!("handle.unlock({h:p})");
+}
 
-pub(crate) unsafe extern "C" fn recover_space(_size: i32) {}
+pub(crate) unsafe extern "C" fn recover_space(size: i32) {
+    trace!("handle.recover_space({size})");
+}
 
 pub fn handle_procs() -> HandleProcs {
     HandleProcs {
@@ -202,6 +242,7 @@ const REPORTED_BUFFER_SPACE: i32 = 256 * 1024 * 1024;
 
 pub(crate) unsafe extern "C" fn allocate_buffer(size: i32, buffer: *mut BufferID) -> OSErr {
     const MEM_FULL_ERR: OSErr = -108;
+    trace!("buffer.allocate({size})");
     if buffer.is_null() {
         return MEM_FULL_ERR;
     }
@@ -218,16 +259,21 @@ pub(crate) unsafe extern "C" fn allocate_buffer(size: i32, buffer: *mut BufferID
 }
 
 pub(crate) unsafe extern "C" fn lock_buffer(b: BufferID, _move_high: MacBoolean) -> *mut u8 {
+    trace!("buffer.lock({b:p})");
     b as *mut u8
 }
 
-pub(crate) unsafe extern "C" fn unlock_buffer(_b: BufferID) {}
+pub(crate) unsafe extern "C" fn unlock_buffer(b: BufferID) {
+    trace!("buffer.unlock({b:p})");
+}
 
 pub(crate) unsafe extern "C" fn free_buffer(b: BufferID) {
+    trace!("buffer.free({b:p})");
     block_free(b as *mut u8);
 }
 
 pub(crate) unsafe extern "C" fn buffer_space() -> i32 {
+    trace!("buffer.space()");
     REPORTED_BUFFER_SPACE
 }
 
@@ -272,18 +318,28 @@ pub struct SPBasicSuite {
 const SP_SUITE_NOT_FOUND: i32 = -1;
 
 pub(crate) unsafe extern "C" fn acquire_suite(
-    _name: *const c_char,
-    _version: i32,
+    name: *const c_char,
+    version: i32,
     suite: *mut *const c_void,
 ) -> i32 {
+    trace!("pica.acquire_suite({:?}, {version})", cstr(name));
     if !suite.is_null() {
         suite.write(std::ptr::null());
     }
     SP_SUITE_NOT_FOUND
 }
 
-pub(crate) unsafe extern "C" fn release_suite(_name: *const c_char, _version: i32) -> i32 {
+pub(crate) unsafe extern "C" fn release_suite(name: *const c_char, version: i32) -> i32 {
+    trace!("pica.release_suite({:?}, {version})", cstr(name));
     NO_ERR as i32
+}
+
+/// Read a plug-in-supplied C string for tracing, tolerating null.
+unsafe fn cstr(p: *const c_char) -> String {
+    if p.is_null() {
+        return "<null>".into();
+    }
+    CStr::from_ptr(p).to_string_lossy().into_owned()
 }
 
 pub(crate) unsafe extern "C" fn is_equal(a: *const c_char, b: *const c_char) -> u8 {
@@ -295,6 +351,7 @@ pub(crate) unsafe extern "C" fn is_equal(a: *const c_char, b: *const c_char) -> 
 
 pub(crate) unsafe extern "C" fn allocate_block(size: usize, block: *mut *mut c_void) -> i32 {
     const SP_OUT_OF_MEMORY: i32 = -2;
+    trace!("pica.allocate_block({size})");
     if block.is_null() {
         return SP_OUT_OF_MEMORY;
     }
@@ -308,6 +365,7 @@ pub(crate) unsafe extern "C" fn allocate_block(size: usize, block: *mut *mut c_v
 }
 
 pub(crate) unsafe extern "C" fn free_block(block: *mut c_void) -> i32 {
+    trace!("pica.free_block({block:p})");
     block_free(block as *mut u8);
     NO_ERR as i32
 }
@@ -337,6 +395,7 @@ pub(crate) unsafe extern "C" fn reallocate_block(
 }
 
 pub(crate) unsafe extern "C" fn undefined() -> i32 {
+    trace!("pica.undefined()");
     SP_SUITE_NOT_FOUND
 }
 

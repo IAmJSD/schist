@@ -9,7 +9,10 @@
 //! host-side work — commit the last output, hand over the next input —
 //! is identical whichever side drives the loop.
 
-use crate::abi::{self, err, filter_case, mode, selector, FilterRecord, OSErr, Point, Rect};
+use crate::abi::{
+    self, dialog_info, err, filter_case, mode, selector, BigDocumentStruct, FilterRecord, OSErr,
+    PIDescriptorParameters, PlatformData, Point, Rect, VPoint, VRect,
+};
 use crate::pipl::{FilterCaseInfo, Pipl};
 use crate::suites;
 use std::cell::Cell;
@@ -224,6 +227,7 @@ impl Filter {
 
     /// Run the filter over `image`, in place.
     pub fn apply(&mut self, image: &mut Image, opts: &RunOptions) -> Result<(), HostError> {
+        suites::trace_from_env();
         if image.width > i16::MAX as u32 || image.height > i16::MAX as u32 {
             return Err(HostError::ImageTooLarge {
                 width: image.width,
@@ -332,11 +336,21 @@ fn with_active<R>(f: impl FnOnce(&mut Session<'static>) -> R) -> Option<R> {
 }
 
 unsafe extern "C" fn advance_state_thunk() -> OSErr {
-    with_active(|s| match s.advance() {
-        Ok(()) => abi::NO_ERR,
-        Err(e) => {
-            s.deferred_error = Some(e);
-            err::FILTER_BAD_PARAMETERS
+    with_active(|s| {
+        crate::suites::trace!(
+            "advanceState in={:?} out={:?} planes={}..={}",
+            s.record.in_rect,
+            s.record.out_rect,
+            s.record.in_lo_plane,
+            s.record.in_hi_plane
+        );
+        match s.advance() {
+            Ok(()) => abi::NO_ERR,
+            Err(e) => {
+                crate::suites::trace!("advanceState failed: {e}");
+                s.deferred_error = Some(e);
+                err::FILTER_BAD_PARAMETERS
+            }
         }
     })
     .unwrap_or(err::FILTER_BAD_PARAMETERS)
@@ -379,6 +393,9 @@ struct Session<'a> {
     _handle_procs: Box<suites::HandleProcs>,
     _buffer_procs: Box<suites::BufferProcs>,
     _sp_basic: Box<suites::SPBasicSuite>,
+    big_doc: Box<BigDocumentStruct>,
+    _descriptor_params: Box<PIDescriptorParameters>,
+    _platform: Box<PlatformData>,
     error_string: Box<[u8; 256]>,
 }
 
@@ -396,6 +413,11 @@ impl<'a> Session<'a> {
         let mut buffer_procs = Box::new(suites::buffer_procs());
         let mut sp_basic = Box::new(suites::sp_basic_suite());
         let mut error_string = Box::new([0u8; 256]);
+        let mut big_doc = Box::new(BigDocumentStruct::default());
+        let mut descriptor_params = Box::new(PIDescriptorParameters::default());
+        let mut platform = Box::new(PlatformData {
+            hwnd: opts.parent_window,
+        });
 
         let mut record = Box::new(FilterRecord::default());
         record.serial_number = 0;
@@ -428,7 +450,7 @@ impl<'a> Session<'a> {
 
         record.host_sig = abi::SIG_8BIM;
         record.host_proc = None;
-        record.platform_data = opts.parent_window;
+        record.platform_data = &mut *platform as *mut _ as *mut c_void;
 
         // Flat image, no selection: no transparency to protect, no mask
         // to hand over, nothing floating.
@@ -447,6 +469,38 @@ impl<'a> Session<'a> {
         record.s_sp_basic = &mut *sp_basic as *mut _ as *mut c_void;
         record.error_string = error_string.as_mut_ptr();
         record.advance_state = Some(advance_state_thunk);
+
+        // Offer wide coordinates even though this stage's images fit in
+        // the narrow ones. A plug-in built against the CS or later SDK
+        // may treat a null bigDocumentData as "host too old" and decline
+        // before it looks at anything else.
+        big_doc.image_size_32 = VPoint {
+            v: h as i32,
+            h: w as i32,
+        };
+        big_doc.whole_size_32 = big_doc.image_size_32;
+        big_doc.float_coord_32 = VPoint { v: 0, h: 0 };
+        big_doc.filter_rect_32 = VRect {
+            top: 0,
+            left: 0,
+            bottom: h as i32,
+            right: w as i32,
+        };
+        record.big_document_data = &mut *big_doc as *mut _ as *mut c_void;
+
+        // Photoshop always passes this, and plug-ins write through it
+        // without checking — `descriptor` is at offset 8, which is
+        // exactly where a null pointer here faults. Both sub-suites stay
+        // null: that is the documented way to say the descriptor
+        // callbacks are unavailable, and it is what stage 4 fills in.
+        descriptor_params.descriptor_parameters_version = 0;
+        descriptor_params.play_info = if opts.show_dialog {
+            dialog_info::REQUIRED_OR_DISPLAY
+        } else {
+            dialog_info::NONE_OR_SILENT
+        };
+        descriptor_params.record_info = dialog_info::OPTIONAL_OR_DONT_DISPLAY;
+        record.descriptor_parameters = &mut *descriptor_params as *mut _ as *mut c_void;
 
         // Everything below is a capability declaration. Saying "no"
         // where the host really cannot help is what makes a well-written
@@ -508,6 +562,9 @@ impl<'a> Session<'a> {
             _handle_procs: handle_procs,
             _buffer_procs: buffer_procs,
             _sp_basic: sp_basic,
+            big_doc,
+            _descriptor_params: descriptor_params,
+            _platform: platform,
             error_string,
         }
     }
@@ -543,6 +600,7 @@ impl<'a> Session<'a> {
 
     fn call(&mut self, entry: EntryProc, sel: i16, data: &mut isize) -> Result<(), HostError> {
         let mut result: i16 = 0;
+        crate::suites::trace!("-> selector {sel}");
         {
             let _guard = ActiveGuard::set(self as *mut Session<'_>);
             // SAFETY: `record` outlives the call, and the plug-in is
@@ -556,6 +614,7 @@ impl<'a> Session<'a> {
                 );
             }
         }
+        crate::suites::trace!("<- selector {sel} = {result}");
         if let Some(e) = self.deferred_error.take() {
             return Err(e);
         }
@@ -573,8 +632,30 @@ impl<'a> Session<'a> {
         s[1..1 + len.min(255)].iter().map(|&b| b as char).collect()
     }
 
+    /// True once the plug-in has claimed the wide coordinate fields, at
+    /// which point they, not the narrow ones, say what it wants.
+    fn wide(&self) -> bool {
+        self.big_doc.plugin_using_32_bit_coordinates != 0
+    }
+
+    fn requested_in(&self) -> Rect {
+        if self.wide() {
+            self.big_doc.in_rect_32.narrow()
+        } else {
+            self.record.in_rect
+        }
+    }
+
+    fn requested_out(&self) -> Rect {
+        if self.wide() {
+            self.big_doc.out_rect_32.narrow()
+        } else {
+            self.record.out_rect
+        }
+    }
+
     fn wants_more(&self) -> bool {
-        !self.record.in_rect.is_empty() || !self.record.out_rect.is_empty()
+        !self.requested_in().is_empty() || !self.requested_out().is_empty()
     }
 
     /// Commit the last output and hand over the next input. This is
@@ -588,10 +669,11 @@ impl<'a> Session<'a> {
         // Continue loop watches these rectangles, so leaving a stale one
         // set would spin forever.
         self.record.mask_rect = Rect::default();
+        self.big_doc.mask_rect_32 = VRect::default();
         self.record.mask_data = std::ptr::null_mut();
         self.record.mask_row_bytes = 0;
 
-        let in_rect = self.record.in_rect;
+        let in_rect = self.requested_in();
         if !in_rect.is_empty() {
             let (lo, hi) = self.plane_range(self.record.in_lo_plane, self.record.in_hi_plane)?;
             let n = (hi - lo + 1) as usize;
@@ -618,7 +700,7 @@ impl<'a> Session<'a> {
             self.record.in_row_bytes = 0;
         }
 
-        let out_rect = self.record.out_rect;
+        let out_rect = self.requested_out();
         if !out_rect.is_empty() {
             if out_rect.left < 0
                 || out_rect.top < 0

@@ -172,13 +172,20 @@ const MAX_PROPERTIES: i32 = 512;
 impl Pipl {
     /// Parse a property list from the raw bytes of a `PiPL` resource.
     ///
-    /// Real Windows resources are not always framed exactly as the
-    /// `PIPropertyList` declaration suggests — `CNVTPIPL.EXE` has been
-    /// observed to emit a short prelude before the `version` field. The
-    /// parse therefore tries the documented framing first and then a
-    /// small set of candidate offsets, accepting whichever one yields a
-    /// list whose first property carries the `'8BIM'` vendor code that
-    /// table 11-2 says every Photoshop property must have.
+    /// Real Windows resources are *not* framed exactly as the
+    /// `PIPropertyList` declaration suggests. Every shipping plug-in
+    /// examined carries a **two-byte prelude**, `01 00`, before the
+    /// `version` field — presumably a count of the property lists in the
+    /// resource. The Resource Guide does not mention it; it only says
+    /// `CNVTPIPL.EXE` "handles padding and byte-ordering issues for you".
+    ///
+    /// So the parse tries the documented framing first and then a small
+    /// set of candidate offsets, accepting whichever yields a list whose
+    /// first property carries the `'8BIM'` vendor code that table 11-2
+    /// says every Photoshop property must have. Note the four-byte
+    /// property alignment is relative to the start of the *list*, not of
+    /// the resource, so with the prelude present the properties are not
+    /// four-byte aligned within the file.
     pub fn parse(bytes: &[u8], endian: Endian) -> Result<Pipl, PiplError> {
         let mut first_err = None;
         for skip in [0usize, 2, 4] {
@@ -319,16 +326,22 @@ impl Pipl {
     /// `'mode'` — is image mode `m` (an [`crate::abi::mode`] ordinal)
     /// declared supported?
     ///
-    /// The flag set is a byte array whose first flag is the least
-    /// significant bit of the first byte (Resource Guide, "the first
-    /// bit ... is in the least-significant bit of the flag byte"), and
-    /// the flags run in the mode order table 11-3 lists.
+    /// The flags run in the mode order table 11-3 lists, and the first
+    /// flag is the **most** significant bit of the first byte.
+    ///
+    /// The Resource Guide's "the first bit ... is in the least-
+    /// significant bit of the flag byte" is said of `FilterCaseInfo`'s
+    /// `flags1`, not of a Rez `FlagSet`, and the two differ. Reading a
+    /// `FlagSet` the other way round is not a subtle error: it silently
+    /// claims a plug-in supports modes it does not and refuses ones it
+    /// does. Settled against two real plug-ins whose `'enbl'` strings
+    /// name their modes in prose — see `docs/8bf-abi-provenance.md`.
     ///
     /// `None` when the plug-in declares no `'mode'` property at all, so
     /// the caller can decide whether to be permissive.
     pub fn supports_mode(&self, m: i16) -> Option<bool> {
         let d = self.get(key::SUPPORTED_MODES)?;
-        let (byte, bit) = ((m / 8) as usize, (m % 8) as u32);
+        let (byte, bit) = ((m / 8) as usize, 7 - (m % 8) as u32);
         Some(d.get(byte).is_some_and(|b| b & (1 << bit) != 0))
     }
 

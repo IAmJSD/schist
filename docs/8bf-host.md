@@ -24,7 +24,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 
 | Stage | Scope | State |
 |---|---|---|
-| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog, Windows only, in-process | **this crate** |
+| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog, Windows only, in-process | **this crate**, verified against two shipping plug-ins |
 | 2 | Out-of-process helper with shared-memory tiles, macOS, 16/32-bit, all modes, selections and transparency, buffer/handle/property suites | not started |
 | 3 | Wine helper on Linux, 32-bit Windows helper, Rosetta helper on Apple Silicon, packaging | not started |
 | 4 | ActionManager / descriptor recording, format plug-ins, big-document coordinates | not started |
@@ -83,11 +83,33 @@ because the API Guide says a zero there means "the host has not set it".
 
 ### The dialog
 
-Filters draw their own modal dialogs with raw Win32 against the window
-handle in `platformData`, and expect a live native event loop. Stage 1
-passes `RunOptions::parent_window` straight through; a null handle gives
-an unparented dialog, which still works. Nothing about this is testable
-off Windows.
+Filters draw their own modal dialogs with raw Win32 and expect a live
+native event loop. `platformData` does not carry the window handle: it
+points at a `PlatformData` whose first member is the `HWND`. Passing the
+handle itself makes a plug-in fault reading at the handle's own numeric
+value, which is how that was pinned down.
+
+This does work off Windows, which was a surprise. Cross-compiling the
+host to `x86_64-pc-windows-gnu` and running it under Wine on a headless
+Xvfb display gets a real plug-in's real dialog on screen, and `xdotool`
+can drive it. `tools/verify-8bf.sh` does exactly that.
+
+### Tracing
+
+`SCHIST_8BF_TRACE=1` logs every selector call and every host callback the
+plug-in makes, with arguments:
+
+```
+[8bf] -> selector 3
+[8bf] pica.acquire_suite("Photoshop Handle Suite for Plug-ins", 2)
+[8bf] handle.new(1)
+[8bf] handle.lock(0x7ffffea99490)
+[8bf] handle.set_size(0x7ffffea99490, 129)
+```
+
+This is the only way to see what an uncooperative plug-in is asking for,
+and it is what established the callback suites' member order: a wrong
+order shows up as a call whose arguments make no sense for the slot.
 
 ## What stage 1 does not do
 
@@ -107,14 +129,30 @@ off Windows.
 - **Format, automation, selection and parser modules.** Filters only.
 - **Crash isolation.** A plug-in fault kills the process.
 
+### Packing
+
+`FilterRecord` is `#[repr(C, packed(4))]`: 560 bytes, with a pointer
+following an `int32` and no hole between them. This is not what a naive
+reading of the declaration gives you. Natural alignment inserts 4-byte
+holes before `inData` and before `outData`, and by `platformData` the
+record is 8 bytes too long — far enough that a real plug-in reads a
+pointer out of the middle of the monitor record and faults on whatever
+happens to be there. That was the single most expensive thing to find and
+the single most important thing to get right.
+
+The callback suites are the opposite: **not** packed. Both plug-ins drove
+a naturally aligned `HandleProcs` correctly, and packing it segfaults
+immediately. Different headers, different pragmas.
+
 ## Testing
 
 The fixture is a C plug-in, `tests/fixtures/plugin.c`, compiled at test
 time. Writing it in C is the point: it declares `FilterRecord`
 independently and exports its own `offsetof` table, so `tests/layout.rs`
-can check that Rust's `repr(C)` and a C compiler's natural alignment
-produce the same 592-byte record, field for field. That is the one
-layout assumption the whole host rests on.
+can check that Rust and a C compiler agree on the same 560-byte record,
+field for field. It also carries the packing asymmetry — `#pragma
+pack(push, 4)` around the record and nothing else — so a regression in
+either direction fails a test rather than a plug-in.
 
 `tests/pipl.rs` links a real x86-64 Windows DLL with mingw-w64, carrying
 a PiPL resource built by the same code path a plug-in author's would use,
@@ -122,6 +160,14 @@ and walks it back out. `tests/run.rs` drives both entry points — one
 using `advanceState`, one using the `Continue` loop — over a gradient and
 checks every byte, including the partial tiles at the right and bottom
 edges.
+
+None of that involves Adobe, so `tools/verify-8bf.sh` does: it downloads
+Filter Foundry and G'MIC-Qt, cross-compiles the host to Windows, and runs
+both under Wine. G'MIC has to get through `Prepare`, use the handle suite
+and call `advanceState`. Filter Foundry has to open its dialog, accept
+`255-r` typed into all three channel fields, and come back with every
+output channel equal to 255 minus the input's red. Only the shipped
+binaries are used; neither project's source is read.
 
 Tests that need a toolchain skip with a printed reason rather than
 failing, but a toolchain that is *present and broken* is a hard failure:
@@ -132,11 +178,14 @@ a silent skip that reads as a pass is worse than no test.
 Everything was derived from Adobe's published prose documentation, not
 from the Photoshop SDK headers, which are licensed and are not vendored
 here. [`8bf-abi-provenance.md`](8bf-abi-provenance.md) lists every ABI
-fact, its source, and — importantly — the twelve that the prose does not
-pin down, what a wrong guess costs, and how to settle each one against a
-real plug-in.
+fact and where it came from.
 
-The largest of those is the member order inside the callback suites: the
-API Guide prints every routine's signature and none of the structs that
-hold them. Until a known-good plug-in has been run on Windows, this crate
-is unproven against anything but its own fixture.
+Twelve of them the prose did not pin down. Most are now settled — by
+running two real plug-ins as black boxes and watching where they read,
+what they called, and where they faulted. That closed the packing
+question, the suite member order, the selector numbers, the image-mode
+ordinals, the `'mode'` flag set's bit order (which was backwards, and was
+making this host refuse plug-ins that were willing to run), the
+`platformData` indirection, and the two-byte prelude on a Windows PiPL
+resource. What is still open is listed there too — chiefly `BufferProcs`,
+which neither plug-in happened to use.

@@ -149,10 +149,125 @@ pub type AdvanceStateProc = unsafe extern "C" fn() -> OSErr;
 /// Host-defined escape hatch. UNVERIFIED signature; always null here.
 pub type HostProc = unsafe extern "C" fn(selector: i16, data: *mut c_void);
 
+/// What `FilterRecord::platform_data` points at on Windows.
+///
+/// The API Guide says only "a pointer to platform specific data", and the
+/// emphasis is on *pointer*: plug-ins dereference this field to reach the
+/// window handle rather than casting the field itself to an `HWND`.
+/// Passing the handle directly makes a plug-in fault reading at the
+/// handle's numeric value, which is how this was pinned down.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PlatformData {
+    pub hwnd: *mut c_void,
+}
+
+/// Scripting parameters, from API Guide table 3-2. Photoshop always
+/// passes this, and a plug-in may write to `descriptor` — at offset 8 —
+/// without checking the pointer first, so passing null here is not a
+/// safe way to say "no scripting".
+///
+/// This host provides the struct with both sub-suites null, which is the
+/// documented way to say the descriptor callbacks are unavailable.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PIDescriptorParameters {
+    pub descriptor_parameters_version: i16,
+    pub play_info: i16,
+    pub record_info: i16,
+    pub descriptor: Handle,
+    pub write_descriptor_procs: *mut c_void,
+    pub read_descriptor_procs: *mut c_void,
+}
+
+/// `playInfo` / `recordInfo` values.
+///
+/// UNVERIFIED assignment: the API Guide prints these three names against
+/// both fields but swaps which triple belongs to which — table 3-2 gives
+/// `playInfo` the Optional/Required/None triple, while the copy of the
+/// same structure later in the guide gives it DontDisplay/Display/
+/// Silent. Only the *values* matter here, and 2 means "no dialog" under
+/// either reading, which is the distinction this host needs.
+pub mod dialog_info {
+    pub const OPTIONAL_OR_DONT_DISPLAY: i16 = 0;
+    pub const REQUIRED_OR_DISPLAY: i16 = 1;
+    pub const NONE_OR_SILENT: i16 = 2;
+}
+
+/// 32-bit coordinate pair, the wide twin of [`Point`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VPoint {
+    pub v: i32,
+    pub h: i32,
+}
+
+/// 32-bit rectangle, the wide twin of [`Rect`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VRect {
+    pub top: i32,
+    pub left: i32,
+    pub bottom: i32,
+    pub right: i32,
+}
+
+impl VRect {
+    pub fn is_empty(&self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    pub fn width(&self) -> i32 {
+        (self.right - self.left).max(0)
+    }
+
+    pub fn height(&self) -> i32 {
+        (self.bottom - self.top).max(0)
+    }
+
+    pub fn narrow(&self) -> Rect {
+        Rect {
+            top: self.top as i16,
+            left: self.left as i16,
+            bottom: self.bottom as i16,
+            right: self.right as i16,
+        }
+    }
+
+    pub fn widen(r: Rect) -> VRect {
+        VRect {
+            top: r.top as i32,
+            left: r.left as i32,
+            bottom: r.bottom as i32,
+            right: r.right as i32,
+        }
+    }
+}
+
+/// Wide coordinates for documents past 32767 pixels, from API Guide
+/// table 62. Adobe's words: this structure "deprecates imageSize,
+/// filterRect, inRect, outRect, maskRect, floatCoord and wholeSize".
+///
+/// The plug-in sets `plugin_using_32_bit_coordinates` non-zero to say it
+/// is reading and writing the wide fields; until it does, the narrow
+/// ones in [`FilterRecord`] are authoritative.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BigDocumentStruct {
+    pub plugin_using_32_bit_coordinates: i32,
+    pub image_size_32: VPoint,
+    pub filter_rect_32: VRect,
+    pub in_rect_32: VRect,
+    pub out_rect_32: VRect,
+    pub mask_rect_32: VRect,
+    pub float_coord_32: VPoint,
+    pub whole_size_32: VPoint,
+}
+
 /// The filter parameter block, from API Guide table 63 ("FilterRecord
 /// structure"), in declaration order. Fields Adobe marks as added in a
 /// later version are grouped by the comment that introduces them.
-#[repr(C)]
+#[repr(C, packed(4))]
 pub struct FilterRecord {
     pub serial_number: i32,
     pub abort_proc: Option<TestAbortProc>,
@@ -328,6 +443,17 @@ pub mod mode {
     pub const LAB_COLOR: i16 = 9;
     pub const GRAY_16: i16 = 10;
     pub const RGB_48: i16 = 11;
+
+    // The 1999 Resource Guide stops at RGB 48. These six were recovered
+    // from shipping plug-ins: Filter Foundry's `'enbl'` string names
+    // them in this order, and the bits its `'mode'` flag set turns on
+    // line up with these ordinals exactly.
+    pub const LAB_48: i16 = 12;
+    pub const CMYK_64: i16 = 13;
+    pub const DEEP_MULTICHANNEL: i16 = 14;
+    pub const DUOTONE_16: i16 = 15;
+    pub const RGB_96: i16 = 16;
+    pub const GRAY_32: i16 = 17;
 }
 
 /// Filter cases, numbered exactly as Resource Guide table 11-13 numbers

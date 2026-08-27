@@ -25,7 +25,7 @@ fn pipl_for(entry: &str) -> Pipl {
         .ostype(key::REQUIRED_HOST, fourcc(b"8BIM"))
         .pstring(key::NAME, "Invert")
         .pstring(key::CATEGORY, "Schist")
-        .raw(key::SUPPORTED_MODES, vec![0b0000_1010, 0])
+        .raw(key::SUPPORTED_MODES, vec![0b0101_0000, 0])
         .cstring(key::CODE_WIN64_X86, entry)
         .raw(key::FILTER_CASE_INFO, {
             let mut v = vec![1u8, 1, 0, 0];
@@ -230,7 +230,8 @@ fn a_plug_in_that_declines_the_mode_is_refused_before_it_runs() {
     let bytes = PiplBuilder::new()
         .ostype(key::KIND, kind::FILTER)
         .pstring(key::NAME, "CMYK only")
-        .raw(key::SUPPORTED_MODES, vec![0b0001_0000, 0])
+        // CMYK is mode 4, so bit 3 counting from the most significant.
+        .raw(key::SUPPORTED_MODES, vec![0b0000_1000, 0])
         .cstring(key::CODE_WIN64_X86, "entry_advance")
         .build();
     let pipl = Pipl::parse(&bytes, Endian::Little).unwrap();

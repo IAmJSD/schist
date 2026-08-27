@@ -36,6 +36,10 @@ typedef struct {
     Fixed gamma, redX, redY, greenX, greenY, blueX, blueY, whiteX, whiteY, ambient;
 } PlugInMonitor;
 
+typedef struct PlatformData {
+    void *hwnd;
+} PlatformData;
+
 typedef struct HandleProcs {
     int16_t handleProcsVersion;
     int16_t numHandleProcs;
@@ -49,6 +53,13 @@ typedef struct HandleProcs {
     void (*disposeRegularHandleProc)(Handle h);
 } HandleProcs;
 
+/* FilterRecord — and only FilterRecord — is packed to four bytes, so a
+ * pointer follows an int32 with no hole. Natural alignment makes the
+ * record eight bytes longer by `platformData`, far enough that a real
+ * plug-in reads a pointer out of the middle of the monitor record. The
+ * callback suites below are *not* packed. Both halves of that were
+ * established against shipping plug-ins; see docs/8bf-abi-provenance.md. */
+#pragma pack(push, 4)
 typedef struct FilterRecord {
     int32_t serialNumber;
     MacBoolean (*abortProc)(void);
@@ -87,7 +98,7 @@ typedef struct FilterRecord {
     Point floatCoord;
     Point wholeSize;
     PlugInMonitor monitor;
-    void *platformData;
+    PlatformData *platformData;
     void *bufferProcs;
     void *resourceProcs;
     void *processEvent;
@@ -178,6 +189,7 @@ typedef struct FilterRecord {
     void *bigDocumentData;
     char reserved[46];
 } FilterRecord;
+#pragma pack(pop)
 
 /* ---- layout probe ---------------------------------------------------- */
 
@@ -336,6 +348,11 @@ static void run(int16_t selector, FilterRecord *fr, intptr_t *data,
             return;
         }
         if (fr->depth != 8) { *result = filterBadMode; return; }
+        /* platformData points at a PlatformData, and is never the raw
+         * window handle. Following it must be safe even when the host
+         * has no window to offer. */
+        if (fr->platformData == NULL) { *result = filterBadParameters; return; }
+        (void)fr->platformData->hwnd;
         if (fr->parameters != NULL && ((Params *)*fr->parameters)->sig != PARAM_SIG) {
             *result = filterBadParameters;
             return;

@@ -74,16 +74,18 @@ const FIELDS: &[(&str, usize)] = &[
 
 #[test]
 fn the_record_starts_where_the_declaration_says() {
-    // Anchors chosen because they are where a packing mistake would
-    // first show. `abort_proc` is a pointer directly after an int32, so
-    // it only sits at 8 if the record is naturally aligned rather than
-    // packed. `mask_rect` follows three `Boolean`s, so it only sits at
-    // 128 if the odd byte count is padded out to the Rect's alignment.
+    // Anchors chosen because they are where a packing mistake shows
+    // first and worst. `abort_proc` is a pointer directly after an
+    // int32: at 4 the record is packed to four bytes, at 8 it is
+    // naturally aligned. Natural alignment is wrong, and wrong in a way
+    // that costs eight bytes by the time you reach `platform_data` —
+    // far enough that a real plug-in reads a pointer out of the middle
+    // of the monitor record and faults on the value it finds there.
     assert_eq!(offset_of!(FilterRecord, serial_number), 0);
-    assert_eq!(offset_of!(FilterRecord, abort_proc), 8);
-    assert_eq!(offset_of!(FilterRecord, is_floating), 124);
-    assert_eq!(offset_of!(FilterRecord, mask_rect), 128);
-    assert_eq!(std::mem::align_of::<FilterRecord>(), 8);
+    assert_eq!(offset_of!(FilterRecord, abort_proc), 4);
+    assert_eq!(offset_of!(FilterRecord, platform_data), 216);
+    assert_eq!(offset_of!(FilterRecord, buffer_procs), 224);
+    assert_eq!(std::mem::align_of::<FilterRecord>(), 4);
 }
 
 #[test]
@@ -91,8 +93,8 @@ fn offsets_are_stable() {
     // Regenerate deliberately, never casually: a change here changes
     // what every plug-in sees.
     let expected: Vec<usize> = vec![
-        0, 8, 24, 32, 36, 38, 46, 60, 68, 96, 112, 124, 128, 136, 148, 156, 168, 188, 232, 272,
-        284, 296, 328, 332, 352, 392, 408, 452, 456, 464, 488, 504, 512, 528, 536, 544,
+        0, 4, 20, 28, 32, 34, 42, 56, 64, 88, 100, 112, 116, 124, 136, 144, 156, 176, 216, 256,
+        268, 280, 308, 312, 328, 368, 384, 428, 432, 440, 464, 480, 484, 500, 504, 512,
     ];
     let actual: Vec<usize> = FIELDS.iter().map(|(_, o)| *o).collect();
     if actual != expected {
@@ -105,7 +107,7 @@ fn offsets_are_stable() {
             table.join("\n")
         );
     }
-    assert_eq!(std::mem::size_of::<FilterRecord>(), 592);
+    assert_eq!(std::mem::size_of::<FilterRecord>(), 560);
 }
 
 #[test]

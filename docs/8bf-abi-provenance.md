@@ -40,35 +40,53 @@ load-bearing.
 | `AboutRecord`, not `FilterRecord`, is passed at `selectorAbout` | API Guide ch. 2 |
 | `errorString` is a `Str255` the plug-in fills before returning `errReportString` | API Guide table 63 |
 
-## Unverified — best-known values, tagged `UNVERIFIED` in the source
+## Settled empirically, against shipping plug-ins
 
-Ranked by how much damage a wrong guess does. Each is validated the same
-way: run a real, known-good plug-in and see.
+Adobe's prose leaves a dozen things open. Most were closed by running two
+real, third-party, freely redistributable plug-ins under Wine — Filter
+Foundry 1.7.0.25 (Telegraphics/ViaThinkSoft, GPL) and G'MIC-Qt 4.0.4
+(0xC0000054) — and watching where they read, what they called, and where
+they faulted. Only the shipped **binaries** were used; neither project's
+source was read, so the clean-room line holds. `tools/verify-8bf.sh`
+reproduces the whole run.
 
-| # | Fact | Why it is a guess | Failure mode if wrong |
+| Fact | How it was settled |
+|---|---|
+| **`FilterRecord` is packed to four bytes**, not naturally aligned | A plug-in read an 8-byte pointer at record offset 224. Poking distinct values there moved the fault address to match exactly, so the read was confirmed rather than inferred. Natural alignment puts nothing meaningful at 224 — it is the tail of `monitor` — because two 4-byte holes before `inData` and `outData` push everything after them 8 bytes late. `packed(4)` puts `bufferProcs` at 224 exactly, and both plug-ins then ran |
+| **The callback suites are *not* packed** | The opposite of the record, and not a guess: both plug-ins drove a naturally aligned `HandleProcs` correctly, and packing it to four bytes segfaults the fixture immediately |
+| **`HandleProcs` member order** — new, dispose, getSize, setSize, lock, unlock | Filter Foundry's call sequence is coherent only in this order: `new(1)`, `lock`, `get_size`, `unlock`, `set_size(129)`, `lock`, `unlock`, `set_size(53)`, and finally `dispose` of the same handle. A wrong order calls a different function with the wrong argument shape |
+| **`SPBasicSuite.AcquireSuite` is the first member** | Filter Foundry called it with `("Photoshop Handle Suite for Plug-ins", 2)` and then `(…, 1)` — a legible name and a version pair, so the slot and the signature are both right |
+| **`filterSelector` values 0..5** | Prepare (2), Start (3), Continue (4) and Finish (5) each behaved as the API Guide describes, in that order, for both plug-ins; Parameters (1) is what raises the dialog |
+| **`plugInMode` ordinals**, extended to 17 | Each plug-in's `'mode'` flag set matches, bit for bit, the modes its `'enbl'` string names in prose. That pins the ordinals *and* recovers the six the 1999 guide predates |
+| **The `'mode'` flag set runs most-significant bit first** | The same cross-check. Reading it the other way round claimed Filter Foundry supports Bitmap and Indexed, which its `'enbl'` denies, and claimed G'MIC supports CMYK and HSB rather than Grayscale and RGB — which is what made this host refuse a plug-in that was perfectly willing to run |
+| **`platformData` is a pointer to a struct holding the window handle**, not the handle | Passing the `HWND` directly made both plug-ins fault reading at the handle's own numeric value, `0x10020`. Passing `&PlatformData { hwnd }` fixed both |
+| **The `'8664'` PiPL key for the Win64 entry point** | Both plug-ins carry it, and the names it yields — `PluginMain`, `GmicPlugin` — resolve as exports |
+| **A Windows PiPL resource has a two-byte prelude**, `01 00`, before `version` | Present in both, from different authors and toolchains. The four-byte property alignment is relative to the start of the *list*, so with the prelude the properties are not four-byte aligned in the file. The tolerant offset scan in `Pipl::parse` exists for this and is load-bearing |
+| **`userCanceledErr` is -128** | G'MIC returns it when it cannot raise its UI, and cleans up afterwards rather than erroring — the behaviour of a cancel, not a failure |
+| `FilterColor` is four bytes | Corroborated rather than proven: any other size shifts the whole tail, and the 224 anchor lands exactly with four |
+
+The end-to-end proof is Filter Foundry running its own Win32 dialog,
+parented to the handle this host passes, with `255-r` typed into all
+three channel fields: every output channel comes back as 255 minus the
+input's red. Dialog, parameters, `Start`, the host-driven `Continue`
+loop, and `Finish` — all of it, through a plug-in that has never heard
+of Schist.
+
+## Still unverified
+
+| # | Fact | Why it is still open | Failure mode if wrong |
 |---|---|---|---|
-| 1 | **Member order inside `HandleProcs`, `BufferProcs` and `SPBasicSuite`** | The API Guide prints each routine's signature but never the suite structs | The plug-in calls the wrong function pointer. Loud crash if the signatures differ, silent corruption if they happen to match. Every suite carries its documented `version`/`count` header so a plug-in that checks refuses instead |
-| 2 | `FilterRecord` uses **natural alignment**, no packing pragma | The prose states no packing rule; the explicit `reservedByte` "(for alignment)" is consistent with it | Every field past the first mismatch is garbage. Mitigated: `tests/layout.rs` cross-checks Rust's `repr(C)` against a C compiler's `offsetof` over the same declaration, so at least the two sides here agree |
-| 3 | `filterSelector*` numeric values 0..5 | The guide names them and fixes their order, prints no numbers | Wrong selector runs, or none does |
-| 4 | `plugInMode*` numeric values start at 0 | Only the ordering is documented | Plug-in rejects the mode, or misreads the pixels |
-| 5 | Padding constants `-1` / `-2` / `-3` | The guide names all four options and says the error case is the default; 0..255 is documented as a literal fill, so the named modes must be negative | Out-of-bounds requests padded wrongly, or refused when they should not be |
-| 6 | `FilterColor` is four bytes | Described only as "in the color space native to the image" | Shifts every field after `back_color`. Covered by test #2's cross-check only in the sense that both sides guess alike |
-| 7 | `errReportString` = -30902, `userCanceledErr` = -128 | Named, not numbered, in the guide | An error is reported as a different error |
-| 8 | The `'8664'` PiPL key for the Win64 entry point | The 1999 Resource Guide predates x86-64 and documents only `'wx86'` | 64-bit plug-ins look like they carry no code |
-| 9 | The `AboutRecord` layout | Referred to as "declared in `PIAbout.h`", not printed | About box misbehaves; it is the only selector this affects |
-| 10 | `HostProc` signature | Named, not printed. Passed as null, so unused | None while it stays null |
-| 11 | Whether a Windows PiPL resource has a prelude before `version` | Not stated; `CNVTPIPL.EXE` is documented to "handle padding and byte-ordering issues for you" without saying what it emits | Parse fails. Mitigated: `Pipl::parse` tries offsets 0, 2 and 4 and accepts the framing whose first property carries `'8BIM'` |
-| 12 | `handleProcsVersion` / `numHandleProcs` values | Not printed | A plug-in that version-checks refuses to run |
+| 1 | **`BufferProcs` member order** | Neither plug-in tested allocates through the buffer suite, so nothing exercised it. The suite carries its documented `version`/`count` header, so a plug-in that checks refuses rather than misbehaves | Wrong function pointer called |
+| 2 | Padding constants `-1` / `-2` / `-3` | Nothing requested a region outside the image | Out-of-bounds requests padded wrongly, or refused when they should not be |
+| 3 | `errReportString` = -30902 | Neither plug-in reported a string | An error is reported as a different error |
+| 4 | The `AboutRecord` layout | The about box was never raised | Misbehaves; affects only that one selector |
+| 5 | `HostProc` signature | Passed as null, so unused | None while it stays null |
+| 6 | `handleProcsVersion` / `numHandleProcs` values | Both plug-ins used the suite without complaint, which means they did not check — so the values are untested, not confirmed | A plug-in that version-checks refuses to run |
+| 7 | Whether `bigDocumentData` and `descriptorParameters` must be non-null | This host provides both because Photoshop always does. Explicitly nulling either changed nothing for the plug-ins tested, so their necessity is unproven either way | A plug-in that dereferences them without checking would fault |
+| 8 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |
 
-## Validating
+## Reproducing
 
-None of the above can be settled on Linux. The check is:
-
-1. On Windows, point `examples/8bf.rs` at a known-good freeware `.8bf`.
-2. `inspect` first — that exercises facts 8 and 11 with no code running.
-3. `apply` with `--no-dialog` — that exercises 3, 4, 5 and, if the
-   plug-in stores parameters, 1.
-4. A plug-in that shows a dialog exercises the rest.
-
-Until that has happened this crate should be treated as unproven against
-anything but its own test fixture.
+`tools/verify-8bf.sh` downloads both plug-ins, cross-compiles the host to
+`x86_64-pc-windows-gnu`, and runs discovery and a filter under Wine. It
+needs `wine`, `Xvfb` and `xdotool`; it prints what it skips.
