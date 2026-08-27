@@ -6,7 +6,7 @@ spec. This knowledge comes from prior art — [afread] by Vladimir Mamonov
 (MIT) and [AFDesignLoad] by Nick Beeuwsaert (MIT) — plus our own
 inspection of real files: `fixtures/affinity/` (Affinity Designer 1.x),
 `fixtures/affinity-probe/` (single-feature documents drawn in the
-unified Affinity 3.1 expressly to probe field layouts — see
+unified Affinity 3.1/3.2 expressly to probe field layouts — see
 [Probe fixtures](#probe-fixtures)), plus private corpora of Affinity
 Photo 2.6 documents and Canva-era Affinity `.af` documents (not
 vendored — point `SCHIST_AFFINITY_CORPUS` at colon-separated
@@ -312,15 +312,35 @@ layer (master + RGB channels).
 **HSL adjustments** (`HsRA`): `AdjP` → "HSSP": `HueA` master hue shift
 as a fraction of the full turn — **sign-flipped**: the UI's +90°
 stores −0.25 — `SatA`/`LumA` as fractions of full range, an `HSV`
-mode flag, and six per-hue-range tweak arrays (`HueC`/`SatC`/`LumC`
-over `RngC` boundary angles in degrees, 315–345 = reds and so on).
-Slider semantics, decoded exactly against isolated fixtures: the
-saturation slider boosts reciprocally (s/(1−A) for positive A), and
-the lightness slider both lifts l toward white (l + (1−l)·L) *and*
-scales saturation by 1−L — Photoshop's does neither, so these are
-opt-in flags on our hue/saturation adjustment that Affinity imports
-set. All three master sliders now reproduce Affinity's render to
-under 0.3 RMS. Per-range tweaks still warn.
+mode flag, and six per-hue-range tweak arrays (`HueC`/`SatC`/`LumC`)
+over the `RngC` boundary angles. Slider semantics, decoded exactly
+against isolated fixtures: the saturation slider boosts reciprocally
+(s/(1−A) for positive A), and the lightness slider both lifts l toward
+white (l + (1−l)·L) *and* scales saturation by 1−L — Photoshop's does
+neither, so these are opt-in flags on our hue/saturation adjustment
+that Affinity imports set. Negative amounts are *not* mirrored
+guesses: −45° hue, −40 saturation and −40 lightness were each probed,
+and s·(1+A), l·(1+L) and the same 1−|L| desaturation reproduce them to
+0.0 RMS.
+
+**Per-hue-range tweaks.** `RngC` is 24 f32 — six ranges of four
+boundary angles in degrees: weight 0 at the first, ramping to 1 by the
+second, flat to the third, back to 0 by the fourth. Reds are
+`315, 345, 15, 45`, and the six wrap round in 60° steps
+(yellows `15, 45, 75, 105`…), so neighbouring ramps overlap and the
+six weights sum to 1 at every hue. `HueC`/`SatC`/`LumC` hold that
+range's shifts, in the same units and with the same sign convention as
+the master `HueA`/`SatA`/`LumA`; the weight comes from the pixel's
+**source** hue, before the master shift (`hsl_range_mix.af` probes
+master hue +120° against a reds-range tweak and settles it). Hue and
+saturation simply add to the master sliders before their transfer
+curves run — but *luminosity does not*: a range's lightness is a
+separate, hue-preserving pull of every channel toward the brightest
+one (positive) or the darkest one (negative), by |w·L| of the way, so
+it changes the HSV saturation or value and leaves the other exactly
+alone. Pure green at range luminosity ±50% goes to (128,255,128) and
+(0,128,0) on the nose, and the master lightness lift would give
+neither. All the per-range fixtures now import to under 0.15 RMS.
 
 **Parametric adjustments**, probed with one fixture file each (values
 below are fractions of the UI's percents unless noted). The class
@@ -344,17 +364,44 @@ per-type accuracy against Affinity's own renders is pinned by
   adjustment (other amounts scale/blend against the tables).
 - `B&WP` black & white: `RedC Yell Gree Cyan Blue Mage`. *(exact)*
 - `WhBP` white balance: `WhBV` version, `WhBa` warmth as an i32
-  percent, `WBTi` tint fraction. Affinity performs a **Bradford
-  chromatic adaptation in linear light** — across seven saturated
-  patches Bradford beats CAT02 (err 25 vs 61) and diagonal RGB gains
-  (339) decisively — whose grey-axis gains follow calibrated
-  exponentials (warmth log-gains quadratic, fitted at 30 and 50;
-  tint linear, fitted at 60). Imported as our own
-  `Params::WhiteBalance`, which implements exactly that.
+  percent, `WBTi` tint fraction — and **`WBTi` is the negation of the
+  Tint field the UI shows** (the panel reads −60 % where the file says
+  0.6; reopening a saved file in Affinity confirms it, and `WhBa` is
+  *not* negated). Affinity performs a **Bradford chromatic adaptation
+  in linear light** — across seven saturated patches Bradford beats
+  CAT02 (err 25 vs 61) and diagonal RGB gains (339) decisively. Its
+  grey-axis gains are now **measured, not fitted**: one probe document
+  per slider position, ten percent apart across both sliders' whole
+  ranges, each solved for the three linear-light gains that reproduce
+  Affinity's own render of the test card. Every solve lands within
+  0.3/255 RMS, so the adaptation *is* the operation; the tables live in
+  `WARMTH_LOG_GAINS`/`TINT_LOG_GAINS` in `schist-adjustments` and are
+  read by linear interpolation. Neither curve is linear or symmetric —
+  warmth +10 moves nearly three times as far as −10, warming saturates
+  towards +100 while cooling runs away (log-gain −1.07 on red at −100
+  against −0.44 at −70) — which is why the earlier mirrored-quadratic
+  fit was 2.5–3.5 RMS out on the cooling half. Single-slider documents
+  now import at 0.1–0.2 RMS. The two sliders are *not* quite
+  independent: Affinity moves one white point in two dimensions rather
+  than adapting twice, so a document using both lands about 0.7/255
+  short of the product of the two tables (whitebalance.af, warmth 30
+  with tint 40, is our only sample of the interior).
 - `CoBP` colour balance: `Sh/Mi/Hi` × `CR/MG/YB` + `PeLu`. Affinity
   moves ~0.11× our step per percent (fitted).
-- `VibP` vibrance: `Vibr` i32 percent, `Satu` fraction. Formula
-  differs on saturated colour.
+- `VibP` vibrance: `Satu` is a plain fraction, but **`Vibr` is an i32
+  on a 0..127 scale, not a percentage** — the panel's 50 % writes 64
+  and 100 % writes 127. The Saturation slider is a straight scale of
+  **CIELAB chroma** by 1 + `Satu`: across the probe card every pixel
+  that stays in gamut comes back at 1.500× its chroma for the +50 %
+  fixture (sd 0.01) and 0.499× for −50 %, against 15 RMS for an HSL
+  saturation scale, 16 for HSV and 11 for a luma push. Clipping back
+  into sRGB leaves ~1.3 RMS, so Affinity's gamut mapping is a little
+  gentler than a hard clip. Vibrance itself is *also* a chroma scale,
+  but its weighting is unmapped: it peaks around 0.5 HSV saturation
+  (chroma ×1.45 at Vibrance 100) and falls to nothing above ~0.7,
+  and the gain does not scale linearly with the slider (50 % already
+  buys most of 100 %'s effect), so neither our "lean on the least
+  saturated pixels" heuristic nor a one-dimensional table of it fits.
 - `InRA` invert: no parameters at all — no `AdjP`. *(exact)*
 - `PosP` posterise: `Post` i32 levels. Both apps quantize
   floor(v·n)/(n−1) — equal input bands, outputs over the full range
@@ -385,25 +432,77 @@ per-type accuracy against Affinity's own renders is pinned by
 **Layer effects** (`FiEf`, an array of `FilE`-derived classes): every
 entry shares `Enab`, `BlnM` (the layer blend table), `Opac` (0..1),
 `SclO` (scale measures with the object) and usually `Radi`
-(blur/width in px) and a `Colr`. `Shad`/`InSh` shadows add `Offs`
-(distance) and `Angl` — the *offset direction* in radians, y-down, so
-the 45° default points down-right — plus `Knck` knockout; `OutG`/
-`InnG` glows add `Comp` (contour range, unmapped); `ColO` is a colour
-overlay; `Strk` an outline stroke (`Radi` width, `Alig` position,
-`Ftyp` solid/gradient with `GrFl` holding the gradient); `BevE` a
-bevel (`Azim`/`Elev` light direction in radians, `Dept`, `Sftn`,
-`Beve` subtype — only seen disabled, so its mapping is a guess);
-`Gaus` a gaussian blur (no layer-style equivalent — reported).
+(blur/width in px) and a `Colr`. The panel's ten rows — probed one
+document per row and per enum setting, in `fixtures/affinity-probe/fx_*.af`
+— are:
+
+| tag | effect | own fields |
+|---|---|---|
+| `Shad` | Outer Shadow | `Offs` · `Angl` · `Comp` · `Knck` · `Colr` |
+| `InnS` | Inner Shadow | `Offs` · `Angl` · `Comp` · `Colr` |
+| `OutG` | Outer Glow | `Comp` · `Colr` |
+| `InnG` | Inner Glow | `Comp` · `Colr` |
+| `ColO` | Colour Overlay | `Colr` |
+| `GrdO` | Gradient Overlay | `GrFl` |
+| `Strk` | Outline | `Alig` · `Ftyp` · `Colr` · `GrFl` |
+| `BevE` | Bevel / Emboss | `Beve` · `Azim` · `Elev` · `Dept` · `Disr` · `Sftn` · `Prof` · `Invt` · `ShBM` · `ShOp` · `ShCl` · `HiCl` |
+| `PhgB` | 3D | `Ambi` · `Diff` · `Spec` · `Expo` · `AmbC` · `SpeC` · `Lits` |
+| `Gaus` | Gaussian Blur | `PrAl` |
+
+The inner shadow's tag is **`InnS`**, not the `InSh` an earlier reading
+assumed — nothing in any corpus or probe file spells it `InSh`, so
+inner shadows were being skipped wholesale.
+
+`Offs` is the shadow's distance and `Angl` the *offset direction* in
+radians, y-down, so the stored 45° default is the panel's 315° and
+points down-right. `Knck` is "fill knocks out shadow".
+
+**`Comp` is the Intensity slider, stored inverted**: 0 % writes 1.0 and
+100 % writes 0.0, on shadows and glows alike (probed at 40, 60, 70 and
+80 %). It is our `spread`, taken as 1 − `Comp`.
+
+`Strk`'s `Alig` is **0 outside · 1 centre · 2 inside**, and `BevE`'s
+`Beve` subtype is **0 inner · 1 outer · 2 emboss · 3 pillow** (pillow
+is the app's default) — a fixture apiece; both had been guessed, and
+both guesses were wrong. A bevel's `Dept` is a depth in *pixels*
+alongside `Radi`, not a factor, `Disr` links the two in the panel,
+`Invt` flips the bevel, and the highlight and shadow each carry their
+own blend, opacity and colour (`BlnM`/`Opac`/`HiCl` against
+`ShBM`/`ShOp`/`ShCl`). `Prof` is an optional contour profile.
+
+`GrdO`'s gradient hangs off `GrFl`, an `FDsc` fill descriptor whose
+`FDeF` is the usual `FilG`; unlike a shape's, it carries **no `FDeX`**
+— the panel's scale, offset and angle controls are absent at their
+defaults and the ramp simply runs left to right across the layer's
+bounds.
+
 Enabled effects import onto our layer style — on any layer kind,
 groups included: the corpus hangs sticker outlines and drop shadows on
 whole groups, so the compositor flattens a styled group's children and
 runs the same fx pipeline over the result
-(`schist_compositor::render_styled`).
+(`schist_compositor::render_styled`). `Gaus` and `PhgB` have no
+layer-style home and are reported. The field mapping is exact for
+everything else; what the probe fixtures' bounds still record is our
+own effect renderers' falloff against Affinity's — closest on the
+inner shadow (3.6 RMS), furthest on the inner glow (21), whose
+intensity ramp saturates far harder than ours.
 
 **Live filter nodes** (`FlRN`): a `Filt` pipeline warping the content
-below between source and destination `Quad`s. Every corpus sighting
-maps each quad onto itself — configured but inert — and imports as
-nothing; a genuine warp would be reported.
+below between source and destination `Quad`s. The node hangs off a
+layer's `AdCh` list, beside its masks, and the `Filt` class names the
+filter — `Pers<RDPF<RasC<SCBa<DcCm` is Live Perspective. A `Quad` is
+eight f64 (`X0`–`X3` then `Y0`–`Y3`) listing its corners top-left,
+bottom-left, bottom-right, top-right in the layer's own pixel space,
+and `Src`→`Dst` is the projective map: dragging one corner handle in
+of a 512² layer writes `Src` (0,0) (0,512) (512,512) (512,0) against
+`Dst` (122,78) (0,512) (512,512) (512,0), so `Dst` is where the
+content lands. `DSrA`/`DDsA` and `DSrB`/`DDsB` are the second pair of
+quads the "Two planes" mode uses (`DMod` says whether it's on; at
+defaults they split the layer down the middle and map onto
+themselves), `AClp` is autoclip and `Live` marks it live. Every
+*corpus* sighting maps each quad onto itself — configured but inert —
+and imports as nothing. A genuine warp (`flrn_perspective.af`) is
+detected and reported by name; we don't resample through it yet.
 
 **Masks**: "MRst" (mask raster) nodes in a layer's `AdCh` list — each
 a full layer node with its own `Xfrm` and a single-channel bitmap
@@ -578,38 +677,69 @@ Nothing an import understands — or doesn't — is thrown away, so the
 
 `fixtures/affinity-probe/` holds one tiny document per probed feature
 — every parametric adjustment (plus isolated single-slider variants
-for brightness, contrast, white balance and HSL), one document per
-shape tool, per rectangle corner type, a curved-edge star, and a
-rotated text layer — drawn in the unified Affinity 3.1 on a synthetic
-test card (hue ramp, grey ramp, saturated patches), saved as `.af`. They serve two purposes: the field layouts
-above were decoded by reading the typed values back out of them with
-afdump, and their embedded thumbnails — Affinity's own renders — pin
-each importer's accuracy in
+for brightness, contrast, white balance and HSL, both signs, and one
+per HSL hue range), one document per shape tool, per rectangle corner
+type, a curved-edge star, a rotated text layer, one per layer-effect
+row and per effect enum setting (`fx_*.af`, drawn on the same card
+shrunk to 300² so outer effects have room), and a live perspective
+warp — drawn in the unified Affinity 3.1/3.2 on a synthetic test card
+(hue ramp, grey ramp, saturated patches), saved as `.af`. They serve
+two purposes: the field layouts above were decoded by reading the
+typed values back out of them with afdump, and their embedded
+thumbnails — Affinity's own renders — pin each importer's accuracy in
 `probed_adjustments_match_affinitys_render`. The same technique
 (create → read back → compare to the file's own thumbnail) is how to
 attack anything left in the list below; the transfer-curve forensics
 work best when the document contains a grey ramp, which separates
 per-channel behaviour from channel-mixing behaviour at a glance.
 
+Driving the app from a terminal, since much of the above was found
+that way: `System Events` menu clicks work, but a *nested* submenu
+click can hang the AppleScript, and killing it mid-tracking leaves a
+phantom menu window that swallows clicks over that corner of the
+screen until the process is killed — so guard every `osascript` with a
+timeout, and check `CGWindowListCopyWindowInfo` when clicks stop
+landing. Panel fields are custom-drawn (no accessibility children):
+click their pixel coordinates, ⌘A, then type. Typing a leading minus
+works in some fields and is silently swallowed in others (the White
+Balance panel's Tint is one) — paste from the clipboard instead. A
+popup menu anchors its current selection under the cursor, so item
+positions move after every pick; rescreenshot between them. Save As
+over an existing file raises a replace sheet the scripted flow will
+not answer, so delete the target first.
+
 ## What's still unknown / to do
 
-- Per-range HSL tweaks (`HueC`/`SatC`/`LumC`) are unmapped, and the
-  negative directions of the HSL/white-balance sliders are assumed to
-  mirror the measured positive ones (all fixtures so far are
-  positive; the minus key was swallowed by the panel fields when
-  probing).
-- Vibrance on *saturated* colour and the lens filter's density curve
-  differ from ours (both grey-exact); more single-slider fixtures
-  would pin them.
-- Non-identity `FlRN` filter warps (every corpus sighting is inert).
+- Warmth and tint interact: each slider alone is measured exactly, but
+  a document using both lands about 0.7/255 short of the two tables'
+  product, and `whitebalance.af` (warmth 30, tint 40) is the only
+  sample of the interior. A grid of combined probes would give the
+  real two-dimensional white-point map.
+- Vibrance's own weighting (see `VibP` above): a chroma scale whose
+  gain rises with saturation to a peak near 0.5 and collapses beyond
+  0.7, and saturates rather than scaling with the slider. It depends
+  on more than the pixel's saturation — binning by chroma, HSV
+  saturation or lightness all leave 5–15 % scatter — so the next step
+  is probing a smooth swatch grid rather than the test card. The lens
+  filter's density curve is likewise still a fitted ×0.2 (grey-exact).
+- `FlRN` warps are decoded and reported but not applied: resampling a
+  layer — and whatever the filter's scope covers below it — through
+  the `Src`→`Dst` homography is the work. Only Live Perspective
+  (`Pers`) has been probed; the other Distort filters presumably hang
+  their own classes off `Filt`.
 - Spirals (`ShSp` — stroke-only, not normalised into `ShpB`) and QR
   codes are reported, not rebuilt; the curved-star bow and the tear
   profile are single-fixture fits.
 - Text: single style per layer (first run wins), no per-run styling.
-- Layer effect gaps: `Gaus` blur has no layer-style home; glow
-  contour range (`Comp`) and shadow spread are unmapped; the `BevE`
-  subtype enum and the `Strk` `Alig` values are only part-verified
-  (every corpus bevel is disabled).
+- Layer effects: the field mapping is settled, but two effects have no
+  home in our layer style — `Gaus` (a per-layer gaussian blur) and
+  `PhgB` (the 3D effect: `Ambi`/`Diff`/`Spec`/`Expo` over a `Lits`
+  array of `PLig` lights) — and our shadow, glow, bevel and stroke
+  renderers still differ from Affinity's in falloff, worst on the
+  inner glow, whose Intensity ramp saturates much harder than our
+  spread does (ours only bites on soft-edged alpha, since it runs
+  *before* the blur). The bevel's `Prof` contour profile is always
+  null so far.
 - ICC profiles: `ICCP` nodes carry the profile name and blob; every
   corpus sighting is sRGB, so no conversion has been needed yet.
 - One corpus file (a thought-bubble collage) still renders its

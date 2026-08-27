@@ -585,6 +585,7 @@ impl Walker<'_> {
         }
 
         self.apply_mask(node, &mut layer);
+        self.report_live_filters(node, &layer);
         self.apply_effects(node, &mut layer);
         if let Some(v) = bool_of(node, b"Visi") {
             layer.visible = v;
@@ -872,6 +873,52 @@ impl Walker<'_> {
         Some(layer)
     }
 
+    /// The per-hue-range tweaks of an "HSSP" HSL adjustment.
+    ///
+    /// `RngC` is six trapezoids, four boundary angles each in degrees
+    /// (reds are 315, 345, 15, 45 — the ramps overlap their
+    /// neighbours', so the six weights sum to 1 at every hue), and
+    /// `HueC`/`SatC`/`LumC` are the six shifts in the same units and
+    /// with the same sign convention as the master `HueA`/`SatA`/
+    /// `LumA`. Ranges left at zero are dropped.
+    fn hsl_ranges(adj: &Node) -> Vec<schist_adjustments::HueRange> {
+        let floats = |t: &[u8; 4]| match adj.field(t) {
+            Some(Value::Array(v)) => v
+                .iter()
+                .map(|x| match x {
+                    Value::F32(f) => *f,
+                    Value::F64(f) => *f as f32,
+                    _ => 0.0,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let (bounds, hue, sat, lum) = (
+            floats(b"RngC"),
+            floats(b"HueC"),
+            floats(b"SatC"),
+            floats(b"LumC"),
+        );
+        let count = [hue.len(), sat.len(), lum.len(), bounds.len() / 4]
+            .into_iter()
+            .min()
+            .unwrap_or(0);
+        (0..count)
+            .filter(|&i| hue[i] != 0.0 || sat[i] != 0.0 || lum[i] != 0.0)
+            .map(|i| schist_adjustments::HueRange {
+                bounds: [
+                    bounds[4 * i],
+                    bounds[4 * i + 1],
+                    bounds[4 * i + 2],
+                    bounds[4 * i + 3],
+                ],
+                hue: (hue[i] * 360.0).clamp(-180.0, 180.0),
+                saturation: (sat[i] * 100.0).clamp(-100.0, 100.0),
+                lightness: (lum[i] * 100.0).clamp(-100.0, 100.0),
+            })
+            .collect()
+    }
+
     /// Rebuild an HSL adjustment layer ("HsRA").
     ///
     /// `AdjP` → "HSSP": master shifts `HueA` (a fraction of the full
@@ -885,17 +932,6 @@ impl Walker<'_> {
             return None;
         }
         let f = |t: &[u8; 4]| f32_of(adj, t).unwrap_or(0.0);
-        let ranged = [b"HueC", b"SatC", b"LumC"].into_iter().any(|t| {
-            matches!(adj.field(t), Some(Value::Array(v)) if v.iter().any(|x| match x {
-                Value::F32(f) => *f != 0.0,
-                _ => false,
-            }))
-        });
-        if ranged {
-            log::warn!(
-                "affinity: HSL adjustment {name:?} has per-range tweaks; keeping master only"
-            );
-        }
         if matches!(adj.field(b"HSV "), Some(Value::Bool(true))) {
             log::warn!("affinity: HSL adjustment {name:?} uses HSV mode; applying as HSL");
         }
@@ -906,6 +942,7 @@ impl Walker<'_> {
             colorize: false,
             lightness_desaturates: true,
             reciprocal_saturation: true,
+            ranges: Self::hsl_ranges(adj),
         };
 
         let mut layer = Layer::new_raster(if name.is_empty() { "HSL" } else { name });
@@ -1059,11 +1096,13 @@ impl Walker<'_> {
                 },
                 "Colour Balance",
             ),
-            // VibP: Vibr is an i32 percentage, Satu a fraction.
+            // VibP: `Satu` is a plain fraction, but `Vibr` is an i32
+            // on a **0..127 scale**, not a percentage — the panel's
+            // 50 % writes 64 and 100 % writes 127.
             b"VbRA" => (
                 schist_core::AdjustmentKind::Vibrance,
                 Params::Vibrance {
-                    vibrance: i32_of(adj, b"Vibr").unwrap_or(0) as f32,
+                    vibrance: i32_of(adj, b"Vibr").unwrap_or(0) as f32 * 100.0 / 127.0,
                     saturation: f(b"Satu") * 100.0,
                 },
                 "Vibrance",
@@ -1252,6 +1291,7 @@ impl Walker<'_> {
                     colorize: true,
                     lightness_desaturates: false,
                     reciprocal_saturation: false,
+                    ranges: Vec::new(),
                 },
                 "Recolour",
             ),
@@ -1276,12 +1316,19 @@ impl Walker<'_> {
     /// Each entry is a `FilE`-derived class sharing `Enab`, `BlnM` (the
     /// layer blend table), `Opac` (0..1), `SclO` (scale with object)
     /// and usually `Radi` (blur/width) and a `Colr`:
-    /// `Shad`/`InSh` shadows add `Offs` (distance) and `Angl` — the
+    /// `Shad`/`InnS` shadows add `Offs` (distance) and `Angl` — the
     /// *offset direction* in radians, y-down, so 45° points down-right —
-    /// plus `Knck`; `OutG`/`InnG` glows; `ColO` colour overlay; `Strk`
-    /// outline stroke (`Radi` width, `Alig` position); `BevE` bevel
+    /// plus `Knck`; `OutG`/`InnG` glows; `ColO` colour overlay; `GrdO`
+    /// gradient overlay (`GrFl`, a fill descriptor); `Strk` outline
+    /// stroke (`Radi` width, `Alig` position); `BevE` bevel
     /// (`Azim`/`Elev` light direction in radians, `Dept`, `Sftn`);
-    /// `Gaus` gaussian blur, which has no equivalent and is reported.
+    /// `Gaus` gaussian blur and `PhgB` (the 3D effect), which have no
+    /// equivalent and are reported.
+    ///
+    /// Shadows and glows share `Comp`, the panel's Intensity slider
+    /// stored *inverted* — 0% intensity writes 1.0 and 100% writes 0.0
+    /// — which is our `spread` (probed with fx_shadow_spread.af,
+    /// fx_glow_outer.af, fx_inner_shadow.af, fx_inner_glow.af).
     fn apply_effects(&mut self, node: &Node, layer: &mut Layer) {
         use schist_core::style;
         let scale = ((self.node_ctm(node).scale_x() + self.node_ctm(node).scale_y()) * 0.5) as f32;
@@ -1314,8 +1361,12 @@ impl Walker<'_> {
                     settings,
                 }
             }
+            /// The panel's Intensity slider, stored inverted in `Comp`.
+            fn intensity(fx: &Node) -> f32 {
+                (1.0 - f64_of(fx, b"Comp").unwrap_or(1.0) as f32).clamp(0.0, 1.0)
+            }
             match &tag {
-                b"Shad" | b"InSh" => {
+                b"Shad" | b"InnS" => {
                     let settings = style::ShadowStyle {
                         color: color.unwrap_or(schist_color::Rgba::new(0.0, 0.0, 0.0, 1.0)),
                         blend: blend.unwrap_or(schist_core::BlendMode::Multiply),
@@ -1328,7 +1379,7 @@ impl Walker<'_> {
                                 .unwrap_or(std::f64::consts::FRAC_PI_4)
                                 .to_degrees() as f32,
                         distance: f64_of(fx, b"Offs").unwrap_or(0.0) as f32 * s,
-                        spread: 0.0,
+                        spread: intensity(fx),
                         size: radius,
                         knockout: bool_of(fx, b"Knck").unwrap_or(true),
                     };
@@ -1343,7 +1394,7 @@ impl Walker<'_> {
                         color: color.unwrap_or(schist_color::Rgba::new(1.0, 1.0, 0.75, 1.0)),
                         blend: blend.unwrap_or(schist_core::BlendMode::Screen),
                         opacity,
-                        spread: 0.0,
+                        spread: intensity(fx),
                         size: radius,
                         technique: style::Technique::Softer,
                         from_edge: true,
@@ -1389,23 +1440,34 @@ impl Walker<'_> {
                         blend: blend.unwrap_or(schist_core::BlendMode::Normal),
                         opacity,
                         size: radius,
+                        // Probed one fixture per setting: 0 outside,
+                        // 1 centre, 2 inside.
                         position: match enum_of(fx, b"Alig") {
-                            Some(1) => style::StrokePosition::Inside,
-                            Some(0) => style::StrokePosition::Center,
+                            Some(1) => style::StrokePosition::Center,
+                            Some(2) => style::StrokePosition::Inside,
                             _ => style::StrokePosition::Outside,
                         },
                     });
                 }
                 b"BevE" => {
-                    // The Beve subtype enum has only been seen disabled;
-                    // the order below is a guess.
-                    log::warn!(
-                        "affinity: bevel on {:?} imported with an unverified subtype mapping",
-                        layer.name
-                    );
+                    // The Type popup writes `Beve` 0 inner · 1 outer ·
+                    // 2 emboss · 3 pillow — one probe fixture each.
+                    // `Dept` is a depth in *pixels* beside `Radi`, not a
+                    // factor; ours is a 0..1 fraction of the radius.
+                    // `Invt` flips the bevel, and the highlight and
+                    // shadow each carry their own blend, opacity and
+                    // colour (`BlnM`/`Opac`/`HiCl` and
+                    // `ShBM`/`ShOp`/`ShCl`).
+                    let depth = f64_of(fx, b"Dept").unwrap_or(5.0) as f32 * s;
+                    let sign = if bool_of(fx, b"Invt") == Some(true) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let default = style::BevelStyle::default();
                     layer.style.bevel = on(style::BevelStyle {
                         style: match enum_of(fx, b"Beve") {
-                            Some(0) => style::BevelStyle_::OuterBevel,
+                            Some(1) => style::BevelStyle_::OuterBevel,
                             Some(2) => style::BevelStyle_::Emboss,
                             Some(3) => style::BevelStyle_::PillowEmboss,
                             _ => style::BevelStyle_::InnerBevel,
@@ -1414,8 +1476,63 @@ impl Walker<'_> {
                         altitude: f64_of(fx, b"Elev").unwrap_or(0.785).to_degrees() as f32,
                         size: radius,
                         soften: f64_of(fx, b"Sftn").unwrap_or(0.0) as f32 * s,
-                        depth: (f64_of(fx, b"Dept").unwrap_or(1.0) as f32 / 10.0).clamp(0.0, 1.0),
-                        ..style::BevelStyle::default()
+                        depth: sign * (depth / radius.max(1e-3)).clamp(0.0, 1.0),
+                        highlight: self
+                            .graph
+                            .child(fx, b"HiCl")
+                            .and_then(color_bytes)
+                            .map(|c| schist_color::Rgba::from_u8(c[0], c[1], c[2], c[3]))
+                            .unwrap_or(default.highlight),
+                        highlight_blend: blend.unwrap_or(default.highlight_blend),
+                        highlight_opacity: opacity,
+                        shadow: self
+                            .graph
+                            .child(fx, b"ShCl")
+                            .and_then(color_bytes)
+                            .map(|c| schist_color::Rgba::from_u8(c[0], c[1], c[2], c[3]))
+                            .unwrap_or(default.shadow),
+                        shadow_blend: match fx.field(b"ShBM") {
+                            Some(Value::Enum { id, version }) => blend_mode(*id, *version),
+                            _ => None,
+                        }
+                        .unwrap_or(default.shadow_blend),
+                        shadow_opacity: f64_of(fx, b"ShOp").unwrap_or(0.75) as f32,
+                    });
+                }
+                b"GrdO" => {
+                    // The gradient lives in a fill descriptor, the same
+                    // shape a shape layer's `BFFl` uses.
+                    let fill = self
+                        .graph
+                        .child(fx, b"GrFl")
+                        .and_then(|g| self.graph.child(g, b"FDeF"));
+                    let Some(stops) = fill.and_then(|f| gradient_stops(self.graph, f)) else {
+                        self.report
+                            .skipped
+                            .push((format!("{} (effect)", layer.name), tag_name(fx.type_tag())));
+                        continue;
+                    };
+                    let rgba = |c: [u8; 4]| schist_color::Rgba::from_u8(c[0], c[1], c[2], c[3]);
+                    let radial = matches!(
+                        fill.and_then(|f| f.field(b"Type")),
+                        Some(Value::Enum { id: 2.., .. })
+                    );
+                    layer.style.gradient_overlay = on(style::GradientOverlayStyle {
+                        from: stops.first().map(|s| rgba(s.1)).unwrap_or_default(),
+                        to: stops.last().map(|s| rgba(s.1)).unwrap_or_default(),
+                        blend: blend.unwrap_or(schist_core::BlendMode::Normal),
+                        opacity,
+                        // No `FDeX`: the panel's own scale, offset and
+                        // angle controls are absent at their defaults,
+                        // and the ramp runs left to right across the
+                        // layer's bounds.
+                        angle: 0.0,
+                        shape: if radial {
+                            style::GradientShape::Radial
+                        } else {
+                            style::GradientShape::Linear
+                        },
+                        ..style::GradientOverlayStyle::default()
                     });
                 }
                 _ => {
@@ -1434,6 +1551,42 @@ impl Walker<'_> {
     /// single-channel bitmap where white reveals. Several masks
     /// multiply, exactly as Affinity stacks them; the product becomes
     /// one real, editable [`LayerMask`].
+    /// Record live filter nodes that actually change their content.
+    ///
+    /// A `FlRN` hangs off a layer's `AdCh` list beside its masks. Its
+    /// `Filt` class names the filter — "Pers" for Live Perspective —
+    /// and, for the warping ones, `Src` and `Dst` are the projective
+    /// map's quads in the layer's own pixel space, corners in the order
+    /// top-left, bottom-left, bottom-right, top-right (probed with
+    /// fixtures/affinity-probe/flrn_perspective.af, which pulls one
+    /// corner in; `DSrA`/`DDsA`/`DSrB`/`DDsB` are the second pair of
+    /// quads "Two planes" mode uses, and `DMod` says whether it's on).
+    /// We don't resample through the map yet, so say what was dropped
+    /// rather than drawing the layer unwarped in silence.
+    fn report_live_filters(&mut self, node: &Node, layer: &Layer) {
+        let filters: Vec<&Node> = self
+            .graph
+            .children(node, b"AdCh")
+            .into_iter()
+            .filter(|n| n.types.iter().any(|(t, _)| *t == graph::tag(b"FlRN")))
+            .filter(|n| !self.filter_is_identity(n))
+            .collect();
+        for f in filters {
+            let name = self
+                .graph
+                .child(f, b"Filt")
+                .map(|c| tag_name(c.type_tag()))
+                .unwrap_or_else(|| "?".into());
+            log::warn!(
+                "affinity: live filter {name} on {:?} warps its content; not applied",
+                layer.name
+            );
+            self.report
+                .skipped
+                .push((format!("{} (live filter)", layer.name), name));
+        }
+    }
+
     fn apply_mask(&mut self, node: &Node, layer: &mut Layer) {
         let masks: Vec<&Node> = self
             .graph
@@ -2593,6 +2746,30 @@ fn gradient_fill(graph: &Graph, fill: &Node, host: Option<&Node>) -> Option<Grad
         return None;
     }
     let radial = matches!(fill.field(b"Type"), Some(Value::Enum { id: 2.., .. }));
+    let stops = gradient_stops(graph, fill)?;
+    // The gradient transform hangs off the descriptor in newer files
+    // and off the fill itself in older ones.
+    let m: [f64; 6] = match host
+        .and_then(|h| h.field(b"FDeX"))
+        .or_else(|| fill.field(b"FDeX"))
+    {
+        Some(Value::VecD(v)) => v.first_chunk().copied()?,
+        _ => return None,
+    };
+    Some(GradientFill {
+        stops,
+        start: (m[2], m[5]),
+        end: (m[0] + m[2], m[3] + m[5]),
+        radial,
+    })
+}
+
+/// A `FilG` gradient fill's stops: `Grad.Posn` positions (each a
+/// position/midpoint pair, of which we keep the position) zipped with
+/// its `Cols` colours. Separate from [`gradient_fill`] because a
+/// gradient *overlay effect* stores no `FDeX` axis — it runs across the
+/// layer's own bounds — so it needs the stops without the geometry.
+fn gradient_stops(graph: &Graph, fill: &Node) -> Option<Vec<(f32, [u8; 4])>> {
     let grad = graph.child(fill, b"Grad")?;
     let positions: Vec<f32> = match grad.field(b"Posn") {
         Some(Value::Array(items)) => items
@@ -2612,21 +2789,7 @@ fn gradient_fill(graph: &Graph, fill: &Node, host: Option<&Node>) -> Option<Grad
     if positions.len() != colors.len() || positions.len() < 2 {
         return None;
     }
-    // The gradient transform hangs off the descriptor in newer files
-    // and off the fill itself in older ones.
-    let m: [f64; 6] = match host
-        .and_then(|h| h.field(b"FDeX"))
-        .or_else(|| fill.field(b"FDeX"))
-    {
-        Some(Value::VecD(v)) => v.first_chunk().copied()?,
-        _ => return None,
-    };
-    Some(GradientFill {
-        stops: positions.into_iter().zip(colors).collect(),
-        start: (m[2], m[5]),
-        end: (m[0] + m[2], m[3] + m[5]),
-        radial,
-    })
+    Some(positions.into_iter().zip(colors).collect())
 }
 
 impl GradientFill {
