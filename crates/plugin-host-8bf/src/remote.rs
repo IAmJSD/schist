@@ -124,6 +124,18 @@ impl From<io::Error> for RemoteError {
 /// Worth asking before offering a plug-in in a menu, so the answer can
 /// be "install Wine" rather than a failure at the moment of use.
 pub fn readiness(found: &Found) -> Result<(), RemoteError> {
+    helper_available(&plan_for(found)?)
+}
+
+/// The half of readiness that is about the plug-in and the machine
+/// rather than about where the helpers are kept: can this architecture
+/// run here at all, and is everything it needs installed.
+///
+/// Split out because [`apply`] must not answer the *other* half through
+/// [`helper_available`]: that one only knows the default locations, so a
+/// caller naming an explicit [`RemoteOptions::helper_dir`] would be
+/// turned away before [`helper_location`] ever got to honour it.
+fn plan_for(found: &Found) -> Result<launch::Plan, RemoteError> {
     let host = launch::Host::current()
         .ok_or(RemoteError::Unsupported(launch::Unsupported::UnknownHost))?;
     let abi = found
@@ -134,7 +146,7 @@ pub fn readiness(found: &Found) -> Result<(), RemoteError> {
     if !missing.is_empty() {
         return Err(RemoteError::Missing(missing));
     }
-    helper_available(&plan)
+    Ok(plan)
 }
 
 /// Whether the helper this plan needs could be found, without unpacking
@@ -198,10 +210,10 @@ fn helper_location(plan: &launch::Plan, opts: &RemoteOptions) -> Result<PathBuf,
 
 /// Run `found` over `image`, in a helper process.
 pub fn apply(found: &Found, image: &mut Image, opts: &RemoteOptions) -> Result<Run, RemoteError> {
-    readiness(found)?;
-    let host = launch::Host::current().unwrap();
-    let plan = launch::plan(host, found.abi().unwrap()).unwrap();
-
+    // `helper_location` asks the helper question itself, and asks it of
+    // the directory this call actually named, so the gate in front of it
+    // is only the architecture one.
+    let plan = plan_for(found)?;
     let dir = helper_location(&plan, opts)?;
 
     // The pixels cross once, through a file both processes map.
@@ -244,9 +256,13 @@ pub fn apply(found: &Found, image: &mut Image, opts: &RemoteOptions) -> Result<R
     };
 
     let mut sock = accept(&listener, &mut child.0, opts)?;
-    handshake(&mut sock, &token)?;
+    // One reader for the whole conversation: the handshake and the run
+    // are the same byte stream, so anything the first buffered past its
+    // own frame belongs to the second.
+    let mut frames = ipc::FrameReader::new();
+    handshake(&mut sock, &mut frames, &token)?;
     ipc::write_frame(&mut sock, &request.encode())?;
-    let outcome = pump(&mut sock, &mut child.0, opts);
+    let outcome = pump(&mut sock, &mut frames, &mut child.0, opts);
 
     // Whatever happened, take back what is in the shared buffer:
     // `Filter::apply` restores the original pixels on failure, so this
@@ -288,8 +304,12 @@ fn accept(
     }
 }
 
-fn handshake(sock: &mut TcpStream, token: &str) -> Result<(), RemoteError> {
-    let frame = read_with_patience(sock)?;
+fn handshake(
+    sock: &mut TcpStream,
+    frames: &mut ipc::FrameReader,
+    token: &str,
+) -> Result<(), RemoteError> {
+    let frame = read_with_patience(sock, frames)?;
     match Report::decode(&frame)? {
         Report::Hello { token: t } if t == token => Ok(()),
         _ => Err(RemoteError::Io(io::Error::new(
@@ -300,13 +320,18 @@ fn handshake(sock: &mut TcpStream, token: &str) -> Result<(), RemoteError> {
 }
 
 /// Read reports until the helper finishes, dies, or is cancelled.
-fn pump(sock: &mut TcpStream, child: &mut Child, opts: &RemoteOptions) -> Result<Run, RemoteError> {
+fn pump(
+    sock: &mut TcpStream,
+    frames: &mut ipc::FrameReader,
+    child: &mut Child,
+    opts: &RemoteOptions,
+) -> Result<Run, RemoteError> {
     loop {
         if opts.abort.load(Ordering::Relaxed) {
             let _ = child.kill();
             return Err(RemoteError::Cancelled);
         }
-        match ipc::read_frame(sock) {
+        match frames.read(sock) {
             Ok(frame) => match Report::decode(&frame)? {
                 Report::Progress { done, total } => {
                     if let Some(p) = &opts.progress {
@@ -338,10 +363,13 @@ fn pump(sock: &mut TcpStream, child: &mut Child, opts: &RemoteOptions) -> Result
     }
 }
 
-fn read_with_patience(sock: &mut TcpStream) -> Result<Vec<u8>, RemoteError> {
+fn read_with_patience(
+    sock: &mut TcpStream,
+    frames: &mut ipc::FrameReader,
+) -> Result<Vec<u8>, RemoteError> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match ipc::read_frame(sock) {
+        match frames.read(sock) {
             Ok(f) => return Ok(f),
             Err(e) if would_block(&e) => {
                 if Instant::now() > deadline {

@@ -105,6 +105,67 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// A frame reader that survives a read timeout.
+///
+/// [`read_frame`] is right for a blocking socket and wrong for one with
+/// a read timeout: `read_exact` that times out partway through a frame
+/// has already taken those bytes off the stream, and the retry then
+/// starts reading from the middle of one. What follows is a garbage
+/// length, and the run fails as though the helper had died — which is a
+/// particularly unhelpful lie, because the helper is usually fine.
+///
+/// This keeps whatever has arrived so far instead, and resumes where it
+/// left off. One reader belongs to one socket for that socket's whole
+/// life: bytes it has buffered but not yet returned are the next
+/// caller's, so sharing the stream means sharing the reader.
+#[derive(Default)]
+pub struct FrameReader {
+    buf: Vec<u8>,
+}
+
+impl FrameReader {
+    pub fn new() -> FrameReader {
+        FrameReader::default()
+    }
+
+    /// The next whole frame, or [`io::ErrorKind::WouldBlock`] when one
+    /// has not finished arriving. Nothing is lost either way.
+    pub fn read(&mut self, r: &mut impl Read) -> io::Result<Vec<u8>> {
+        loop {
+            if let Some(frame) = self.take()? {
+                return Ok(frame);
+            }
+            let mut chunk = [0u8; 8192];
+            match r.read(&mut chunk) {
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// A whole frame out of what is already buffered, if there is one.
+    fn take(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let Some(head) = self.buf.get(..4) else {
+            return Ok(None);
+        };
+        let len = u32::from_le_bytes(head.try_into().unwrap());
+        if len > MAX_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame of {len} bytes is beyond anything this protocol sends"),
+            ));
+        }
+        let total = 4 + len as usize;
+        if self.buf.len() < total {
+            return Ok(None);
+        }
+        let frame = self.buf[4..total].to_vec();
+        self.buf.drain(..total);
+        Ok(Some(frame))
+    }
+}
+
 // --- encoding ------------------------------------------------------------
 
 struct Enc(Vec<u8>);
@@ -324,6 +385,78 @@ mod tests {
         let mut absurd = (MAX_FRAME + 1).to_le_bytes().to_vec();
         absurd.extend_from_slice(b"...");
         let err = read_frame(&mut absurd.as_slice()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A reader that hands over `step` bytes at a time and reports a
+    /// timeout between each — a socket with a read timeout, whose peer
+    /// is sending slowly or has filled the buffer mid-frame.
+    struct Trickle<'a> {
+        bytes: &'a [u8],
+        step: usize,
+        stalled: bool,
+    }
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if self.bytes.is_empty() {
+                return Ok(0);
+            }
+            // Every other call times out having delivered nothing, which
+            // is the case `read_exact` cannot survive.
+            self.stalled = !self.stalled;
+            if self.stalled {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let n = self.step.min(self.bytes.len()).min(out.len());
+            out[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_frame_split_by_a_timeout_is_read_whole() {
+        // Two frames back to back, delivered a byte at a time with a
+        // timeout between each. Retrying is the caller's job; losing
+        // nothing across the retries is this reader's.
+        let mut wire = Vec::new();
+        write_frame(&mut wire, b"the first frame").unwrap();
+        write_frame(&mut wire, b"and the second").unwrap();
+
+        let mut src = Trickle {
+            bytes: &wire,
+            step: 1,
+            stalled: false,
+        };
+        let mut reader = FrameReader::new();
+        let mut got = Vec::new();
+        // Generous, but bounded: a bug here is an infinite loop
+        // otherwise, and the loop should need about 2 turns per byte.
+        for _ in 0..(wire.len() * 4) {
+            match reader.read(&mut src) {
+                Ok(frame) => got.push(frame),
+                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) => panic!("unexpected {e}"),
+            }
+            if got.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(
+            got,
+            vec![b"the first frame".to_vec(), b"and the second".to_vec()],
+            "a frame arriving in pieces should still be read whole"
+        );
+    }
+
+    #[test]
+    fn the_frame_reader_still_rejects_an_absurd_length() {
+        let mut absurd = (MAX_FRAME + 1).to_le_bytes().to_vec();
+        absurd.extend_from_slice(b"...");
+        let err = FrameReader::new()
+            .read(&mut absurd.as_slice())
+            .expect_err("should refuse");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
