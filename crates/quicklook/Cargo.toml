@@ -1,0 +1,25 @@
+[package]
+name = "schist-quicklook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "macOS Quick Look thumbnail and preview extensions for Schist's document formats"
+
+[[bin]]
+name = "schist-quicklook"
+path = "src/main.rs"
+
+# macOS-only by nature: on every other platform this builds to a binary
+# that says so and exits. The dependencies follow the same rule, so a
+# Linux or Windows `cargo build --workspace` never fetches them.
+[target.'cfg(target_os = "macos")'.dependencies]
+schist-preview.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+# "objc2" is what teaches CGSize how to cross a message send.
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "objc2", "CFCGTypes"] }
+block2 = "0.6"

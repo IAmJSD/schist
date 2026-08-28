@@ -5800,7 +5800,6 @@ dependencies = [
  "env_logger",
  "image",
  "log",
- "rustc-hash 2.1.3",
  "schist-adjustments",
  "schist-codec-psd",
  "schist-codecs-common",
@@ -5894,8 +5893,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "schist-preview"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "schist-codec-affinity",
+ "schist-codec-psd",
+ "schist-codecs-common",
+ "schist-compositor",
+ "schist-core",
+ "schist-plugin-api",
+]
+
+[[package]]
 name = "schist-psd-descriptor"
 version = "0.6.0"
+
+[[package]]
+name = "schist-quicklook"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "block2",
+ "env_logger",
+ "log",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "schist-preview",
+]
 
 [[package]]
 name = "schist-text-engine"

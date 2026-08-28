@@ -5,11 +5,13 @@ mod header;
 mod image_data;
 mod layers;
 mod pixels;
+mod preview;
 mod resources;
 pub(crate) mod rle;
 
 use crate::error::PsdError;
 use cursor::Cursor;
+pub use preview::{read_dimensions, read_thumbnail, Thumbnail};
 use schist_color::ColorMode;
 use schist_core::{Document, IntRect, Layer, PreservedResource, RasterLayer};
 

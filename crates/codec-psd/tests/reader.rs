@@ -3,7 +3,7 @@
 mod common;
 
 use common::{resolution_res, Mask, Psd, Res, L};
-use schist_codec_psd::{is_psd, read_psd, PsdError};
+use schist_codec_psd::{is_psd, read_dimensions, read_psd, read_thumbnail, PsdError};
 use schist_color::{ColorMode, Depth};
 use schist_core::{BlendMode, Layer, LayerKind};
 
@@ -533,4 +533,84 @@ fn truncated_buffers_error_never_panic() {
     for n in 4..26 {
         assert!(read_psd(&bytes[..n]).is_err(), "prefix {n} should fail");
     }
+}
+
+/// A 0x040C (or 0x0409) thumbnail resource wrapping `jpeg`.
+fn thumbnail_res(id: u16, w: u32, h: u32, jpeg: &[u8]) -> Res {
+    let mut d = Vec::new();
+    d.extend(1u32.to_be_bytes()); // format: kJpegRGB
+    d.extend(w.to_be_bytes());
+    d.extend(h.to_be_bytes());
+    d.extend((w * 3).to_be_bytes()); // row stride
+    d.extend((w * h * 3).to_be_bytes()); // decompressed size
+    d.extend((jpeg.len() as u32).to_be_bytes());
+    d.extend(24u16.to_be_bytes()); // bits per pixel
+    d.extend(1u16.to_be_bytes()); // planes
+    d.extend_from_slice(jpeg);
+    Res {
+        id,
+        name: Vec::new(),
+        data: d,
+    }
+}
+
+#[test]
+fn dimensions_come_from_the_header_alone() {
+    let mut psd = Psd::rgb8(320, 200);
+    psd.layers
+        .push(L::solid("Red", (0, 0, 200, 320), [255, 0, 0, 255]));
+    let bytes = psd.build();
+    assert_eq!(read_dimensions(&bytes).unwrap(), (320, 200));
+    // Truncated to the header: still enough, where read_psd would fail.
+    assert_eq!(read_dimensions(&bytes[..26]).unwrap(), (320, 200));
+    assert!(read_psd(&bytes[..26]).is_err());
+}
+
+#[test]
+fn embedded_thumbnail_is_found_past_other_resources() {
+    let mut psd = Psd::rgb8(64, 48);
+    psd.resources.push(resolution_res(300.0));
+    // An odd-length resource before it: its pad byte has to be consumed
+    // or every later block is misread.
+    psd.resources.push(Res {
+        id: 0x03F0,
+        name: Vec::new(),
+        data: b"odd".to_vec(),
+    });
+    psd.resources
+        .push(thumbnail_res(0x040C, 16, 12, b"\xff\xd8not-really-a-jpeg"));
+    psd.layers
+        .push(L::solid("Red", (0, 0, 48, 64), [255, 0, 0, 255]));
+    let bytes = psd.build();
+
+    let thumb = read_thumbnail(&bytes).expect("thumbnail resource");
+    assert_eq!((thumb.width, thumb.height), (16, 12));
+    assert!(!thumb.bgr);
+    assert_eq!(thumb.jpeg, b"\xff\xd8not-really-a-jpeg");
+}
+
+#[test]
+fn photoshop_4_thumbnail_is_flagged_bgr_and_yields_to_the_modern_one() {
+    let mut psd = Psd::rgb8(64, 48);
+    psd.resources.push(thumbnail_res(0x0409, 8, 6, b"old"));
+    let bytes = psd.build();
+    let thumb = read_thumbnail(&bytes).expect("0x0409 thumbnail");
+    assert!(thumb.bgr);
+    assert_eq!(thumb.jpeg, b"old");
+
+    let mut psd = Psd::rgb8(64, 48);
+    psd.resources.push(thumbnail_res(0x0409, 8, 6, b"old"));
+    psd.resources.push(thumbnail_res(0x040C, 8, 6, b"new"));
+    let bytes = psd.build();
+    let thumb = read_thumbnail(&bytes).expect("0x040C thumbnail");
+    assert!(!thumb.bgr);
+    assert_eq!(thumb.jpeg, b"new");
+}
+
+#[test]
+fn no_thumbnail_resource_is_none_not_an_error() {
+    let psd = Psd::rgb8(8, 8);
+    assert!(read_thumbnail(&psd.build()).is_none());
+    assert!(read_thumbnail(b"not a psd").is_none());
+    assert!(read_thumbnail(&[]).is_none());
 }
