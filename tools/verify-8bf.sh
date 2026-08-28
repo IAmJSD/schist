@@ -73,6 +73,26 @@ else
 fi
 
 echo
+echo "== a plug-in with a helper DLL beside it =="
+# These only load if the host puts the plug-in's own directory on the
+# DLL search path. Without that they fail at LoadLibraryExW with nothing
+# to say why, which is how the missing flag was found in the first place.
+if python3 "$root/tools/verify-8bf-support.py" fetch-ft; then
+  python3 "$root/tools/verify-8bf-support.py" square
+  for p in Ft2DF iFt2DF; do
+    timeout 90 wine "$exe" apply "$(winpath "$work/$p.8bf")" \
+      "$(winpath "$work/square.ppm")" "$(winpath "$work/$p-out.ppm")" --no-dialog \
+      >"ft-$p.log" 2>&1
+    if grep -q 'LoadLibrary' "ft-$p.log"; then
+      echo "FAIL ($p): could not load — is the plug-in's own directory on the search path?"
+      fail=1
+    else
+      python3 "$root/tools/verify-8bf-support.py" check-changed "$p-out.ppm" "$p" || fail=1
+    fi
+  done
+fi
+
+echo
 echo "== about box =="
 ( timeout 30 wine "$exe" about "$(winpath "$work/FilterFoundry64.8bf")" >about.log 2>&1 & )
 sleep 14

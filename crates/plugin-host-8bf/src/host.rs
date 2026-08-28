@@ -164,8 +164,7 @@ impl Filter {
         // SAFETY: loading a plug-in runs its initialisers, which is the
         // whole point; there is no way to do this safely, which is why
         // stage 3 moves it into its own process.
-        let lib = unsafe { libloading::Library::new(path) }
-            .map_err(|e| HostError::Load(e.to_string()))?;
+        let lib = unsafe { load_library(path) }.map_err(|e| HostError::Load(e.to_string()))?;
         let entry = unsafe {
             let sym: libloading::Symbol<EntryProc> = lib
                 .get(format!("{entry_name}\0").as_bytes())
@@ -285,6 +284,36 @@ impl Filter {
 /// A filter that asks for one scanline at a time on a 32767-row image
 /// still finishes well inside this; anything past it is a stuck plug-in.
 const MAX_CONTINUE_CALLS: u32 = 1_000_000;
+
+/// Load a plug-in so that DLLs sitting beside it resolve.
+///
+/// Plug-ins routinely ship helper libraries in their own folder — an FFT
+/// filter next to its FFTW build, say — and Windows does not search a
+/// module's own directory when loading it. Without
+/// `LOAD_WITH_ALTERED_SEARCH_PATH` those plug-ins fail at
+/// `LoadLibraryExW` with nothing to explain why, which is exactly how
+/// this was found.
+///
+/// The flag only takes effect for an absolute path, so the path is
+/// canonicalised first.
+///
+/// # Safety
+///
+/// Loading runs the library's initialisers.
+#[cfg(windows)]
+unsafe fn load_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    use libloading::os::windows::{Library, LOAD_WITH_ALTERED_SEARCH_PATH};
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    Library::load_with_flags(absolute, LOAD_WITH_ALTERED_SEARCH_PATH).map(Into::into)
+}
+
+/// # Safety
+///
+/// Loading runs the library's initialisers.
+#[cfg(not(windows))]
+unsafe fn load_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    libloading::Library::new(path)
+}
 
 fn check(selector: i16, result: OSErr, message: Option<String>) -> Result<(), HostError> {
     match result {

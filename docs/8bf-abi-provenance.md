@@ -42,13 +42,21 @@ load-bearing.
 
 ## Settled empirically, against shipping plug-ins
 
-Adobe's prose leaves a dozen things open. Most were closed by running two
-real, third-party, freely redistributable plug-ins under Wine — Filter
-Foundry 1.7.0.25 (Telegraphics/ViaThinkSoft, GPL) and G'MIC-Qt 4.0.4
-(0xC0000054) — and watching where they read, what they called, and where
-they faulted. Only the shipped **binaries** were used; neither project's
-source was read, so the clean-room line holds. `tools/verify-8bf.sh`
-reproduces the whole run.
+Adobe's prose leaves a dozen things open. Most were closed by running
+real, third-party, freely redistributable plug-ins under Wine and
+watching where they read, what they called, and where they faulted.
+Three families, fifteen binaries:
+
+- **Filter Foundry 1.7.0.25** (Telegraphics/ViaThinkSoft), 32- and 64-bit
+- **G'MIC-Qt 4.0.4** (0xC0000054), whose one binary declares two filters
+- **Ft/Fourier 08oct2019** (rechmbrs), twelve x86-64 transforms — the
+  first to declare interface version **4.1** rather than 4.0
+
+Only the shipped **binaries** were used; no project's source was read, so
+the clean-room line holds. GitHub code search was used once, purely as an
+index — to find out *which* projects call `AllocateBlock` and so whose
+binary was worth downloading — and not to read anything.
+`tools/verify-8bf.sh` reproduces the whole run.
 
 | Fact | How it was settled |
 |---|---|
@@ -91,12 +99,13 @@ all but one.
 | **`SPBasicSuite.ReleaseSuite` is the second member** | Serving the PICA handle suite made Filter Foundry call `ReleaseSuite` — which it never did while every `AcquireSuite` failed. Nothing else would have exercised that slot |
 | **The PICA handle suite layout** | Chapter 4: "Suite PEA Handle suite. Current version: 1; Routines: 6" over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace. Filter Foundry acquires it by name, calls `SetLock` with `lock=1` and later `lock=0`, and its pixels stay correct |
 | `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because stage 4 needs the descriptor block regardless |
+| **A plug-in must be loaded with its own directory on the DLL search path** | Not an ABI fact but a loading one, and it fails just as hard. The Fourier family ships FFTW beside it, and Windows does not search a module's own directory: all twelve failed at `LoadLibraryExW` with nothing to say why. `LOAD_WITH_ALTERED_SEARCH_PATH` over a canonicalised path fixes the lot |
 
 ## Still unverified
 
 | # | Fact | Why it is still open | Failure mode if wrong |
 |---|---|---|---|
-| 1 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position, but the API Guide documents no `SPBasicSuite` struct anywhere — only usage examples of those two. Neither plug-in calls the rest: Filter Foundry only ever asks for the handle suite, and G'MIC asks for one ADM suite by GUID and falls back to its own Qt UI when refused | A plug-in that allocates through PICA calls the wrong slot. This is the last real gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise. `SCHIST_8BF_BUFPROBE` is the technique that would settle it |
+| 1 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position; the API Guide documents no `SPBasicSuite` struct anywhere, only usage examples of those two. **Fifteen plug-in binaries across three families have now been run and not one calls the rest.** Filter Foundry only ever asks for the handle suite; G'MIC asks for one ADM suite by GUID and falls back to Qt when refused; the Fourier family uses no host suite at all and manages its own memory. G'MIC's source *does* call `AllocateBlock` — GitHub code search says so — but nothing reachable from a filter run gets there | A plug-in that allocates through PICA calls the wrong slot. This is the last gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise rather than treated as probably fine. The probe technique below is what would settle it, the moment a plug-in that exercises it turns up |
 | 2 | `HostProc`'s signature | Named but never printed, and passed as null | None while it stays null |
 | 3 | The suites this host does not implement — PseudoResource, Property, Image Services, Channel Ports, and the descriptor sub-suites | All passed as null, which is the documented way to say "unavailable" | None; a plug-in that needs one declines |
 | 4 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |

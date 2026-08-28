@@ -515,6 +515,7 @@ unsafe fn cstr(p: *const c_char) -> String {
 }
 
 pub(crate) unsafe extern "C" fn is_equal(a: *const c_char, b: *const c_char) -> u8 {
+    trace!("pica.is_equal({:?}, {:?})", cstr(a), cstr(b));
     if a.is_null() || b.is_null() {
         return u8::from(a == b);
     }
@@ -523,7 +524,9 @@ pub(crate) unsafe extern "C" fn is_equal(a: *const c_char, b: *const c_char) -> 
 
 pub(crate) unsafe extern "C" fn allocate_block(size: usize, block: *mut *mut c_void) -> i32 {
     const SP_OUT_OF_MEMORY: i32 = -2;
-    trace!("pica.allocate_block({size})");
+    // Every argument, raw: if the slot order is wrong this is where it
+    // shows, as a "size" that is obviously a pointer or vice versa.
+    trace!("pica.allocate_block(size={size} out={block:p})");
     if block.is_null() {
         return SP_OUT_OF_MEMORY;
     }
@@ -548,6 +551,7 @@ pub(crate) unsafe extern "C" fn reallocate_block(
     out: *mut *mut c_void,
 ) -> i32 {
     const SP_OUT_OF_MEMORY: i32 = -2;
+    trace!("pica.reallocate_block({block:p}, {size})");
     if out.is_null() {
         return SP_OUT_OF_MEMORY;
     }

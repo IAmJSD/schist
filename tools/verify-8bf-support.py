@@ -4,6 +4,7 @@ Kept out of the shell script because the checks need real parsing, and
 because a heredoc inside a heredoc is nobody's friend.
 """
 
+import os
 import sys
 import zipfile
 
@@ -20,6 +21,64 @@ def extract():
             if name.endswith('/' + want) or name == want:
                 open(want, 'wb').write(zf.read(name))
     zipfile.ZipFile('gm.zip').extractall('.')
+
+
+FT_REPO = 'rechmbrs/FtPattern'
+FT_FILES = [
+    'FtWinPlugins08oct2019/Ft2DF.8bf',
+    'FtWinPlugins08oct2019/iFt2DF.8bf',
+    'Ft/Ft_lib/libfftwx64_3-3.dll',
+]
+
+
+def fetch_ft():
+    """A third plug-in family, fetched for one specific reason: these
+    ship a helper DLL beside them, so they only load if the host puts the
+    plug-in's own directory on the search path."""
+    import urllib.parse
+    import urllib.request
+    for path in FT_FILES:
+        out = path.rsplit('/', 1)[-1]
+        if os.path.exists(out):
+            continue
+        url = (f'https://raw.githubusercontent.com/{FT_REPO}/HEAD/'
+               + urllib.parse.quote(path))
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                open(out, 'wb').write(r.read())
+        except Exception as e:
+            print(f'skip: could not fetch {out}: {e}')
+            return 1
+    return 0
+
+
+def square():
+    """64x64, because a Fourier transform wants power-of-two sides."""
+    w = h = 64
+    data = bytearray()
+    for y in range(h):
+        for x in range(w):
+            data += bytes([(x * 4) % 256, (y * 4) % 256, ((x * y) // 4) % 256])
+    open('square.ppm', 'wb').write(b'P6\n%d %d\n255\n' % (w, h) + bytes(data))
+
+
+def check_changed(out, label):
+    """The transform's maths is its own business; what the host has to
+    get right is a full-size buffer that is not the input."""
+    try:
+        before, after = pixels('square.ppm'), pixels(out)
+    except FileNotFoundError:
+        print(f'FAIL ({label}): no output written')
+        return 1
+    if len(after) != 64 * 64 * 3:
+        print(f'FAIL ({label}): output is {len(after)} bytes')
+        return 1
+    if after == before:
+        print(f'FAIL ({label}): nothing changed')
+        return 1
+    colours = len({tuple(after[i:i + 3]) for i in range(0, len(after), 3)})
+    print(f'ok ({label}): transformed, {colours} distinct colours out')
+    return 0
 
 
 def gradient():
@@ -109,6 +168,12 @@ if __name__ == '__main__':
         gradient()
     elif cmd == 'halves':
         halves()
+    elif cmd == 'fetch-ft':
+        sys.exit(fetch_ft())
+    elif cmd == 'square':
+        square()
+    elif cmd == 'check-changed':
+        sys.exit(check_changed(sys.argv[2], sys.argv[3]))
     elif cmd == 'check':
         sys.exit(check(sys.argv[2], sys.argv[3]))
     elif cmd == 'check-halves':

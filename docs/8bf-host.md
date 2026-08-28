@@ -145,6 +145,15 @@ make no sense for the slot it landed on.
 - **Most callback suites.** See above.
 - **Crash isolation.** A plug-in fault kills the process.
 
+### Loading
+
+A plug-in is loaded with `LOAD_WITH_ALTERED_SEARCH_PATH` over a
+canonicalised path, so DLLs sitting beside it resolve. Plug-ins ship
+helper libraries in their own folder as a matter of course — an FFT
+filter next to its FFTW build, say — and Windows does not search a
+module's own directory when loading it. Without the flag those plug-ins
+fail at `LoadLibraryExW` with nothing to explain why.
+
 ### Suites
 
 `handleProcs` and `bufferProcs` are implemented; `sSPBasic` serves the
@@ -209,7 +218,12 @@ targets, and runs them under Wine.
 - Serving the PICA handle suite has to make the plug-in acquire, use and
   release it.
 
-Only the shipped binaries are used; neither project's source is read.
+- A plug-in that ships a helper DLL beside it has to load at all, which
+  is what guards the search-path flag.
+
+Only the shipped binaries are used; no project's source is read. Three
+families are covered: Filter Foundry, G'MIC-Qt, and a set of Fourier
+transforms whose only job here is to depend on a sibling DLL.
 
 Tests that need a toolchain skip with a printed reason rather than
 failing, but a toolchain that is *present and broken* is a hard failure:
