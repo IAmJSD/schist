@@ -148,7 +148,7 @@ fn finds_the_pipl_inside_a_real_dll() {
     let found = bf::inspect_file(&dll).expect("PiPL should be discoverable");
     assert_eq!(found.len(), 1);
     let f = &found[0];
-    assert_eq!(f.machine, bf::pe::Machine::Amd64);
+    assert_eq!(f.abi, Some(bf::launch::PluginAbi::WindowsX86_64));
     assert_eq!(f.pipl.kind(), Some(kind::FILTER));
     assert_eq!(f.menu_name(), "Schist > Invert Test");
     assert_eq!(

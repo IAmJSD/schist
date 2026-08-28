@@ -75,6 +75,19 @@ pub mod key {
     pub const FILTER_CASE_INFO: OSType = fourcc(b"fici");
     /// `'wx86'` — 32-bit Windows DLL entry point name.
     pub const CODE_WIN32_X86: OSType = fourcc(b"wx86");
+    /// `'ma64'` — Intel 64-bit Mach-O entry point name.
+    ///
+    /// UNVERIFIED, as are the two below. The 1999 Resource Guide
+    /// documents only the 68k, PowerPC and Win32 descriptors; every
+    /// Mach-O key postdates it and none has been checked against a real
+    /// Mac plug-in. Discovery tries each in turn and reports honestly
+    /// when none is present, rather than guessing an entry point.
+    pub const CODE_MAC_X86_64: OSType = fourcc(b"ma64");
+    /// `'mi32'` — Intel 32-bit Mach-O entry point name. UNVERIFIED.
+    pub const CODE_MAC_X86: OSType = fourcc(b"mi32");
+    /// `'mm64'` — Apple Silicon Mach-O entry point name. UNVERIFIED.
+    pub const CODE_MAC_ARM64: OSType = fourcc(b"mm64");
+
     /// `'8664'` — 64-bit Windows DLL entry point name.
     ///
     /// UNVERIFIED: the 1999 Resource Guide predates x86-64 and documents
@@ -101,6 +114,8 @@ pub mod kind {
 pub enum CodeArch {
     Win32X86,
     Win64X86,
+    MacX86_64,
+    MacArm64,
 }
 
 impl CodeArch {
@@ -114,10 +129,14 @@ impl CodeArch {
         }
     }
 
-    fn key(self) -> OSType {
+    /// The property keys to try, in order. Mach-O has more than one
+    /// candidate because none of them is documented.
+    fn keys(self) -> &'static [OSType] {
         match self {
-            CodeArch::Win32X86 => key::CODE_WIN32_X86,
-            CodeArch::Win64X86 => key::CODE_WIN64_X86,
+            CodeArch::Win32X86 => &[key::CODE_WIN32_X86],
+            CodeArch::Win64X86 => &[key::CODE_WIN64_X86],
+            CodeArch::MacX86_64 => &[key::CODE_MAC_X86_64, key::CODE_MAC_X86],
+            CodeArch::MacArm64 => &[key::CODE_MAC_ARM64],
         }
     }
 }
@@ -337,15 +356,22 @@ impl Pipl {
     /// `char fEntryName[1]` — a null-terminated C string, padded with
     /// extra nulls to reach four-byte alignment.
     pub fn entry_point(&self, arch: CodeArch) -> Option<String> {
-        self.get(arch.key()).and_then(c_string)
+        arch.keys()
+            .iter()
+            .find_map(|k| self.get(*k).and_then(c_string))
     }
 
     /// Every architecture this PiPL carries code for.
     pub fn code_archs(&self) -> Vec<CodeArch> {
-        [CodeArch::Win64X86, CodeArch::Win32X86]
-            .into_iter()
-            .filter(|a| self.get(a.key()).is_some())
-            .collect()
+        [
+            CodeArch::Win64X86,
+            CodeArch::Win32X86,
+            CodeArch::MacArm64,
+            CodeArch::MacX86_64,
+        ]
+        .into_iter()
+        .filter(|a| a.keys().iter().any(|k| self.get(*k).is_some()))
+        .collect()
     }
 
     /// `'mode'` — is image mode `m` (an [`crate::abi::mode`] ordinal)

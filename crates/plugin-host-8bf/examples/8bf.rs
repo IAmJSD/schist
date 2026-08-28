@@ -56,7 +56,7 @@ fn inspect(path: &Path) -> Res {
     for f in &found {
         println!("{}", f.menu_name());
         println!("  file      {}", f.path.display());
-        println!("  machine   {}", f.machine);
+        println!("  built for {}", f.architecture());
         if let Some((major, minor)) = f.pipl.version_pair() {
             println!("  interface {major}.{minor}");
         }
@@ -95,13 +95,7 @@ fn run_remote(args: &[String]) -> Res {
     let found = bf::inspect_file(&plugin)?;
     let first = found.into_iter().next().ok_or("no filter in that file")?;
     println!("{}", first.menu_name());
-    println!(
-        "  plug-in is {}",
-        match first.abi() {
-            Some(a) => a.to_string(),
-            None => format!("{}", first.machine),
-        }
-    );
+    println!("  plug-in is {}", first.architecture());
     if let Some(b) = first.blocker() {
         return Err(format!("{b}").into());
     }

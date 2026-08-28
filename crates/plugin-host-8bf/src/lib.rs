@@ -35,6 +35,7 @@ pub mod display;
 pub mod host;
 pub mod ipc;
 pub mod launch;
+pub mod macos;
 pub mod pe;
 pub mod pipl;
 pub mod remote;
@@ -46,8 +47,9 @@ pub use pipl::{CodeArch, Endian, Pipl, PiplError};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// File extensions Photoshop uses for filter modules on Windows.
-pub const FILTER_EXTENSIONS: &[&str] = &["8bf"];
+/// File extensions Photoshop uses for filter modules. `.8bf` is a
+/// Windows DLL; `.plugin` is a macOS bundle, which is a directory.
+pub const FILTER_EXTENSIONS: &[&str] = &["8bf", "plugin"];
 
 /// One filter found inside a plug-in file. A single `.8bf` may hold
 /// several, each with its own PiPL and entry point.
@@ -58,8 +60,11 @@ pub struct Found {
     /// The raw PiPL resource, kept so a helper process parses exactly
     /// what was discovered rather than a summary of it.
     pub raw_pipl: Vec<u8>,
-    /// The machine the containing image was built for.
-    pub machine: pe::Machine,
+    /// The architecture the plug-in binary was built for.
+    pub abi: Option<launch::PluginAbi>,
+    /// What the user sees in the plug-ins folder: the `.8bf` file, or
+    /// the `.plugin` bundle rather than the binary buried inside it.
+    pub container: PathBuf,
     /// Entry point for the plug-in's **own** architecture — not the
     /// host's. A helper is built to match the plug-in, so what matters
     /// is the code descriptor for the machine the binary actually is.
@@ -70,10 +75,14 @@ impl Found {
     /// Which architecture this plug-in is, in the terms
     /// [`launch::plan`] reasons about.
     pub fn abi(&self) -> Option<launch::PluginAbi> {
-        match self.machine {
-            pe::Machine::Amd64 => Some(launch::PluginAbi::WindowsX86_64),
-            pe::Machine::I386 => Some(launch::PluginAbi::WindowsX86),
-            _ => None,
+        self.abi
+    }
+
+    /// How to describe the architecture to a person.
+    pub fn architecture(&self) -> String {
+        match self.abi {
+            Some(a) => a.to_string(),
+            None => "an architecture Schist cannot run".into(),
         }
     }
 
@@ -103,8 +112,8 @@ impl Found {
                 has: self.pipl.code_archs(),
             });
         }
-        let Some(abi) = self.abi() else {
-            return Some(Blocker::UnknownArch(self.machine));
+        let Some(abi) = self.abi else {
+            return Some(Blocker::UnknownArch);
         };
         let Some(here) = launch::Host::current() else {
             return Some(Blocker::CannotRun(launch::Unsupported::UnknownHost));
@@ -142,7 +151,7 @@ pub enum Blocker {
     NoEntryPoint {
         has: Vec<CodeArch>,
     },
-    UnknownArch(pe::Machine),
+    UnknownArch,
     /// No way to run this plug-in's architecture on this machine.
     CannotRun(launch::Unsupported),
     /// It could run, with something installed that is not.
@@ -163,7 +172,9 @@ impl fmt::Display for Blocker {
                     write!(f, "carries code descriptors only for {has:?}")
                 }
             }
-            Blocker::UnknownArch(m) => write!(f, "built for {m}, which Schist cannot run"),
+            Blocker::UnknownArch => {
+                write!(f, "built for an architecture Schist cannot run")
+            }
             Blocker::CannotRun(u) => write!(f, "{u}"),
             Blocker::NeedsInstalling(r) => {
                 let names: Vec<&str> = r.iter().map(|x| x.name()).collect();
@@ -183,6 +194,8 @@ impl fmt::Display for Blocker {
 pub enum DiscoverError {
     Io(std::io::Error),
     Pe(pe::PeError),
+    /// Not a `.plugin` bundle: no binary in `Contents/MacOS`.
+    NotABundle,
     /// The file parsed as a PE image but carried no PiPL resource, so it
     /// is not a plug-in Photoshop would recognise either.
     NoPipl,
@@ -193,6 +206,7 @@ impl fmt::Display for DiscoverError {
         match self {
             DiscoverError::Io(e) => write!(f, "{e}"),
             DiscoverError::Pe(e) => write!(f, "{e}"),
+            DiscoverError::NotABundle => write!(f, "not a plug-in bundle"),
             DiscoverError::NoPipl => write!(f, "no PiPL resource"),
         }
     }
@@ -223,10 +237,16 @@ pub fn inspect_file(path: &Path) -> Result<Vec<Found>, DiscoverError> {
     // The entry point wanted is the one for the *plug-in's* machine: a
     // helper is built to match the plug-in, so what Schist happens to be
     // running as does not come into it.
-    let wanted = match image.machine {
-        pe::Machine::Amd64 => Some(CodeArch::Win64X86),
-        pe::Machine::I386 => Some(CodeArch::Win32X86),
-        _ => None,
+    let (abi, wanted) = match image.machine {
+        pe::Machine::Amd64 => (
+            Some(launch::PluginAbi::WindowsX86_64),
+            Some(CodeArch::Win64X86),
+        ),
+        pe::Machine::I386 => (
+            Some(launch::PluginAbi::WindowsX86),
+            Some(CodeArch::Win32X86),
+        ),
+        _ => (None, None),
     };
     let mut found = Vec::new();
     for raw in resources {
@@ -238,11 +258,70 @@ pub fn inspect_file(path: &Path) -> Result<Vec<Found>, DiscoverError> {
         let entry_point = wanted.and_then(|a| pipl.entry_point(a));
         found.push(Found {
             path: path.to_path_buf(),
+            container: path.to_path_buf(),
             pipl,
             raw_pipl: raw,
-            machine: image.machine,
+            abi,
             entry_point,
         });
+    }
+    if found.is_empty() {
+        return Err(DiscoverError::NoPipl);
+    }
+    Ok(found)
+}
+
+/// Read a macOS `.plugin` bundle and return every filter it declares.
+///
+/// Pure byte parsing like [`inspect_file`], so a Linux or Windows build
+/// can list what is in a folder of Mac plug-ins and say why it cannot
+/// run them.
+///
+/// A universal binary carries more than one architecture, and the one
+/// that matters is whichever this machine can actually run — so the
+/// preference is native first, then whatever is left.
+pub fn inspect_bundle(path: &Path) -> Result<Vec<Found>, DiscoverError> {
+    let bundle = macos::open_bundle(path).ok_or(DiscoverError::NotABundle)?;
+    let binary = std::fs::read(&bundle.executable)?;
+    let arches = macos::architectures(&binary);
+    if arches.is_empty() {
+        return Err(DiscoverError::NoPipl);
+    }
+    // Prefer the slice this machine runs without translation.
+    let here = launch::Host::current();
+    let abi = here
+        .and_then(|h| {
+            arches
+                .iter()
+                .copied()
+                .find(|a| launch::plan(h, *a).is_ok_and(|p| p.needs.is_empty()))
+        })
+        .or_else(|| arches.first().copied());
+
+    let mut found = Vec::new();
+    for resources in &bundle.resource_files {
+        let Ok(bytes) = std::fs::read(resources) else {
+            continue;
+        };
+        for raw in macos::resource_fork(&bytes, macos::PIPL_TYPE) {
+            let Some(pipl) = macos::parse_pipl(&raw) else {
+                continue;
+            };
+            let entry_point = abi.and_then(|a| {
+                pipl.entry_point(match a {
+                    launch::PluginAbi::MacArm64 => CodeArch::MacArm64,
+                    _ => CodeArch::MacX86_64,
+                })
+            });
+            found.push(Found {
+                path: bundle.executable.clone(),
+                container: path.to_path_buf(),
+                pipl,
+                raw_pipl: raw,
+                abi,
+                entry_point,
+            });
+        }
     }
     if found.is_empty() {
         return Err(DiscoverError::NoPipl);
@@ -266,7 +345,12 @@ pub fn discover_dir(dir: &Path) -> Result<Vec<Found>, std::io::Error> {
         if !is_plugin {
             continue;
         }
-        if let Ok(found) = inspect_file(&path) {
+        let read = if path.is_dir() {
+            inspect_bundle(&path)
+        } else {
+            inspect_file(&path)
+        };
+        if let Ok(found) = read {
             out.extend(found);
         }
     }
