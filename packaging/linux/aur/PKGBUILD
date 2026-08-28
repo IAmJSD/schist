@@ -1,6 +1,6 @@
 # Maintainer: Astrid <astrid@infrawrench.com>
 pkgname=schist
-pkgver=0.6.0
+pkgver=0.7.0
 pkgrel=1
 pkgdesc="Layered image editor with PSD and Affinity support"
 arch=(x86_64 aarch64)
