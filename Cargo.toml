@@ -21,6 +21,8 @@ members = [
     "crates/adjustments",
     "crates/plugin-host-wasm",
     "crates/plugin-sdk",
+    "crates/preview",
+    "crates/quicklook",
     "crates/colormgmt",
     "crates/mcp",
     "plugins/codecs-common",
@@ -58,6 +60,7 @@ schist-vector = { path = "crates/vector" }
 schist-layer-fx = { path = "crates/layer-fx" }
 schist-neural = { path = "crates/neural" }
 schist-psd-descriptor = { path = "crates/psd-descriptor" }
+schist-preview = { path = "crates/preview" }
 
 # zlib for PSD's zip-compressed channels; pure Rust, no C toolchain.
 miniz_oxide = "0.8"

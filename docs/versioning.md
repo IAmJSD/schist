@@ -29,7 +29,10 @@ they will not break the plugin ABI or saved files.
 
 ## Releasing
 
-1. Update the version in the root `Cargo.toml` and `packaging/macos/Info.plist`.
+1. Update the version in the root `Cargo.toml`, `packaging/macos/Info.plist`
+   and both `packaging/macos/quicklook/*-Info.plist` (an app extension
+   carries its own version, and macOS re-registers one whose version
+   moved).
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
 3. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 4. The release workflow builds Linux AppImages for x86_64 and aarch64, a

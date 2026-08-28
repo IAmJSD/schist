@@ -20,6 +20,10 @@ crates/app              GPUI shell: window, canvas, panels, dialogs, keymap
 ├── crates/plugin-host-wasm  sandboxed third-party plugins
 └── crates/plugin-sdk   what plugin authors compile against
 
+crates/quicklook        macOS Quick Look thumbnail and preview extensions
+└── crates/preview      one windowless image of a file, as fast as the file allows
+crates/mcp              headless editing sessions over the Model Context Protocol
+
 plugins/                first-party features, each optional at compile time
 ├── tools-basic         move, eyedropper, hand, zoom
 ├── tools-paint         brush, pencil, eraser, clone, gradient, bucket, dodge…

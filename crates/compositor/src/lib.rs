@@ -308,6 +308,87 @@ pub fn render_styled(layer: &Layer) -> Option<schist_core::StyledRaster> {
     )
 }
 
+/// Walk the layer tree rebuilding stale styled rasters, collecting the
+/// areas that changed.
+///
+/// Layer effects are a cache: the compositor blends `layer.styled` and
+/// ignores `layer.style` on its own, so nothing with effects renders
+/// until this has run. Editors call it after every change; a freshly
+/// imported document needs it once, before the first composite.
+pub fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
+    for layer in layers.iter_mut() {
+        if let LayerKind::Group(g) = &mut layer.kind {
+            restyle_layers(&mut g.children, damage);
+        }
+        if layer.style.is_empty() {
+            if let Some(old) = layer.styled.take() {
+                damage.push(old.bounds);
+            }
+            continue;
+        }
+        // `fx_key` changes whenever anything the raster depends on does.
+        let key = fx_key(layer);
+        if layer.styled.as_ref().map(|s| s.key) == Some(key) {
+            continue;
+        }
+        let before = layer.styled.as_ref().map(|s| s.bounds);
+        layer.styled = render_styled(layer).map(|mut r| {
+            r.key = key;
+            Arc::new(r)
+        });
+        if let Some(b) = before {
+            damage.push(b);
+        }
+        if let Some(s) = layer.styled.as_ref() {
+            damage.push(s.bounds);
+        }
+    }
+}
+
+/// A cheap fingerprint of everything the styled raster is derived from.
+fn fx_key(layer: &Layer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    // The style itself, via its debug form: these are small plain structs
+    // with float fields, so there is nothing cheaper that is also correct.
+    format!("{:?}", layer.style).hash(&mut h);
+    layer.fill_opacity.to_bits().hash(&mut h);
+    if let Some(r) = layer.as_raster() {
+        r.tiles.fingerprint().hash(&mut h);
+    }
+    // A group's styled raster is rendered from its flattened children,
+    // so anything that moves their pixels must change the key. Children
+    // restyle before their parent, so child styled keys are fresh here.
+    if let LayerKind::Group(g) = &layer.kind {
+        fx_key_children(&g.children, &mut h);
+    }
+    h.finish()
+}
+
+fn fx_key_children(layers: &[Layer], h: &mut rustc_hash::FxHasher) {
+    use std::hash::Hash;
+    for l in layers {
+        l.visible.hash(h);
+        l.opacity.to_bits().hash(h);
+        l.fill_opacity.to_bits().hash(h);
+        format!("{:?}", l.blend).hash(h);
+        l.render_offset.hash(h);
+        l.clipping.hash(h);
+        if let Some(r) = l.as_raster() {
+            r.tiles.fingerprint().hash(h);
+        }
+        if let Some(s) = l.styled.as_ref() {
+            s.key.hash(h);
+        }
+        if let Some(m) = &l.mask {
+            m.enabled.hash(h);
+        }
+        if let LayerKind::Group(g) = &l.kind {
+            fx_key_children(&g.children, h);
+        }
+    }
+}
+
 /// Composite a run of sibling layers (bottom-to-top) onto `dst` for `coord`.
 fn composite_layers(
     doc: &Document,

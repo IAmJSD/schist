@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>SchistQuickLookPreview</string>
+    <key>CFBundleDisplayName</key><string>Schist Previews</string>
+    <key>CFBundleIdentifier</key><string>place.astrid.schist.quicklook-preview</string>
+    <key>CFBundleVersion</key><string>0.6.0</string>
+    <key>CFBundleShortVersionString</key><string>0.6.0</string>
+    <key>CFBundleExecutable</key><string>schist-quicklook</string>
+    <!-- An app extension is an XPC service, not an application. -->
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <!-- QLPreviewProvider, the data-based preview class, is macOS 12.
+         Older systems load the thumbnail extension only. -->
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
+
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.quicklook.preview</string>
+        <!-- Registered from Rust at startup; see crates/quicklook. -->
+        <key>NSExtensionPrincipalClass</key>
+        <string>SchistPreviewProvider</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <!-- The types the app's Info.plist imports, and only those:
+                 where Affinity itself is installed it declares its own
+                 (com.canva.affinity*) and previews them with its own
+                 extension, which needs no help from us. -->
+            <key>QLSupportedContentTypes</key>
+            <array>
+                <string>com.adobe.photoshop-image</string>
+                <string>com.adobe.photoshop-large-image</string>
+                <string>com.seriflabs.afphoto</string>
+                <string>com.seriflabs.afdesign</string>
+                <string>com.seriflabs.afpub</string>
+                <string>com.seriflabs.af</string>
+            </array>
+            <!-- The preview is an image this extension produces, not a
+                 view controller it presents. -->
+            <key>QLIsDataBasedPreview</key><true/>
+            <!-- Files only: Schist indexes nothing for Spotlight. -->
+            <key>QLSupportsSearchableItems</key><false/>
+        </dict>
+    </dict>
+</dict>
+</plist>

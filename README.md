@@ -33,6 +33,15 @@ register `.psd`, `.psb`, `.afphoto`, `.afdesign`, `.afpub` and `.af` as
 openable, never as the default handler: an installed Schist joins the
 "Open with" menu rather than taking files off Photoshop or Affinity.
 
+On macOS the bundle also carries two Quick Look app extensions, so
+Finder draws real thumbnails for those files and the space bar opens a
+real preview of them — layers, masks, blend modes and effects composited
+by Schist itself, or the writing app's own embedded preview when that is
+already big enough for the size asked for. Nothing needs enabling: the
+extensions register when the app is first opened, and
+`schist-quicklook --render file.afphoto out.png` shows what Quick Look
+would show. See [docs/quicklook.md](docs/quicklook.md).
+
 The logo is generated, not drawn: [`tools/logo.py`](tools/logo.py) holds the
 geometry and `python3 tools/logo.py` re-emits the SVGs and every `.icns`,
 `.ico` and `.png` the packaging needs. Edit the constants at the top of that
@@ -276,4 +285,5 @@ schist-mcp` builds it from source. See [docs/mcp.md](docs/mcp.md).
 * [docs/architecture.md](docs/architecture.md) — how the pieces fit
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
 * [docs/mcp.md](docs/mcp.md) — the MCP server
+* [docs/quicklook.md](docs/quicklook.md) — the macOS Quick Look extensions
 * [docs/versioning.md](docs/versioning.md) — compatibility and releases

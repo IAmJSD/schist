@@ -32,7 +32,7 @@ pub(crate) const PSB_U64_KEYS: [[u8; 4]; 13] = [
 ];
 
 pub use error::PsdError;
-pub use reader::read_psd;
+pub use reader::{read_dimensions, read_psd, read_thumbnail, Thumbnail};
 pub use writer::{write_psd, write_psd_with, PSB_MAX_DIM, PSD_MAX_DIM};
 
 /// Quick signature probe: does this buffer look like a PSD/PSB file?

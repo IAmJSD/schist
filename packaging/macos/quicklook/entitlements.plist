@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App extensions are sandboxed even when their container app is
+         not. Quick Look hands the extension a sandbox extension for the
+         one file being previewed, which is all the access it needs: the
+         readers here never open anything else, and unlike the app this
+         binary hosts no wasm plugins, so it wants no JIT either. -->
+    <key>com.apple.security.app-sandbox</key><true/>
+</dict>
+</plist>

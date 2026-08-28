@@ -1,0 +1,18 @@
+[package]
+name = "schist-preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Windowless document previews: one image of a file, as fast as the file allows"
+
+[dependencies]
+schist-core.workspace = true
+schist-compositor.workspace = true
+schist-codec-psd.workspace = true
+schist-codec-affinity.workspace = true
+schist-codecs-common.workspace = true
+schist-plugin-api.workspace = true
+anyhow.workspace = true
+image.workspace = true
+log.workspace = true
