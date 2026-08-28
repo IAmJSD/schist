@@ -43,8 +43,49 @@ fn main() -> ExitCode {
 
 type Res = Result<(), Box<dyn std::error::Error>>;
 
+/// The loadable binary for a path: the Mach-O inside a `.plugin`, or
+/// the path itself for anything else.
+fn bundle_binary(path: &Path) -> PathBuf {
+    if is_bundle(path) {
+        if let Some(b) = bf::macos::open_bundle(path) {
+            return b.executable;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// True for a path naming a macOS plug-in bundle, which is a directory
+/// and so has to be told apart from a folder *of* plug-ins by its name.
+fn is_bundle(path: &Path) -> bool {
+    path.is_dir()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("plugin"))
+}
+
+/// Read one plug-in, whichever kind of thing it is on disk.
+fn read_plugin(path: &Path) -> Result<Vec<bf::Found>, bf::DiscoverError> {
+    if is_bundle(path) {
+        bf::inspect_bundle(path)
+    } else {
+        bf::inspect_file(path)
+    }
+}
+
+/// The first filter in a plug-in, which is what the single-plug-in
+/// subcommands operate on.
+fn first_filter(path: &Path) -> Result<bf::Found, Box<dyn std::error::Error>> {
+    read_plugin(path)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no filter in that plug-in".into())
+}
+
 fn inspect(path: &Path) -> Res {
-    let found = if path.is_dir() {
+    let found = if is_bundle(path) {
+        bf::inspect_bundle(path)?
+    } else if path.is_dir() {
         bf::discover_dir(path)?
     } else {
         bf::inspect_file(path)?
@@ -92,8 +133,7 @@ fn run_remote(args: &[String]) -> Res {
         }
     }
 
-    let found = bf::inspect_file(&plugin)?;
-    let first = found.into_iter().next().ok_or("no filter in that file")?;
+    let first = first_filter(&plugin)?;
     println!("{}", first.menu_name());
     println!("  plug-in is {}", first.architecture());
     if let Some(b) = first.blocker() {
@@ -155,16 +195,17 @@ fn open_filter(
         // which is what rescues a plug-in whose PiPL is malformed — and
         // what lets this example drive a bare shared library.
         Some(entry) => {
-            let pipl = bf::inspect_file(plugin)
+            let pipl = read_plugin(plugin)
                 .ok()
                 .and_then(|f| f.into_iter().next())
                 .map(|f| f.pipl)
                 .unwrap_or_else(minimal_filter_pipl);
-            Ok(bf::Filter::open(plugin, pipl, &entry)?)
+            // dlopen wants the Mach-O inside the bundle, not the bundle.
+            let binary = bundle_binary(plugin);
+            Ok(bf::Filter::open(&binary, pipl, &entry)?)
         }
         None => {
-            let found = bf::inspect_file(plugin)?;
-            let first = found.into_iter().next().ok_or("no filter in that file")?;
+            let first = first_filter(plugin)?;
             if let Some(b) = first.blocker() {
                 return Err(format!("{}: {b}", first.menu_name()).into());
             }
@@ -193,7 +234,7 @@ fn apply(args: &[String]) -> Res {
         // which is what rescues a plug-in whose PiPL is malformed — and
         // what lets this example drive a bare shared library.
         Some(entry) => {
-            let pipl = bf::inspect_file(&plugin)
+            let pipl = read_plugin(&plugin)
                 .ok()
                 .and_then(|f| f.into_iter().next())
                 .map(|f| f.pipl)
@@ -201,8 +242,7 @@ fn apply(args: &[String]) -> Res {
             bf::Filter::open(&plugin, pipl, &entry)?
         }
         None => {
-            let found = bf::inspect_file(&plugin)?;
-            let first = found.into_iter().next().ok_or("no filter in that file")?;
+            let first = first_filter(&plugin)?;
             if let Some(b) = first.blocker() {
                 return Err(format!("{}: {b}", first.menu_name()).into());
             }
