@@ -51,6 +51,9 @@ Three families, fifteen binaries:
 - **G'MIC-Qt 4.0.4** (0xC0000054), whose one binary declares two filters
 - **Ft/Fourier 08oct2019** (rechmbrs), twelve x86-64 transforms — the
   first to declare interface version **4.1** rather than 4.0
+- **Adobe's own SDK samples** (Dissolve with and without AppleScript,
+  ColorMunger, Propetizer), 32-bit, recovered from an archive repository
+- **hayabuzo/Graphic-Filters**, eight 32-bit FilterMeister builds
 
 Only the shipped **binaries** were used; no project's source was read, so
 the clean-room line holds. GitHub code search was used once, purely as an
@@ -105,10 +108,25 @@ all but one.
 
 | # | Fact | Why it is still open | Failure mode if wrong |
 |---|---|---|---|
-| 1 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position; the API Guide documents no `SPBasicSuite` struct anywhere, only usage examples of those two. **Fifteen plug-in binaries across three families have now been run and not one calls the rest.** Filter Foundry only ever asks for the handle suite; G'MIC asks for one ADM suite by GUID and falls back to Qt when refused; the Fourier family uses no host suite at all and manages its own memory. G'MIC's source *does* call `AllocateBlock` — GitHub code search says so — but nothing reachable from a filter run gets there | A plug-in that allocates through PICA calls the wrong slot. This is the last gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise rather than treated as probably fine. The probe technique below is what would settle it, the moment a plug-in that exercises it turns up |
+| 0 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position; the API Guide documents no `SPBasicSuite` struct anywhere, only usage examples of those two. **Twenty-seven plug-in binaries across five families have now been run and not one calls the rest.** Filter Foundry only ever asks for the handle suite; G'MIC asks for one ADM suite by GUID and falls back to Qt when refused; the Fourier family uses no host suite at all; Adobe's own samples use the direct callbacks. G'MIC's source *does* call `AllocateBlock` — GitHub code search says so, which is all it was used for — but nothing reachable from a filter run gets there, including its second entry point and its settings dialog. Adobe's published prose for **three** products (Photoshop, Premiere Pro, After Effects) documents only `AcquireSuite` and `ReleaseSuite`, and never the struct, so the documentation route is exhausted too | A plug-in that allocates through PICA calls the wrong slot. This is the last gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise rather than treated as probably fine. The probe technique below is what would settle it, the moment a plug-in that exercises it turns up |
 | 2 | `HostProc`'s signature | Named but never printed, and passed as null | None while it stays null |
 | 3 | The suites this host does not implement — PseudoResource, Property, Image Services, Channel Ports, and the descriptor sub-suites | All passed as null, which is the documented way to say "unavailable" | None; a plug-in that needs one declines |
 | 4 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |
+
+## Gaps that block real plug-ins
+
+Not ABI questions — things this host simply does not implement yet, each
+found by a plug-in refusing to run. In rough order of how much they buy:
+
+| Missing | What it blocks | Evidence |
+|---|---|---|
+| `displayPixels` | **FilterMeister**, and so a large slice of the freeware world — Harry's Filters, Plugin Galaxy and many others are FilterMeister builds | All eight Graphic-Filters plug-ins refuse with "This plug-in requires Adobe Photoshop 2.5.2 or later functionality". Pointing `displayPixels` alone at a non-null address gets every one of them past the check and into its real dialog; none of the other null callbacks make any difference |
+| `colorServices` | ColorMunger, and presumably anything that converts or picks colours | Hangs inside `filterSelectorStart` after reading its parameters |
+| `propertyProcs` | Propetizer, and anything asking the host about the document | Faults reading `NULL + 4` |
+
+`displayPixels` is the one worth doing first, and it is real work rather
+than a stub: it hands over a `PSPixelMap` and a platform drawing context
+and expects the pixels on screen, which on Windows means a GDI blit.
 
 ## Settling a suite's member order
 

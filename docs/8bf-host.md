@@ -142,7 +142,10 @@ make no sense for the slot it landed on.
   for everything, which is what makes a plug-in take its compatible path
   instead of misreading a zero.
 - **Format, automation, selection and parser modules.** Filters only.
-- **Most callback suites.** See above.
+- **Most callback suites.** See above — and note that `displayPixels`
+  being absent is what stops every FilterMeister-built plug-in dead,
+  which is a large slice of the freeware world. `docs/8bf-abi-provenance.md`
+  has the evidence and the shortlist.
 - **Crash isolation.** A plug-in fault kills the process.
 
 ### Loading
