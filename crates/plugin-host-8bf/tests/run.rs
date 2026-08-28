@@ -380,13 +380,15 @@ fn a_plug_in_that_declines_the_flat_case_is_refused() {
 }
 
 #[test]
-fn an_oversized_image_is_refused_rather_than_wrapped() {
+fn an_oversized_image_is_refused_unless_the_plug_in_asked_for_wide_coordinates() {
     let dir = tempfile::tempdir().unwrap();
     let Some(mut filter) = load("entry_advance", dir.path()) else {
         return;
     };
-    // Rectangles are 16-bit without BigDocumentStruct, so anything past
-    // 32767 would silently wrap into a negative coordinate.
+    // Rectangles are 16-bit unless a plug-in claims BigDocumentStruct's
+    // wide ones. The fixture does not, so it is told rather than handed
+    // coordinates that have wrapped — and the narrow fields it does see
+    // are clamped, never negative.
     let mut image = bf::Image {
         width: 40_000,
         height: 1,
@@ -650,4 +652,27 @@ fn a_sixteen_bit_grayscale_image_is_gray_16_not_grayscale() {
     filter
         .apply(&mut image, &bf::RunOptions::default())
         .expect("grayscale at 16 bits is its own mode, and the fixture checks which");
+}
+
+#[test]
+fn a_big_document_runs_if_the_plug_in_claims_the_wide_coordinates() {
+    // The other side of the previous test: a plug-in that sets
+    // PluginUsing32BitCoordinates and works from BigDocumentStruct's
+    // rectangles gets the whole document, however wide.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_big", dir.path()) else {
+        return;
+    };
+    let mut image = bf::Image::new(40_000, 2, 3);
+    image
+        .data
+        .iter_mut()
+        .enumerate()
+        .for_each(|(i, b)| *b = (i % 251) as u8);
+    let original = image.clone();
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("a wide-coordinate plug-in should get the whole document");
+    let expected: Vec<u8> = original.data.iter().map(|&b| 255 - b).collect();
+    assert_eq!(image.data, expected);
 }

@@ -170,8 +170,8 @@ pub enum HostError {
     UnsupportedCase,
     /// The plug-in declared it cannot handle this image mode.
     UnsupportedMode(i16),
-    /// The image is larger than the 16-bit rectangles of a non-big
-    /// document can address.
+    /// The image is larger than 16-bit rectangles can address and the
+    /// plug-in did not claim `BigDocumentStruct`'s wide ones.
     ImageTooLarge { width: u32, height: u32 },
     /// The plug-in returned a non-zero result for `selector`.
     Plugin {
@@ -196,7 +196,8 @@ impl std::fmt::Display for HostError {
             HostError::UnsupportedMode(m) => write!(f, "plug-in does not support image mode {m}"),
             HostError::ImageTooLarge { width, height } => write!(
                 f,
-                "{width}x{height} exceeds the 32767 px limit of a non-big document"
+                "the plug-in does not handle documents larger than 32767 px, \
+                 and this one is {width}x{height}"
             ),
             HostError::Plugin {
                 selector,
@@ -309,12 +310,6 @@ impl Filter {
     /// Run the filter over `image`, in place.
     pub fn apply(&mut self, image: &mut Image, opts: &RunOptions) -> Result<(), HostError> {
         suites::trace_from_env();
-        if image.width > i16::MAX as u32 || image.height > i16::MAX as u32 {
-            return Err(HostError::ImageTooLarge {
-                width: image.width,
-                height: image.height,
-            });
-        }
         // Deliberately not 4: a fourth plane is transparency, and
         // offering it under filterCaseFlatImageNoSelection would have
         // the plug-in filter alpha as if it were a colour channel.
@@ -842,7 +837,7 @@ struct Session<'a> {
     out_buf: Vec<u8>,
     /// The rectangle and plane range whose `out_buf` contents have not
     /// been written back to `dest` yet.
-    pending: Option<(Rect, i16, i16)>,
+    pending: Option<(VRect, i16, i16)>,
 
     parameters_owner: bool,
     abort: Arc<AtomicBool>,
@@ -909,14 +904,32 @@ impl<'a> Session<'a> {
         record.abort_proc = Some(abort_thunk);
         record.progress_proc = Some(progress_thunk);
         record.parameters = std::ptr::null_mut();
+        // Past 32767 the narrow fields cannot say the truth. They are
+        // clamped rather than left to wrap — a plug-in reading them gets
+        // a small number instead of a negative one — and the wide fields
+        // beside them carry the real size. A plug-in that never looks at
+        // those is caught after Start rather than allowed to work from
+        // the clamped ones.
+        let narrow = |v: u32| v.min(i16::MAX as u32) as i16;
         record.image_size = Point {
-            v: h as i16,
-            h: w as i16,
+            v: narrow(h),
+            h: narrow(w),
         };
         record.whole_size = record.image_size;
         record.float_coord = Point { v: 0, h: 0 };
         record.planes = planes as i16;
-        record.filter_rect = Rect::new(0, 0, h as i16, w as i16);
+        // Past 32767 the narrow rectangle is left *empty* rather than
+        // clamped. A clamped one invites a plug-in to work on a region
+        // that is not the document — and to overflow its own 16-bit
+        // arithmetic walking it. Empty means "nothing to do here", which
+        // a narrow plug-in returns from harmlessly and is then told the
+        // document is too large for it; a plug-in using the wide fields
+        // never looks at this one.
+        record.filter_rect = if w > i16::MAX as u32 || h > i16::MAX as u32 {
+            Rect::default()
+        } else {
+            Rect::new(0, 0, h as i16, w as i16)
+        };
         record.image_mode = image_mode;
         record.depth = image.depth.bits();
         record.image_h_res = fixed(opts.resolution);
@@ -1095,6 +1108,12 @@ impl<'a> Session<'a> {
         }
         self.call(entry, selector::PREPARE, &mut data)?;
         self.call(entry, selector::START, &mut data)?;
+        if self.needs_wide_coordinates() && !self.wide() {
+            return Err(HostError::ImageTooLarge {
+                width: self.dest.width,
+                height: self.dest.height,
+            });
+        }
         // Without advanceState the plug-in leaves rectangles behind for
         // us to service; with it, Start already emptied them.
         let mut guard = 0u32;
@@ -1215,25 +1234,35 @@ impl<'a> Session<'a> {
         Some(s[1..=len].iter().map(|&b| b as char).collect())
     }
 
+    /// True when the image is larger than 16-bit rectangles can address,
+    /// so only a plug-in using `BigDocumentStruct` can work on it.
+    fn needs_wide_coordinates(&self) -> bool {
+        self.dest.width > i16::MAX as u32 || self.dest.height > i16::MAX as u32
+    }
+
     /// True once the plug-in has claimed the wide coordinate fields, at
     /// which point they, not the narrow ones, say what it wants.
     fn wide(&self) -> bool {
         self.big_doc.plugin_using_32_bit_coordinates != 0
     }
 
-    fn requested_in(&self) -> Rect {
+    /// Always 32-bit. Narrowing here is what silently wrapped a
+    /// 40000-pixel-wide request into a negative one; the wide fields
+    /// exist precisely so that cannot happen, so everything downstream
+    /// works in them.
+    fn requested_in(&self) -> VRect {
         if self.wide() {
-            self.big_doc.in_rect_32.narrow()
+            self.big_doc.in_rect_32
         } else {
-            self.record.in_rect
+            VRect::widen(self.record.in_rect)
         }
     }
 
-    fn requested_out(&self) -> Rect {
+    fn requested_out(&self) -> VRect {
         if self.wide() {
-            self.big_doc.out_rect_32.narrow()
+            self.big_doc.out_rect_32
         } else {
-            self.record.out_rect
+            VRect::widen(self.record.out_rect)
         }
     }
 
@@ -1263,9 +1292,9 @@ impl<'a> Session<'a> {
         // watches these rectangles, so leaving a stale one set would
         // spin forever.
         let mask_rect = if self.wide() {
-            self.big_doc.mask_rect_32.narrow()
+            self.big_doc.mask_rect_32
         } else {
-            self.record.mask_rect
+            VRect::widen(self.record.mask_rect)
         };
         match (&self.mask, mask_rect.is_empty()) {
             (Some(mask), false) => {
@@ -1403,12 +1432,12 @@ impl<'a> Session<'a> {
         let masking = self.record.auto_mask != 0 && self.mask.is_some();
         let depth = self.dest.depth;
         for y in 0..rect.height() {
-            let dy = rect.top as i32 + y;
+            let dy = rect.top + y;
             if dy < 0 || dy >= h {
                 continue;
             }
             for x in 0..rect.width() {
-                let dx = rect.left as i32 + x;
+                let dx = rect.left + x;
                 if dx < 0 || dx >= w {
                     continue;
                 }
@@ -1459,7 +1488,7 @@ fn read_rect(
     width: u32,
     height: u32,
     planes: u16,
-    rect: Rect,
+    rect: VRect,
     lo: i16,
     hi: i16,
     padding: i16,
@@ -1472,9 +1501,9 @@ fn read_rect(
     let lo = lo as usize * sample;
 
     for y in 0..rect.height() {
-        let sy = rect.top as i32 + y;
+        let sy = rect.top + y;
         for x in 0..rect.width() {
-            let sx = rect.left as i32 + x;
+            let sx = rect.left + x;
             let oi = y as usize * row_bytes + x as usize * n;
             let inside = sx >= 0 && sy >= 0 && (sx as u32) < width && (sy as u32) < height;
             if inside {

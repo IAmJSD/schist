@@ -104,6 +104,19 @@ typedef struct ColorServicesInfo {
     uintptr_t selectorParameter;
 } ColorServicesInfo;
 
+typedef struct VRect32 { int32_t top, left, bottom, right; } VRect32;
+typedef struct VPoint32 { int32_t v, h; } VPoint32;
+typedef struct BigDocumentStruct {
+    int32_t PluginUsing32BitCoordinates;
+    VPoint32 imageSize32;
+    VRect32 filterRect32;
+    VRect32 inRect32;
+    VRect32 outRect32;
+    VRect32 maskRect32;
+    VPoint32 floatCoord32;
+    VPoint32 wholeSize32;
+} BigDocumentStruct;
+
 typedef struct PlatformData {
     void *hwnd;
 } PlatformData;
@@ -344,6 +357,22 @@ static void invert_tile(FilterRecord *fr, int32_t amount) {
     }
 }
 
+/* invert_tile's wide twin, reading its extent from the 32-bit rects. */
+static void invert_tile_wide(FilterRecord *fr, void *bigv, int32_t amount) {
+    BigDocumentStruct *big = (BigDocumentStruct *)bigv;
+    int planes = fr->inHiPlane - fr->inLoPlane + 1;
+    int32_t w = big->inRect32.right - big->inRect32.left;
+    int32_t h = big->inRect32.bottom - big->inRect32.top;
+    for (int32_t y = 0; y < h; y++) {
+        const unsigned char *src = (const unsigned char *)fr->inData + (size_t)y * fr->inRowBytes;
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        for (int32_t i = 0; i < w * planes; i++) {
+            int v = amount - src[i];
+            dst[i] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+}
+
 /* Point the record at the next tile, or empty the rectangles when the
  * whole filterRect has been covered. Returns 1 while there is work. */
 static int next_tile(FilterRecord *fr, Progress *p) {
@@ -477,6 +506,46 @@ EXPORT void entry_advance(int16_t selector, void *pb, intptr_t *data, int16_t *r
 
 EXPORT void entry_continue(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
     run(selector, (FilterRecord *)pb, data, result, RUN_CONTINUE);
+}
+
+/* ---- big documents ----------------------------------------------------
+ *
+ * Past 32767 pixels the 16-bit rectangles cannot say where anything is,
+ * and the host leaves them empty. A plug-in that wants such a document
+ * claims BigDocumentStruct's wide ones and works from those.
+ */
+#define bigMissing (-30170)
+
+EXPORT void entry_big(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    BigDocumentStruct *big = (BigDocumentStruct *)fr->bigDocumentData;
+    if (big == NULL) { *result = bigMissing; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+    big->PluginUsing32BitCoordinates = 1;
+
+    /* A strip at a time, in 32-bit coordinates throughout. */
+    int32_t rows = 64;
+    for (int32_t top = big->filterRect32.top; top < big->filterRect32.bottom; top += rows) {
+        int32_t bottom = top + rows;
+        if (bottom > big->filterRect32.bottom) bottom = big->filterRect32.bottom;
+        big->inRect32.top = top;
+        big->inRect32.left = big->filterRect32.left;
+        big->inRect32.bottom = bottom;
+        big->inRect32.right = big->filterRect32.right;
+        big->outRect32 = big->inRect32;
+        fr->inLoPlane = fr->outLoPlane = 0;
+        fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+        OSErr e = fr->advanceState();
+        if (e != 0) { *result = e; return; }
+        invert_tile_wide(fr, big, 255);
+    }
+    big->inRect32.top = big->inRect32.left = 0;
+    big->inRect32.bottom = big->inRect32.right = 0;
+    big->outRect32 = big->inRect32;
+    big->maskRect32 = big->inRect32;
 }
 
 /* ---- layers and selections -------------------------------------------- */

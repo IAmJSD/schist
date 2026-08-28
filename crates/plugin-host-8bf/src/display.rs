@@ -242,6 +242,14 @@ pub unsafe fn blit(hdc: usize, dst_row: i32, dst_col: i32, surface: &Surface) ->
         ) -> i32;
     }
 
+    // No device context is not the same as bad pixels. A plug-in that
+    // passes none has asked for nothing to be drawn, and the only error
+    // this callback can report means "unsupported colour mode" — saying
+    // that would send it looking for a fault in pixels that are fine.
+    if hdc == 0 {
+        return true;
+    }
+
     let header = BitmapInfoHeader {
         size: std::mem::size_of::<BitmapInfoHeader>() as u32,
         width: surface.width,
