@@ -405,7 +405,11 @@ impl Exporter {
                     ),
                     f(b"Opac", 0x0a, Value::F64(s.opacity as f64)),
                     f(b"SclO", 0x29, Value::Bool(false)),
-                    f(b"Radi", 0x0a, Value::F64((s.size / crate::BLUR_RADI) as f64)),
+                    f(
+                        b"Radi",
+                        0x0a,
+                        Value::F64((s.size / crate::BLUR_RADI) as f64),
+                    ),
                     f(b"Offs", 0x0a, Value::F64(s.distance as f64)),
                     // Ours is where the light comes from; Affinity
                     // stores the offset direction itself.
@@ -451,7 +455,11 @@ impl Exporter {
                     ),
                     f(b"Opac", 0x0a, Value::F64(s.opacity as f64)),
                     f(b"SclO", 0x29, Value::Bool(false)),
-                    f(b"Radi", 0x0a, Value::F64((s.size / crate::BLUR_RADI) as f64)),
+                    f(
+                        b"Radi",
+                        0x0a,
+                        Value::F64((s.size / crate::BLUR_RADI) as f64),
+                    ),
                     f(
                         b"Comp",
                         0x0a,

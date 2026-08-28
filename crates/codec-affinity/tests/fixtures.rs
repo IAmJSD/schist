@@ -484,8 +484,8 @@ fn probed_adjustments_match_affinitys_render() {
         // The RGB-cube probes: one document per feature, whose
         // thumbnail is a byte-exact render, so these pin the whole
         // transfer function rather than one card's worth of it.
-        ("cube_vib100.af", 4.0), // hue window + chroma curve
-        ("cube_vib50.af", 3.0),  // the slider law
+        ("cube_vib100.af", 4.0),    // hue window + chroma curve
+        ("cube_vib50.af", 3.0),     // the slider law
         ("cube_vibneg100.af", 1.5), // a flat half-chroma scale
         ("cube_lens100.af", 1.0),
         ("cube_lens100_nolum.af", 0.5),
@@ -528,9 +528,61 @@ fn probed_adjustments_match_affinitys_render() {
         ("ig_r40_i0.af", 1.0),
         ("ig_r80_i0.af", 1.0),
         ("ig_r40_i80.af", 3.0),
-        ("fx_3d.af", 11.0),       // PhgB, the 3D effect
-        ("fx_gaussian.af", 2.0),  // Gaus, a layer-style blur
+        ("fx_3d.af", 11.0),           // PhgB, the 3D effect
+        ("fx_gaussian.af", 2.0),      // Gaus, a layer-style blur
         ("flrn_perspective.af", 0.5), // Live Perspective, resampled through
+        // The geometric live filters, each on the RGB cube — whose
+        // every pixel is a distinct colour, so the render is the
+        // filter's own displacement field and the mapping falls out of
+        // one file. Two settings each where a second one pins something
+        // the first cannot: the twirl's radius, the pinch's sign, the
+        // spherical's two directions and the ripple's slider law.
+        ("lf_twirl.af", 0.1),
+        ("lf_twirl45r80.af", 0.1),
+        ("lf_punch.af", 0.1),
+        ("lf_sphericalneg.af", 0.1),
+        ("lf_lensdist.af", 0.1),
+        ("lf_pixelate.af", 0.1),
+        ("lf_pixelate32.af", 0.1),
+        ("lf_ripple.af", 0.5),
+        ("lf_ripple25.af", 1.0),
+        ("lf_ripple50.af", 2.5), // the fitted amplitude law, +/-2%
+        // Where the filter magnifies, Affinity resamples each 256x256
+        // bitmap tile on its own: the source seam at x = y = 256 comes
+        // back unblended, and these two disagree along that cross and
+        // nowhere else — 99.4% of both cards is bit-identical.
+        ("lf_pinch.af", 1.5),
+        ("lf_spherical.af", 1.5),
+        ("lf_spherical100.af", 2.0),
+        // The live blurs. Maximum and median come back bit-exact, down
+        // to the darker band the median leaves where its window hangs
+        // off the page; the rest are the fitted size conventions.
+        ("lf_maxblur.af", 0.1),
+        ("lf_medblur.af", 0.1),
+        ("lf_box10.af", 0.5),
+        ("lf_motion30.af", 0.6),
+        ("lf_radial.af", 1.0),
+        ("lf_gauss10.af", 0.5), // three box passes, sigma = Radi/3
+        ("lf_gauss30.af", 0.5),
+        // Unsharp mask over the same blur. The widest of the three is
+        // where Affinity's own blur stops scaling with Radi.
+        ("lf_usm_r5.af", 0.3),
+        ("lf_usm_r10.af", 0.3),
+        ("lf_usm_r20.af", 3.0),
+        ("lf_highpass.af", 1.0), // mid grey plus half the same detail
+        // Dust & Scratches is the median gated by a tolerance, and both
+        // probes come back byte-exact.
+        ("lf_dust_r8.af", 0.1),
+        ("lf_dust_r8t50.af", 0.1),
+        // The vignette: one probe per field, all on the same ellipse.
+        // `lf_vig_hard1` is a hard edge, where the whole disagreement is
+        // the one ring Affinity antialiases and we do not; away from it
+        // that probe is at 0.31.
+        ("lf_vig_base.af", 1.5),
+        ("lf_vig_b.af", 1.5),      // Hard 0, a ramp from the centre
+        ("lf_vig_c.af", 1.5),      // Scal 0.5
+        ("lf_vig_shap50.af", 1.5), // Shap 0.5, half as wide
+        ("lf_vig_hard1.af", 5.0),
         // Shapes — each drawn once with its tool; the embedded
         // thumbnail is Affinity's own render of it.
         ("shp_arrow.af", 1.0),
@@ -548,7 +600,7 @@ fn probed_adjustments_match_affinitys_render() {
         ("shp_polygon.af", 0.5),
         ("shp_segment.af", 1.0),
         ("shp_star_curved.af", 4.5), // fitted bow model
-        ("shp_tear.af", 2.5), // fitted profile
+        ("shp_tear.af", 2.5),        // fitted profile
         ("shp_trapezoid.af", 0.5),
         ("shp_triangle.af", 0.5),
         ("text_rotated.af", 2.5), // resampled through the rotation
@@ -577,7 +629,12 @@ fn probed_adjustments_match_affinitys_render() {
         let ours = if ours.dimensions() == thumb.dimensions() {
             ours
         } else {
-            image::imageops::resize(&ours, thumb.width(), thumb.height(), image::imageops::Triangle)
+            image::imageops::resize(
+                &ours,
+                thumb.width(),
+                thumb.height(),
+                image::imageops::Triangle,
+            )
         };
         let mut sum = 0.0f64;
         let mut n = 0u64;

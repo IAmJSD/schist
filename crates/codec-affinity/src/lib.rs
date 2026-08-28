@@ -34,12 +34,15 @@ pub(crate) const BLUR_RADI: f32 = 0.58;
 
 pub mod archive;
 pub mod container;
+pub(crate) mod distort;
 pub mod emit;
 pub mod error;
 pub mod export;
 pub mod graph;
 pub mod import;
+pub(crate) mod liveblur;
 pub mod preserve;
+pub(crate) mod vignette;
 
 pub use archive::{is_affinity, Archive};
 pub use error::AffinityError;

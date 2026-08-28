@@ -17,7 +17,10 @@
 //! better.
 
 use crate::archive::Archive;
+use crate::distort::Distort;
 use crate::error::{malformed, AffinityError};
+use crate::liveblur::LiveBlur;
+use crate::vignette::Vignette;
 
 /// Ceiling on the pixel count of one imported canvas or bitmap.
 ///
@@ -90,6 +93,14 @@ pub fn read_affinity(bytes: &[u8]) -> Result<(Document, ImportReport), AffinityE
     let doc_bytes = archive.extract(entry)?;
     let graph = graph::parse(&doc_bytes)?;
     build(&archive, &graph)
+}
+
+/// A live filter we know how to run over a layer's own pixels: one that
+/// moves them about, or one that mixes neighbours together.
+enum LiveFilter {
+    Geometry(Distort),
+    Blur(LiveBlur),
+    Vignette(Vignette),
 }
 
 fn f64s<'g>(node: &'g Node, name: &[u8; 4]) -> Option<&'g [f64]> {
@@ -790,16 +801,24 @@ impl Walker<'_> {
 
     /// True when a live filter node's warp maps every source quad onto
     /// itself — it changes nothing on screen.
+    ///
+    /// Only Live Perspective carries quads. Every other filter keeps
+    /// plain parameter fields, and a node with no quads at all is not
+    /// inert but unexamined, so it has to say so rather than claim to
+    /// be an identity.
     fn filter_is_identity(&self, node: &Node) -> bool {
         let Some(filt) = self.graph.child(node, b"Filt") else {
             return false;
         };
+        let mut saw_quad = false;
         for (src, dst) in [(b"DSrA", b"DDsA"), (b"DSrB", b"DDsB"), (b"Src ", b"Dst ")] {
             match (self.quad(filt, src), self.quad(filt, dst)) {
                 (Some(a), Some(b)) => {
-                    if a.iter().zip(&b).any(|(p, q)| {
-                        (p.0 - q.0).abs() > 1e-6 || (p.1 - q.1).abs() > 1e-6
-                    }) {
+                    saw_quad = true;
+                    if a.iter()
+                        .zip(&b)
+                        .any(|(p, q)| (p.0 - q.0).abs() > 1e-6 || (p.1 - q.1).abs() > 1e-6)
+                    {
                         return false;
                     }
                 }
@@ -807,7 +826,7 @@ impl Walker<'_> {
                 _ => return false,
             }
         }
-        true
+        saw_quad
     }
 
     /// One of a filter's corner quads. `Quad` stores its corners as
@@ -826,12 +845,7 @@ impl Walker<'_> {
         if v.len() < 8 || !v[..8].iter().all(|f| f.is_finite()) {
             return None;
         }
-        Some([
-            (v[0], v[4]),
-            (v[1], v[5]),
-            (v[2], v[6]),
-            (v[3], v[7]),
-        ])
+        Some([(v[0], v[4]), (v[1], v[5]), (v[2], v[6]), (v[3], v[7])])
     }
 
     /// The projective map one live filter applies to the pixels it sits
@@ -847,6 +861,148 @@ impl Walker<'_> {
         let (src, dst) = (self.quad(filt, b"Src ")?, self.quad(filt, b"Dst ")?);
         let h = Homography::from_quads(&src, &dst)?;
         (!h.is_identity()).then_some(h)
+    }
+
+    /// The geometric filter one `FlRN` applies, if we know how to run
+    /// it. Its centre and radii are already in the layer's own pixel
+    /// space, which is where the fields are stored.
+    ///
+    /// Every mapping is measured, not guessed; the derivations are in
+    /// [`crate::distort`] and in the spec.
+    fn distort_of(&self, flrn: &Node) -> Option<LiveFilter> {
+        let filt = self.graph.child(flrn, b"Filt")?;
+        let centre = |tag: &[u8; 4]| -> (f64, f64) {
+            match f64s(filt, tag) {
+                Some([x, y, ..]) => (*x, *y),
+                _ => (0.0, 0.0),
+            }
+        };
+        let num = |tag: &[u8; 4]| f64_of(filt, tag).unwrap_or(0.0);
+        let d = match &filt.type_tag().to_be_bytes() {
+            b"RTwC" => {
+                let (cx, cy) = centre(b"Orin");
+                Distort::Twirl {
+                    cx,
+                    cy,
+                    radius: num(b"Radi"),
+                    angle_deg: num(b"Angl"),
+                }
+            }
+            b"RPPC" => {
+                let (cx, cy) = centre(b"Orig");
+                Distort::Pinch {
+                    cx,
+                    cy,
+                    radius: num(b"Radi"),
+                    amount: num(b"Inte") / 100.0,
+                }
+            }
+            b"RSpC" => {
+                let (cx, cy) = centre(b"Orig");
+                Distort::Spherical {
+                    cx,
+                    cy,
+                    radius: num(b"Radi"),
+                    amount: num(b"Inte") / 100.0,
+                }
+            }
+            b"RRiC" => {
+                let (cx, cy) = centre(b"Orig");
+                Distort::Ripple {
+                    cx,
+                    cy,
+                    intensity: num(b"Inte"),
+                }
+            }
+            b"RLdC" => {
+                let (cx, cy) = centre(b"Orig");
+                Distort::Lens {
+                    cx,
+                    cy,
+                    rad_x: num(b"RadX"),
+                    rad_y: num(b"RadY"),
+                    amount: num(b"Inte"),
+                }
+            }
+            b"RPxC" => Distort::Pixelate { size: num(b"Quan") },
+            b"RGBC" => {
+                return Some(LiveFilter::Blur(LiveBlur::Gaussian {
+                    radius: num(b"Radi"),
+                }))
+            }
+            b"RBBC" => {
+                return Some(LiveFilter::Blur(LiveBlur::Box {
+                    radius: num(b"Radi"),
+                }))
+            }
+            b"RMoB" => {
+                return Some(LiveFilter::Blur(LiveBlur::Motion {
+                    radius: num(b"Radi"),
+                    angle_rad: num(b"Angl"),
+                }))
+            }
+            b"RRaB" => {
+                let (cx, cy) = centre(b"Cent");
+                return Some(LiveFilter::Blur(LiveBlur::Radial {
+                    cx,
+                    cy,
+                    angle_deg: num(b"Angl"),
+                }));
+            }
+            b"RMBC" => {
+                return Some(LiveFilter::Blur(LiveBlur::Maximum {
+                    radius: num(b"Radi"),
+                    circular: bool_of(filt, b"Circ").unwrap_or(false),
+                }))
+            }
+            b"RMeB" => {
+                return Some(LiveFilter::Blur(LiveBlur::Median {
+                    radius: num(b"Radi"),
+                }))
+            }
+            b"RVgC" => {
+                return Some(LiveFilter::Vignette(Vignette {
+                    exposure: num(b"Expo"),
+                    hardness: num(b"Hard"),
+                    scale: num(b"Scal"),
+                    shape: num(b"Shap"),
+                }))
+            }
+            b"D&SC" => {
+                return Some(LiveFilter::Blur(LiveBlur::DustAndScratches {
+                    radius: num(b"Radi"),
+                    tolerance: num(b"Tole"),
+                    per_channel: bool_of(filt, b"Chan").unwrap_or(false),
+                }))
+            }
+            b"RHPC" => {
+                return Some(LiveFilter::Blur(LiveBlur::HighPass {
+                    radius: num(b"Radi"),
+                    mono: bool_of(filt, b"Mono").unwrap_or(false),
+                }))
+            }
+            b"RUSC" => {
+                return Some(LiveFilter::Blur(LiveBlur::Unsharp {
+                    radius: num(b"Radi"),
+                    factor: num(b"Fact"),
+                    threshold: num(b"Thrs"),
+                }))
+            }
+            _ => return None,
+        };
+        Some(LiveFilter::Geometry(d))
+    }
+
+    /// Every live filter we can run on a node, in `AdCh` order — a later
+    /// one works on what the earlier one produced.
+    fn live_filters(&self, node: &Node) -> Vec<LiveFilter> {
+        self.graph
+            .children(node, b"AdCh")
+            .into_iter()
+            .filter(|f| f.types.iter().any(|(t, _)| *t == graph::tag(b"FlRN")))
+            .filter(|f| bool_of(f, b"Visi") != Some(false))
+            .filter_map(|f| self.distort_of(f))
+            .collect()
     }
 
     /// Every warp on a node, composed into one map. Filters apply in
@@ -1637,8 +1793,9 @@ impl Walker<'_> {
     /// fixtures/affinity-probe/flrn_perspective.af, which pulls one
     /// corner in; `DSrA`/`DDsA`/`DSrB`/`DDsB` are the second pair of
     /// quads "Two planes" mode uses, and `DMod` says whether it's on).
-    /// We don't resample through the map yet, so say what was dropped
-    /// rather than drawing the layer unwarped in silence.
+    /// The geometric ones are resampled through in `place_raster`; the
+    /// rest we cannot run yet, so say what was dropped rather than
+    /// drawing the layer unfiltered in silence.
     fn report_live_filters(&mut self, node: &Node, layer: &Layer) {
         let filters: Vec<&Node> = self
             .graph
@@ -1648,7 +1805,7 @@ impl Walker<'_> {
             .filter(|n| !self.filter_is_identity(n))
             .collect();
         for f in filters {
-            if self.warp_of(f).is_some() {
+            if self.warp_of(f).is_some() || self.distort_of(f).is_some() {
                 continue; // resampled through in place_raster
             }
             let name = self
@@ -2161,6 +2318,22 @@ impl Walker<'_> {
         // layer transform places them, so resample here and slide the
         // transform by wherever the destination quad ended up.
         let mut img = img;
+        // The geometric filters and the blurs rework the same pixels
+        // in place, so they run before the quad warp that can move them
+        // somewhere else.
+        for f in self.live_filters(node) {
+            img.pixels = match f {
+                LiveFilter::Geometry(d) => {
+                    crate::distort::apply(img.width, img.height, &img.pixels, &d)
+                }
+                LiveFilter::Blur(b) => {
+                    crate::liveblur::apply(img.width, img.height, &img.pixels, &b)
+                }
+                LiveFilter::Vignette(v) => {
+                    crate::vignette::apply(img.width, img.height, &img.pixels, &v)
+                }
+            };
+        }
         if let Some(h) = self.live_warp(node) {
             // A degenerate map is not worth losing the layer over: draw
             // it where it would have been instead.
@@ -4019,16 +4192,17 @@ impl Homography {
             for v in a[col].iter_mut() {
                 *v /= d;
             }
-            for row in 0..8 {
+            let pivot = a[col];
+            for (row, cells) in a.iter_mut().enumerate() {
                 if row == col {
                     continue;
                 }
-                let f = a[row][col];
+                let f = cells[col];
                 if f == 0.0 {
                     continue;
                 }
-                for k in col..9 {
-                    a[row][k] -= f * a[col][k];
+                for (k, v) in cells.iter_mut().enumerate().skip(col) {
+                    *v -= f * pivot[k];
                 }
             }
         }

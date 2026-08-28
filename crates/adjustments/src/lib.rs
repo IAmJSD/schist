@@ -2316,8 +2316,7 @@ fn white_balance_interaction(warmth: f32, tint: f32) -> [f32; 3] {
     let mut out = [0.0f32; 3];
     for (k, o) in out.iter_mut().enumerate() {
         let a = WB_INTERACTION[iw][it][k] * (1.0 - ft) + WB_INTERACTION[iw][it + 1][k] * ft;
-        let b =
-            WB_INTERACTION[iw + 1][it][k] * (1.0 - ft) + WB_INTERACTION[iw + 1][it + 1][k] * ft;
+        let b = WB_INTERACTION[iw + 1][it][k] * (1.0 - ft) + WB_INTERACTION[iw + 1][it + 1][k] * ft;
         *o = a * (1.0 - fw) + b * fw;
     }
     out
@@ -2463,7 +2462,6 @@ fn set_lum(px: Rgba, target: f32) -> Rgba {
         a: px.a,
     }
 }
-
 
 /// Scale a pixel's CIELAB chroma about its own lightness, keeping hue,
 /// and clip back into sRGB. Affinity saturates this way.
