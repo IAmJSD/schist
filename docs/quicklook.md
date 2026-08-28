@@ -48,7 +48,8 @@ macOS allows one extension point per bundle and thumbnails and previews
 are two, so `packaging/macos/bundle.sh` wraps that one executable in two
 `.appex` bundles under `Schist.app/Contents/PlugIns`, each with its own
 Info.plist. Both are sandboxed (`packaging/macos/quicklook/entitlements.plist`)
-and are signed before the app, whose signature seals them.
+and are signed before the app, whose signature seals them. `make release`
+is what runs that script on macOS.
 
 Data-based previews need macOS 12. On macOS 11 the preview extension's
 class does not exist, the binary notices and skips it, and thumbnails —
@@ -66,10 +67,13 @@ cargo run -p schist-quicklook -- --render file.afphoto out.png [max-edge]
 It prints the size and which of the two paths above produced it.
 
 To exercise the real thing, build the bundle and let Launch Services see
-it:
+it. `make release` cross-builds the `.8bf` plug-in helpers on the way,
+which the extensions never touch, so the script it wraps builds the same
+bundle without them — `./packaging/macos/bundle.sh debug` — if the rustup
+targets those helpers need are not installed:
 
 ```sh
-./packaging/macos/bundle.sh debug
+make release PROFILE=debug
 cp -R dist/Schist.app ~/Applications/
 # Sign them the way bundle.sh does -- inside out, the extensions with
 # their own sandboxed entitlements first -- so what is tested matches
