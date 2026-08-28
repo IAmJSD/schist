@@ -33,6 +33,53 @@ def gradient():
     open('in.ppm', 'wb').write(b'P6\n%d %d\n255\n' % (w, h) + bytes(data))
 
 
+def halves():
+    """Two solid halves. A filter that mangles the row stride cannot
+    leave this looking like two solid halves split down the middle."""
+    w, h = 64, 48
+    data = bytearray()
+    for _ in range(h):
+        for x in range(w):
+            data += bytes([0, 0, 255] if x < w // 2 else [255, 255, 0])
+    open('halves.ppm', 'wb').write(b'P6\n%d %d\n255\n' % (w, h) + bytes(data))
+
+
+def check_halves(out, label):
+    """The filter's exact maths is its own business; what the host has to
+    get right is that each half comes back solid, the split stays at the
+    midpoint, and something actually changed."""
+    w, h = 64, 48
+    try:
+        before, after = pixels('halves.ppm'), pixels(out)
+    except FileNotFoundError:
+        print(f'FAIL ({label}): no output written')
+        return 1
+    if len(after) != w * h * 3:
+        print(f'FAIL ({label}): output is {len(after)} bytes, expected {w * h * 3}')
+        return 1
+
+    def px(buf, x, y):
+        i = (y * w + x) * 3
+        return tuple(buf[i:i + 3])
+
+    left = {px(after, x, y) for y in range(h) for x in range(0, w // 2)}
+    right = {px(after, x, y) for y in range(h) for x in range(w // 2, w)}
+    problems = []
+    if len(left) != 1:
+        problems.append(f'left half is not solid ({len(left)} colours)')
+    if len(right) != 1:
+        problems.append(f'right half is not solid ({len(right)} colours)')
+    if left == right:
+        problems.append('both halves came back the same colour')
+    if after == before:
+        problems.append('nothing changed')
+    if problems:
+        print(f'FAIL ({label}): ' + '; '.join(problems))
+        return 1
+    print(f'ok ({label}): {left.pop()} | {right.pop()}, split intact')
+    return 0
+
+
 def pixels(path):
     raw = open(path, 'rb').read()
     return raw[raw.index(b'255\n') + 4:]
@@ -60,7 +107,11 @@ if __name__ == '__main__':
         extract()
     elif cmd == 'gradient':
         gradient()
+    elif cmd == 'halves':
+        halves()
     elif cmd == 'check':
         sys.exit(check(sys.argv[2], sys.argv[3]))
+    elif cmd == 'check-halves':
+        sys.exit(check_halves(sys.argv[2], sys.argv[3]))
     else:
         sys.exit(f'unknown command {cmd}')

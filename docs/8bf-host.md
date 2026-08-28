@@ -109,8 +109,8 @@ has never seen still comes back with real pixels.
 
 ### Tracing
 
-`SCHIST_8BF_TRACE=1` logs every selector call and every host callback the
-plug-in makes, with arguments:
+`SCHIST_8BF_TRACE=1` logs every selector call, every host callback the
+plug-in makes, and every rectangle the host serves, with arguments:
 
 ```
 [8bf] -> selector 3
@@ -120,9 +120,11 @@ plug-in makes, with arguments:
 [8bf] handle.set_size(0x7ffffea99490, 129)
 ```
 
-This is the only way to see what an uncooperative plug-in is asking for,
-and it is what established the callback suites' member order: a wrong
-order shows up as a call whose arguments make no sense for the slot.
+This is the only way to see what an uncooperative plug-in is asking for.
+`SCHIST_8BF_BUFPROBE=1` goes further and replaces the buffer suite with
+one interchangeable probe per slot, which is how that suite's member
+order was established — a wrong order shows up as a call whose arguments
+make no sense for the slot it landed on.
 
 ## What stage 1 does not do
 
@@ -152,11 +154,14 @@ zero. Everything else — PseudoResource, Property, Image Services,
 Channel Ports, the descriptor sub-suites — is null, the documented way to
 say "unavailable".
 
-Member order inside a suite is the one thing Adobe never prints. But
-chapter 3 heads each suite with a version and a routine count and then
-documents its routines in a fixed order, and for the Handle suite that
-order is exactly what a real plug-in was observed calling. That is what
-licenses reading the Buffer suite off the page the same way.
+Member order inside a suite is the one thing Adobe never prints — and it
+cannot be inferred from the order the prose introduces the routines in.
+The Handle suite's narrative order happens to match its struct order; the
+Buffer suite's does not, and assuming otherwise put a wrong order in this
+host for a commit. Both are now established the same way, separately: by
+handing a real plug-in one interchangeable probe per slot and reading
+which slot received arguments shaped like which routine. See
+`SCHIST_8BF_BUFPROBE` and the note in `docs/8bf-abi-provenance.md`.
 
 ### Packing
 

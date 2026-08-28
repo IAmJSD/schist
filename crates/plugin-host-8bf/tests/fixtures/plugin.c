@@ -36,20 +36,20 @@ typedef struct {
     Fixed gamma, redX, redY, greenX, greenY, blueX, blueY, whiteX, whiteY, ambient;
 } PlugInMonitor;
 
-/* Buffer suite. Order and header values from API Guide chapter 3:
- * "Current version: 2; Routines: 5", over BufferSpace, AllocateBuffer,
- * FreeBuffer, LockBuffer, UnlockBuffer. Declared here independently so
- * the host's own ordering is checked against the documentation rather
- * than against itself. */
+/* Buffer suite. Version and count from API Guide chapter 3 ("Current
+ * version: 2; Routines: 5"); the member order is Allocate, Lock, Unlock,
+ * Free, Space, which is NOT the order the guide's prose introduces the
+ * routines in — it was read off a real plug-in's argument registers.
+ * See docs/8bf-abi-provenance.md. */
 typedef void *BufferID;
 typedef struct BufferProcs {
     int16_t bufferProcsVersion;
     int16_t numBufferProcs;
-    int32_t (*spaceProc)(void);
     OSErr (*allocateProc)(int32_t size, BufferID *buffer);
-    void (*freeProc)(BufferID buffer);
     void *(*lockProc)(BufferID buffer, MacBoolean moveHigh);
     void (*unlockProc)(BufferID buffer);
+    void (*freeProc)(BufferID buffer);
+    int32_t (*spaceProc)(void);
 } BufferProcs;
 
 typedef struct PlatformData {

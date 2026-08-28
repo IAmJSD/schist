@@ -80,8 +80,10 @@ all but one.
 
 | Fact | How it was settled |
 |---|---|
-| **`BufferProcs` member order**, and its version/count | Chapter 3 heads each suite with a version and a routine count, then documents the routines in a fixed order. For the Handle suite that reads "version 1, routines 7" over New, Dispose, GetSize, SetSize, Lock, Unlock, RecoverSpace — **exactly the order a real plug-in was observed calling**. That match is what licenses reading the Buffer suite the same way: "version 2, routines 5" over Space, Allocate, Free, Lock, Unlock. The order this host shipped with was wrong, and any plug-in that had used the suite would have crashed |
+| **`BufferProcs` version and routine count** — 2 and 5 | Chapter 3 heads each suite with both: "Buffer suite. Current version: 2; Adobe Photoshop: 5.0; Routines: 5" |
+| **`BufferProcs` member order** — Allocate, Lock, Unlock, Free, Space | Read off a real plug-in. G'MIC was handed five interchangeable probes, one per slot, each logging the arguments it received; slot 0 arrived with `(3072, <stack pointer>)`, and 3072 is exactly one plane of the image it was filtering — unmistakably `AllocateBufferProc(size, &buffer)`. With the order restored, G'MIC allocates, locks, writes three planes, unlocks and frees, and its output is correct |
 | **`handleProcsVersion` = 1, `numHandleProcs` = 7** | The same suite headers, printed in the prose. The host had been claiming 8 |
+| **The API Guide's narrative order is *not* generally the struct order** | The Handle suite's prose order — New, Dispose, GetSize, SetSize, Lock, Unlock, RecoverSpace — happens to match what a plug-in was seen calling. Treating that single match as a rule and applying it to the Buffer suite put a **wrong order in this host for one commit**; the prose there runs Space, Allocate, Free, Lock, Unlock and the struct does not. Each suite's order has to be established on its own evidence. The Handle suite's is; the Buffer suite's now is too; neither licenses the other |
 | **The padding constants stopped mattering** | Rather than guess three numbers the prose never prints, the host fills for the documented 0..=255 and replicates the edge for anything else. Replication satisfies `plugInWantsEdgeReplication` outright, is a valid answer to `plugInDoesNotWantPadding` ("leave the data random"), and beats the error `plugInWantsErrorOnBoundsException` asks for, which exists only because older hosts could not serve the region. A fixture requests a rectangle overhanging every edge under a mode the host has never heard of and still gets usable pixels |
 | **`errReportString` stopped mattering** | The host reports whatever the plug-in wrote into `errorString` whatever result code came with it. A non-empty `Str255` only happens because the plug-in filled it, so the string is the signal and the code need not be known |
 | **The `AboutRecord` layout** | Filter Foundry's about box renders correctly and the selector returns 0, so `platformData` is at offset 0 and indirect there too |
@@ -94,14 +96,36 @@ all but one.
 
 | # | Fact | Why it is still open | Failure mode if wrong |
 |---|---|---|---|
-| 1 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are both confirmed by position, but the API Guide documents no `SPBasicSuite` struct anywhere — only usage examples of those two. Neither plug-in called the rest | A plug-in that allocates through PICA calls the wrong slot. This is the last real gap |
+| 1 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position, but the API Guide documents no `SPBasicSuite` struct anywhere — only usage examples of those two. Neither plug-in calls the rest: Filter Foundry only ever asks for the handle suite, and G'MIC asks for one ADM suite by GUID and falls back to its own Qt UI when refused | A plug-in that allocates through PICA calls the wrong slot. This is the last real gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise. `SCHIST_8BF_BUFPROBE` is the technique that would settle it |
 | 2 | `HostProc`'s signature | Named but never printed, and passed as null | None while it stays null |
 | 3 | The suites this host does not implement — PseudoResource, Property, Image Services, Channel Ports, and the descriptor sub-suites | All passed as null, which is the documented way to say "unavailable" | None; a plug-in that needs one declines |
 | 4 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |
+
+## Settling a suite's member order
+
+The technique, since it had to be invented twice and will be needed again
+for stages 2 to 4:
+
+Fill every slot of the suite with an interchangeable probe that logs the
+arguments it was handed. Each routine in a suite is `extern "C"` and
+passes its arguments in the same registers, so one probe can stand in for
+any slot, and the argument *shape* says which routine the plug-in thought
+it was calling — `(small int, pointer)` is an allocate, `(pointer, 0|1)`
+is a lock, a bare pointer is a free or an unlock, nothing meaningful is a
+space query. Then run a plug-in that uses the suite and read the log.
+
+`SCHIST_8BF_BUFPROBE=1` does this for `BufferProcs`; `suites.rs` has the
+machinery to point it at another.
+
+Finding a plug-in that exercises the suite at all is the hard part. Both
+plug-ins here had to be driven through their own UI before either touched
+the buffer suite — a headless run never gets that far.
 
 ## Reproducing
 
 `tools/verify-8bf.sh` downloads both plug-ins, cross-compiles the host to
 both Windows targets, and runs discovery, the about box, a headless
-G'MIC run, and the Filter Foundry dialog on 64- and 32-bit under Wine.
-It needs `wine`, `Xvfb` and `xdotool`, and prints whatever it skips.
+G'MIC run, the Filter Foundry dialog on 64- and 32-bit, and a full G'MIC
+round trip through its Qt UI — which is the only thing here that
+exercises the buffer suite end to end. It needs `wine`, `Xvfb` and
+`xdotool`, and prints whatever it skips.

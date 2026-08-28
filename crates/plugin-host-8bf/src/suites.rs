@@ -233,19 +233,32 @@ pub type UnlockBufferProc = unsafe extern "C" fn(b: BufferID);
 pub type FreeBufferProc = unsafe extern "C" fn(b: BufferID);
 pub type BufferSpaceProc = unsafe extern "C" fn() -> i32;
 
-/// Member order and header values from API Guide chapter 3: "Buffer
-/// suite. Current version: 2; Adobe Photoshop: 5.0; Routines: 5", over
-/// `BufferSpaceProc`, `AllocateBufferProc`, `FreeBufferProc`,
-/// `LockBufferProc`, `UnlockBufferProc` in that sequence.
+/// Version and routine count from API Guide chapter 3: "Buffer suite.
+/// Current version: 2; Adobe Photoshop: 5.0; Routines: 5".
+///
+/// The member *order*, however, is **not** the order the guide
+/// documents the routines in. The prose runs Space, Allocate, Free,
+/// Lock, Unlock; the struct runs Allocate, Lock, Unlock, Free, Space.
+/// That was settled by handing a real plug-in five interchangeable
+/// probes, one per slot, and reading the argument registers: slot 0
+/// arrived with `(3072, <stack pointer>)`, and 3072 is exactly one plane
+/// of the image it was filtering — unmistakably
+/// `AllocateBufferProc(size, &buffer)`.
+///
+/// This is worth dwelling on, because the Handle suite's narrative order
+/// *does* match its struct order. One suite matching is not a rule, and
+/// treating it as one put a wrong order in this file for a while. Only
+/// the Handle suite's order is licensed by observation; this one is too,
+/// separately, and neither licenses the other.
 #[repr(C)]
 pub struct BufferProcs {
     pub buffer_procs_version: i16,
     pub num_buffer_procs: i16,
-    pub space_proc: Option<BufferSpaceProc>,
     pub allocate_proc: Option<AllocateBufferProc>,
-    pub free_proc: Option<FreeBufferProc>,
     pub lock_proc: Option<LockBufferProc>,
     pub unlock_proc: Option<UnlockBufferProc>,
+    pub free_proc: Option<FreeBufferProc>,
+    pub space_proc: Option<BufferSpaceProc>,
 }
 
 /// What `BufferSpaceProc` reports. The suite exists so a plug-in can
@@ -291,15 +304,81 @@ pub(crate) unsafe extern "C" fn buffer_space() -> i32 {
     REPORTED_BUFFER_SPACE
 }
 
+/// Five interchangeable probes, one per slot of [`BufferProcs`], each
+/// logging the arguments it was handed. Enabled with
+/// `SCHIST_8BF_BUFPROBE`.
+///
+/// This is how the member order of a suite gets settled, and it is worth
+/// keeping. Every routine in a suite is `extern "C"` and takes its
+/// arguments in the same registers, so one probe can stand in for any
+/// slot; the argument *shape* then says which routine the plug-in
+/// thought it was calling. `(small int, pointer)` is Allocate,
+/// `(pointer, 0|1)` is Lock, a bare pointer is Free or Unlock, and no
+/// meaningful arguments at all is Space.
+///
+/// It earned its place: it caught this file claiming an order taken from
+/// the order the API Guide's prose introduces the routines in, which for
+/// this suite is not the order of the struct.
+unsafe extern "C" fn probe_slot(slot: u64, a: u64, b: u64, c: u64) -> u64 {
+    trace!("bufslot {slot}: arg1={a:#x} arg2={b:#x} arg3={c:#x}");
+    0
+}
+
+macro_rules! slot_probe {
+    ($name:ident, $n:literal) => {
+        unsafe extern "C" fn $name(a: u64, b: u64, c: u64) -> u64 {
+            probe_slot($n, a, b, c)
+        }
+    };
+}
+slot_probe!(probe0, 0);
+slot_probe!(probe1, 1);
+slot_probe!(probe2, 2);
+slot_probe!(probe3, 3);
+slot_probe!(probe4, 4);
+
+fn probing_buffer_procs() -> BufferProcs {
+    // SAFETY: every one of these fn types is extern "C" and passes its
+    // arguments in the same registers, so reading them through a wider
+    // signature is sound on the targets this host runs on. The probes
+    // return 0, so a plug-in that actually uses the suite while probing
+    // will misbehave — which is the point, and why this is off unless
+    // asked for.
+    unsafe {
+        BufferProcs {
+            buffer_procs_version: 2,
+            num_buffer_procs: 5,
+            allocate_proc: Some(std::mem::transmute::<*const (), AllocateBufferProc>(
+                probe0 as *const (),
+            )),
+            lock_proc: Some(std::mem::transmute::<*const (), LockBufferProc>(
+                probe1 as *const (),
+            )),
+            unlock_proc: Some(std::mem::transmute::<*const (), UnlockBufferProc>(
+                probe2 as *const (),
+            )),
+            free_proc: Some(std::mem::transmute::<*const (), FreeBufferProc>(
+                probe3 as *const (),
+            )),
+            space_proc: Some(std::mem::transmute::<*const (), BufferSpaceProc>(
+                probe4 as *const (),
+            )),
+        }
+    }
+}
+
 pub fn buffer_procs() -> BufferProcs {
+    if std::env::var("SCHIST_8BF_BUFPROBE").is_ok() {
+        return probing_buffer_procs();
+    }
     BufferProcs {
         buffer_procs_version: 2,
         num_buffer_procs: 5,
-        space_proc: Some(buffer_space),
         allocate_proc: Some(allocate_buffer),
-        free_proc: Some(free_buffer),
         lock_proc: Some(lock_buffer),
         unlock_proc: Some(unlock_buffer),
+        free_proc: Some(free_buffer),
+        space_proc: Some(buffer_space),
     }
 }
 

@@ -88,25 +88,55 @@ if ! command -v Xvfb >/dev/null || ! command -v xdotool >/dev/null; then
   exit $fail
 fi
 
-Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
+Xvfb :99 -screen 0 1400x1050x24 >/dev/null 2>&1 &
 xvfb=$!
 trap 'kill $xvfb 2>/dev/null' EXIT
 sleep 3
 export DISPLAY=:99
 
+# Click at a position relative to a window's top-left corner, so the
+# script does not depend on where the window manager put it or on the
+# screen size.
+click_in() {  # $1 = window id, $2 = dx, $3 = dy
+  local geom x y
+  geom=$(xdotool getwindowgeometry --shell "$1")
+  x=$(echo "$geom" | sed -n 's/^X=//p')
+  y=$(echo "$geom" | sed -n 's/^Y=//p')
+  xdotool mousemove $((x + $2)) $((y + $3)) click 1
+}
+
 # Type 255-r into the R, G and B formula fields, then click OK.
-drive_dialog() {
-  if ! xdotool search --name "Filter Foundry" >/dev/null 2>&1; then
+drive_filter_foundry() {
+  local wid
+  wid=$(xdotool search --name "Filter Foundry" 2>/dev/null | head -1)
+  if [ -z "$wid" ]; then
     echo "FAIL: the plug-in never opened its dialog"; return 1
   fi
   echo "ok: dialog is up; typing 255-r into R, G and B"
-  local y
-  for y in 537 583 628; do
-    xdotool mousemove 650 "$y" click 1; sleep 0.3
+  local dy
+  for dy in 237 283 328; do
+    click_in "$wid" 244 "$dy"; sleep 0.3
     xdotool key --clearmodifiers ctrl+a; sleep 0.2
     xdotool type --delay 35 "255-r"; sleep 0.3
   done
-  xdotool mousemove 826 722 click 1
+  click_in "$wid" 420 422    # OK
+}
+
+# Search for a filter, select it, and apply. G'MIC is the only plug-in
+# here that reaches for the buffer suite, which is the one thing a purely
+# headless run never covers.
+drive_gmic() {
+  local wid
+  wid=$(xdotool search --name "G.MIC-Qt for" 2>/dev/null | head -1)
+  if [ -z "$wid" ]; then
+    echo "FAIL: G'MIC never opened its UI"; return 1
+  fi
+  echo "ok: G'MIC UI is up; selecting a filter"
+  click_in "$wid" 451 29; sleep 0.5      # search box
+  xdotool key --clearmodifiers ctrl+a; sleep 0.3
+  xdotool type --delay 60 "invert"; sleep 5
+  click_in "$wid" 477 117; sleep 8       # the single result
+  click_in "$wid" 874 672                # OK
 }
 
 echo
@@ -115,7 +145,7 @@ rm -f ff-out.ppm
 ( timeout 150 wine "$exe" apply "$(winpath "$work/FilterFoundry64.8bf")" \
     "$(winpath "$work/in.ppm")" "$(winpath "$work/ff-out.ppm")" >ff.log 2>&1 & )
 sleep 22
-drive_dialog || fail=1
+drive_filter_foundry || fail=1
 sleep 18
 python3 "$root/tools/verify-8bf-support.py" check ff-out.ppm 64-bit || fail=1
 
@@ -134,9 +164,26 @@ if [ "$have32" = 1 ]; then
   ( timeout 150 wine "$exe32" apply "$(winpath "$work/FilterFoundry.8bf")" \
       "$(winpath "$work/in.ppm")" "$(winpath "$work/ff32-out.ppm")" >ff32.log 2>&1 & )
   sleep 24
-  drive_dialog || fail=1
+  drive_filter_foundry || fail=1
   sleep 18
   python3 "$root/tools/verify-8bf-support.py" check ff32-out.ppm 32-bit || fail=1
 fi
+
+echo
+echo "== G'MIC: full round trip through the buffer suite =="
+python3 "$root/tools/verify-8bf-support.py" halves
+rm -f gmic-halves-out.ppm
+( timeout 240 wine "$exe" apply "$(winpath "$work/GmicPlugin.8bf")" \
+    "$(winpath "$work/halves.ppm")" "$(winpath "$work/gmic-halves-out.ppm")" \
+    >gmic-ui.log 2>&1 & )
+sleep 50
+drive_gmic || fail=1
+sleep 30
+python3 "$root/tools/verify-8bf-support.py" check-halves gmic-halves-out.ppm gmic || fail=1
+for want in buffer.allocate buffer.lock buffer.unlock buffer.free; do
+  grep -q "$want" gmic-ui.log || { echo "FAIL: G'MIC never called $want"; fail=1; }
+done
+grep -q 'buffer.allocate(0)' gmic-ui.log && {
+  echo "FAIL: allocate was called with size 0 — the suite order is wrong again"; fail=1; }
 
 exit $fail

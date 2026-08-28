@@ -346,13 +346,23 @@ fn with_active<R>(f: impl FnOnce(&mut Session<'static>) -> R) -> Option<R> {
 
 unsafe extern "C" fn advance_state_thunk() -> OSErr {
     with_active(|s| {
-        crate::suites::trace!(
-            "advanceState in={:?} out={:?} planes={}..={}",
-            s.record.in_rect,
-            s.record.out_rect,
-            s.record.in_lo_plane,
-            s.record.in_hi_plane
-        );
+        {
+            let (ir, or, lo, hi) = (
+                s.record.in_rect,
+                s.record.out_rect,
+                s.record.in_lo_plane,
+                s.record.in_hi_plane,
+            );
+            let big = *s.big_doc;
+            crate::suites::trace!("advanceState in={ir:?} out={or:?} planes={lo}..={hi}");
+            crate::suites::trace!(
+                "   big: using32={} in32={:?} out32={:?} filter32={:?}",
+                big.plugin_using_32_bit_coordinates,
+                big.in_rect_32,
+                big.out_rect_32,
+                big.filter_rect_32
+            );
+        }
         match s.advance() {
             Ok(()) => abi::NO_ERR,
             Err(e) => {
@@ -716,6 +726,10 @@ impl<'a> Session<'a> {
         self.record.mask_row_bytes = 0;
 
         let in_rect = self.requested_in();
+        crate::suites::trace!(
+            "   host will serve in={in_rect:?} out={:?}",
+            self.requested_out()
+        );
         if !in_rect.is_empty() {
             let (lo, hi) = self.plane_range(self.record.in_lo_plane, self.record.in_hi_plane)?;
             let n = (hi - lo + 1) as usize;
@@ -735,6 +749,10 @@ impl<'a> Session<'a> {
             );
             self.record.in_data = self.in_buf.as_mut_ptr() as *mut c_void;
             self.record.in_row_bytes = row_bytes as i32;
+            crate::suites::trace!(
+                "   served in {in_rect:?} planes {lo}..={hi} rowBytes={row_bytes} bytes={}",
+                self.in_buf.len()
+            );
             self.record.in_column_bytes = n as i32;
             self.record.in_plane_bytes = 1;
         } else {
@@ -776,6 +794,9 @@ impl<'a> Session<'a> {
             }
             self.record.out_data = self.out_buf.as_mut_ptr() as *mut c_void;
             self.record.out_row_bytes = row_bytes as i32;
+            crate::suites::trace!(
+                "   served out {out_rect:?} planes {lo}..={hi} rowBytes={row_bytes}"
+            );
             self.record.out_column_bytes = n as i32;
             self.record.out_plane_bytes = 1;
             self.pending = Some((out_rect, lo, hi));
