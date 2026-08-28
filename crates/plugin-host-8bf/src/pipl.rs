@@ -163,6 +163,12 @@ pub struct Pipl {
     pub version: i32,
     pub endian: Endian,
     pub properties: Vec<Property>,
+    /// The list declared more properties than the resource holds, and
+    /// what is here is everything that was actually readable. Shipping
+    /// plug-ins do this — `fersatgit`'s filters claim seven and carry
+    /// six — and Photoshop evidently loads them anyway, so refusing the
+    /// whole list over a bad count would reject plug-ins that work.
+    pub truncated: bool,
 }
 
 /// A `count` past this is taken as evidence the bytes are not a PiPL at
@@ -193,6 +199,11 @@ impl Pipl {
                 break;
             }
             match Pipl::parse_at(&bytes[skip..], endian) {
+                // A short list is only believable if it looks like a
+                // Photoshop one, whatever offset it was found at:
+                // stopping early is exactly what a *wrong* framing does
+                // too, and the vendor code is what tells them apart.
+                Ok(p) if p.truncated && !p.looks_like_photoshop() => {}
                 Ok(p) if skip == 0 || p.looks_like_photoshop() => return Ok(p),
                 Ok(_) => {}
                 Err(e) => {
@@ -218,21 +229,28 @@ impl Pipl {
 
         let mut properties = Vec::with_capacity(count as usize);
         let mut off = 8usize;
+        let mut truncated = false;
         for _ in 0..count {
             if off + 16 > bytes.len() {
-                return Err(PiplError::Truncated { at: off });
+                truncated = true;
+                break;
             }
             let vendor = endian.u32(bytes[off..off + 4].try_into().unwrap());
             let key = endian.u32(bytes[off + 4..off + 8].try_into().unwrap());
             let id = endian.i32(bytes[off + 8..off + 12].try_into().unwrap());
             let len = endian.i32(bytes[off + 12..off + 16].try_into().unwrap());
-            let len = usize::try_from(len).map_err(|_| PiplError::Truncated { at: off + 12 })?;
+            let Ok(len) = usize::try_from(len) else {
+                truncated = true;
+                break;
+            };
             let start = off + 16;
-            let end = start
-                .checked_add(len)
-                .ok_or(PiplError::Truncated { at: start })?;
+            let Some(end) = start.checked_add(len) else {
+                truncated = true;
+                break;
+            };
             if end > bytes.len() {
-                return Err(PiplError::Truncated { at: start });
+                truncated = true;
+                break;
             }
             properties.push(Property {
                 vendor,
@@ -244,10 +262,17 @@ impl Pipl {
             // length field excludes that padding.
             off = end.next_multiple_of(4);
         }
+        // Nothing readable at all is a wrong framing, not a damaged
+        // list, and has to stay an error so the offset scan can reject
+        // it and try the next one.
+        if properties.is_empty() {
+            return Err(PiplError::Truncated { at: 8 });
+        }
         Ok(Pipl {
             version,
             endian,
             properties,
+            truncated,
         })
     }
 

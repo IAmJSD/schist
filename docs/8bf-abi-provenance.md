@@ -57,8 +57,7 @@ Three families, fifteen binaries:
 - **bognikol/Smart-Gradients**, 32- and 64-bit, a managed (.NET) plug-in
 - **pluginguy/plugins** (GREYCstoration, Unsharp Mask 2), 64-bit
 - **fersatgit/EscherTwist** and **Seam-Carving**, hand-written assembly,
-  32- and 64-bit — and the only things seen so far carrying *no* PiPL
-  resource at all, so this host cannot identify them
+  32- and 64-bit
 
 Only the shipped **binaries** were used; no project's source was read, so
 the clean-room line holds. GitHub code search was used once, purely as an
@@ -108,6 +107,7 @@ all but one.
 | **The PICA handle suite layout** | Chapter 4: "Suite PEA Handle suite. Current version: 1; Routines: 6" over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace. Filter Foundry acquires it by name, calls `SetLock` with `lock=1` and later `lock=0`, and its pixels stay correct |
 | `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because stage 4 needs the descriptor block regardless |
 | **`PSPixelMap` is naturally aligned**, unlike `FilterRecord` | Filter Foundry's 64-bit preview draws correctly through it, and a 32-bit FilterMeister build does too. If the map were packed like the record, `base_addr` would be read four bytes early on 64-bit and the preview would be noise or a fault |
+| **A PiPL may declare more properties than it carries** | fersatgit's filters claim seven and hold six; the resource simply ends. Photoshop loads them, so refusing the whole list over a bad count rejects plug-ins that work — and everything that matters, kind and name and entry point, is in the part that parses. The parse now stops at the shortfall, reports it, and keeps what it read. A framing that yields *nothing* is still an error, because that is what a wrong offset looks like and the offset scan depends on telling them apart |
 | **An overhanging *output* rectangle has to be served, not refused** | Adobe says the output rectangle must be a subset of `filterRect`. Propetizer asks for a row above the top edge anyway. Refusing leaves `outData` null, and Propetizer does not check — it writes through it and faults. Serving a buffer of the size asked for and clipping on commit is what survives real plug-ins |
 | **Plug-ins really do write the negative padding modes** | FilterMeister sets `inputPadding`, `outputPadding` and `maskPadding` all to -2. Which named mode that is remains unknown and, by design, does not matter: the host replicates the edge for any value outside 0..=255 |
 | **A plug-in must be loaded with its own directory on the DLL search path** | Not an ABI fact but a loading one, and it fails just as hard. The Fourier family ships FFTW beside it, and Windows does not search a module's own directory: all twelve failed at `LoadLibraryExW` with nothing to say why. `LOAD_WITH_ALTERED_SEARCH_PATH` over a canonicalised path fixes the lot |
@@ -135,6 +135,19 @@ because the evidence is the interesting part.
 
 `displayPixels` and `colorServices` are done and described in
 `docs/8bf-host.md`. `propertyProcs` remains.
+
+## Not settled, and not settleable here
+
+- The **ChannelPorts suite**. Smart Gradients asks for it. It cannot be
+  written clean-room from what is available: a plug-in reaches channels
+  through `ReadImageDocumentDesc`, and that structure is *named* in the
+  API Guide — twice, as a `FilterRecord` field — and defined nowhere in
+  it. Without the document description there is no port to read from, so
+  implementing `ReadPixels` alone would buy nothing. It needs a source
+  the guide does not contain.
+- The **GUID-named suite** `61e608b0-40fd-11d1-8da3-00c04fd5f7ee`, which
+  both of pluginguy's filters ask for and carry on without. Nothing
+  public identifies it.
 
 ## The PICA suites
 

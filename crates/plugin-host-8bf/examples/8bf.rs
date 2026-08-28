@@ -182,6 +182,7 @@ fn minimal_filter_pipl() -> bf::Pipl {
     bf::Pipl {
         version: 0,
         endian: bf::Endian::Little,
+        truncated: false,
         properties: vec![bf::pipl::Property {
             vendor: bf::abi::SIG_8BIM,
             key: bf::pipl::key::KIND,

@@ -104,12 +104,20 @@ fn refuses_rather_than_guesses_on_damaged_input() {
         Err(PiplError::TooShort)
     );
 
-    let mut truncated = sample();
-    truncated.truncate(40);
-    assert!(matches!(
-        Pipl::parse(&truncated, Endian::Little),
-        Err(PiplError::Truncated { .. })
-    ));
+    // A resource cut short still yields the properties that survived,
+    // flagged as short — see the fersatgit case below. What it must not
+    // do is invent the ones that are missing.
+    let mut cut = sample();
+    cut.truncate(40);
+    let p = Pipl::parse(&cut, Endian::Little).unwrap();
+    assert!(p.truncated);
+    assert!(!p.properties.is_empty() && p.properties.len() < 8);
+    assert_eq!(p.kind(), Some(kind::FILTER));
+    assert_eq!(
+        p.entry_point(CodeArch::Win64X86),
+        None,
+        "not in the part that survived"
+    );
 
     // A count no real property list would carry.
     let mut absurd = sample();
@@ -119,7 +127,9 @@ fn refuses_rather_than_guesses_on_damaged_input() {
         Err(PiplError::BadCount(1_000_000))
     ));
 
-    // A length that runs off the end.
+    // A first property whose length runs off the end leaves nothing
+    // readable at all, which is a wrong framing rather than a short
+    // list, and still has to be an error.
     let mut overlong = sample();
     overlong[20..24].copy_from_slice(&9999i32.to_le_bytes());
     assert!(matches!(
@@ -172,4 +182,48 @@ fn a_dll_without_a_pipl_is_not_a_plug_in() {
     for f in &found {
         assert!(f.blocker().is_some());
     }
+}
+
+#[test]
+fn a_list_that_overstates_its_count_still_yields_what_it_has() {
+    // fersatgit's filters ship a PiPL claiming seven properties and
+    // carrying six. Photoshop loads them, so refusing the whole list
+    // over a bad count would reject plug-ins that work — and everything
+    // that matters (kind, name, category, entry point) is in the part
+    // that parsed.
+    let mut bytes = sample();
+    let count = i32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    bytes[4..8].copy_from_slice(&(count + 1).to_le_bytes());
+
+    let p = Pipl::parse(&bytes, Endian::Little).unwrap();
+    assert!(p.truncated, "the shortfall should be reported, not hidden");
+    assert_eq!(p.properties.len(), count as usize);
+    assert_eq!(p.kind(), Some(kind::FILTER));
+    assert_eq!(p.name().as_deref(), Some("Invert Test"));
+    assert_eq!(
+        p.entry_point(CodeArch::Win64X86).as_deref(),
+        Some("entry_advance")
+    );
+}
+
+#[test]
+fn a_complete_list_is_not_reported_as_truncated() {
+    let p = Pipl::parse(&sample(), Endian::Little).unwrap();
+    assert!(!p.truncated);
+}
+
+#[test]
+fn tolerating_a_short_list_does_not_let_a_wrong_framing_through() {
+    // The offset scan tries several framings and takes the one that
+    // validates. Now that a short list is acceptable, a wrong framing
+    // must still be rejected — otherwise the scan would settle on the
+    // first offset that produced any bytes at all.
+    let mut junk = vec![0u8; 64];
+    junk[0..4].copy_from_slice(&0i32.to_le_bytes());
+    junk[4..8].copy_from_slice(&40i32.to_le_bytes()); // 40 properties, none present
+    junk[8..12].copy_from_slice(&0xdead_beefu32.to_le_bytes()); // not '8BIM'
+    assert!(
+        Pipl::parse(&junk, Endian::Little).is_err(),
+        "a list whose first property is not Photoshop's must be refused"
+    );
 }

@@ -47,6 +47,10 @@ crates/plugin-host-8bf
 └── host.rs     the selector sequence, advanceState, pixel marshalling
 ```
 
+A PiPL that overstates its property count is read as far as it goes
+rather than refused: shipping plug-ins do it, and everything that
+matters is in the part that parses.
+
 Discovery is host-independent: `pe.rs` and `pipl.rs` are byte parsers, so
 a Linux build can list a folder of Windows plug-ins, print what each one
 declares, and say exactly why it cannot run it. Only `Filter::open`
