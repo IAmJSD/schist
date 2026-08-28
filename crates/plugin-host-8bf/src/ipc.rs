@@ -49,6 +49,11 @@ pub struct RunRequest {
     pub background: [u8; 4],
     /// Empty for "the document has no name".
     pub title: String,
+    /// The parameters block a previous run of this plug-in left behind,
+    /// replayed so it resumes from its own settings. Empty for a plug-in
+    /// that has not run yet. Opaque: the helper hands it straight to the
+    /// plug-in and neither end looks inside.
+    pub parameters: Vec<u8>,
 }
 
 /// What the helper says back.
@@ -62,10 +67,13 @@ pub enum Report {
         total: i32,
     },
     /// `code` is zero on success; `message` carries the plug-in's own
-    /// words where it gave any.
+    /// words where it gave any. `parameters` is whatever the plug-in
+    /// left in its parameters handle, to replay on the next run, and is
+    /// empty unless the filter actually applied.
     Finished {
         code: i32,
         message: String,
+        parameters: Vec<u8>,
     },
     Log {
         text: String,
@@ -175,6 +183,7 @@ impl RunRequest {
         e.0.extend_from_slice(&self.foreground);
         e.0.extend_from_slice(&self.background);
         e.str(&self.title);
+        e.bytes(&self.parameters);
         e.0
     }
 
@@ -198,6 +207,7 @@ impl RunRequest {
             foreground: d.arr4()?,
             background: d.arr4()?,
             title: d.str()?,
+            parameters: d.bytes()?,
         })
     }
 }
@@ -212,8 +222,12 @@ impl Report {
             Report::Progress { done, total } => {
                 e.u8(TAG_PROGRESS).i32(*done).i32(*total);
             }
-            Report::Finished { code, message } => {
-                e.u8(TAG_FINISHED).i32(*code).str(message);
+            Report::Finished {
+                code,
+                message,
+                parameters,
+            } => {
+                e.u8(TAG_FINISHED).i32(*code).str(message).bytes(parameters);
             }
             Report::Log { text } => {
                 e.u8(TAG_LOG).str(text);
@@ -233,6 +247,7 @@ impl Report {
             TAG_FINISHED => Report::Finished {
                 code: d.i32()?,
                 message: d.str()?,
+                parameters: d.bytes()?,
             },
             TAG_LOG => Report::Log { text: d.str()? },
             other => {
@@ -262,6 +277,7 @@ mod tests {
             foreground: [1, 2, 3, 4],
             background: [250, 251, 252, 253],
             title: "seaside.psd".into(),
+            parameters: vec![7, 7, 0, 1],
         }
     }
 
@@ -284,6 +300,12 @@ mod tests {
             Report::Finished {
                 code: -30101,
                 message: "cannot filter this mode".into(),
+                parameters: Vec::new(),
+            },
+            Report::Finished {
+                code: 0,
+                message: String::new(),
+                parameters: vec![0xDE, 0xAD, 0xBE, 0xEF],
             },
             Report::Log {
                 text: "handle.new(8)".into(),

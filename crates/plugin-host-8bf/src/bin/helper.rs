@@ -80,20 +80,26 @@ fn run(port: u16, token: &str) -> Result<(), String> {
     // how, instead of only that a process disappeared.
     let outcome = filter(&req, &mut sock);
     let report = match outcome {
-        Ok(()) => Report::Finished {
+        Ok(parameters) => Report::Finished {
             code: 0,
             message: String::new(),
+            parameters,
         },
+        // Nothing to remember from a run that did not apply: Last Filter
+        // replays the last settings that landed, not the last a dialog
+        // saw before it was cancelled.
         Err(e) => Report::Finished {
             code: 1,
             message: e,
+            parameters: Vec::new(),
         },
     };
     send(&mut sock, &report)?;
     Ok(())
 }
 
-fn filter(req: &RunRequest, sock: &mut TcpStream) -> Result<(), String> {
+/// Run the plug-in, and hand back the parameters block it leaves.
+fn filter(req: &RunRequest, sock: &mut TcpStream) -> Result<Vec<u8>, String> {
     let pipl = Pipl::parse(&req.pipl, Endian::Little)
         .map_err(|e| format!("plug-in metadata did not parse: {e}"))?;
     let mut plugin =
@@ -128,6 +134,7 @@ fn filter(req: &RunRequest, sock: &mut TcpStream) -> Result<(), String> {
         foreground: req.foreground,
         background: req.background,
         document_title: (!req.title.is_empty()).then(|| req.title.clone()),
+        parameters: (!req.parameters.is_empty()).then(|| req.parameters.clone()),
         parent_window: parent_window(),
         progress: Some(Box::new(move |done, total| {
             if let Some(s) = reporter.borrow_mut().as_mut() {
@@ -138,13 +145,14 @@ fn filter(req: &RunRequest, sock: &mut TcpStream) -> Result<(), String> {
     };
 
     let result = plugin.apply(&mut image, &opts);
+    let parameters = plugin.last_parameters().unwrap_or_default().to_vec();
     // The pixels go back whether or not the filter succeeded, because
     // `apply` restores them on failure and Schist should see that.
     pixels[..wanted].copy_from_slice(&image.data);
     pixels
         .flush()
         .map_err(|e| format!("could not write the filtered pixels back: {e}"))?;
-    result.map_err(|e| e.to_string())
+    result.map(|()| parameters).map_err(|e| e.to_string())
 }
 
 /// Report a plug-in fault down the socket and stop.
@@ -197,6 +205,9 @@ fn install_crash_handler() {
                         message: format!(
                             "the plug-in {what} at {address:#x} ({code:#010x}) and was stopped"
                         ),
+                        // Nothing to replay: the run that would have
+                        // produced it is the one that just faulted.
+                        parameters: Vec::new(),
                     }
                     .encode(),
                 );

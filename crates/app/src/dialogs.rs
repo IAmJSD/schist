@@ -47,6 +47,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             filter,
             link,
         } => image_size(ws, &state, width, height, filter, link, cx).into_any_element(),
+        Modal::FilterRunning { name } => filter_running(&name).into_any_element(),
         Modal::CanvasSize {
             width,
             height,
@@ -1744,7 +1745,8 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                     .child("No plugins installed yet."),
             )
         })
-        .children(rows);
+        .children(rows)
+        .children(photoshop_section(ws, cx));
 
     let actions = div()
         .flex()
@@ -1763,6 +1765,118 @@ fn plugin_manager(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             cx,
         ));
     ui::modal_frame("Plugins", 420.0, body, actions)
+}
+
+/// The Photoshop plug-in half of the manager.
+///
+/// Everything discovered is listed, including what this machine cannot
+/// run: a Windows filter with no Wine installed is the case people
+/// actually hit, and the reason is more use than an absence. Only the
+/// runnable ones carry a switch, because disabling something that was
+/// never offered would say nothing.
+fn photoshop_section(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Vec<gpui::AnyElement> {
+    let manager = &ws.photoshop_plugins;
+    if manager.entries.is_empty() {
+        return Vec::new();
+    }
+    let folders = manager
+        .dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out: Vec<gpui::AnyElement> = vec![div()
+        .flex()
+        .flex_col()
+        .pt_2()
+        .child(div().text_size(px(12.0)).child("Photoshop plug-ins"))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child(format!("Loaded from {folders}")),
+        )
+        .into_any_element()];
+
+    for entry in &manager.entries {
+        let id = entry.id.clone();
+        let enabled = entry.enabled;
+        let detail = match &entry.blocker {
+            Some(why) => format!("{} · {why}", entry.architecture),
+            None => format!("{} · {}", entry.architecture, entry.id),
+        };
+        let blocked = entry.blocker.is_some();
+        out.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        // Bounded so a reason wraps inside the dialog: the
+                        // one that matters most names a missing helper by
+                        // its full path, which is wider than the modal.
+                        .w(px(290.0))
+                        .child(div().text_size(px(12.0)).child(entry.name.clone()))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(gpui::rgb(if blocked {
+                                    0xD08770
+                                } else {
+                                    ui::palette().text_dim
+                                }))
+                                .child(detail),
+                        ),
+                )
+                .child(if blocked {
+                    div().into_any_element()
+                } else {
+                    ui::checkbox(
+                        if enabled { "Enabled" } else { "Disabled" },
+                        enabled,
+                        move |ws, _cx| {
+                            let id = id.clone();
+                            ws.pending_plugin_toggle = Some((id, !enabled));
+                        },
+                        cx,
+                    )
+                    .into_any_element()
+                })
+                .into_any_element(),
+        );
+    }
+    out
+}
+
+/// What is showing while a plug-in runs in its own process.
+///
+/// No buttons: the plug-in's dialog is a separate window and answering it
+/// is what ends this. A Cancel here would have to kill the helper, which
+/// is a bigger promise than "the document is busy".
+fn filter_running(name: &str) -> impl IntoElement {
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_size(px(12.0)).child(format!("Running {name}")))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child("The plug-in runs in its own process. If it opens a window, answer that to continue."),
+        );
+    ui::modal_frame(
+        "Photoshop plug-in",
+        360.0,
+        body,
+        div().flex().flex_row().gap_2(),
+    )
 }
 
 use gpui::prelude::FluentBuilder as _;

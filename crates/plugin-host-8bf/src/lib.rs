@@ -38,6 +38,10 @@ pub mod host;
 pub mod ipc;
 pub mod launch;
 pub mod macos;
+/// Photoshop plug-ins as ordinary Schist filters. Off by default so the
+/// cross-compiled helper never builds the editor's plugin API.
+#[cfg(feature = "registry")]
+pub mod manager;
 pub mod pe;
 pub mod pipl;
 pub mod remote;

@@ -5810,6 +5810,7 @@ dependencies = [
  "schist-filters-core",
  "schist-layer-fx",
  "schist-plugin-api",
+ "schist-plugin-host-8bf",
  "schist-plugin-host-wasm",
  "schist-tools-basic",
  "schist-tools-doc",
@@ -5863,8 +5864,10 @@ name = "schist-plugin-host-8bf"
 version = "0.6.0"
 dependencies = [
  "libloading",
+ "log",
  "memmap2",
  "miniz_oxide",
+ "schist-plugin-api",
  "tempfile",
 ]
 

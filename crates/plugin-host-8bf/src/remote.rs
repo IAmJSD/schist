@@ -33,6 +33,10 @@ pub struct RemoteOptions {
     pub helper_dir: Option<PathBuf>,
     /// Set from another thread to kill the helper.
     pub abort: Arc<AtomicBool>,
+    /// The parameters block the plug-in left on its last run, replayed
+    /// so it opens on its own settings rather than its defaults. `None`
+    /// for a plug-in that has not run yet.
+    pub parameters: Option<Vec<u8>>,
     /// How long to wait for the helper to connect back. A plug-in may
     /// then take as long as it likes — a filter on a large image legitimately
     /// does — so only the handshake is bounded.
@@ -48,10 +52,20 @@ impl Default for RemoteOptions {
             document_title: None,
             progress: None,
             helper_dir: None,
+            parameters: None,
             abort: Arc::new(AtomicBool::new(false)),
             startup_timeout: Duration::from_secs(30),
         }
     }
+}
+
+/// What a completed run leaves behind.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// The plug-in's own parameters block, to hand back through
+    /// [`RemoteOptions::parameters`] next time. Empty for a plug-in that
+    /// keeps no settings.
+    pub parameters: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -120,7 +134,28 @@ pub fn readiness(found: &Found) -> Result<(), RemoteError> {
     if !missing.is_empty() {
         return Err(RemoteError::Missing(missing));
     }
-    Ok(())
+    helper_available(&plan)
+}
+
+/// Whether the helper this plan needs could be found, without unpacking
+/// it. A carried helper counts as present: it is extracted on first use,
+/// and asking the question should not be what causes that.
+///
+/// Separate from [`helper_location`] because readiness is asked once per
+/// plug-in while a folder is being scanned, and a scan has no business
+/// writing to the cache.
+fn helper_available(plan: &launch::Plan) -> Result<(), RemoteError> {
+    let name = plan.helper.file_name();
+    let beside = launch::helper_dir();
+    if beside.as_ref().is_some_and(|dir| dir.join(name).is_file()) {
+        return Ok(());
+    }
+    if crate::bundled::names().any(|carried| carried == name) {
+        return Ok(());
+    }
+    Err(RemoteError::NoHelper(
+        beside.unwrap_or_else(|| PathBuf::from(".")).join(name),
+    ))
 }
 
 /// Find the directory holding the helper this plan needs.
@@ -162,7 +197,7 @@ fn helper_location(plan: &launch::Plan, opts: &RemoteOptions) -> Result<PathBuf,
 }
 
 /// Run `found` over `image`, in a helper process.
-pub fn apply(found: &Found, image: &mut Image, opts: &RemoteOptions) -> Result<(), RemoteError> {
+pub fn apply(found: &Found, image: &mut Image, opts: &RemoteOptions) -> Result<Run, RemoteError> {
     readiness(found)?;
     let host = launch::Host::current().unwrap();
     let plan = launch::plan(host, found.abi().unwrap()).unwrap();
@@ -205,6 +240,7 @@ pub fn apply(found: &Found, image: &mut Image, opts: &RemoteOptions) -> Result<(
         foreground: opts.foreground,
         background: opts.background,
         title: opts.document_title.clone().unwrap_or_default(),
+        parameters: opts.parameters.clone().unwrap_or_default(),
     };
 
     let mut sock = accept(&listener, &mut child.0, opts)?;
@@ -264,7 +300,7 @@ fn handshake(sock: &mut TcpStream, token: &str) -> Result<(), RemoteError> {
 }
 
 /// Read reports until the helper finishes, dies, or is cancelled.
-fn pump(sock: &mut TcpStream, child: &mut Child, opts: &RemoteOptions) -> Result<(), RemoteError> {
+fn pump(sock: &mut TcpStream, child: &mut Child, opts: &RemoteOptions) -> Result<Run, RemoteError> {
     loop {
         if opts.abort.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -278,7 +314,11 @@ fn pump(sock: &mut TcpStream, child: &mut Child, opts: &RemoteOptions) -> Result
                     }
                 }
                 Report::Log { text } => eprintln!("[8bf helper] {text}"),
-                Report::Finished { code: 0, .. } => return Ok(()),
+                Report::Finished {
+                    code: 0,
+                    parameters,
+                    ..
+                } => return Ok(Run { parameters }),
                 Report::Finished { message, .. } => return Err(RemoteError::Plugin(message)),
                 Report::Hello { .. } => {}
             },

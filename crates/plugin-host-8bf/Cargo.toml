@@ -17,6 +17,16 @@ memmap2 = "0.9"
 # cross-compiles to every helper target without a C toolchain.
 miniz_oxide = "0.8"
 
+# Only for `manager`, which joins discovered plug-ins to the editor's
+# filter registry. Optional so the helper — cross-compiled to every
+# architecture a plug-in might be — never builds them.
+schist-plugin-api = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+
+[features]
+# Photoshop plug-ins as registry filters, for the app and the MCP server.
+registry = ["dep:schist-plugin-api", "dep:log"]
+
 # The out-of-process plug-in host. Cross-compiled to every architecture
 # a plug-in might be built for, which is what lets an x86-64 filter run
 # on an Apple Silicon Mac and a Windows filter run on Linux.

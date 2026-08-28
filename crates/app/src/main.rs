@@ -86,7 +86,13 @@ fn crash_reports_enabled() -> bool {
 
 /// Assemble the first-party plugin set. Every entry here is optional — the
 /// app boots (to an empty shell) with any or all of them removed.
-fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) {
+type Hosts = (
+    PluginRegistry,
+    schist_plugin_host_wasm::PluginManager,
+    schist_plugin_host_8bf::manager::PluginManager,
+);
+
+fn build_registry() -> Hosts {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
         Box::new(schist_tools_basic::BasicToolsPlugin),
@@ -113,7 +119,15 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
         None => schist_plugin_host_wasm::PluginManager::default(),
     };
     log_8bf_support();
-    (registry, manager)
+    // Photoshop plug-ins, each run in a helper process. `Interactive::Yes`
+    // because a `.8bf` carries its own dialog, and in the app there is
+    // someone to answer it — which is the whole of its parameter UI.
+    let photoshop = schist_plugin_host_8bf::manager::PluginManager::load_dirs(
+        &schist_plugin_host_8bf::manager::PluginManager::search_dirs(),
+        &mut registry,
+        schist_plugin_host_8bf::manager::Interactive::Yes,
+    );
+    (registry, manager, photoshop)
 }
 
 /// Report which Photoshop plug-in helpers this build carries.
@@ -194,7 +208,7 @@ fn main() {
     // crash_reports flag once the user enables it in Preferences.
     crash::install_handler(crash_reports_enabled());
     workspace::init_compositor_backend(workspace::load_view_options().gpu_compositing);
-    let (registry, plugin_manager) = build_registry();
+    let (registry, plugin_manager, photoshop_plugins) = build_registry();
 
     let requests: Rc<RefCell<OpenRequests>> = Rc::default();
     let app = Application::new().with_assets(assets::Assets);
@@ -236,7 +250,8 @@ fn main() {
                 },
                 |_window, cx| {
                     let workspace = cx.new(|cx| {
-                        let mut ws = Workspace::new(registry, plugin_manager, cx);
+                        let mut ws =
+                            Workspace::new(registry, plugin_manager, photoshop_plugins, cx);
                         // Recovery runs whatever else is happening: opening
                         // a document from the shell or the file manager is
                         // not a reason to leave a previous session's

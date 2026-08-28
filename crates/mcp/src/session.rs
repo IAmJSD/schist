@@ -59,7 +59,13 @@ impl PluginManifest for PsdPlugin {
 /// The same first-party plugin set `schist-app` assembles, plus any
 /// installed third-party WebAssembly plugins. Each session gets its own
 /// registry because tools carry per-gesture state.
-fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) {
+type Hosts = (
+    PluginRegistry,
+    schist_plugin_host_wasm::PluginManager,
+    schist_plugin_host_8bf::manager::PluginManager,
+);
+
+fn build_registry() -> Hosts {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
         Box::new(schist_tools_basic::BasicToolsPlugin),
@@ -83,7 +89,15 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
         Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
         None => schist_plugin_host_wasm::PluginManager::default(),
     };
-    (registry, manager)
+    // Photoshop plug-ins, out of process. `Interactive::No` because a
+    // `.8bf` shows its own dialog and there is nobody here to dismiss
+    // one: over MCP they run with their own defaults.
+    let photoshop = schist_plugin_host_8bf::manager::PluginManager::load_dirs(
+        &schist_plugin_host_8bf::manager::PluginManager::search_dirs(),
+        &mut registry,
+        schist_plugin_host_8bf::manager::Interactive::No,
+    );
+    (registry, manager, photoshop)
 }
 
 pub struct Session {
@@ -92,6 +106,8 @@ pub struct Session {
     pub registry: PluginRegistry,
     /// Keeps loaded WASM plugins alive for the session's lifetime.
     _wasm: schist_plugin_host_wasm::PluginManager,
+    /// Keeps the discovered Photoshop plug-ins alive alongside them.
+    pub photoshop: schist_plugin_host_8bf::manager::PluginManager,
 }
 
 impl Session {
@@ -117,7 +133,7 @@ impl Session {
     /// Open a file through the codec registry, like File ▸ Open.
     pub fn open(path: &Path) -> Result<Session> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let (registry, wasm) = build_registry();
+        let (registry, wasm, photoshop) = build_registry();
         let ext = path.extension().and_then(|e| e.to_str());
         let codec = registry
             .codec_for(&bytes, ext)
@@ -134,6 +150,7 @@ impl Session {
             state: EditorState::default(),
             registry,
             _wasm: wasm,
+            photoshop,
         };
         session.after_change();
         Ok(session)
@@ -141,12 +158,13 @@ impl Session {
 
     fn install(mut doc: Document) -> Session {
         doc.snapshot_history_source();
-        let (registry, wasm) = build_registry();
+        let (registry, wasm, photoshop) = build_registry();
         Session {
             doc,
             state: EditorState::default(),
             registry,
             _wasm: wasm,
+            photoshop,
         }
     }
 
@@ -354,6 +372,13 @@ impl Session {
             region.height() as usize,
             &resolved,
         );
+        // A Photoshop plug-in runs in a helper process and can fail
+        // there. Reporting the filter as applied, with an undo entry
+        // that restores pixels nothing touched, would be worse than
+        // saying so.
+        if let Some(err) = filter.last_error() {
+            bail!("filter {id:?} failed: {err}");
+        }
         self.write_region(layer_id, region, &original, &buf, &name);
         self.after_change();
         Ok(name)

@@ -27,6 +27,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 | **Loading and running** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
 | **Isolation and depth** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
 | **Platforms** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery is written but unproven, packaging still to do |
+| **Reaching the editor** | Folder scan, Filter menu and gallery entries, the plug-in manager, MCP | **done**, see below |
 | **Scripting and scale** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules need a source that documents `FormatRecord`, and the API Guide does not |
 
 ### Scripting
@@ -219,6 +220,74 @@ all carry the helpers without any change to those scripts.
 
 A missing helper is reported rather than guessed at: `RemoteError::NoHelper`
 says which directory it looked in.
+
+## Reaching the editor
+
+A plug-in is only useful once it is in a menu. `manager.rs` — behind the
+crate's `registry` feature, so the cross-compiled helper never builds the
+editor's plugin API — scans the plug-in folders and hands what it finds to
+the same `PluginRegistry` a first-party filter registers with. Everything
+downstream follows from that: the Filter menu, the Filter Gallery and the
+MCP server all read the registry and need no knowledge of `.8bf` at all.
+
+Plug-ins load from `<config>/schist/photoshop-plugins` — XDG on Unix,
+local app data on Windows — plus every folder named in `SCHIST_8BF_PATH`,
+separated the way the platform separates `PATH`. The environment variable
+matters because people who own these plug-ins already keep them in a
+folder belonging to some other host, and copying is not the only
+reasonable answer. File ▸ Plugins… installs into the first folder;
+`disabled.txt` beside them lists what the user switched off, and only the
+first folder is ever written to, since the others may not be ours.
+
+Each filter becomes one registry entry, id `8bf.<file>.<entry point>`,
+named and categorised from its PiPL. The category goes straight into the
+Filter menu, merging with a built-in group of the same name — a plug-in
+declaring "Blur" lands beside the other blurs, which is what Photoshop
+does and what vendors choose their category expecting. It is also what
+the menu can actually show: it nests one level, and a submenu inside a
+submenu cannot be reached with the pointer.
+
+**Only what can run here is registered.** `remote::readiness` is asked
+once per plug-in during the scan — the architecture is runnable, Wine is
+installed if it is needed, and the helper for it exists — and anything
+that fails is listed in the manager with the reason instead of being
+offered. "Install Wine" is a better answer than a menu entry that fails
+when clicked. Readiness does not *unpack* a carried helper, only notice
+that it is carried: a folder scan has no business writing to the cache.
+
+Two hosts, one difference. A `.8bf` publishes no parameter list — its own
+dialog is its entire UI — so the app runs it with `show_dialog` on and
+the MCP server runs it off, where nobody could dismiss one. That is what
+`manager::Interactive` selects, and it is the only thing the two callers
+disagree about. Over MCP the plug-ins appear in `describe filters` like
+any other, and `describe photoshop_plugins` reports the folders scanned,
+each plug-in's architecture, and why anything unavailable is unavailable.
+
+**Settings survive between runs.** The descriptor suites are null, so
+nothing records through them — but plug-ins fall back to the `parameters`
+handle, and that does work. The helper reads whatever the plug-in left
+there and sends it back; the next run installs it before the first
+selector. That is what makes a plug-in's dialog open on what you last
+chose, and what makes a second silent run over MCP repeat the first. The
+bytes are the plug-in's own structure and are never interpreted. Only a
+run that applied updates them: Last Filter replays the last settings that
+landed, not the last a cancelled dialog saw.
+
+**A plug-in never blocks the window.** `FilterPlugin::runs_out_of_process`
+marks a filter whose `apply` waits on something outside this process, and
+the app runs those on a background thread behind a modal that holds the
+document still — a filter dialog is open for as long as someone takes to
+answer it, and a frozen window is not the right way to say so. The same
+flag keeps them out of the Filter Gallery, which is a live-preview stack:
+previewing a Photoshop plug-in means launching a helper and raising its
+dialog, which is not something to do per keystroke. They appear in the
+Filter menu, as they do in Photoshop.
+
+Because the helper can fail where an ordinary filter cannot — a crash, a
+refusal, a dialog the user cancelled — `FilterPlugin::last_error` reports
+what went wrong, and both hosts decline to record an edit when it is set.
+The alternative is a history entry that undoes nothing and a report that
+the filter was applied when it was not.
 
 ## The pieces
 

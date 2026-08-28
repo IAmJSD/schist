@@ -135,6 +135,16 @@ pub struct RunOptions {
     /// plug-in so it can pick up where it left off. This is what makes
     /// Last Filter remember its settings.
     pub descriptor: Option<crate::descriptor::Descriptor>,
+    /// The opaque parameters block the plug-in left behind on its last
+    /// run, handed back so it resumes from its own settings.
+    ///
+    /// This — not [`RunOptions::descriptor`] — is what actually carries
+    /// settings between runs here. The descriptor sub-suites are null
+    /// (see the `descriptor_parameters` setup below), so a plug-in falls
+    /// back to the `parameters` handle, which Photoshop keeps alive
+    /// between runs for its Last Filter command. The bytes are the
+    /// plug-in's own private structure and are never interpreted.
+    pub parameters: Option<Vec<u8>>,
     /// A selection, one byte per pixel of the whole image, 255 meaning
     /// fully selected.
     ///
@@ -160,6 +170,7 @@ impl Default for RunOptions {
             progress: None,
             document_title: None,
             descriptor: None,
+            parameters: None,
             selection: None,
         }
     }
@@ -225,6 +236,32 @@ impl std::error::Error for HostError {}
 type EntryProc =
     unsafe extern "C" fn(selector: i16, record: *mut c_void, data: *mut isize, result: *mut i16);
 
+/// Put a saved parameters block into a fresh handle for the plug-in.
+///
+/// Null on failure, which is the same thing the plug-in sees when it has
+/// never run: it allocates its own and starts from its defaults.
+///
+/// # Safety
+///
+/// `bytes` is a block a previous run produced; the handle is disposed by
+/// the session that installs it.
+unsafe fn make_parameters(bytes: &[u8]) -> abi::Handle {
+    let Ok(size) = i32::try_from(bytes.len()) else {
+        return std::ptr::null_mut();
+    };
+    let h = suites::new_handle(size);
+    if h.is_null() {
+        return h;
+    }
+    let data = h.read();
+    if data.is_null() {
+        suites::dispose_handle(h);
+        return std::ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+    h
+}
+
 /// A loaded filter plug-in, with its metadata and entry point resolved.
 pub struct Filter {
     _lib: libloading::Library,
@@ -232,6 +269,7 @@ pub struct Filter {
     pipl: Pipl,
     entry_name: String,
     recorded: Option<crate::descriptor::Descriptor>,
+    last_parameters: Option<Vec<u8>>,
 }
 
 impl Filter {
@@ -257,6 +295,7 @@ impl Filter {
             pipl,
             entry_name: entry_name.to_string(),
             recorded: None,
+            last_parameters: None,
         })
     }
 
@@ -264,6 +303,13 @@ impl Filter {
     /// [`RunOptions::descriptor`] next time.
     pub fn recorded(&self) -> Option<&crate::descriptor::Descriptor> {
         self.recorded.as_ref()
+    }
+
+    /// The parameters block the last run left behind, to hand back
+    /// through [`RunOptions::parameters`] next time. Opaque: it is the
+    /// plug-in's own structure, and only it knows what is in there.
+    pub fn last_parameters(&self) -> Option<&[u8]> {
+        self.last_parameters.as_deref()
     }
 
     pub fn pipl(&self) -> &Pipl {
@@ -383,6 +429,9 @@ impl Filter {
         // goes away — even on failure, since a plug-in may record on its
         // way out of a dialog it then cancelled.
         self.recorded = session.take_recorded();
+        // Read before disposal: this is the block the plug-in wants back
+        // next time, and the handle does not outlive the session.
+        self.last_parameters = session.take_parameters();
         session.dispose_parameters();
         if result.is_err() {
             // A filter either applies or it does not. Leaving half a
@@ -917,7 +966,12 @@ impl<'a> Session<'a> {
         record.serial_number = 0;
         record.abort_proc = Some(abort_thunk);
         record.progress_proc = Some(progress_thunk);
-        record.parameters = std::ptr::null_mut();
+        // Either what a previous run left, replayed, or nothing — in
+        // which case the plug-in allocates its own during Parameters.
+        record.parameters = match &opts.parameters {
+            Some(bytes) if !bytes.is_empty() => unsafe { make_parameters(bytes) },
+            _ => std::ptr::null_mut(),
+        };
         // Past 32767 the narrow fields cannot say the truth. They are
         // clamped rather than left to wrap — a plug-in reading them gets
         // a small number instead of a negative one — and the wide fields
@@ -1493,6 +1547,27 @@ impl<'a> Session<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// Copy out whatever the plug-in left in the parameters handle.
+    ///
+    /// Taken by copy rather than by ownership because the handle is
+    /// disposed either way, and the bytes have to outlive it.
+    fn take_parameters(&mut self) -> Option<Vec<u8>> {
+        let h = self.record.parameters;
+        if h.is_null() {
+            return None;
+        }
+        // SAFETY: null-checked, and either a handle this host made or
+        // one the plug-in made through this host's handle suite.
+        unsafe {
+            let size = suites::get_handle_size(h);
+            let data = h.read();
+            if size <= 0 || data.is_null() {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(data.cast_const(), size as usize).to_vec())
         }
     }
 

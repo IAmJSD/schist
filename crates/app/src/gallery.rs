@@ -48,9 +48,13 @@ pub fn render(
     preview: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    // Every filter, grouped by category, to pick from.
+    // Every filter, grouped by category, to pick from — except the ones
+    // that run outside this process. The gallery is a live-preview stack,
+    // and a Photoshop plug-in previews by launching a helper and putting
+    // its own dialog up, which is not something to do on every keystroke.
+    // They live in the Filter menu instead, as they do in Photoshop.
     let mut categories: Vec<(&'static str, Vec<(&'static str, String)>)> = Vec::new();
-    for f in ws.registry.filters() {
+    for f in ws.registry.filters().filter(|f| !f.runs_out_of_process()) {
         let entry = (f.id(), f.name().to_string());
         match categories.iter_mut().find(|(c, _)| *c == f.category()) {
             Some((_, list)) => list.push(entry),

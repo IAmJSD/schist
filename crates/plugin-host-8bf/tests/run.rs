@@ -697,3 +697,63 @@ fn the_descriptor_block_is_always_there_even_though_scripting_is_not() {
         "nothing can be recorded while the suites are not served"
     );
 }
+
+#[test]
+fn settings_come_back_out_and_go_back_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_advance", dir.path()) else {
+        return;
+    };
+
+    // First run: the plug-in has no parameters, so it allocates its own
+    // and starts from its default — inverting against 255.
+    let original = gradient(40, 40, 3);
+    let mut image = original.clone();
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap();
+    let expected: Vec<u8> = original.data.iter().map(|&b| 255 - b).collect();
+    assert_eq!(image.data, expected);
+
+    // What it left behind is its own private structure: a signature and
+    // an amount. This host never interprets it — the test does, because
+    // it is also the plug-in.
+    let saved = filter
+        .last_parameters()
+        .expect("the plug-in allocated a parameters handle")
+        .to_vec();
+    assert_eq!(saved.len(), 8, "sig and amount");
+    assert_eq!(
+        u32::from_ne_bytes(saved[..4].try_into().unwrap()),
+        0x5343_4831
+    );
+    assert_eq!(i32::from_ne_bytes(saved[4..].try_into().unwrap()), 255);
+
+    // Hand back a block with a different amount, the way a second run
+    // replays what the first one settled on.
+    let mut replayed = saved.clone();
+    replayed[4..].copy_from_slice(&200i32.to_ne_bytes());
+    let mut image = original.clone();
+    filter
+        .apply(
+            &mut image,
+            &bf::RunOptions {
+                parameters: Some(replayed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let expected: Vec<u8> = original
+        .data
+        .iter()
+        .map(|&b| (200i32 - b as i32).clamp(0, 255) as u8)
+        .collect();
+    assert_eq!(
+        image.data, expected,
+        "the replayed amount should be what the plug-in filtered with"
+    );
+
+    // And the block that came back reflects the run that just happened.
+    let after = filter.last_parameters().expect("still there").to_vec();
+    assert_eq!(i32::from_ne_bytes(after[4..].try_into().unwrap()), 200);
+}
