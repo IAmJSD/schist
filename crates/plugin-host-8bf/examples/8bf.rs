@@ -6,7 +6,7 @@
 //! ```
 //!
 //! PPM is the image format here purely so the example needs no codec:
-//! stage 1 is about the plug-in ABI, not about file formats.
+//! this crate is about the plug-in ABI, not about file formats.
 
 use schist_plugin_host_8bf as bf;
 use std::path::{Path, PathBuf};

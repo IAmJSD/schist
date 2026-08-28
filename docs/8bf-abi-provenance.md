@@ -106,7 +106,7 @@ all but one.
 | **The 32-bit path** | The host cross-compiled to `i686-pc-windows-gnu` loads the 32-bit Filter Foundry through its `'wx86'` descriptor and produces byte-identical pixels to the 64-bit run. `packed(4)` is right on both: on 32-bit it simply coincides with natural alignment |
 | **`SPBasicSuite.ReleaseSuite` is the second member** | Serving the PICA handle suite made Filter Foundry call `ReleaseSuite` — which it never did while every `AcquireSuite` failed. Nothing else would have exercised that slot |
 | **The PICA handle suite layout** | Chapter 4: "Suite PEA Handle suite. Current version: 1; Routines: 6" over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace. Filter Foundry acquires it by name, calls `SetLock` with `lock=1` and later `lock=0`, and its pixels stay correct |
-| `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because stage 4 needs the descriptor block regardless |
+| `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because plug-ins write through the descriptor block without checking it first |
 | **`PSPixelMap` is naturally aligned**, unlike `FilterRecord` | Filter Foundry's 64-bit preview draws correctly through it, and a 32-bit FilterMeister build does too. If the map were packed like the record, `base_addr` would be read four bytes early on 64-bit and the preview would be noise or a fault |
 | **A PiPL may declare more properties than it carries** | fersatgit's filters claim seven and hold six; the resource simply ends. Photoshop loads them, so refusing the whole list over a bad count rejects plug-ins that work — and everything that matters, kind and name and entry point, is in the part that parses. The parse now stops at the shortfall, reports it, and keeps what it read. A framing that yields *nothing* is still an error, because that is what a wrong offset looks like and the offset scan depends on telling them apart |
 | **An overhanging *output* rectangle has to be served, not refused** | Adobe says the output rectangle must be a subset of `filterRect`. Propetizer asks for a row above the top edge anyway. Refusing leaves `outData` null, and Propetizer does not check — it writes through it and faults. Serving a buffer of the size asked for and clipping on commit is what survives real plug-ins |
@@ -115,13 +115,12 @@ all but one.
 
 ## Still unverified
 
-| # | Fact | Why it is still open | Failure mode if wrong |
-|---|---|---|---|
-| 0 | **The descriptor suites' member order** — 18 read routines, 16 write | The guide lists them alphabetically after Open and Close, and that is not the layout. Served in the documented order, Filter Foundry opened a read descriptor and then called slot 2 **one and a half million times** without stopping: it was iterating keys, so `GetKey` is the *third* member and the listing is documentation order. One slot of eighteen is not enough to serve on, and the write suite counts sixteen routines while naming thirteen | A wrong getter hands a plug-in a value of the wrong type, or spins. Both sub-suites are therefore left null — the documented way to say scripting is unavailable — and plug-ins keep parameters in the `parameters` handle, which they already do and which works |
-| 0 | **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position; the API Guide documents no `SPBasicSuite` struct anywhere, only usage examples of those two. **Twenty-seven plug-in binaries across five families have now been run and not one calls the rest.** Filter Foundry only ever asks for the handle suite; G'MIC asks for one ADM suite by GUID and falls back to Qt when refused; the Fourier family uses no host suite at all; Adobe's own samples use the direct callbacks. G'MIC's source *does* call `AllocateBlock` — GitHub code search says so, which is all it was used for — but nothing reachable from a filter run gets there, including its second entry point and its settings dialog. Adobe's published prose for **three** products (Photoshop, Premiere Pro, After Effects) documents only `AcquireSuite` and `ReleaseSuite`, and never the struct, so the documentation route is exhausted too | A plug-in that allocates through PICA calls the wrong slot. This is the last gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise rather than treated as probably fine. The probe technique below is what would settle it, the moment a plug-in that exercises it turns up |
-| 2 | `HostProc`'s signature | Named but never printed, and passed as null | None while it stays null |
-| 3 | The suites this host does not implement — PseudoResource, Property, Image Services, Channel Ports, and the descriptor sub-suites | All passed as null, which is the documented way to say "unavailable" | None; a plug-in that needs one declines |
-| 4 | Anything past 8-bit, or with a selection or transparency | Out of scope for stage 1 | — |
+| Fact | Why it is still open | Failure mode if wrong |
+|---|---|---|
+| **The descriptor suites' member order** — 18 read routines, 16 write | The guide lists them alphabetically after Open and Close, and that is not the layout. Served in the documented order, Filter Foundry opened a read descriptor and then called slot 2 **one and a half million times** without stopping: it was iterating keys, so `GetKey` is the *third* member and the listing is documentation order. One slot of eighteen is not enough to serve on, and the write suite counts sixteen routines while naming thirteen | A wrong getter hands a plug-in a value of the wrong type, or spins. Both sub-suites are therefore left null — the documented way to say scripting is unavailable — and plug-ins keep parameters in the `parameters` handle, which they already do and which works |
+| **`SPBasicSuite` members past the first two** — `IsEqual`, `AllocateBlock`, `FreeBlock`, `ReallocateBlock`, `Undefined` | `AcquireSuite` and `ReleaseSuite` are confirmed by position; the API Guide documents no `SPBasicSuite` struct anywhere, only usage examples of those two. **Twenty-seven plug-in binaries across five families have now been run and not one calls the rest.** Filter Foundry only ever asks for the handle suite; G'MIC asks for one ADM suite by GUID and falls back to Qt when refused; the Fourier family uses no host suite at all; Adobe's own samples use the direct callbacks. G'MIC's source *does* call `AllocateBlock` — GitHub code search says so, which is all it was used for — but nothing reachable from a filter run gets there, including its second entry point and its settings dialog. Adobe's published prose for **three** products (Photoshop, Premiere Pro, After Effects) documents only `AcquireSuite` and `ReleaseSuite`, and never the struct, so the documentation route is exhausted too | A plug-in that allocates through PICA calls the wrong slot. This is the last gap, and given how the Buffer suite turned out it should be assumed wrong until a plug-in proves otherwise rather than treated as probably fine. The probe technique below is what would settle it, the moment a plug-in that exercises it turns up |
+| `HostProc`'s signature | Named but never printed, and passed as null | None while it stays null |
+| The suites this host does not implement — PseudoResource, Image Services, Channel Ports, and the descriptor sub-suites | All passed as null, which is the documented way to say "unavailable" | None; a plug-in that needs one declines |
 
 ## Gaps that block real plug-ins
 
@@ -174,15 +173,15 @@ name: it hands back raw pointers rather than opaque ids, and takes a size
 Still refused, and known to be wanted:
 
 - `Photoshop ChannelPorts Suite for Plug-ins` v3 — Smart Gradients asks
-  for it first and falls back when refused. Reading other channels is
-  stage 2 work.
+  for it first and falls back when refused. Reading channels other than
+  the ones the filter was handed is what it wants.
 - A GUID-named suite, `61e608b0-40fd-11d1-8da3-00c04fd5f7ee` — both of
   pluginguy's filters ask for it and carry on without it.
 
 ## Settling a suite's member order
 
-The technique, since it had to be invented twice and will be needed again
-for stages 2 to 4:
+The technique, since it had to be invented twice and is what would
+settle the two suites still listed as open above:
 
 Fill every slot of the suite with an interchangeable probe that logs the
 arguments it was handed. Each routine in a suite is `extern "C"` and

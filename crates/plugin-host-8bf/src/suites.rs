@@ -573,7 +573,7 @@ pub struct SPBasicSuite {
 
 /// PICA's "no such suite". A plug-in that gets this is expected to fall
 /// back to the direct `FilterRecord` callbacks, which is exactly what
-/// this stage supports.
+/// this host serves.
 const SP_SUITE_NOT_FOUND: i32 = -1;
 
 pub(crate) unsafe extern "C" fn acquire_suite(

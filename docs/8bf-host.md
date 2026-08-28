@@ -20,14 +20,14 @@ callback suites the *host* has to implement. The plug-in drives the pixel
 loop from there: it sets `inRect`, the host fills `inData`, it writes
 `outData`, and it repeats until it leaves an empty rectangle behind.
 
-## Staging
+## What works
 
-| Stage | Scope | State |
+| Area | Scope | State |
 |---|---|---|
-| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
-| **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
-| **3** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery and packaging still to do |
-| **4** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules need a source that documents `FormatRecord`, and the API Guide does not |
+| **Loading and running** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
+| **Isolation and depth** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
+| **Platforms** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery is written but unproven, packaging still to do |
+| **Scripting and scale** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules need a source that documents `FormatRecord`, and the API Guide does not |
 
 ### Scripting
 
@@ -102,14 +102,15 @@ Cancelling is killing the helper. That is both simpler and more reliable
 than asking a plug-in to stop, because a plug-in stuck in its own loop
 never reads a message.
 
-Stage 1 is deliberately in-process even though the eventual design is
-not. Running a twenty-year-old binary inside the editor is not something
-to ship — it will segfault and take the document with it — but proving
-the ABI is a prerequisite for the process split, and doing it in one
-address space keeps the failures legible while the layout is still being
-established.
+The ABI was established in-process first, deliberately. Running a
+twenty-year-old binary inside the editor is not something to ship — it
+will segfault and take the document with it — but proving the ABI was a
+prerequisite for the process split, and doing it in one address space
+kept the failures legible while the layout was still being established.
+The in-process path is still here, and is what the unit tests drive; it
+is `remote::apply` that shipping code should call.
 
-## What stage 1 does
+## The pieces
 
 ```
 crates/plugin-host-8bf
@@ -141,7 +142,7 @@ Schist > Invert
   interface 4.0
   code      [Win64X86]
   enable    in(PSHOP_ImageMode, RGBMode, GrayScaleMode)
-  BLOCKED   this build cannot load Windows plug-ins; running them under Wine is stage 3
+  BLOCKED   needs Wine installed (https://www.winehq.org)
 ```
 
 ### The pixel loop
@@ -203,23 +204,23 @@ one interchangeable probe per slot, which is how that suite's member
 order was established — a wrong order shows up as a call whose arguments
 make no sense for the slot it landed on.
 
-## What stage 1 does not do
+## What it does not do
 
-- **Documents past 32767 pixels.** `bigDocumentData` is null, so the
-  16-bit rectangles are the limit and an oversized image is refused
-  rather than silently wrapped into negative coordinates.
-- **The descriptor / scripting suites.** `descriptorParameters` is null,
-  so nothing records or plays back. `AcquireSuite` reports "not found"
-  for everything, which is what makes a plug-in take its compatible path
-  instead of misreading a zero.
+- **The descriptor / scripting suites.** `descriptorParameters` is
+  provided, because plug-ins write through it without checking, but both
+  sub-suites are null, so nothing records or plays back. The routines are
+  written and tested in `descriptor.rs`; serving them needs a member
+  order the API Guide does not give. `AcquireSuite` reports "not found"
+  for what is left, which is what makes a plug-in take its compatible
+  path instead of misreading a zero.
 - **Format, automation, selection and parser modules.** Filters only.
   `FormatRecord` is not in the API Guide — its contents run from Filter
   Modules straight to Selection Modules — so there is nothing to write
   one from.
-- **Some callback suites.** PseudoResource, Image Services, Channel
-  Ports and the descriptor sub-suites are still null. Nothing tested so
-  far needs them; `docs/8bf-abi-provenance.md` tracks what does.
-- **Crash isolation.** A plug-in fault kills the process.
+- **Some callback suites.** PseudoResource, Image Services and Channel
+  Ports are still null. `docs/8bf-abi-provenance.md` tracks what asks for
+  them and why Channel Ports in particular cannot be written from the
+  published prose.
 
 ### Previews
 

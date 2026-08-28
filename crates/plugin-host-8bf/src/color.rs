@@ -14,7 +14,7 @@
 //!
 //! Everything is deliberately self-contained rather than reaching for
 //! `schist-color`, because this crate stays dependency-free for the
-//! out-of-process helper that stage 3 turns it into.
+//! helper process it is loaded into.
 
 use crate::abi::color_space;
 

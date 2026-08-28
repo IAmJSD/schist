@@ -1,11 +1,11 @@
 //! A host for Adobe Photoshop filter plug-ins (`.8bf`).
 //!
-//! This is **stage 1** of the plan in `docs/8bf-host.md`: enough to
-//! discover Windows filter plug-ins, read their metadata, and run one
-//! over an 8-bit image, in process. What it does *not* do yet — 16/32-bit,
-//! selections and transparency, the descriptor/scripting suites, format
-//! and automation modules, and above all running out of process — is
-//! listed there too.
+//! Discovers Windows and macOS filter plug-ins, reads their metadata,
+//! and runs one over an 8-, 16- or 32-bit image, with selections and
+//! transparency, in a helper process — so a plug-in that segfaults takes
+//! the helper down and not the document. What it does *not* do — serve
+//! the descriptor/scripting suites, or host format and automation
+//! modules — is listed in `docs/8bf-host.md`.
 //!
 //! ```no_run
 //! use schist_plugin_host_8bf as bf;

@@ -5,8 +5,8 @@
 //! one calling convention on both x86-64 targets — and that lets the
 //! whole selector sequence, `advanceState`, the handle suite and the
 //! pixel marshalling be exercised on a Linux CI box. What it does *not*
-//! cover is loading a real PE plug-in, which needs Windows or stage 3's
-//! Wine helper.
+//! cover is loading a real PE plug-in, which needs Windows or the Wine
+//! helper — `tools/verify-8bf.sh` is what does that.
 
 mod common;
 

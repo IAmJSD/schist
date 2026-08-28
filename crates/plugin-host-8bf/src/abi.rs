@@ -13,11 +13,14 @@
 //!
 //! # Layout
 //!
-//! `FilterRecord` is `#[repr(C)]` with *natural* alignment: no packing
-//! pragma. Both the host and the plug-in compile the same declaration
-//! with their toolchain's defaults, so natural alignment is what is
-//! actually on the wire for the Win64 target this stage supports. The
-//! field offsets are pinned by `tests/layout.rs` and cross-checked
+//! `FilterRecord` is `#[repr(C, packed(4))]`, not naturally aligned.
+//! The API Guide says packing "should be the default for the target
+//! system", which sounds like natural alignment and is not: it was
+//! written for 32-bit, where a pointer's default alignment *is* four
+//! bytes. On 64-bit the SDK pins four rather than following the platform
+//! to eight, and real plug-ins agree — they read `bufferProcs` at the
+//! offset four-byte packing puts it at, which is how this was settled.
+//! The field offsets are pinned by `tests/layout.rs` and cross-checked
 //! against a C compiler's own `offsetof` by `tests/fixtures/probe.c`, so
 //! a wrong assumption fails loudly instead of silently corrupting a
 //! plug-in's view of the record.

@@ -17,7 +17,7 @@
 //!
 //! Written and unit-tested against fixtures built here; **not yet run
 //! against a real macOS plug-in**, because this machine is Linux. The
-//! stage 1 host was in exactly this position before Wine, and was wrong
+//! Windows path was in exactly this position before Wine, and was wrong
 //! in three places when it finally met one. Treat accordingly.
 
 use crate::launch::PluginAbi;

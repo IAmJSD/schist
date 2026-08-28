@@ -243,7 +243,7 @@ impl Filter {
         }
         // SAFETY: loading a plug-in runs its initialisers, which is the
         // whole point; there is no way to do this safely, which is why
-        // stage 3 moves it into its own process.
+        // `remote::apply` runs it in a helper process.
         let lib = unsafe { load_library(path) }.map_err(|e| HostError::Load(e.to_string()))?;
         let entry = unsafe {
             let sym: libloading::Symbol<EntryProc> = lib
@@ -323,10 +323,6 @@ impl Filter {
     /// Run the filter over `image`, in place.
     pub fn apply(&mut self, image: &mut Image, opts: &RunOptions) -> Result<(), HostError> {
         suites::trace_from_env();
-        // Deliberately not 4: a fourth plane is transparency, and
-        // offering it under filterCaseFlatImageNoSelection would have
-        // the plug-in filter alpha as if it were a colour channel.
-        // Transparency is stage 2.
         // A trailing plane is transparency, not colour: 4 planes is RGB
         // plus alpha, 2 is grayscale plus alpha. The image *mode* is
         // named for the colour planes alone.
@@ -997,8 +993,8 @@ impl<'a> Session<'a> {
         // identical, so older plug-ins get the same answers.
         record.get_property = get_property_thunk as *mut c_void;
 
-        // Offer wide coordinates even though this stage's images fit in
-        // the narrow ones. A plug-in built against the CS or later SDK
+        // Offer wide coordinates even though most images fit in the
+        // narrow ones. A plug-in built against the CS or later SDK
         // may treat a null bigDocumentData as "host too old" and decline
         // before it looks at anything else.
         big_doc.image_size_32 = VPoint {
@@ -1019,7 +1015,9 @@ impl<'a> Session<'a> {
         // without checking — `descriptor` is at offset 8, which is
         // exactly where a null pointer here faults. Both sub-suites stay
         // null: that is the documented way to say the descriptor
-        // callbacks are unavailable, and it is what stage 4 fills in.
+        // callbacks are unavailable. `descriptor` has both suites
+        // written and tested; serving them needs a member order the API
+        // Guide does not give.
         descriptor_params.descriptor_parameters_version = 0;
         descriptor_params.play_info = if opts.show_dialog {
             dialog_info::REQUIRED_OR_DISPLAY
@@ -1084,7 +1082,7 @@ impl<'a> Session<'a> {
 
         // "If zero, assume the host has not set it" — so these are only
         // meaningful because we fill them, and they describe the plain
-        // interleaved layout this stage produces.
+        // interleaved layout this host produces.
         record.in_column_bytes = (planes as usize * sample) as i32;
         record.in_plane_bytes = sample as i32;
         record.out_column_bytes = (planes as usize * sample) as i32;
@@ -1507,7 +1505,7 @@ impl<'a> Session<'a> {
     }
 
     /// Photoshop keeps the parameters handle alive between runs for the
-    /// Last Filter command; this stage runs each filter standalone, so
+    /// Last Filter command; this host runs each filter standalone, so
     /// the handle is released once `Finish` has read it back.
     fn dispose_parameters(&mut self) {
         if self.parameters_owner && !self.record.parameters.is_null() {
