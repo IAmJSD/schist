@@ -96,7 +96,6 @@ pub mod key {
     pub const CODE_WIN64_X86: OSType = fourcc(b"8664");
 }
 
-/// `'kind'` values, from Resource Guide table 11-3.
 /// Parse a PiPL whose byte order is not known up front.
 ///
 /// The Resource Guide says a PiPL's integers are "in native byte order
@@ -123,6 +122,7 @@ pub fn parse_any_order(raw: &[u8]) -> Option<Pipl> {
     None
 }
 
+/// `'kind'` values, from Resource Guide table 11-3.
 pub mod kind {
     use crate::abi::{fourcc, OSType};
 
