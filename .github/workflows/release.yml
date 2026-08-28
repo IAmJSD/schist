@@ -96,7 +96,9 @@ jobs:
           # executable itself -- strip it here so neither the AppImage payload
           # nor the loose binaries ship it. Symbols stay; only DWARF goes.
           strip --strip-debug target/release/schist target/release/schist-mcp
-          sudo apt-get install -y libfuse2 || true
+          # libfuse2: appimagetool. rpm: rpmbuild, for the .rpm.
+          # libarchive-tools: bsdtar, which writes the .pkg.tar.zst's .MTREE.
+          sudo apt-get install -y libfuse2 rpm libarchive-tools || true
           curl -sSL -o /tmp/appimagetool \
             "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$(uname -m).AppImage"
           chmod +x /tmp/appimagetool
@@ -105,6 +107,8 @@ jobs:
           # destination file" and no AppImage is produced.
           mkdir -p dist
           APPIMAGETOOL=/tmp/appimagetool ./packaging/linux/appimage.sh
+          # The .deb, .rpm and .pkg.tar.zst, from the same build.
+          ./packaging/linux/packages.sh
           # Arch-suffixed: the x86_64 and aarch64 jobs publish into the same
           # release, and same-named assets would collide there.
           cp target/release/schist "dist/schist-linux-$(uname -m)"
