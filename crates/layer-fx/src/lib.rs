@@ -14,8 +14,8 @@
 use schist_color::Rgba;
 use schist_core::{
     blend::BlendMode, BevelStyle, BevelStyle_, BlurStyle, GlowStyle, GradientOverlayStyle,
-    GradientShape, IntRect, Layer, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle,
-    StyledRaster, Technique, TileCoord, TileMap,
+    GradientShape, IntRect, Layer, LayerStyle, SatinStyle, ShadowStyle, StrokePosition,
+    StrokeStyle, StyledRaster, Technique, TileCoord, TileMap,
 };
 
 mod blur;
@@ -226,20 +226,16 @@ fn blur_content(base: &mut Plane, alpha: &mut [f32], w: usize, h: usize, b: &Blu
     let mut chan = vec![0.0f32; n];
     let kept: Vec<f32> = base.px.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     for c in 0..4 {
-        for i in 0..n {
+        for (i, v) in chan.iter_mut().enumerate() {
             let a = base.px[i * 4 + 3];
-            chan[i] = if c == 3 {
-                a
-            } else {
-                base.px[i * 4 + c] * a
-            };
+            *v = if c == 3 { a } else { base.px[i * 4 + c] * a };
         }
         gaussian_alpha(&mut chan, w, h, b.radius);
-        for i in 0..n {
-            base.px[i * 4 + c] = chan[i];
+        for (i, v) in chan.iter().enumerate() {
+            base.px[i * 4 + c] = *v;
         }
     }
-    for i in 0..n {
+    for (i, keep) in kept.iter().enumerate().take(n) {
         let a = base.px[i * 4 + 3];
         if a > f32::EPSILON {
             let unpremul = 1.0 / a;
@@ -248,7 +244,7 @@ fn blur_content(base: &mut Plane, alpha: &mut [f32], w: usize, h: usize, b: &Blu
             }
         }
         if b.preserve_alpha {
-            base.px[i * 4 + 3] = kept[i];
+            base.px[i * 4 + 3] = *keep;
         }
     }
     if !b.preserve_alpha {

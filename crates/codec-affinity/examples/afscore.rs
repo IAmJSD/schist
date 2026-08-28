@@ -34,7 +34,12 @@ fn main() {
     let ours = if ours.dimensions() == thumb.dimensions() {
         ours
     } else {
-        image::imageops::resize(&ours, thumb.width(), thumb.height(), image::imageops::Triangle)
+        image::imageops::resize(
+            &ours,
+            thumb.width(),
+            thumb.height(),
+            image::imageops::Triangle,
+        )
     };
     let mut sum = 0.0f64;
     let mut n = 0u64;

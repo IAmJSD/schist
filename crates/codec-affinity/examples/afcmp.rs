@@ -33,7 +33,9 @@ fn main() {
         .unwrap()
         .to_string_lossy()
         .to_string();
-    thumb.save(format!("{dir}/{stem}.affinity.png")).expect("save");
+    thumb
+        .save(format!("{dir}/{stem}.affinity.png"))
+        .expect("save");
 
     let (mut doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
     restyle(&mut doc.tree.layers);
@@ -47,7 +49,12 @@ fn main() {
     let ours = if ours.dimensions() == thumb.dimensions() {
         ours
     } else {
-        image::imageops::resize(&ours, thumb.width(), thumb.height(), image::imageops::Triangle)
+        image::imageops::resize(
+            &ours,
+            thumb.width(),
+            thumb.height(),
+            image::imageops::Triangle,
+        )
     };
     ours.save(format!("{dir}/{stem}.schist.png")).expect("save");
     println!("{stem}: {}x{}", thumb.width(), thumb.height());
