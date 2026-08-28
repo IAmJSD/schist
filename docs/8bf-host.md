@@ -25,7 +25,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 | Stage | Scope | State |
 |---|---|---|
 | **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
-| **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites | **helper done**; 16/32-bit, selections and transparency still to do |
+| **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit | **done** but for selections and transparency |
 | **3** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery and packaging still to do |
 | 4 | ActionManager / descriptor recording, format plug-ins, big-document coordinates | not started |
 
@@ -182,9 +182,6 @@ make no sense for the slot it landed on.
 
 ## What stage 1 does not do
 
-- **Anything but 8-bit.** `depth` is reported as 8 and `imageMode` as RGB
-  or grayscale. 16-bit Photoshop pixels run 0..32768, not 0..65535, which
-  is its own trap for stage 2.
 - **Selections, masks and transparency.** Only
   `filterCaseFlatImageNoSelection` is offered; a plug-in that declares it
   cannot filter that case is refused up front rather than run wrongly.
@@ -219,6 +216,25 @@ or later functionality" — and FilterMeister is what a great deal of the
 freeware world is built with.
 
 Unlike `FilterRecord`, `PSPixelMap` is naturally aligned.
+
+### Depth
+
+8-, 16- and 32-bit images all go through, as grayscale or RGB — six
+modes in all, since Photoshop treats each depth as a different mode
+rather than as an attribute of one.
+
+**16-bit runs 0..=32768, not 0..=65535.** Photoshop's range spans 32769
+values so that half-way is exactly representable, and a host that hands
+over 65535-scaled data gives a plug-in colours twice as bright as
+intended across the whole top half. `Depth::Sixteen` says so and the
+fixture inverts about 32768 to prove it. Previews scale the same way,
+and 32-bit float previews clamp at 1.0 because scene-referred values
+above white have nowhere else to go.
+
+One thing this taught: a plug-in that supports 16-bit may not say so in
+its `'mode'` flags. G'MIC declares only Grayscale and RGB there and
+handles depth through `'enbl'`'s `PSHOP_ImageDepth` test instead. So only
+the *base* mode is grounds for refusal; a missing deep-mode flag is not.
 
 ### Colour services
 

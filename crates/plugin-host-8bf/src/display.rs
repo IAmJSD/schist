@@ -17,6 +17,39 @@ use crate::abi::{mask_description, PSPixelMap, PSPixelMask, VRect};
 /// generally due to unsupported color modes."
 const MODE_GRAYSCALE: i32 = crate::abi::mode::GRAY_SCALE as i32;
 const MODE_RGB: i32 = crate::abi::mode::RGB_COLOR as i32;
+const MODE_GRAY_16: i32 = crate::abi::mode::GRAY_16 as i32;
+const MODE_RGB_48: i32 = crate::abi::mode::RGB_48 as i32;
+const MODE_GRAY_32: i32 = crate::abi::mode::GRAY_32 as i32;
+const MODE_RGB_96: i32 = crate::abi::mode::RGB_96 as i32;
+
+/// How wide a sample is, and how to bring it down to the eight bits a
+/// screen wants.
+#[derive(Clone, Copy)]
+enum Sample {
+    Byte,
+    /// Photoshop's 16-bit tops out at 32768, not 65535.
+    Short,
+    Float,
+}
+
+impl Sample {
+    /// # Safety
+    ///
+    /// `p` must point at a sample of this width.
+    unsafe fn read(self, p: *const u8) -> u8 {
+        match self {
+            Sample::Byte => *p,
+            Sample::Short => {
+                let v = u16::from_le_bytes([*p, *p.add(1)]) as u32;
+                ((v * 255) / 32768).min(255) as u8
+            }
+            Sample::Float => {
+                let v = f32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)]);
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            }
+        }
+    }
+}
 
 /// A rectangle of 32-bit BGRX pixels, top row first — the layout a
 /// Windows top-down DIB wants, and 32 bits per pixel so rows need no
@@ -38,9 +71,13 @@ pub struct Surface {
 /// `map` must describe a live buffer: `base_addr` valid for the strides
 /// and bounds it declares.
 pub unsafe fn read_surface(map: &PSPixelMap, src_rect: VRect) -> Option<Surface> {
-    let planes = match map.image_mode {
-        MODE_GRAYSCALE => 1usize,
-        MODE_RGB => 3,
+    let (planes, sample) = match map.image_mode {
+        MODE_GRAYSCALE => (1usize, Sample::Byte),
+        MODE_RGB => (3, Sample::Byte),
+        MODE_GRAY_16 => (1, Sample::Short),
+        MODE_RGB_48 => (3, Sample::Short),
+        MODE_GRAY_32 => (1, Sample::Float),
+        MODE_RGB_96 => (3, Sample::Float),
         _ => return None,
     };
     if map.base_addr.is_null() || src_rect.is_empty() {
@@ -76,10 +113,14 @@ pub unsafe fn read_surface(map: &PSPixelMap, src_rect: VRect) -> Option<Surface>
             let sx = (src_rect.left + x - map.bounds.left) as isize;
             let px = base.offset(sy * row_bytes + sx * col_bytes);
             let (r, g, b) = if planes == 1 {
-                let v = *px;
+                let v = sample.read(px);
                 (v, v, v)
             } else {
-                (*px, *px.offset(plane_bytes), *px.offset(plane_bytes * 2))
+                (
+                    sample.read(px),
+                    sample.read(px.offset(plane_bytes)),
+                    sample.read(px.offset(plane_bytes * 2)),
+                )
             };
             let (r, g, b) = match matte {
                 Some(m) => dematte(map, sx, sy, (r, g, b), m),
@@ -322,6 +363,49 @@ mod tests {
         };
         let s = unsafe { read_surface(&map, map.bounds).unwrap() };
         assert_eq!(s.bgrx, vec![5, 3, 1, 255, 6, 4, 2, 255]);
+    }
+
+    #[test]
+    fn sixteen_bit_pixels_are_scaled_from_photoshops_range_not_from_65535() {
+        // 32768 is white. Treating it as 65535-scaled would draw it at
+        // half brightness, and every 16-bit preview would look wrong in
+        // a way easy to mistake for the plug-in's doing.
+        let mut data = Vec::new();
+        for v in [0u16, 16384, 32768] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let map = PSPixelMap {
+            image_mode: crate::abi::mode::GRAY_16 as i32,
+            row_bytes: 6,
+            col_bytes: 2,
+            plane_bytes: 2,
+            ..interleaved(&mut data, 3, 1, 1, MODE_GRAYSCALE)
+        };
+        let s = unsafe { read_surface(&map, map.bounds).unwrap() };
+        assert_eq!(s.bgrx[0], 0);
+        assert_eq!(s.bgrx[4], 127);
+        assert_eq!(s.bgrx[8], 255);
+    }
+
+    #[test]
+    fn thirty_two_bit_pixels_clamp_at_white() {
+        // Scene-referred float legitimately goes above 1.0; a preview
+        // has nowhere to put that but white.
+        let mut data = Vec::new();
+        for v in [0.0f32, 0.5, 4.0] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let map = PSPixelMap {
+            image_mode: crate::abi::mode::GRAY_32 as i32,
+            row_bytes: 12,
+            col_bytes: 4,
+            plane_bytes: 4,
+            ..interleaved(&mut data, 3, 1, 1, MODE_GRAYSCALE)
+        };
+        let s = unsafe { read_surface(&map, map.bounds).unwrap() };
+        assert_eq!(s.bgrx[0], 0);
+        assert_eq!(s.bgrx[4], 128);
+        assert_eq!(s.bgrx[8], 255);
     }
 
     #[test]

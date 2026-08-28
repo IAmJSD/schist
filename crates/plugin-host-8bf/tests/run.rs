@@ -286,6 +286,7 @@ fn an_oversized_image_is_refused_rather_than_wrapped() {
         width: 40_000,
         height: 1,
         planes: 3,
+        depth: bf::host::Depth::Eight,
         data: vec![0; 120_000],
     };
     let err = filter
@@ -491,4 +492,57 @@ fn an_output_rectangle_overhanging_the_image_is_served_and_clipped() {
         "every in-bounds pixel should have been written"
     );
     assert_eq!(image.data.len(), 16 * 12 * 3, "and nothing outside it");
+}
+
+/// A gradient of 16-bit samples over Photoshop's 0..=32768 range.
+fn deep_gradient(width: u32, height: u32, planes: u16) -> bf::Image {
+    let mut img = bf::Image::with_depth(width, height, planes, bf::host::Depth::Sixteen);
+    for y in 0..height {
+        for x in 0..width {
+            for p in 0..planes as u32 {
+                let v = ((x * 337 + y * 613 + p * 977) % 32769) as u16;
+                let at = (((y * width + x) * planes as u32 + p) * 2) as usize;
+                img.data[at..at + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    img
+}
+
+#[test]
+fn sixteen_bit_images_go_through_at_the_documented_range() {
+    // The fixture refuses unless depth is 16, the mode is RGB48, and the
+    // strides were scaled for two-byte samples — and inverts about
+    // 32768, which is Photoshop's white and not 65535.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_deep", dir.path()) else {
+        return;
+    };
+    let original = deep_gradient(19, 11, 3);
+    let mut image = original.clone();
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap();
+
+    let before = original.data.as_chunks::<2>().0;
+    let after = image.data.as_chunks::<2>().0;
+    for (i, (b, a)) in before.iter().zip(after).enumerate() {
+        assert_eq!(
+            u16::from_le_bytes(*a),
+            32768 - u16::from_le_bytes(*b),
+            "sample {i}"
+        );
+    }
+}
+
+#[test]
+fn a_sixteen_bit_grayscale_image_is_gray_16_not_grayscale() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_deep", dir.path()) else {
+        return;
+    };
+    let mut image = deep_gradient(8, 8, 1);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("grayscale at 16 bits is its own mode, and the fixture checks which");
 }

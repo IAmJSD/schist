@@ -304,6 +304,7 @@ fn read_ppm(path: &Path) -> Result<bf::Image, Box<dyn std::error::Error>> {
         width,
         height,
         planes: 3,
+        depth: bf::host::Depth::Eight,
         data: pixels[..want].to_vec(),
     })
 }

@@ -479,6 +479,57 @@ EXPORT void entry_continue(int16_t selector, void *pb, intptr_t *data, int16_t *
     run(selector, (FilterRecord *)pb, data, result, RUN_CONTINUE);
 }
 
+/* ---- deep images ------------------------------------------------------
+ *
+ * Photoshop's 16-bit range is 0..32768, not 0..65535 — a host that gets
+ * that wrong hands over colours twice as bright as intended across the
+ * whole top half. Inverting about 32768 is how that shows.
+ */
+#define deepBadDepth (-30150)
+#define deepBadMode  (-30151)
+
+EXPORT void entry_deep(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    if (fr->depth != 16) { *result = deepBadDepth; return; }
+    /* RGB48 is mode 11, Gray16 is 10. */
+    if (fr->imageMode != 11 && fr->imageMode != 10) { *result = deepBadMode; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    while (next_tile(fr, p)) {
+        OSErr e = fr->advanceState();
+        if (e != 0) { *result = e; return; }
+        /* Strides are in bytes and samples are two, so the host having
+         * scaled colBytes and planeBytes is what makes this work. */
+        if (fr->inColumnBytes != fr->planes * 2 || fr->inPlaneBytes != 2) {
+            *result = deepBadDepth; return;
+        }
+        int planes = fr->planes;
+        int w = fr->inRect.right - fr->inRect.left;
+        int h = fr->inRect.bottom - fr->inRect.top;
+        for (int y = 0; y < h; y++) {
+            const uint16_t *src = (const uint16_t *)((const unsigned char *)fr->inData
+                                                     + (size_t)y * fr->inRowBytes);
+            uint16_t *dst = (uint16_t *)((unsigned char *)fr->outData
+                                         + (size_t)y * fr->outRowBytes);
+            for (int i = 0; i < w * planes; i++) {
+                int v = 32768 - src[i];
+                dst[i] = (uint16_t)(v < 0 ? 0 : (v > 32768 ? 32768 : v));
+            }
+        }
+    }
+}
+
 /* ---- padding ---------------------------------------------------------
  *
  * Ask for a rectangle that overhangs the image on every side, then copy

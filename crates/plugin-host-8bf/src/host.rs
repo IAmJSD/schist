@@ -21,34 +21,92 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// An 8-bit interleaved image, the only shape this stage handles.
+/// How many bits a sample takes, and what range it spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Depth {
+    /// 0..=255.
+    Eight,
+    /// **0..=32768**, not 0..=65535. Photoshop's 16-bit spans 32769
+    /// values so that half-way is exactly representable, and a host that
+    /// hands over 0..=65535 data gives a plug-in colours twice as bright
+    /// as intended over the whole top half of the range.
+    Sixteen,
+    /// 32-bit float, where 1.0 is white and values above it are
+    /// legitimate.
+    ThirtyTwo,
+}
+
+impl Depth {
+    /// Bytes per sample.
+    pub fn bytes(self) -> usize {
+        match self {
+            Depth::Eight => 1,
+            Depth::Sixteen => 2,
+            Depth::ThirtyTwo => 4,
+        }
+    }
+
+    /// What goes in `FilterRecord::depth`.
+    pub fn bits(self) -> i32 {
+        match self {
+            Depth::Eight => 8,
+            Depth::Sixteen => 16,
+            Depth::ThirtyTwo => 32,
+        }
+    }
+
+    /// The largest value an integer sample holds.
+    pub fn max(self) -> u32 {
+        match self {
+            Depth::Eight => 255,
+            Depth::Sixteen => 32768,
+            Depth::ThirtyTwo => 1,
+        }
+    }
+}
+
+/// An interleaved image, as a plug-in wants to see one.
 ///
-/// Planes are stored the way the plug-in wants to see them: byte 0 of a
-/// pixel is plane 0. For [`mode::RGB_COLOR`] that is R, G, B.
+/// Planes are stored the way the plug-in reads them: sample 0 of a pixel
+/// is plane 0. For [`mode::RGB_COLOR`] that is R, G, B. Samples wider
+/// than a byte are in the machine's own order, which is what a plug-in
+/// compiled for that machine expects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
     pub planes: u16,
+    pub depth: Depth,
     pub data: Vec<u8>,
 }
 
 impl Image {
+    /// An 8-bit image, which is what most plug-ins want.
     pub fn new(width: u32, height: u32, planes: u16) -> Image {
+        Image::with_depth(width, height, planes, Depth::Eight)
+    }
+
+    pub fn with_depth(width: u32, height: u32, planes: u16, depth: Depth) -> Image {
         Image {
             width,
             height,
             planes,
-            data: vec![0; width as usize * height as usize * planes as usize],
+            depth,
+            data: vec![0; width as usize * height as usize * planes as usize * depth.bytes()],
         }
     }
 
+    /// Bytes from one pixel to the next.
+    fn pixel_bytes(&self) -> usize {
+        self.planes as usize * self.depth.bytes()
+    }
+
     fn row_bytes(&self) -> usize {
-        self.width as usize * self.planes as usize
+        self.width as usize * self.pixel_bytes()
     }
 
     fn index(&self, x: u32, y: u32) -> usize {
-        y as usize * self.row_bytes() + x as usize * self.planes as usize
+        y as usize * self.row_bytes() + x as usize * self.pixel_bytes()
     }
 }
 
@@ -249,16 +307,32 @@ impl Filter {
         // offering it under filterCaseFlatImageNoSelection would have
         // the plug-in filter alpha as if it were a colour channel.
         // Transparency is stage 2.
-        let image_mode = match image.planes {
-            1 => mode::GRAY_SCALE,
-            3 => mode::RGB_COLOR,
-            n => {
+        let image_mode = match (image.planes, image.depth) {
+            (1, Depth::Eight) => mode::GRAY_SCALE,
+            (3, Depth::Eight) => mode::RGB_COLOR,
+            (1, Depth::Sixteen) => mode::GRAY_16,
+            (3, Depth::Sixteen) => mode::RGB_48,
+            (1, Depth::ThirtyTwo) => mode::GRAY_32,
+            (3, Depth::ThirtyTwo) => mode::RGB_96,
+            (n, d) => {
                 return Err(HostError::BadRequest(format!(
-                    "{n} planes; this stage handles 1 (grayscale) or 3 (RGB)"
+                    "{n} planes at {} bits; this host offers 1 or 3",
+                    d.bits()
                 )))
             }
         };
-        if self.pipl.supports_mode(image_mode) == Some(false) {
+        // Only the *base* mode is a refusal. A plug-in that declares
+        // neither Gray16 nor RGB48 in its `'mode'` flags may still
+        // handle them: G'MIC does exactly that, declaring 16- and
+        // 32-bit support through `'enbl'`'s PSHOP_ImageDepth test
+        // instead. Refusing on the flag set alone would turn away a
+        // plug-in that works.
+        let base_mode = if image.planes == 1 {
+            mode::GRAY_SCALE
+        } else {
+            mode::RGB_COLOR
+        };
+        if self.pipl.supports_mode(base_mode) == Some(false) {
             return Err(HostError::UnsupportedMode(image_mode));
         }
 
@@ -672,6 +746,8 @@ struct Session<'a> {
     source: Vec<u8>,
     dest: &'a mut Image,
     planes: u16,
+    /// Bytes per sample, so every stride is one multiplication away.
+    sample: usize,
     case_info: Option<FilterCaseInfo>,
 
     in_buf: Vec<u8>,
@@ -718,6 +794,7 @@ impl<'a> Session<'a> {
         opts: &'a RunOptions,
     ) -> Session<'a> {
         let (w, h, planes) = (image.width, image.height, image.planes);
+        let sample = image.depth.bytes();
         let source = image.data.clone();
 
         let mut handle_procs = Box::new(suites::handle_procs());
@@ -750,7 +827,7 @@ impl<'a> Session<'a> {
         record.planes = planes as i16;
         record.filter_rect = Rect::new(0, 0, h as i16, w as i16);
         record.image_mode = image_mode;
-        record.depth = 8;
+        record.depth = image.depth.bits();
         record.image_h_res = fixed(opts.resolution);
         record.image_v_res = fixed(opts.resolution);
         // What the plug-in may expect to reach at once: input plus
@@ -862,10 +939,10 @@ impl<'a> Session<'a> {
         // "If zero, assume the host has not set it" — so these are only
         // meaningful because we fill them, and they describe the plain
         // interleaved layout this stage produces.
-        record.in_column_bytes = planes as i32;
-        record.in_plane_bytes = 1;
-        record.out_column_bytes = planes as i32;
-        record.out_plane_bytes = 1;
+        record.in_column_bytes = (planes as usize * sample) as i32;
+        record.in_plane_bytes = sample as i32;
+        record.out_column_bytes = (planes as usize * sample) as i32;
+        record.out_plane_bytes = sample as i32;
 
         let tile = 128i16;
         record.in_tile_height = tile;
@@ -878,6 +955,7 @@ impl<'a> Session<'a> {
             source,
             dest: image,
             planes,
+            sample,
             case_info,
             in_buf: Vec::new(),
             out_buf: Vec::new(),
@@ -994,11 +1072,30 @@ impl<'a> Session<'a> {
         if x < 0 || y < 0 || x as u32 >= self.dest.width || y as u32 >= self.dest.height {
             return None;
         }
-        let i = self.dest.index(x as u32, y as u32);
-        let px = self.source.get(i..i + self.planes as usize)?;
+        let base = self.dest.index(x as u32, y as u32);
+        // Colour services speak in bytes whatever the image's depth, so
+        // a deep sample is scaled down rather than truncated.
+        let read = |plane: usize| -> Option<i16> {
+            let at = base + plane * self.sample;
+            let raw = self.source.get(at..at + self.sample)?;
+            Some(match self.dest.depth {
+                Depth::Eight => raw[0] as i16,
+                Depth::Sixteen => {
+                    let v = u16::from_le_bytes([raw[0], raw[1]]) as u32;
+                    ((v * 255) / Depth::Sixteen.max()).min(255) as i16
+                }
+                Depth::ThirtyTwo => {
+                    let v = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                    (v.clamp(0.0, 1.0) * 255.0).round() as i16
+                }
+            })
+        };
         Some(match self.planes {
-            1 => [px[0] as i16, px[0] as i16, px[0] as i16, 0],
-            _ => [px[0] as i16, px[1] as i16, px[2] as i16, 0],
+            1 => {
+                let g = read(0)?;
+                [g, g, g, 0]
+            }
+            _ => [read(0)?, read(1)?, read(2)?, 0],
         })
     }
 
@@ -1060,7 +1157,7 @@ impl<'a> Session<'a> {
         if !in_rect.is_empty() {
             let (lo, hi) = self.plane_range(self.record.in_lo_plane, self.record.in_hi_plane)?;
             let n = (hi - lo + 1) as usize;
-            let row_bytes = in_rect.width() as usize * n;
+            let row_bytes = in_rect.width() as usize * n * self.sample;
             self.in_buf.resize(row_bytes * in_rect.height() as usize, 0);
             let padding = self.record.input_padding;
             read_rect(
@@ -1072,6 +1169,7 @@ impl<'a> Session<'a> {
                 lo,
                 hi,
                 padding,
+                self.sample,
                 &mut self.in_buf,
             );
             self.record.in_data = self.in_buf.as_mut_ptr() as *mut c_void;
@@ -1080,8 +1178,8 @@ impl<'a> Session<'a> {
                 "   served in {in_rect:?} planes {lo}..={hi} rowBytes={row_bytes} bytes={}",
                 self.in_buf.len()
             );
-            self.record.in_column_bytes = n as i32;
-            self.record.in_plane_bytes = 1;
+            self.record.in_column_bytes = (n * self.sample) as i32;
+            self.record.in_plane_bytes = self.sample as i32;
         } else {
             self.record.in_data = std::ptr::null_mut();
             self.record.in_row_bytes = 0;
@@ -1098,7 +1196,7 @@ impl<'a> Session<'a> {
             // which is a fault rather than a diagnostic.
             let (lo, hi) = self.plane_range(self.record.out_lo_plane, self.record.out_hi_plane)?;
             let n = (hi - lo + 1) as usize;
-            let row_bytes = out_rect.width() as usize * n;
+            let row_bytes = out_rect.width() as usize * n * self.sample;
             self.out_buf
                 .resize(row_bytes * out_rect.height() as usize, 0);
             // "Normally source data is copied to the destination before
@@ -1114,6 +1212,7 @@ impl<'a> Session<'a> {
                     lo,
                     hi,
                     abi::padding::WANTS_EDGE_REPLICATION,
+                    self.sample,
                     &mut self.out_buf,
                 );
             }
@@ -1122,8 +1221,8 @@ impl<'a> Session<'a> {
             crate::suites::trace!(
                 "   served out {out_rect:?} planes {lo}..={hi} rowBytes={row_bytes}"
             );
-            self.record.out_column_bytes = n as i32;
-            self.record.out_plane_bytes = 1;
+            self.record.out_column_bytes = (n * self.sample) as i32;
+            self.record.out_plane_bytes = self.sample as i32;
             self.pending = Some((out_rect, lo, hi));
         } else {
             self.record.out_data = std::ptr::null_mut();
@@ -1151,9 +1250,10 @@ impl<'a> Session<'a> {
         let Some((rect, lo, hi)) = self.pending.take() else {
             return;
         };
-        let n = (hi - lo + 1) as usize;
+        let n = (hi - lo + 1) as usize * self.sample;
         let src_row = rect.width() as usize * n;
         let (w, h) = (self.dest.width as i32, self.dest.height as i32);
+        let lo = lo as usize * self.sample;
         for y in 0..rect.height() {
             let dy = rect.top as i32 + y;
             if dy < 0 || dy >= h {
@@ -1164,11 +1264,9 @@ impl<'a> Session<'a> {
                 if dx < 0 || dx >= w {
                     continue;
                 }
-                let di = self.dest.index(dx as u32, dy as u32);
+                let di = self.dest.index(dx as u32, dy as u32) + lo;
                 let si = y as usize * src_row + x as usize * n;
-                for p in 0..n {
-                    self.dest.data[di + lo as usize + p] = self.out_buf[si + p];
-                }
+                self.dest.data[di..di + n].copy_from_slice(&self.out_buf[si..si + n]);
             }
         }
     }
@@ -1199,11 +1297,13 @@ fn read_rect(
     lo: i16,
     hi: i16,
     padding: i16,
+    sample: usize,
     out: &mut [u8],
 ) {
-    let n = (hi - lo + 1) as usize;
+    let n = (hi - lo + 1) as usize * sample;
     let row_bytes = rect.width() as usize * n;
-    let src_row = width as usize * planes as usize;
+    let src_row = width as usize * planes as usize * sample;
+    let lo = lo as usize * sample;
 
     for y in 0..rect.height() {
         let sy = rect.top as i32 + y;
@@ -1212,7 +1312,7 @@ fn read_rect(
             let oi = y as usize * row_bytes + x as usize * n;
             let inside = sx >= 0 && sy >= 0 && (sx as u32) < width && (sy as u32) < height;
             if inside {
-                let si = sy as usize * src_row + sx as usize * planes as usize + lo as usize;
+                let si = sy as usize * src_row + sx as usize * planes as usize * sample + lo;
                 out[oi..oi + n].copy_from_slice(&src[si..si + n]);
             } else if (0..=255).contains(&padding) {
                 // Adobe documents this range as a literal fill value.
@@ -1222,7 +1322,7 @@ fn read_rect(
                 // is a good answer to all of them. See `abi::padding`.
                 let cx = sx.clamp(0, width as i32 - 1) as usize;
                 let cy = sy.clamp(0, height as i32 - 1) as usize;
-                let si = cy * src_row + cx * planes as usize + lo as usize;
+                let si = cy * src_row + cx * planes as usize * sample + lo;
                 out[oi..oi + n].copy_from_slice(&src[si..si + n]);
             }
         }
