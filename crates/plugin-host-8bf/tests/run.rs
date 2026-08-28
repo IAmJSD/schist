@@ -425,3 +425,20 @@ fn a_plug_in_error_string_reaches_the_caller() {
         other => panic!("expected the plug-in's own words, got: {other}"),
     }
 }
+
+#[test]
+fn the_host_draws_a_plug_in_preview() {
+    // Not an optional nicety: every FilterMeister-built plug-in refuses
+    // to run at all if displayPixels is missing, and that is a large
+    // slice of the freeware world. The fixture declares PSPixelMap
+    // independently and asks the host to draw through it, then checks a
+    // mode the host cannot draw is refused rather than drawn wrong.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_display", dir.path()) else {
+        return;
+    };
+    let mut image = gradient(20, 12, 3);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("the host should be able to draw a plug-in's pixels");
+}

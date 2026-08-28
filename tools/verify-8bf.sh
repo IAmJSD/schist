@@ -190,6 +190,32 @@ if [ "$have32" = 1 ]; then
 fi
 
 echo
+echo "== FilterMeister: the plug-in preview =="
+# These check for "Photoshop 2.5.2 functionality" before they will run,
+# and what they mean by it is displayPixels. Without it they put up an
+# error box instead of a dialog, so a displayPixels call is the signal.
+if python3 "$root/tools/verify-8bf-support.py" fetch-fm; then
+  if [ "$have32" = 1 ]; then
+    for p in WindyPixel Zebra; do
+      ( timeout 40 wine "$exe32" apply "$(winpath "$work/$p.8bf")" \
+          "$(winpath "$work/in.ppm")" "$(winpath "$work/$p-out.ppm")" \
+          >"fm-$p.log" 2>&1 & )
+      sleep 16
+      if grep -q 'requires Adobe Photoshop' "fm-$p.log"; then
+        echo "FAIL ($p): refused the host — is displayPixels implemented?"; fail=1
+      elif grep -q 'displayPixels' "fm-$p.log"; then
+        echo "ok ($p): drew its preview through the host"
+      else
+        echo "FAIL ($p): never asked the host to draw"; fail=1
+      fi
+      pkill -x wine >/dev/null 2>&1; sleep 2
+    done
+  else
+    echo "skip: these builds are 32-bit"
+  fi
+fi
+
+echo
 echo "== G'MIC: full round trip through the buffer suite =="
 python3 "$root/tools/verify-8bf-support.py" halves
 rm -f gmic-halves-out.ppm

@@ -52,6 +52,30 @@ def fetch_ft():
     return 0
 
 
+FM_REPO = 'hayabuzo/Graphic-Filters'
+FM_FILES = ['01. WindyPixel/WindyPixel.8bf', '04. Zebra/Zebra.8bf']
+
+
+def fetch_fm():
+    """FilterMeister builds. These refuse to run at all unless the host
+    implements displayPixels, so they are the guard on that."""
+    import urllib.parse
+    import urllib.request
+    for path in FM_FILES:
+        out = path.rsplit('/', 1)[-1]
+        if os.path.exists(out):
+            continue
+        url = (f'https://raw.githubusercontent.com/{FM_REPO}/HEAD/'
+               + urllib.parse.quote(path))
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                open(out, 'wb').write(r.read())
+        except Exception as e:
+            print(f'skip: could not fetch {out}: {e}')
+            return 1
+    return 0
+
+
 def square():
     """64x64, because a Fourier transform wants power-of-two sides."""
     w = h = 64
@@ -170,6 +194,8 @@ if __name__ == '__main__':
         halves()
     elif cmd == 'fetch-ft':
         sys.exit(fetch_ft())
+    elif cmd == 'fetch-fm':
+        sys.exit(fetch_fm())
     elif cmd == 'square':
         square()
     elif cmd == 'check-changed':

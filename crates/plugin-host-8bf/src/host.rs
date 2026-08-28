@@ -408,6 +408,37 @@ unsafe extern "C" fn abort_thunk() -> abi::MacBoolean {
     with_active(|s| u8::from(s.abort.load(Ordering::Relaxed))).unwrap_or(0)
 }
 
+/// Draw a plug-in's preview. Self-contained from its arguments, so
+/// unlike the other callbacks it needs no session: a plug-in calls this
+/// from its dialog's paint handler, on whatever thread that runs on.
+unsafe extern "C" fn display_pixels_thunk(
+    source: *const abi::PSPixelMap,
+    src_rect: *const abi::VRect,
+    dst_row: i32,
+    dst_col: i32,
+    platform_context: usize,
+) -> OSErr {
+    let (Some(map), Some(rect)) = (source.as_ref(), src_rect.as_ref()) else {
+        return err::FILTER_BAD_PARAMETERS;
+    };
+    crate::suites::trace!(
+        "displayPixels mode={} rect={rect:?} -> ({dst_col},{dst_row}) hdc={platform_context:#x}",
+        map.image_mode
+    );
+    let Some(surface) = crate::display::read_surface(map, *rect) else {
+        // The guide: "Nonsuccess is generally due to unsupported color
+        // modes." Saying so lets the plug-in fall back to its own
+        // drawing instead of showing nothing.
+        crate::suites::trace!("   cannot draw mode {}", map.image_mode);
+        return err::FILTER_BAD_MODE;
+    };
+    if crate::display::blit(platform_context, dst_row, dst_col, &surface) {
+        abi::NO_ERR
+    } else {
+        err::FILTER_BAD_PARAMETERS
+    }
+}
+
 unsafe extern "C" fn progress_thunk(done: i32, total: i32) {
     with_active(|s| {
         if let Some(p) = s.progress {
@@ -520,6 +551,10 @@ impl<'a> Session<'a> {
         record.s_sp_basic = &mut *sp_basic as *mut _ as *mut c_void;
         record.error_string = error_string.as_mut_ptr();
         record.advance_state = Some(advance_state_thunk);
+        // Not optional in practice: FilterMeister-built plug-ins refuse
+        // to run at all without it, and that is most of the freeware
+        // world. See `crate::display`.
+        record.display_pixels = display_pixels_thunk as *mut c_void;
 
         // Offer wide coordinates even though this stage's images fit in
         // the narrow ones. A plug-in built against the CS or later SDK

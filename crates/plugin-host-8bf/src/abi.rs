@@ -149,6 +149,66 @@ pub type AdvanceStateProc = unsafe extern "C" fn() -> OSErr;
 /// Host-defined escape hatch. UNVERIFIED signature; always null here.
 pub type HostProc = unsafe extern "C" fn(selector: i16, data: *mut c_void);
 
+/// One mask in a [`PSPixelMap`]'s chain, from API Guide table A-2.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PSPixelMask {
+    pub next: *mut PSPixelMask,
+    pub mask_data: *mut c_void,
+    pub row_bytes: i32,
+    pub col_bytes: i32,
+    pub mask_description: i32,
+}
+
+/// `PSPixelMask::mask_description` values, numbered in table A-2.
+pub mod mask_description {
+    pub const SIMPLE: i32 = 0;
+    pub const BLACK_MAT: i32 = 1;
+    pub const GRAY_MAT: i32 = 2;
+    pub const WHITE_MAT: i32 = 3;
+    pub const INVERT: i32 = 4;
+}
+
+/// A block of pixels a plug-in asks the host to draw, from API Guide
+/// table A-1.
+///
+/// `base_addr` is the first plane of the pixel at `bounds`' top-left, so
+/// a pixel `(x, y)` of plane `p` sits at
+/// `(y - bounds.top) * row_bytes + (x - bounds.left) * col_bytes
+/// + p * plane_bytes`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PSPixelMap {
+    pub version: i32,
+    pub bounds: VRect,
+    pub image_mode: i32,
+    pub row_bytes: i32,
+    pub col_bytes: i32,
+    pub plane_bytes: i32,
+    pub base_addr: *mut c_void,
+    // Fields new in version 1.
+    pub mat: *mut PSPixelMask,
+    pub masks: *mut PSPixelMask,
+    pub mask_phase_row: i32,
+    pub mask_phase_col: i32,
+}
+
+/// `MACPASCAL OSErr (*DisplayPixelsProc)(const PSPixelMap *source,
+/// const VRect *srcRect, int32 dstRow, int32 dstCol,
+/// unsigned32 platformContext)`.
+///
+/// "On Windows, `platformContext` should be the target `hDC`". The guide
+/// is from 2003 and says `unsigned32`; a handle is pointer-sized on
+/// Win64, so this takes it pointer-sized. On 32-bit — where every
+/// plug-in that needs this callback happens to live — the two agree.
+pub type DisplayPixelsProc = unsafe extern "C" fn(
+    source: *const PSPixelMap,
+    src_rect: *const VRect,
+    dst_row: i32,
+    dst_col: i32,
+    platform_context: usize,
+) -> OSErr;
+
 /// What `FilterRecord::platform_data` points at on Windows.
 ///
 /// The API Guide says only "a pointer to platform specific data", and the

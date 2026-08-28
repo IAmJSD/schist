@@ -52,6 +52,33 @@ typedef struct BufferProcs {
     int32_t (*spaceProc)(void);
 } BufferProcs;
 
+/* Pixel map for displayPixels, from API Guide tables A-1 and A-2.
+ * Declared outside the packed region: like the callback suites, and
+ * unlike FilterRecord, this one is naturally aligned. */
+typedef struct VRect { int32_t top, left, bottom, right; } VRect;
+
+typedef struct PSPixelMask {
+    struct PSPixelMask *next;
+    void *maskData;
+    int32_t rowBytes;
+    int32_t colBytes;
+    int32_t maskDescription;
+} PSPixelMask;
+
+typedef struct PSPixelMap {
+    int32_t version;
+    VRect bounds;
+    int32_t imageMode;
+    int32_t rowBytes;
+    int32_t colBytes;
+    int32_t planeBytes;
+    void *baseAddr;
+    PSPixelMask *mat;
+    PSPixelMask *masks;
+    int32_t maskPhaseRow;
+    int32_t maskPhaseCol;
+} PSPixelMap;
+
 typedef struct PlatformData {
     void *hwnd;
 } PlatformData;
@@ -118,7 +145,8 @@ typedef struct FilterRecord {
     BufferProcs *bufferProcs;
     void *resourceProcs;
     void *processEvent;
-    void *displayPixels;
+    OSErr (*displayPixels)(const PSPixelMap *source, const VRect *srcRect,
+                           int32_t dstRow, int32_t dstCol, uintptr_t platformContext);
     HandleProcs *handleProcs;
 
     /* new in 3.0 */
@@ -514,6 +542,63 @@ EXPORT void entry_buffers(int16_t selector, void *pb, intptr_t *data, int16_t *r
         if (p[i] != 0x5a) { *result = bufferBadData; return; }
     bp->unlockProc(b);
     bp->freeProc(b);
+
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+/* ---- displayPixels ---------------------------------------------------
+ *
+ * Hand the host a pixel map over the input buffer and ask it to draw.
+ * Every FilterMeister-built plug-in refuses to run without this
+ * callback, so a host that means to run real filters has to have it.
+ */
+
+#define displayBadCallback  (-30120)
+#define displayRefused      (-30121)
+#define displayAcceptedJunk (-30122)
+
+EXPORT void entry_display(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    if (fr->displayPixels == NULL) { *result = displayBadCallback; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    if (!next_tile(fr, p)) return;
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+
+    int planes = fr->inHiPlane - fr->inLoPlane + 1;
+    int w = fr->inRect.right - fr->inRect.left;
+    int h = fr->inRect.bottom - fr->inRect.top;
+    PSPixelMap map;
+    memset(&map, 0, sizeof(map));
+    map.version = 1;
+    map.bounds.top = 0; map.bounds.left = 0;
+    map.bounds.bottom = h; map.bounds.right = w;
+    map.imageMode = fr->imageMode;
+    map.rowBytes = fr->inRowBytes;
+    map.colBytes = planes;
+    map.planeBytes = 1;
+    map.baseAddr = fr->inData;
+    VRect rect; rect.top = 0; rect.left = 0; rect.bottom = h; rect.right = w;
+
+    if (fr->displayPixels(&map, &rect, 0, 0, 0) != 0) { *result = displayRefused; return; }
+
+    /* A mode the host cannot draw must be refused, not drawn wrong. */
+    map.imageMode = 4; /* CMYK */
+    if (fr->displayPixels(&map, &rect, 0, 0, 0) == 0) { *result = displayAcceptedJunk; return; }
 
     fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
     fr->outRect = fr->inRect;

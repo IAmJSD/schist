@@ -102,6 +102,8 @@ all but one.
 | **`SPBasicSuite.ReleaseSuite` is the second member** | Serving the PICA handle suite made Filter Foundry call `ReleaseSuite` — which it never did while every `AcquireSuite` failed. Nothing else would have exercised that slot |
 | **The PICA handle suite layout** | Chapter 4: "Suite PEA Handle suite. Current version: 1; Routines: 6" over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace. Filter Foundry acquires it by name, calls `SetLock` with `lock=1` and later `lock=0`, and its pixels stay correct |
 | `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because stage 4 needs the descriptor block regardless |
+| **`PSPixelMap` is naturally aligned**, unlike `FilterRecord` | Filter Foundry's 64-bit preview draws correctly through it, and a 32-bit FilterMeister build does too. If the map were packed like the record, `base_addr` would be read four bytes early on 64-bit and the preview would be noise or a fault |
+| **Plug-ins really do write the negative padding modes** | FilterMeister sets `inputPadding`, `outputPadding` and `maskPadding` all to -2. Which named mode that is remains unknown and, by design, does not matter: the host replicates the edge for any value outside 0..=255 |
 | **A plug-in must be loaded with its own directory on the DLL search path** | Not an ABI fact but a loading one, and it fails just as hard. The Fourier family ships FFTW beside it, and Windows does not search a module's own directory: all twelve failed at `LoadLibraryExW` with nothing to say why. `LOAD_WITH_ALTERED_SEARCH_PATH` over a canonicalised path fixes the lot |
 
 ## Still unverified
@@ -120,13 +122,12 @@ found by a plug-in refusing to run. In rough order of how much they buy:
 
 | Missing | What it blocks | Evidence |
 |---|---|---|
-| `displayPixels` | **FilterMeister**, and so a large slice of the freeware world — Harry's Filters, Plugin Galaxy and many others are FilterMeister builds | All eight Graphic-Filters plug-ins refuse with "This plug-in requires Adobe Photoshop 2.5.2 or later functionality". Pointing `displayPixels` alone at a non-null address gets every one of them past the check and into its real dialog; none of the other null callbacks make any difference |
+| ~~`displayPixels`~~ — **now implemented** | Was blocking **FilterMeister**, and so a large slice of the freeware world | All eight Graphic-Filters plug-ins refused with "This plug-in requires Adobe Photoshop 2.5.2 or later functionality", and `displayPixels` alone was the field they checked. All eight now draw previews, and Filter Foundry's own preview pane — blank until this landed — shows the image on both architectures |
 | `colorServices` | ColorMunger, and presumably anything that converts or picks colours | Hangs inside `filterSelectorStart` after reading its parameters |
 | `propertyProcs` | Propetizer, and anything asking the host about the document | Faults reading `NULL + 4` |
 
-`displayPixels` is the one worth doing first, and it is real work rather
-than a stub: it hands over a `PSPixelMap` and a platform drawing context
-and expects the pixels on screen, which on Windows means a GDI blit.
+`displayPixels` was done first and is described in `docs/8bf-host.md`.
+`colorServices` and `propertyProcs` remain.
 
 ## Settling a suite's member order
 
