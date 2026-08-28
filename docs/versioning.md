@@ -38,9 +38,11 @@ they will not break the plugin ABI or saved files.
 4. The release workflow builds, for x86_64 and aarch64, a Linux AppImage
    plus the native packages `packaging/linux/packages.sh` emits (`.deb`,
    `.rpm` and a binary `.pkg.tar.zst` — the last one is a convenience
-   build, not the AUR package from step 5), a
-   macOS `Schist.zip` (signed and notarized when the secrets below
-   exist), and a Windows installer, then drafts the release. Each
+   build, not the AUR package from step 5), a macOS `Schist.dmg` and
+   `Schist.zip` (both signed and notarized when the secrets below exist
+   — the disk image is the one to point people at, the zip is for
+   anything that unpacks a download itself), and a Windows installer,
+   then drafts the release. Each
    platform also ships the `schist-mcp` server from the same build: a
    loose arch-suffixed binary on Linux (`schist-mcp-linux-x86_64`,
    `schist-mcp-linux-aarch64`), a loose binary on Windows, and on macOS
