@@ -27,7 +27,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 | **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
 | **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
 | **3** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery and packaging still to do |
-| **4** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules not started |
+| **4** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules need a source that documents `FormatRecord`, and the API Guide does not |
 
 ### Scripting
 
@@ -213,6 +213,9 @@ make no sense for the slot it landed on.
   for everything, which is what makes a plug-in take its compatible path
   instead of misreading a zero.
 - **Format, automation, selection and parser modules.** Filters only.
+  `FormatRecord` is not in the API Guide — its contents run from Filter
+  Modules straight to Selection Modules — so there is nothing to write
+  one from.
 - **Some callback suites.** PseudoResource, Image Services, Channel
   Ports and the descriptor sub-suites are still null. Nothing tested so
   far needs them; `docs/8bf-abi-provenance.md` tracks what does.

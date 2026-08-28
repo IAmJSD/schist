@@ -67,7 +67,8 @@ binary was worth downloading — and not to read anything.
 
 | Fact | How it was settled |
 |---|---|
-| **`FilterRecord` is packed to four bytes**, not naturally aligned | A plug-in read an 8-byte pointer at record offset 224. Poking distinct values there moved the fault address to match exactly, so the read was confirmed rather than inferred. Natural alignment puts nothing meaningful at 224 — it is the tail of `monitor` — because two 4-byte holes before `inData` and `outData` push everything after them 8 bytes late. `packed(4)` puts `bufferProcs` at 224 exactly, and both plug-ins then ran |
+| **`FilterRecord` is packed to four bytes**, not naturally aligned — and the guide agrees, read carefully | Chapter 2 says packing "should be the default for the target system", which sounds like natural alignment and is not, because the target system it was written for was 32-bit: there, default alignment of a pointer *is* four bytes. On 64-bit the SDK evidently pins four rather than following the platform to eight, and that is what the observation below shows. The two are reconcilable; only the 64-bit case had to be measured. The same section adds that the `Info` structures are packed to *byte* boundaries, which is a third rule again |
+| The evidence for it | A plug-in read an 8-byte pointer at record offset 224. Poking distinct values there moved the fault address to match exactly, so the read was confirmed rather than inferred. Natural alignment puts nothing meaningful at 224 — it is the tail of `monitor` — because two 4-byte holes before `inData` and `outData` push everything after them 8 bytes late. `packed(4)` puts `bufferProcs` at 224 exactly, and both plug-ins then ran |
 | **The callback suites are *not* packed** | The opposite of the record, and not a guess: both plug-ins drove a naturally aligned `HandleProcs` correctly, and packing it to four bytes segfaults the fixture immediately |
 | **`HandleProcs` member order** — new, dispose, getSize, setSize, lock, unlock | Filter Foundry's call sequence is coherent only in this order: `new(1)`, `lock`, `get_size`, `unlock`, `set_size(129)`, `lock`, `unlock`, `set_size(53)`, and finally `dispose` of the same handle. A wrong order calls a different function with the wrong argument shape |
 | **`SPBasicSuite.AcquireSuite` is the first member** | Filter Foundry called it with `("Photoshop Handle Suite for Plug-ins", 2)` and then `(…, 1)` — a legible name and a version pair, so the slot and the signature are both right |
@@ -139,6 +140,12 @@ because the evidence is the interesting part.
 
 ## Not settled, and not settleable here
 
+- **Format modules** (`.8bi`, `.8be`). `FormatRecord` is not documented
+  in the API Guide at all: the contents run from Filter Modules on page
+  96 to Selection Modules on page 108, and the chapter 9 that another
+  page points at is simply not in the document. A parameter block that
+  size cannot be guessed, and guessing struct layouts is what this
+  project has spent its time *not* doing.
 - The **ChannelPorts suite**. Smart Gradients asks for it. It cannot be
   written clean-room from what is available: a plug-in reaches channels
   through `ReadImageDocumentDesc`, and that structure is *named* in the
