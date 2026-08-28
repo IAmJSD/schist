@@ -408,16 +408,17 @@ mod tests {
             Path::new("/opt/schist"),
             &["--socket".into(), "9000".into()],
         );
-        assert_eq!(
-            cmd,
-            vec![
-                "FEXInterpreter",
-                "wine",
-                "/opt/schist/schist-8bf-helper-x86_64.exe",
-                "--socket",
-                "9000",
-            ]
+        // Compared piecewise rather than as one string: the helper's
+        // path is built with `Path::join`, whose separator is the
+        // *running* platform's, and this test runs on all three.
+        assert_eq!(cmd[0], "FEXInterpreter");
+        assert_eq!(cmd[1], "wine");
+        assert!(
+            cmd[2].ends_with("schist-8bf-helper-x86_64.exe"),
+            "{}",
+            cmd[2]
         );
+        assert_eq!(&cmd[3..], &["--socket", "9000"]);
     }
 
     #[test]
