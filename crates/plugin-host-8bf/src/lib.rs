@@ -31,6 +31,7 @@
 
 pub mod abi;
 pub mod color;
+pub mod descriptor;
 pub mod display;
 pub mod host;
 pub mod ipc;

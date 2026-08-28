@@ -27,7 +27,30 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 | **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
 | **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
 | **3** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery and packaging still to do |
-| 4 | ActionManager / descriptor recording, format plug-ins, big-document coordinates | not started |
+| **4** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules not started |
+
+### Scripting
+
+Recording a filter's parameters and playing them back — what Last Filter
+and actions are made of — is written, tested and **not served**. The read
+and write sub-suites of `PIDescriptorParameters` are null.
+
+The reason is the member order. Adobe documents every routine's
+signature and no struct, and lists the routines alphabetically after Open
+and Close, which is not the layout: handed the read suite in that order,
+Filter Foundry opened a descriptor and then called slot 2 a million and a
+half times without stopping. It was iterating keys, so `GetKey` is the
+third member — one position of eighteen, and the write suite counts
+sixteen routines while naming thirteen.
+
+Serving a suite whose slots are in the wrong places is worse than not
+serving one: a plug-in that works today stops. Null is the documented way
+to say scripting is unavailable, and plug-ins fall back to keeping
+parameters in the `parameters` handle, which is what they already do.
+
+What would settle it is a plug-in whose recorded keys are known, so the
+getter it reaches for can be identified the way `GetKey` was.
+`SCHIST_8BF_TRACE` names whichever slot gets called.
 
 ## Where a plug-in runs
 

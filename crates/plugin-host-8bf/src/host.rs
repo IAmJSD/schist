@@ -131,6 +131,10 @@ pub struct RunOptions {
     pub progress: Option<Box<dyn Fn(i32, i32)>>,
     /// The document's name, answered to `propTitle`.
     pub document_title: Option<String>,
+    /// Parameters recorded by a previous run, played back to the
+    /// plug-in so it can pick up where it left off. This is what makes
+    /// Last Filter remember its settings.
+    pub descriptor: Option<crate::descriptor::Descriptor>,
     /// A selection, one byte per pixel of the whole image, 255 meaning
     /// fully selected.
     ///
@@ -155,6 +159,7 @@ impl Default for RunOptions {
             abort: Arc::new(AtomicBool::new(false)),
             progress: None,
             document_title: None,
+            descriptor: None,
             selection: None,
         }
     }
@@ -226,6 +231,7 @@ pub struct Filter {
     entry: EntryProc,
     pipl: Pipl,
     entry_name: String,
+    recorded: Option<crate::descriptor::Descriptor>,
 }
 
 impl Filter {
@@ -250,7 +256,14 @@ impl Filter {
             entry,
             pipl,
             entry_name: entry_name.to_string(),
+            recorded: None,
         })
+    }
+
+    /// What the plug-in recorded on the last run, to hand back through
+    /// [`RunOptions::descriptor`] next time.
+    pub fn recorded(&self) -> Option<&crate::descriptor::Descriptor> {
+        self.recorded.as_ref()
     }
 
     pub fn pipl(&self) -> &Pipl {
@@ -369,6 +382,11 @@ impl Filter {
 
         let mut session = Session::new(image, image_mode, case, case_info, opts);
         let result = session.run(self.entry, opts.show_dialog);
+        // Whatever the plug-in wrote back into `descriptor` is what it
+        // wants replaying next time, so it is taken before the block
+        // goes away — even on failure, since a plug-in may record on its
+        // way out of a dialog it then cancelled.
+        self.recorded = session.take_recorded();
         session.dispose_parameters();
         if result.is_err() {
             // A filter either applies or it does not. Leaving half a
@@ -1009,6 +1027,20 @@ impl<'a> Session<'a> {
             dialog_info::NONE_OR_SILENT
         };
         descriptor_params.record_info = dialog_info::OPTIONAL_OR_DONT_DISPLAY;
+        // The scripting sub-suites stay null. Everything behind them is
+        // written and tested, but their member order is not known — see
+        // `crate::descriptor` — and serving a suite whose slots are in
+        // the wrong places is worse than not serving one. Handed the
+        // read suite in the order the guide lists, Filter Foundry span
+        // in `GetKey` forever; with it null, it runs. Null is the
+        // documented way to say scripting is unavailable, and plug-ins
+        // fall back to the `parameters` handle, which works.
+        descriptor_params.read_descriptor_procs = std::ptr::null_mut();
+        descriptor_params.write_descriptor_procs = std::ptr::null_mut();
+        descriptor_params.descriptor = match &opts.descriptor {
+            Some(d) if !d.is_empty() => unsafe { crate::descriptor::make_handle(d.clone()) },
+            _ => std::ptr::null_mut(),
+        };
         record.descriptor_parameters = &mut *descriptor_params as *mut _ as *mut c_void;
 
         // Everything below is a capability declaration. Saying "no"
@@ -1464,6 +1496,14 @@ impl<'a> Session<'a> {
                 }
             }
         }
+    }
+
+    /// Take back whatever the plug-in left in the descriptor slot.
+    fn take_recorded(&mut self) -> Option<crate::descriptor::Descriptor> {
+        let h = self._descriptor_params.descriptor;
+        self._descriptor_params.descriptor = std::ptr::null_mut();
+        // SAFETY: either null, or a handle this host made.
+        unsafe { crate::descriptor::take_handle(h) }.filter(|d| !d.is_empty())
     }
 
     /// Photoshop keeps the parameters handle alive between runs for the

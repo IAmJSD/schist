@@ -508,6 +508,122 @@ EXPORT void entry_continue(int16_t selector, void *pb, intptr_t *data, int16_t *
     run(selector, (FilterRecord *)pb, data, result, RUN_CONTINUE);
 }
 
+/* ---- scripting -------------------------------------------------------
+ *
+ * Record a parameter on the way out, and expect it back on the way in.
+ * This is what Last Filter and actions are made of.
+ */
+typedef void *PIReadDescriptor;
+typedef void *PIWriteDescriptor;
+
+typedef struct ReadDescriptorProcs {
+    int16_t readDescriptorProcsVersion;
+    int16_t numReadDescriptorProcs;
+    PIReadDescriptor (*openReadDescriptorProc)(Handle, void *);
+    OSErr (*closeReadDescriptorProc)(PIReadDescriptor);
+    OSErr (*getAliasProc)(PIReadDescriptor, Handle *);
+    OSErr (*getBooleanProc)(PIReadDescriptor, MacBoolean *);
+    OSErr (*getClassProc)(PIReadDescriptor, OSType *);
+    OSErr (*getCountProc)(PIReadDescriptor, uint32_t *);
+    OSErr (*getEnumeratedProc)(PIReadDescriptor, OSType *, OSType *);
+    OSErr (*getFloatProc)(PIReadDescriptor, double *);
+    OSErr (*getIntegerProc)(PIReadDescriptor, int32_t *);
+    MacBoolean (*getKeyProc)(PIReadDescriptor, OSType *, OSType *, int16_t *);
+    OSErr (*getSimpleReferenceProc)(PIReadDescriptor, void *);
+    OSErr (*getObjectProc)(PIReadDescriptor, OSType *, Handle *);
+    OSErr (*getPinnedFloatProc)(PIReadDescriptor, const double *, const double *, double *);
+    OSErr (*getPinnedIntegerProc)(PIReadDescriptor, int32_t, int32_t, int32_t *);
+    OSErr (*getPinnedUnitFloatProc)(PIReadDescriptor, const double *, const double *,
+                                    OSType *, double *);
+    OSErr (*getStringProc)(PIReadDescriptor, unsigned char *);
+    OSErr (*getTextProc)(PIReadDescriptor, Handle *);
+    OSErr (*getUnitFloatProc)(PIReadDescriptor, OSType *, double *);
+} ReadDescriptorProcs;
+
+typedef struct WriteDescriptorProcs {
+    int16_t writeDescriptorProcsVersion;
+    int16_t numWriteDescriptorProcs;
+    PIWriteDescriptor (*openWriteDescriptorProc)(void);
+    OSErr (*closeWriteDescriptorProc)(PIWriteDescriptor, Handle *);
+    OSErr (*putAliasProc)(PIWriteDescriptor, OSType, Handle);
+    OSErr (*putBooleanProc)(PIWriteDescriptor, OSType, MacBoolean);
+    OSErr (*putClassProc)(PIWriteDescriptor, OSType, OSType);
+    OSErr (*putCountProc)(PIWriteDescriptor, OSType, uint32_t);
+    OSErr (*putEnumeratedProc)(PIWriteDescriptor, OSType, OSType, OSType);
+    OSErr (*putFloatProc)(PIWriteDescriptor, OSType, const double *);
+    OSErr (*putIntegerProc)(PIWriteDescriptor, OSType, int32_t);
+    OSErr (*putSimpleReferenceProc)(PIWriteDescriptor, OSType, const void *);
+    OSErr (*putObjectProc)(PIWriteDescriptor, OSType, OSType, Handle);
+    OSErr (*putStringProc)(PIWriteDescriptor, OSType, const unsigned char *);
+    OSErr (*putTextProc)(PIWriteDescriptor, OSType, Handle);
+    OSErr (*undocumented[3])(void);
+} WriteDescriptorProcs;
+
+typedef struct PIDescriptorParameters {
+    int16_t descriptorParametersVersion;
+    int16_t playInfo;
+    int16_t recordInfo;
+    Handle descriptor;
+    WriteDescriptorProcs *writeDescriptorProcs;
+    ReadDescriptorProcs *readDescriptorProcs;
+} PIDescriptorParameters;
+
+#define scriptNoSuite   (-30180)
+#define scriptBadRead   (-30181)
+#define scriptBadWrite  (-30182)
+#define scriptWrongBack (-30183)
+
+#define KEY_RADIUS 0x52647320u /* 'Rds ' */
+
+EXPORT void entry_script(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    PIDescriptorParameters *dp = (PIDescriptorParameters *)fr->descriptorParameters;
+    /* The block itself must always be there — plug-ins write to it
+     * without checking. The sub-suites may not be, and a plug-in that
+     * cannot record simply does not. */
+    if (dp == NULL) { *result = scriptNoSuite; return; }
+    if (dp->readDescriptorProcs == NULL || dp->writeDescriptorProcs == NULL) return;
+    if (dp->readDescriptorProcs->numReadDescriptorProcs < 18 ||
+        dp->writeDescriptorProcs->numWriteDescriptorProcs < 16) {
+        *result = scriptNoSuite; return;
+    }
+
+    if (selector == selectorStart) {
+        /* Read back whatever a previous run recorded, if anything. */
+        if (dp->descriptor != NULL) {
+            ReadDescriptorProcs *r = dp->readDescriptorProcs;
+            PIReadDescriptor rd = r->openReadDescriptorProc(dp->descriptor, NULL);
+            if (rd == NULL) { *result = scriptBadRead; return; }
+            OSType key = 0, type = 0; int16_t flags = 0;
+            int found = 0;
+            while (r->getKeyProc(rd, &key, &type, &flags)) {
+                if (key == KEY_RADIUS) {
+                    int32_t v = 0;
+                    if (r->getIntegerProc(rd, &v) != 0) { *result = scriptBadRead; break; }
+                    if (v != 25) { *result = scriptWrongBack; break; }
+                    found = 1;
+                }
+            }
+            r->closeReadDescriptorProc(rd);
+            if (*result != 0) return;
+            if (!found) { *result = scriptWrongBack; return; }
+        }
+        return;
+    }
+
+    if (selector == selectorFinish) {
+        WriteDescriptorProcs *w = dp->writeDescriptorProcs;
+        PIWriteDescriptor wd = w->openWriteDescriptorProc();
+        if (wd == NULL) { *result = scriptBadWrite; return; }
+        if (w->putIntegerProc(wd, KEY_RADIUS, 25) != 0) { *result = scriptBadWrite; return; }
+        if (w->closeWriteDescriptorProc(wd, &dp->descriptor) != 0) {
+            *result = scriptBadWrite; return;
+        }
+    }
+}
+
 /* ---- big documents ----------------------------------------------------
  *
  * Past 32767 pixels the 16-bit rectangles cannot say where anything is,

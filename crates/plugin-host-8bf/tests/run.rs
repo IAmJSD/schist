@@ -676,3 +676,24 @@ fn a_big_document_runs_if_the_plug_in_claims_the_wide_coordinates() {
     let expected: Vec<u8> = original.data.iter().map(|&b| 255 - b).collect();
     assert_eq!(image.data, expected);
 }
+
+#[test]
+fn the_descriptor_block_is_always_there_even_though_scripting_is_not() {
+    // Plug-ins write into `descriptorParameters` without checking it —
+    // G'MIC faults on a null one — so the block is always supplied. The
+    // read and write sub-suites are null, which is the documented way to
+    // say scripting is unavailable, and a plug-in that cannot record has
+    // to carry on regardless. The fixture insists on exactly that.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_script", dir.path()) else {
+        return;
+    };
+    let mut image = gradient(8, 4, 3);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap();
+    assert!(
+        filter.recorded().is_none(),
+        "nothing can be recorded while the suites are not served"
+    );
+}
