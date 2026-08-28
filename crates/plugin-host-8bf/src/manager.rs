@@ -382,11 +382,13 @@ impl FilterPlugin for EightBfFilter {
         // A trailing plane is transparency to a plug-in, and an image
         // with none is cheaper to hand over — so only send the alpha
         // plane when there is something in it to send.
-        let opaque = pixels.chunks_exact(4).all(|p| p[3] >= 1.0);
+        let opaque = pixels.as_chunks::<4>().0.iter().all(|p| p[3] >= 1.0);
         let planes: u16 = if opaque { 3 } else { 4 };
         let mut image = Image::new(w, h, planes);
         for (px, out) in pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .zip(image.data.chunks_exact_mut(planes as usize))
         {
             for (sample, value) in out.iter_mut().zip(px) {
@@ -417,7 +419,9 @@ impl FilterPlugin for EightBfFilter {
             (!run.parameters.is_empty()).then_some(run.parameters);
 
         for (px, sample) in pixels
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip(image.data.chunks_exact(planes as usize))
         {
             for (value, byte) in px.iter_mut().zip(sample) {
