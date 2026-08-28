@@ -35,6 +35,6 @@ jobs:
       # The plug-in helpers are the one thing `cargo test` cannot cover:
       # they are built for other architectures than the one under test, so
       # nothing else would notice them failing to compile or link.
-      - name: Cross-build the plug-in helpers
+      - name: Cross-build the plug-in helpers, and check they unpack
         if: runner.os == 'Linux'
-        run: make helpers PROFILE=debug
+        run: make check-bundle PROFILE=debug

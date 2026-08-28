@@ -38,6 +38,14 @@ endif
 
 DESTDIR ?= target/$(PROFILE)
 
+# Where `make build` stages the helpers for the app build to embed. An
+# absolute path: build.rs turns these into `include_bytes!` arguments,
+# and cargo runs it from the crate directory rather than this one.
+HELPER_STAGE := $(CURDIR)/target/helper-bundle/$(PROFILE)
+
+# Only used to name the Windows installer, and only read on Windows.
+VERSION := $(shell sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
+
 # Windows sets OS in the environment and may have no `uname` at all, so
 # it is checked first; MSYS and Cygwin set it too and are Windows for
 # this purpose. Anything unrecognised is an error rather than a guess —
@@ -76,6 +84,10 @@ endif
 # `tests/launch.rs` pins the same names from the Rust side.
 name-x86_64-pc-windows-gnu  := schist-8bf-helper-x86_64.exe
 name-i686-pc-windows-gnu    := schist-8bf-helper-x86.exe
+# These two are also spelled out in .github/workflows/release.yml, whose
+# Windows job stages helpers without make: MSYS make would hand build.rs
+# an /d/a/... path that a native Windows build cannot read. Both sides are
+# pinned from Rust by `Helper::file_name` in tests/launch.rs.
 name-x86_64-pc-windows-msvc := schist-8bf-helper-x86_64.exe
 name-i686-pc-windows-msvc   := schist-8bf-helper-x86.exe
 name-x86_64-apple-darwin    := schist-8bf-helper-x86_64
@@ -88,19 +100,36 @@ exe = $(if $(findstring windows,$(1)),.exe,)
 HELPERS := $(foreach t,$(HELPER_TARGETS),$(DESTDIR)/$(name-$(t)))
 
 .DEFAULT_GOAL := help
-.PHONY: help all app helpers install-helpers preflight clean-helpers FORCE
+.PHONY: help all app build helpers install-helpers preflight release check-bundle clean-helpers FORCE
 
 help:
-	@echo 'make app              build the Schist binary ($(PROFILE))'
-	@echo 'make helpers          build the .8bf plug-in helpers for this platform'
-	@echo 'make all              both'
+	@echo 'make build            the app, carrying the plug-in helpers ($(PROFILE))'
+	@echo 'make release          build and package into dist/'
+	@echo
+	@echo 'make app              just the Schist binary, no helpers'
+	@echo 'make helpers          just the .8bf plug-in helpers, beside the binary'
 	@echo 'make install-helpers DESTDIR=DIR   put the helpers somewhere else'
 	@echo
 	@echo 'this platform hosts plug-ins built for:'
 	@$(foreach t,$(HELPER_TARGETS),echo '  $(t)  ->  $(name-$(t))';)
 
-all: app helpers
+all: build
 
+# The app, carrying the helpers inside it.
+#
+# They are staged somewhere of their own rather than reused from beside
+# the binary, so that what gets embedded is exactly what this build
+# produced and not whatever an earlier `make helpers` left lying there.
+build: stage-helpers
+	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' $(CARGO) build $(PROFILE_FLAG) -p schist-app
+
+.PHONY: stage-helpers
+stage-helpers:
+	@$(MAKE) --no-print-directory install-helpers \
+	  DESTDIR='$(HELPER_STAGE)' PROFILE='$(PROFILE)'
+
+# Just the binary. Without helpers it still runs; it just has none to
+# unpack, and says so if asked to run a plug-in.
 app:
 	$(CARGO) build $(PROFILE_FLAG) -p schist-app
 
@@ -138,13 +167,39 @@ define helper_rule
 $$(DESTDIR)/$$(name-$(1)): FORCE | $$(DESTDIR)
 	@$$(RUSTUP) target list --installed 2>/dev/null | grep -qx '$(1)' \
 	  || $$(RUSTUP) target add $(1)
-	$$(CARGO) build $$(PROFILE_FLAG) -p $$(HELPER_CRATE) --bin $$(HELPER_BIN) --target $(1)
+	SCHIST_BUNDLED_HELPERS= $$(CARGO) build $$(PROFILE_FLAG) -p $$(HELPER_CRATE) --bin $$(HELPER_BIN) --target $(1)
 	@cp target/$(1)/$$(PROFILE)/$$(HELPER_BIN)$$(call exe,$(1)) $$@
 	@echo '  helper   $$@'
 endef
 $(foreach t,$(HELPER_TARGETS),$(eval $(call helper_rule,$(t))))
 
+# Packaging. Each script runs its own cargo build, so the staged helpers
+# are exported rather than passed: the build inside picks them up and the
+# packaged binary carries them, with no change to the scripts themselves.
+release: stage-helpers
+	@mkdir -p dist
+ifeq ($(HOST),linux)
+	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' ./packaging/linux/appimage.sh
+else ifeq ($(HOST),macos)
+	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' ./packaging/macos/bundle.sh $(PROFILE)
+else ifeq ($(HOST),windows)
+	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' $(CARGO) build $(PROFILE_FLAG) -p schist-app -p schist-mcp
+	cp target/$(PROFILE)/schist.exe target/$(PROFILE)/schist-mcp.exe dist/
+	makensis -DVERSION=$(VERSION) packaging/windows/installer.nsi
+else
+	@echo 'error: nothing to package on this host' >&2; exit 1
+endif
+	@echo 'packaged into dist/'
+
+# Build the helpers, embed them, and check they unpack. The unpacking
+# tests only have something to unpack when a bundle is present, so this
+# is the run that exercises them at all.
+check-bundle: stage-helpers
+	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' \
+	  $(CARGO) test -p $(HELPER_CRATE) --lib bundled
+
 clean-helpers:
 	rm -f $(HELPERS)
+	rm -rf $(HELPER_STAGE)
 
 FORCE:

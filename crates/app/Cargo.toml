@@ -46,4 +46,7 @@ schist-commands-core.workspace = true
 schist-filters-core.workspace = true
 schist-adjustments.workspace = true
 schist-plugin-host-wasm.workspace = true
+# Carries the .8bf plug-in helpers, which are binaries for architectures
+# other than this one and are unpacked on first use. See the Makefile.
+schist-plugin-host-8bf.workspace = true
 schist-colormgmt.workspace = true

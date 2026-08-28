@@ -145,14 +145,57 @@ make rules depend on a phony target rather than restating cargo's
 dependency graph, because a second, worse copy of it would go stale the
 first time a file was added.
 
-Two things it deliberately is not. It is **not a `build.rs`**: a build
-script that shells out to cargo re-enters a cargo already holding the lock
-on `target/`, and blocks until it gives up. And it is **not wired into the
-packaging scripts** yet — the helpers land beside the app binary, which is
-where `helper_dir` looks and what makes `cargo run` work, but no installer
-ships them, because the host is not reachable from the app yet. When it
-is, `make install-helpers DESTDIR=...` is the hook the three packaging
-scripts should call.
+### Carried inside the app
+
+`make build` goes one step further and embeds the staged helpers in the
+Schist binary, which then unpacks one the first time a plug-in actually
+needs it — for most people, never. The alternative is shipping them loose
+beside the app, which works but multiplies what an installer has to place
+and a signature has to cover.
+
+```
+make build      # helpers, then an app carrying them
+make release    # ... and package it into dist/
+```
+
+`build.rs` reads `SCHIST_BUNDLED_HELPERS`, a directory of
+`schist-8bf-helper-*` files, and emits an `include_bytes!` for each. It is
+an environment variable rather than a cargo feature deliberately: a
+feature would make `cargo test --workspace` depend on artifacts only the
+Makefile knows how to produce. Unset, nothing is embedded, a plain `cargo
+build` works with no setup, and the host falls back to looking beside the
+executable.
+
+Unpacking goes to the per-user cache — XDG on Unix, local app data on
+Windows — in a directory named after a hash of the bundle's contents, so
+an upgrade never reuses the previous version's binaries. Writes go
+through a temporary file and a rename, because two Schist windows can
+unpack the same helper at the same moment; the worst case is redundant
+work rather than a half-written binary. A helper already there with the
+right length is left alone.
+
+Where a helper is looked for, in order: an explicit `helper_dir` in
+`RemoteOptions`, taken at its word and not second-guessed; then beside
+the executable, which is where a package shipping them loose puts them;
+then unpacked from the bundle.
+
+One trap worth knowing about. The payload is `#[used]`, because without
+it the optimiser is entirely within its rights to notice that a binary
+which only ever reads the helper *names* never touches the bytes, fold
+the names into constants, and drop the rest. A thin-LTO release build was
+measured doing exactly that — the app came out byte-identical to one
+built with no bundle at all. With `#[used]` it grows by the 5.7 MB the
+two helpers actually weigh.
+
+The orchestration is deliberately **not a `build.rs`** driving cargo: a
+build script that shells out to cargo re-enters a cargo already holding
+the lock on `target/`, and blocks until it gives up. The build script that
+does exist only reads files somebody else has already produced.
+
+`make release` hands the staged directory to the platform's existing
+packaging script, which runs its own cargo build and picks the bundle up
+from the environment — so the AppImage, the `.app` and the NSIS installer
+all carry the helpers without any change to those scripts.
 
 A missing helper is reported rather than guessed at: `RemoteError::NoHelper`
 says which directory it looked in.

@@ -123,20 +123,51 @@ pub fn readiness(found: &Found) -> Result<(), RemoteError> {
     Ok(())
 }
 
+/// Find the directory holding the helper this plan needs.
+///
+/// An explicit `helper_dir` is taken at its word and not second-guessed:
+/// a caller that names a directory wants that one, and silently running
+/// some other build of the helper would be worse than saying it is not
+/// there. Otherwise the helper is looked for beside the executable,
+/// which is where a package that ships them loose puts them, and failing
+/// that unpacked from the bundle this build carries.
+fn helper_location(plan: &launch::Plan, opts: &RemoteOptions) -> Result<PathBuf, RemoteError> {
+    let name = plan.helper.file_name();
+
+    if let Some(dir) = &opts.helper_dir {
+        let helper = dir.join(name);
+        return if helper.is_file() {
+            Ok(dir.clone())
+        } else {
+            Err(RemoteError::NoHelper(helper))
+        };
+    }
+
+    let beside = launch::helper_dir();
+    if let Some(dir) = &beside {
+        if dir.join(name).is_file() {
+            return Ok(dir.clone());
+        }
+    }
+
+    if let Some(dir) = crate::bundled::extract(name)? {
+        return Ok(dir);
+    }
+
+    // Nothing on disk and nothing carried. Name the place that was
+    // looked in, since that is what someone packaging this needs to know.
+    Err(RemoteError::NoHelper(
+        beside.unwrap_or_else(|| PathBuf::from(".")).join(name),
+    ))
+}
+
 /// Run `found` over `image`, in a helper process.
 pub fn apply(found: &Found, image: &mut Image, opts: &RemoteOptions) -> Result<(), RemoteError> {
     readiness(found)?;
     let host = launch::Host::current().unwrap();
     let plan = launch::plan(host, found.abi().unwrap()).unwrap();
 
-    let dir = match &opts.helper_dir {
-        Some(d) => d.clone(),
-        None => launch::helper_dir().ok_or(RemoteError::NoHelper(PathBuf::from(".")))?,
-    };
-    let helper = dir.join(plan.helper.file_name());
-    if !helper.is_file() {
-        return Err(RemoteError::NoHelper(helper));
-    }
+    let dir = helper_location(&plan, opts)?;
 
     // The pixels cross once, through a file both processes map.
     let pixels = Scratch::new(&image.data)?;

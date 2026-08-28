@@ -5605,6 +5605,7 @@ dependencies = [
  "schist-layer-fx",
  "schist-neural",
  "schist-plugin-api",
+ "schist-plugin-host-8bf",
  "schist-plugin-host-wasm",
  "schist-text-engine",
  "schist-tools-basic",

@@ -112,7 +112,28 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
         Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
         None => schist_plugin_host_wasm::PluginManager::default(),
     };
+    log_8bf_support();
     (registry, manager)
+}
+
+/// Report which Photoshop plug-in helpers this build carries.
+///
+/// They are binaries for architectures other than this one, so they ride
+/// inside the executable and are unpacked to the cache the first time a
+/// plug-in actually needs one — which for most people is never. Nothing
+/// is written here; this only says what is available, because that is
+/// the first question when a `.8bf` will not load.
+fn log_8bf_support() {
+    use schist_plugin_host_8bf::bundled;
+    let carried: Vec<&str> = bundled::names().collect();
+    if carried.is_empty() {
+        log::info!(
+            "no Photoshop plug-in helpers bundled; .8bf support needs them \
+             installed beside the binary"
+        );
+    } else {
+        log::info!("Photoshop plug-in helpers carried: {}", carried.join(", "));
+    }
 }
 
 /// Documents the platform hands over outside argv, and the window they are
