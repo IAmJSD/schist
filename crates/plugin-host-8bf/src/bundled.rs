@@ -7,6 +7,10 @@
 //! means one file ships and the helpers appear when a plug-in is
 //! actually run — which for most users is never.
 //!
+//! They travel deflated. The helpers are stripped first, which takes far
+//! more off than compression does — 2.8 MB of helper is 390 KB once its
+//! debug info goes — and what remains packs to about half again.
+//!
 //! What lands here is decided at build time by `build.rs`; with nothing
 //! bundled every function below reports that honestly and the host falls
 //! back to looking beside the executable.
@@ -14,11 +18,19 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// One carried helper: its installed name, the size it unpacks to, and
+/// the deflate stream it unpacks from.
+pub(crate) struct Helper {
+    name: &'static str,
+    size: usize,
+    packed: &'static [u8],
+}
+
 include!(concat!(env!("OUT_DIR"), "/bundled.rs"));
 
 /// The helpers this build carries, by file name.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    BUNDLED.iter().map(|(n, _)| *n)
+    BUNDLED.iter().map(|h| h.name)
 }
 
 /// Whether this build carries any helper at all.
@@ -26,8 +38,8 @@ pub fn is_empty() -> bool {
     BUNDLED.is_empty()
 }
 
-fn bytes(name: &str) -> Option<&'static [u8]> {
-    BUNDLED.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)
+fn helper(name: &str) -> Option<&'static Helper> {
+    BUNDLED.iter().find(|h| h.name == name)
 }
 
 /// Per-user cache directory, following the same rules as the app's own
@@ -62,7 +74,7 @@ pub fn unpack_dir() -> Option<PathBuf> {
 /// error: it is the ordinary state of a build that ships its helpers
 /// loose instead.
 pub fn extract(name: &str) -> io::Result<Option<PathBuf>> {
-    let Some(bytes) = bytes(name) else {
+    let Some(helper) = helper(name) else {
         return Ok(None);
     };
     let Some(dir) = unpack_dir() else {
@@ -71,13 +83,28 @@ pub fn extract(name: &str) -> io::Result<Option<PathBuf>> {
     let path = dir.join(name);
 
     // Already unpacked. The directory name pins the contents, so a file
-    // of the right length in the right directory is the right file.
-    if has_len(&path, bytes.len()) {
+    // of the right length in the right directory is the right file --
+    // and checking it first means the common path never inflates
+    // anything at all.
+    if has_len(&path, helper.size) {
         return Ok(Some(dir));
     }
 
+    let bytes = miniz_oxide::inflate::decompress_to_vec(helper.packed)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {e}")))?;
+    if bytes.len() != helper.size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{name} unpacked to {} bytes, expected {}",
+                bytes.len(),
+                helper.size
+            ),
+        ));
+    }
+
     std::fs::create_dir_all(&dir)?;
-    write_executable(&path, bytes)?;
+    write_executable(&path, &bytes)?;
     Ok(Some(dir))
 }
 
@@ -143,10 +170,15 @@ mod tests {
             let dir = extract(name).unwrap().expect("a carried helper unpacks");
             let path = dir.join(name);
             assert!(path.is_file(), "{} should exist", path.display());
+            let carried = helper(name).unwrap();
             assert_eq!(
                 path.metadata().unwrap().len() as usize,
-                bytes(name).unwrap().len(),
+                carried.size,
                 "unpacked {name} should be whole"
+            );
+            assert!(
+                carried.packed.len() < carried.size,
+                "{name} should be carried compressed"
             );
             #[cfg(unix)]
             {

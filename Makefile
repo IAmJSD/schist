@@ -28,6 +28,12 @@ PROFILE ?= release
 HELPER_CRATE := schist-plugin-host-8bf
 HELPER_BIN   := schist-8bf-helper
 
+# Helpers always build with the `helper` profile, whatever the app is
+# built with: they are a shipping artifact either way, and the profile
+# strips them. Debug info is 86% of a helper's size and nothing reads it
+# -- see the profile's comment in Cargo.toml.
+HELPER_PROFILE := helper
+
 # `--release` names the directory `release`; the default profile builds
 # into `debug` and takes no flag at all.
 ifeq ($(PROFILE),release)
@@ -167,9 +173,10 @@ define helper_rule
 $$(DESTDIR)/$$(name-$(1)): FORCE | $$(DESTDIR)
 	@$$(RUSTUP) target list --installed 2>/dev/null | grep -qx '$(1)' \
 	  || $$(RUSTUP) target add $(1)
-	SCHIST_BUNDLED_HELPERS= $$(CARGO) build $$(PROFILE_FLAG) -p $$(HELPER_CRATE) --bin $$(HELPER_BIN) --target $(1)
-	@cp target/$(1)/$$(PROFILE)/$$(HELPER_BIN)$$(call exe,$(1)) $$@
-	@echo '  helper   $$@'
+	SCHIST_BUNDLED_HELPERS= $$(CARGO) build --profile $$(HELPER_PROFILE) \
+	  -p $$(HELPER_CRATE) --bin $$(HELPER_BIN) --target $(1)
+	@cp target/$(1)/$$(HELPER_PROFILE)/$$(HELPER_BIN)$$(call exe,$(1)) $$@
+	@echo '  helper   $$@' $$$$(du -h '$$@' 2>/dev/null | cut -f1)
 endef
 $(foreach t,$(HELPER_TARGETS),$(eval $(call helper_rule,$(t))))
 

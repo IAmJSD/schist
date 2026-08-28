@@ -5864,6 +5864,7 @@ version = "0.6.0"
 dependencies = [
  "libloading",
  "memmap2",
+ "miniz_oxide",
  "tempfile",
 ]
 

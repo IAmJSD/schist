@@ -149,9 +149,27 @@ first time a file was added.
 
 `make build` goes one step further and embeds the staged helpers in the
 Schist binary, which then unpacks one the first time a plug-in actually
-needs it — for most people, never. The alternative is shipping them loose
-beside the app, which works but multiplies what an installer has to place
-and a signature has to cover.
+needs it — for most people, never. The point is that **what you share is
+one executable**: no loose files beside it, nothing for an installer to
+place or a signature to cover, and a Linux or Windows build that hosts
+plug-ins for every architecture it can reach with nothing else present.
+
+They are stripped and deflated on the way in, which matters more than it
+sounds like it should:
+
+| | per pair |
+|---|---|
+| as built, `release` profile | 5.68 MB |
+| stripped (the `helper` profile) | 826 KB |
+| stripped and deflated | **423 KB** |
+
+Almost all of that is the strip, not the compression: debug info is 86%
+of a helper, and nothing reads it — the crash handler reports a raw fault
+address belonging to the *plug-in* and never symbolises anything. What
+survives packs to roughly half again, with `miniz_oxide`, which is pure
+Rust and so cross-compiles to every helper target without a C toolchain.
+Something stronger than deflate would save perhaps another 60 KB and is
+not worth a heavier dependency.
 
 ```
 make build      # helpers, then an app carrying them
@@ -168,7 +186,9 @@ executable.
 
 Unpacking goes to the per-user cache — XDG on Unix, local app data on
 Windows — in a directory named after a hash of the bundle's contents, so
-an upgrade never reuses the previous version's binaries. Writes go
+an upgrade never reuses the previous version's binaries. A helper already
+there with the right length is used as it stands, so the common path
+never inflates anything. Writes go
 through a temporary file and a rename, because two Schist windows can
 unpack the same helper at the same moment; the worst case is redundant
 work rather than a half-written binary. A helper already there with the

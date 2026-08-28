@@ -122,3 +122,14 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 debug = 1
+
+# The .8bf plug-in helpers. They ship compressed inside the app binary,
+# so their size is worth caring about in a way the app's own is not, and
+# `debug = 1` costs a great deal here: a helper is 2.8 MB with debug info
+# and 390 KB without. Nothing reads it — the crash handler reports a raw
+# fault address belonging to the *plug-in*, and never symbolises anything
+# — so it goes.
+[profile.helper]
+inherits = "release"
+debug = false
+strip = true
