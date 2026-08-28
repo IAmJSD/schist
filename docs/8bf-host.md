@@ -110,6 +110,53 @@ kept the failures legible while the layout was still being established.
 The in-process path is still here, and is what the unit tests drive; it
 is `remote::apply` that shipping code should call.
 
+## Building the helpers
+
+A plug-in is a binary for one OS and architecture, and it is routinely
+not the one Schist was compiled for. So an install is one app binary
+beside *several* helpers, and something has to run cargo once per
+architecture — cargo builds a single target per invocation. That is what
+the root `Makefile` is for:
+
+```sh
+make helpers                # for this platform, into target/release/
+make helpers PROFILE=debug  # beside a debug build
+make install-helpers DESTDIR=some/dir
+```
+
+Which helpers get built follows the host, matching the table in
+`launch.rs`:
+
+| Building on | Helpers built | Hosts |
+|---|---|---|
+| Linux | `x86_64-pc-windows-gnu`, `i686-pc-windows-gnu` | Windows plug-ins, through Wine |
+| Windows | `x86_64-pc-windows-msvc`, `i686-pc-windows-msvc` | Windows plug-ins, natively |
+| macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | Mac plug-ins, Intel ones through Rosetta |
+
+Linux and Windows build the same *pair* because Wine runs the same PE
+binary a real Windows does; only the linker differs. Nothing here builds
+a helper for a platform it is not running on — a Linux box cannot produce
+the macOS helpers, and does not try.
+
+This is cheap enough to be unremarkable: the helper links `libloading` and
+`memmap2` and nothing else — no GPUI, no wgpu — so each one is about five
+seconds and under 3 MB. Cargo remains the incremental build system; the
+make rules depend on a phony target rather than restating cargo's
+dependency graph, because a second, worse copy of it would go stale the
+first time a file was added.
+
+Two things it deliberately is not. It is **not a `build.rs`**: a build
+script that shells out to cargo re-enters a cargo already holding the lock
+on `target/`, and blocks until it gives up. And it is **not wired into the
+packaging scripts** yet — the helpers land beside the app binary, which is
+where `helper_dir` looks and what makes `cargo run` work, but no installer
+ships them, because the host is not reachable from the app yet. When it
+is, `make install-helpers DESTDIR=...` is the hook the three packaging
+scripts should call.
+
+A missing helper is reported rather than guessed at: `RemoteError::NoHelper`
+says which directory it looked in.
+
 ## The pieces
 
 ```
