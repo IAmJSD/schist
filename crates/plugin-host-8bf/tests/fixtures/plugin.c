@@ -479,6 +479,77 @@ EXPORT void entry_continue(int16_t selector, void *pb, intptr_t *data, int16_t *
     run(selector, (FilterRecord *)pb, data, result, RUN_CONTINUE);
 }
 
+/* ---- layers and selections -------------------------------------------- */
+
+#define layerBadCase   (-30160)
+#define layerBadPlanes (-30161)
+#define maskMissing    (-30162)
+#define maskBadData    (-30163)
+
+/* A layer: colour planes followed by transparency, in one of the two
+ * editable-transparency cases. */
+EXPORT void entry_layer(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    /* 4 and 5 are the editable-transparency cases. */
+    if (fr->filterCase != 4 && fr->filterCase != 5) { *result = layerBadCase; return; }
+    if (fr->inTransparencyMask != 1) { *result = layerBadPlanes; return; }
+    if (fr->inLayerPlanes != fr->planes - 1) { *result = layerBadPlanes; return; }
+    if (fr->outTransparencyMask != 1) { *result = layerBadPlanes; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    while (next_tile(fr, p)) {
+        OSErr e = fr->advanceState();
+        if (e != 0) { *result = e; return; }
+        invert_tile(fr, 255);
+    }
+}
+
+/* A selection: the host has to hand over the mask when asked. */
+EXPORT void entry_masked(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (!fr->haveMask) { *result = maskMissing; return; }
+    /* 2, 5 and 7 are the with-selection cases. */
+    if (fr->filterCase != 2 && fr->filterCase != 5 && fr->filterCase != 7) {
+        *result = layerBadCase; return;
+    }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    if (!next_tile(fr, p)) return;
+    fr->maskRect = fr->inRect;
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+    if (fr->maskData == NULL || fr->maskRowBytes <= 0) { *result = maskBadData; return; }
+
+    /* The top-left of every mask these tests build is fully selected,
+     * so this says the host served the rectangle asked for and lined it
+     * up. What the values mean is the caller's business, not this
+     * fixture's. */
+    const unsigned char *m = (const unsigned char *)fr->maskData;
+    int w = fr->maskRect.right - fr->maskRect.left;
+    if (fr->maskRowBytes < w) { *result = maskBadData; return; }
+    if (m[0] != 255) { *result = maskBadData; return; }
+    invert_tile(fr, 255);
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
 /* ---- deep images ------------------------------------------------------
  *
  * Photoshop's 16-bit range is 0..32768, not 0..65535 — a host that gets

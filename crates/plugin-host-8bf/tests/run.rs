@@ -27,11 +27,9 @@ fn pipl_for(entry: &str) -> Pipl {
         .pstring(key::CATEGORY, "Schist")
         .raw(key::SUPPORTED_MODES, vec![0b0101_0000, 0])
         .cstring(key::CODE_WIN64_X86, entry)
-        .raw(key::FILTER_CASE_INFO, {
-            let mut v = vec![1u8, 1, 0, 0];
-            v.extend(std::iter::repeat_n(0u8, 24));
-            v
-        })
+        // All seven cases filterable, which is what a real plug-in
+        // that handles layers and selections declares.
+        .raw(key::FILTER_CASE_INFO, [1u8, 1, 0, 0].repeat(7))
         .build();
     Pipl::parse(&bytes, Endian::Little).unwrap()
 }
@@ -205,18 +203,125 @@ fn a_run_that_fails_partway_leaves_the_image_untouched() {
 }
 
 #[test]
-fn transparency_is_refused_rather_than_filtered_as_colour() {
+fn a_layer_is_offered_as_colour_planes_plus_transparency() {
+    // The fixture refuses unless it is given one of the editable
+    // transparency cases with the plane structure to match: three
+    // colour planes then one of transparency, writable on the way out.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_layer", dir.path()) else {
+        return;
+    };
+    let original = gradient(20, 12, 4);
+    let mut image = original.clone();
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap();
+    let expected: Vec<u8> = original.data.iter().map(|&b| 255 - b).collect();
+    assert_eq!(image.data, expected, "transparency is filtered too");
+}
+
+#[test]
+fn a_plug_in_that_cannot_filter_transparency_gets_a_flat_image() {
+    // Adobe: if the editable cases are unsupported the host tries the
+    // protected ones, and failing those a layer can still be filtered
+    // as flat. Losing the transparency beats refusing to run.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(so) = common::build_native_plugin(dir.path()) else {
+        return;
+    };
+    let bytes = PiplBuilder::new()
+        .ostype(key::KIND, kind::FILTER)
+        .pstring(key::NAME, "Flat only")
+        .cstring(key::CODE_WIN64_X86, "entry_advance")
+        .raw(key::FILTER_CASE_INFO, {
+            // Only case 1 — flat, no selection — is filterable.
+            let mut v = vec![1u8, 1, 0, 0];
+            v.extend(std::iter::repeat_n(0u8, 24));
+            v
+        })
+        .build();
+    let pipl = Pipl::parse(&bytes, Endian::Little).unwrap();
+    let mut filter = bf::Filter::open(&so, pipl, "entry_advance").unwrap();
+    let mut image = gradient(12, 8, 4);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("a layer should fall back to being filtered flat");
+}
+
+#[test]
+fn a_selection_is_handed_over_and_confines_the_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_masked", dir.path()) else {
+        return;
+    };
+    let (w, h) = (16u32, 8u32);
+    // Selected on the left, unselected on the right, so the fixture's
+    // corner check passes and the effect has a visible edge.
+    let selection: Vec<u8> = (0..w * h)
+        .map(|i| if i % w < w / 2 { 255 } else { 0 })
+        .collect();
+    let original = gradient(w, h, 3);
+    let mut image = original.clone();
+    let opts = bf::RunOptions {
+        selection: Some(selection),
+        ..Default::default()
+    };
+    filter.apply(&mut image, &opts).unwrap();
+
+    for y in 0..h {
+        for x in 0..w {
+            let at = ((y * w + x) * 3) as usize;
+            let before = original.data[at];
+            let after = image.data[at];
+            if x < w / 2 {
+                assert_eq!(after, 255 - before, "inside the selection at ({x},{y})");
+            } else {
+                assert_eq!(after, before, "outside it at ({x},{y})");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_half_selected_pixel_is_blended_not_switched() {
+    // autoMask is coverage, not a stencil: a pixel selected halfway
+    // moves halfway.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_masked", dir.path()) else {
+        return;
+    };
+    let (w, h) = (8u32, 4u32);
+    let selection: Vec<u8> = (0..w * h)
+        .map(|i| if i % w == 0 { 255 } else { 128 })
+        .collect();
+    let original = gradient(w, h, 3);
+    let mut image = original.clone();
+    let opts = bf::RunOptions {
+        selection: Some(selection),
+        ..Default::default()
+    };
+    filter.apply(&mut image, &opts).unwrap();
+    // Column 1 is half selected: halfway between v and 255 - v.
+    let at = 3usize;
+    let before = original.data[at] as f32;
+    let want = (before + ((255.0 - before) - before) * (128.0 / 255.0)).round() as u8;
+    assert_eq!(image.data[at], want);
+}
+
+#[test]
+fn a_selection_of_the_wrong_size_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let Some(mut filter) = load("entry_advance", dir.path()) else {
         return;
     };
-    let mut image = gradient(16, 16, 4);
-    let err = filter
-        .apply(&mut image, &bf::RunOptions::default())
-        .unwrap_err();
-    match err {
-        bf::HostError::BadRequest(m) => assert!(m.contains("4 planes"), "{m}"),
-        other => panic!("wrong error: {other}"),
+    let mut image = gradient(8, 8, 3);
+    let opts = bf::RunOptions {
+        selection: Some(vec![255; 10]),
+        ..Default::default()
+    };
+    match filter.apply(&mut image, &opts) {
+        Err(bf::HostError::BadRequest(m)) => assert!(m.contains("one per pixel"), "{m}"),
+        other => panic!("expected a refusal, got {other:?}"),
     }
 }
 

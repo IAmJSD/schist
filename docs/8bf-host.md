@@ -25,7 +25,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 | Stage | Scope | State |
 |---|---|---|
 | **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
-| **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit | **done** but for selections and transparency |
+| **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
 | **3** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery and packaging still to do |
 | 4 | ActionManager / descriptor recording, format plug-ins, big-document coordinates | not started |
 
@@ -182,9 +182,6 @@ make no sense for the slot it landed on.
 
 ## What stage 1 does not do
 
-- **Selections, masks and transparency.** Only
-  `filterCaseFlatImageNoSelection` is offered; a plug-in that declares it
-  cannot filter that case is refused up front rather than run wrongly.
 - **Documents past 32767 pixels.** `bigDocumentData` is null, so the
   16-bit rectangles are the limit and an oversized image is refused
   rather than silently wrapped into negative coordinates.
@@ -235,6 +232,27 @@ One thing this taught: a plug-in that supports 16-bit may not say so in
 its `'mode'` flags. G'MIC declares only Grayscale and RGB there and
 handles depth through `'enbl'`'s `PSHOP_ImageDepth` test instead. So only
 the *base* mode is grounds for refusal; a missing deep-mode flag is not.
+
+### Layers and selections
+
+A trailing plane is transparency, not colour: four planes is RGB plus
+alpha, two is grayscale plus alpha. A layer is offered as the editable
+transparency case, and if the plug-in says it cannot filter that, the
+protected case, and failing that as a flat image — losing the
+transparency but running, which is what Adobe describes and beats
+refusing.
+
+A selection arrives as one byte per pixel, 255 meaning fully selected,
+and is handed to the plug-in as mask data for whatever rectangle it asks
+for. `autoMask` is the host's job: the plug-in filters the whole
+rectangle and the host blends the result back through the selection, so
+a half-selected pixel moves half way rather than being switched. A
+plug-in that wants to do its own masking turns `autoMask` off and the
+host stops.
+
+Adobe's table says of mask data "0=no mask (selected) and 255=masked
+(not selected)", which contradicts the rest of the same page and what
+Photoshop does. It is coverage: 255 is selected.
 
 ### Colour services
 

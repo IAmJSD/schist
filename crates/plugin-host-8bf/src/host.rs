@@ -131,6 +131,17 @@ pub struct RunOptions {
     pub progress: Option<Box<dyn Fn(i32, i32)>>,
     /// The document's name, answered to `propTitle`.
     pub document_title: Option<String>,
+    /// A selection, one byte per pixel of the whole image, 255 meaning
+    /// fully selected.
+    ///
+    /// Adobe's table says "0=no mask (selected) and 255=masked (not
+    /// selected)", which contradicts both the rest of the same page and
+    /// what Photoshop does; a selection mask is coverage, and 255 is
+    /// selected. `None` for "no selection", which is not the same as a
+    /// mask of all 255 — with no selection the host tells the plug-in
+    /// there is none at all, and a rectangular selection is expressed as
+    /// a smaller `filterRect` rather than as a mask.
+    pub selection: Option<Vec<u8>>,
 }
 
 impl Default for RunOptions {
@@ -144,6 +155,7 @@ impl Default for RunOptions {
             abort: Arc::new(AtomicBool::new(false)),
             progress: None,
             document_title: None,
+            selection: None,
         }
     }
 }
@@ -307,19 +319,27 @@ impl Filter {
         // offering it under filterCaseFlatImageNoSelection would have
         // the plug-in filter alpha as if it were a colour channel.
         // Transparency is stage 2.
-        let image_mode = match (image.planes, image.depth) {
+        // A trailing plane is transparency, not colour: 4 planes is RGB
+        // plus alpha, 2 is grayscale plus alpha. The image *mode* is
+        // named for the colour planes alone.
+        let (colour_planes, has_alpha) = match image.planes {
+            1 | 3 => (image.planes, false),
+            2 => (1, true),
+            4 => (3, true),
+            n => {
+                return Err(HostError::BadRequest(format!(
+                    "{n} planes; this host offers 1 or 3, each with or without transparency"
+                )))
+            }
+        };
+        let image_mode = match (colour_planes, image.depth) {
             (1, Depth::Eight) => mode::GRAY_SCALE,
             (3, Depth::Eight) => mode::RGB_COLOR,
             (1, Depth::Sixteen) => mode::GRAY_16,
             (3, Depth::Sixteen) => mode::RGB_48,
             (1, Depth::ThirtyTwo) => mode::GRAY_32,
             (3, Depth::ThirtyTwo) => mode::RGB_96,
-            (n, d) => {
-                return Err(HostError::BadRequest(format!(
-                    "{n} planes at {} bits; this host offers 1 or 3",
-                    d.bits()
-                )))
-            }
+            _ => unreachable!("colour planes are 1 or 3 by construction"),
         };
         // Only the *base* mode is a refusal. A plug-in that declares
         // neither Gray16 nor RGB48 in its `'mode'` flags may still
@@ -336,16 +356,23 @@ impl Filter {
             return Err(HostError::UnsupportedMode(image_mode));
         }
 
-        // Stage 1 offers exactly one case: a flat image, no selection.
-        let case_info = self
-            .pipl
-            .filter_case_info()
-            .map(|c| c[filter_case::FLAT_IMAGE_NO_SELECTION as usize - 1]);
-        if case_info.is_some_and(|c| !c.is_supported()) {
-            return Err(HostError::UnsupportedCase);
+        let fci = self.pipl.filter_case_info();
+        let selected = opts.selection.is_some();
+        if let Some(sel) = &opts.selection {
+            let want = image.width as usize * image.height as usize;
+            if sel.len() != want {
+                return Err(HostError::BadRequest(format!(
+                    "the selection is {} bytes, expected {want} — one per pixel",
+                    sel.len()
+                )));
+            }
         }
+        let Some(case) = choose_case(fci.as_ref(), has_alpha, selected) else {
+            return Err(HostError::UnsupportedCase);
+        };
+        let case_info = fci.map(|c| c[case as usize - 1]);
 
-        let mut session = Session::new(image, image_mode, case_info, opts);
+        let mut session = Session::new(image, image_mode, case, case_info, opts);
         let result = session.run(self.entry, opts.show_dialog);
         session.dispose_parameters();
         if result.is_err() {
@@ -356,6 +383,61 @@ impl Filter {
         }
         result
     }
+}
+
+/// True for the two cases where the plug-in may write transparency.
+fn editable_transparency(case: i16) -> bool {
+    matches!(
+        case,
+        filter_case::EDITABLE_TRANSPARENCY_NO_SELECTION
+            | filter_case::EDITABLE_TRANSPARENCY_WITH_SELECTION
+    )
+}
+
+/// Pick the filter case to offer, best first.
+///
+/// Adobe: "If the editable transparency cases are unsupported, then
+/// Photoshop will try the corresponding protected transparency cases."
+/// A layer therefore prefers editable, falls back to protected, and
+/// falls back again to being treated as a flat image — which loses the
+/// transparency but runs. A plug-in that supports none of them is
+/// refused rather than handed something it said it cannot filter.
+fn choose_case(
+    fci: Option<&[FilterCaseInfo; filter_case::COUNT]>,
+    has_alpha: bool,
+    selected: bool,
+) -> Option<i16> {
+    let flat = if selected {
+        filter_case::FLAT_IMAGE_WITH_SELECTION
+    } else {
+        filter_case::FLAT_IMAGE_NO_SELECTION
+    };
+    let order: &[i16] = if has_alpha {
+        if selected {
+            &[
+                filter_case::EDITABLE_TRANSPARENCY_WITH_SELECTION,
+                filter_case::PROTECTED_TRANSPARENCY_WITH_SELECTION,
+                filter_case::FLAT_IMAGE_WITH_SELECTION,
+            ]
+        } else {
+            &[
+                filter_case::EDITABLE_TRANSPARENCY_NO_SELECTION,
+                filter_case::PROTECTED_TRANSPARENCY_NO_SELECTION,
+                filter_case::FLAT_IMAGE_NO_SELECTION,
+            ]
+        }
+    } else {
+        std::slice::from_ref(&flat)
+    };
+    // With no `'fici'` at all the plug-in has said nothing, and the
+    // first choice is as good a guess as any.
+    let Some(fci) = fci else {
+        return order.first().copied();
+    };
+    order
+        .iter()
+        .copied()
+        .find(|c| fci[*c as usize - 1].is_supported())
 }
 
 /// A filter that asks for one scanline at a time on a 32767-row image
@@ -746,8 +828,14 @@ struct Session<'a> {
     source: Vec<u8>,
     dest: &'a mut Image,
     planes: u16,
+    /// Colour planes, which is `planes` less the transparency one.
+    colour_planes: u16,
     /// Bytes per sample, so every stride is one multiplication away.
     sample: usize,
+    /// The selection, one byte per pixel, 255 meaning fully selected.
+    mask: Option<Vec<u8>>,
+    /// Scratch for the rectangle of mask handed to the plug-in.
+    mask_buf: Vec<u8>,
     case_info: Option<FilterCaseInfo>,
 
     in_buf: Vec<u8>,
@@ -790,10 +878,13 @@ impl<'a> Session<'a> {
     fn new(
         image: &'a mut Image,
         image_mode: i16,
+        case: i16,
         case_info: Option<FilterCaseInfo>,
         opts: &'a RunOptions,
     ) -> Session<'a> {
         let (w, h, planes) = (image.width, image.height, image.planes);
+        let has_alpha = matches!(planes, 2 | 4);
+        let colour_planes: u16 = if has_alpha { planes - 1 } else { planes };
         let sample = image.depth.bytes();
         let source = image.data.clone();
 
@@ -846,12 +937,13 @@ impl<'a> Session<'a> {
         record.host_proc = None;
         record.platform_data = &mut *platform as *mut _ as *mut c_void;
 
-        // Flat image, no selection: no transparency to protect, no mask
-        // to hand over, nothing floating.
-        record.filter_case = filter_case::FLAT_IMAGE_NO_SELECTION;
+        record.filter_case = case;
         record.is_floating = 0;
-        record.have_mask = 0;
-        record.auto_mask = 0;
+        record.have_mask = u8::from(opts.selection.is_some());
+        // "By default, Photoshop automatically masks any changes to the
+        // area actually selected", and a plug-in may turn that off to do
+        // its own. Either way it is the host that honours it.
+        record.auto_mask = record.have_mask;
         record.mask_rect = Rect::default();
         record.mask_data = std::ptr::null_mut();
         record.mask_row_bytes = 0;
@@ -924,17 +1016,26 @@ impl<'a> Session<'a> {
         record.input_rate = fixed(1.0);
         record.mask_rate = fixed(1.0);
 
-        // The plane structure of a flat image: all colour, nothing else.
-        record.in_layer_planes = 0;
-        record.in_transparency_mask = 0;
+        // The plane structure, in the order the planes are presented.
+        // A flat image is all colour; a layer's colour planes are
+        // followed by its transparency.
+        let alpha = i16::from(has_alpha);
+        let colour = colour_planes as i16;
+        record.in_layer_planes = if has_alpha { colour } else { 0 };
+        record.in_transparency_mask = alpha;
         record.in_layer_masks = 0;
         record.in_inverted_layer_masks = 0;
-        record.in_non_layer_planes = planes as i16;
-        record.out_layer_planes = 0;
-        record.out_transparency_mask = 0;
+        record.in_non_layer_planes = if has_alpha { 0 } else { colour };
+        // In the protected-transparency case the plug-in may read the
+        // transparency but must not write it, so the output is a prefix
+        // of the input — which is what Adobe means by "the output will
+        // contain just the layerPlanes".
+        let writes_alpha = has_alpha && editable_transparency(case);
+        record.out_layer_planes = if has_alpha { colour } else { 0 };
+        record.out_transparency_mask = i16::from(writes_alpha);
         record.out_layer_masks = 0;
         record.out_inverted_layer_masks = 0;
-        record.out_non_layer_planes = planes as i16;
+        record.out_non_layer_planes = if has_alpha { 0 } else { colour };
 
         // "If zero, assume the host has not set it" — so these are only
         // meaningful because we fill them, and they describe the plain
@@ -955,7 +1056,10 @@ impl<'a> Session<'a> {
             source,
             dest: image,
             planes,
+            colour_planes,
             sample,
+            mask: opts.selection.clone(),
+            mask_buf: Vec::new(),
             case_info,
             in_buf: Vec::new(),
             out_buf: Vec::new(),
@@ -1090,7 +1194,10 @@ impl<'a> Session<'a> {
                 }
             })
         };
-        Some(match self.planes {
+        // Colour planes, not all planes: on a grayscale layer plane 1 is
+        // transparency, and reading it as green would sample a colour
+        // the image does not contain.
+        Some(match self.colour_planes {
             1 => {
                 let g = read(0)?;
                 [g, g, g, 0]
@@ -1134,20 +1241,59 @@ impl<'a> Session<'a> {
         !self.requested_in().is_empty() || !self.requested_out().is_empty()
     }
 
+    /// How much of a pixel the selection lets through, 0.0 to 1.0.
+    fn coverage(&self, x: u32, y: u32) -> f32 {
+        match &self.mask {
+            None => 1.0,
+            Some(m) => {
+                let at = y as usize * self.dest.width as usize + x as usize;
+                m.get(at).map_or(1.0, |v| *v as f32 / 255.0)
+            }
+        }
+    }
+
     /// Commit the last output and hand over the next input. This is
     /// both what `advanceState` does and what the host does between
     /// `Continue` calls.
     fn advance(&mut self) -> Result<(), HostError> {
         self.commit_pending();
 
-        // With no selection there is no mask to serve, and the API
-        // Guide says the field is ignored in that case — but the
-        // Continue loop watches these rectangles, so leaving a stale one
-        // set would spin forever.
-        self.record.mask_rect = Rect::default();
-        self.big_doc.mask_rect_32 = VRect::default();
-        self.record.mask_data = std::ptr::null_mut();
-        self.record.mask_row_bytes = 0;
+        // With no selection there is no mask to serve, and the API Guide
+        // says the field is ignored in that case — but the Continue loop
+        // watches these rectangles, so leaving a stale one set would
+        // spin forever.
+        let mask_rect = if self.wide() {
+            self.big_doc.mask_rect_32.narrow()
+        } else {
+            self.record.mask_rect
+        };
+        match (&self.mask, mask_rect.is_empty()) {
+            (Some(mask), false) => {
+                let row = mask_rect.width() as usize;
+                self.mask_buf.resize(row * mask_rect.height() as usize, 0);
+                read_rect(
+                    mask,
+                    self.dest.width,
+                    self.dest.height,
+                    1,
+                    mask_rect,
+                    0,
+                    0,
+                    abi::padding::WANTS_EDGE_REPLICATION,
+                    1,
+                    &mut self.mask_buf,
+                );
+                self.record.mask_data = self.mask_buf.as_mut_ptr() as *mut c_void;
+                self.record.mask_row_bytes = row as i32;
+                crate::suites::trace!("   served mask {mask_rect:?} rowBytes={row}");
+            }
+            _ => {
+                self.record.mask_rect = Rect::default();
+                self.big_doc.mask_rect_32 = VRect::default();
+                self.record.mask_data = std::ptr::null_mut();
+                self.record.mask_row_bytes = 0;
+            }
+        }
 
         let in_rect = self.requested_in();
         crate::suites::trace!(
@@ -1254,6 +1400,8 @@ impl<'a> Session<'a> {
         let src_row = rect.width() as usize * n;
         let (w, h) = (self.dest.width as i32, self.dest.height as i32);
         let lo = lo as usize * self.sample;
+        let masking = self.record.auto_mask != 0 && self.mask.is_some();
+        let depth = self.dest.depth;
         for y in 0..rect.height() {
             let dy = rect.top as i32 + y;
             if dy < 0 || dy >= h {
@@ -1266,7 +1414,25 @@ impl<'a> Session<'a> {
                 }
                 let di = self.dest.index(dx as u32, dy as u32) + lo;
                 let si = y as usize * src_row + x as usize * n;
-                self.dest.data[di..di + n].copy_from_slice(&self.out_buf[si..si + n]);
+                // "By default, Photoshop automatically masks any changes
+                // to the area actually selected." A plug-in filters the
+                // whole rectangle it asked for; the host is what keeps
+                // the result inside the selection.
+                let cover = if masking {
+                    self.coverage(dx as u32, dy as u32)
+                } else {
+                    1.0
+                };
+                if cover >= 1.0 {
+                    self.dest.data[di..di + n].copy_from_slice(&self.out_buf[si..si + n]);
+                } else if cover > 0.0 {
+                    blend_samples(
+                        &mut self.dest.data[di..di + n],
+                        &self.out_buf[si..si + n],
+                        cover,
+                        depth,
+                    );
+                }
             }
         }
     }
@@ -1324,6 +1490,31 @@ fn read_rect(
                 let cy = sy.clamp(0, height as i32 - 1) as usize;
                 let si = cy * src_row + cx * planes as usize * sample + lo;
                 out[oi..oi + n].copy_from_slice(&src[si..si + n]);
+            }
+        }
+    }
+}
+
+/// Move `dest` towards `src` by `cover`, in whatever sample width the
+/// image uses. This is what `autoMask` means at the level of bytes.
+fn blend_samples(dest: &mut [u8], src: &[u8], cover: f32, depth: Depth) {
+    let width = depth.bytes();
+    for (d, s) in dest.chunks_exact_mut(width).zip(src.chunks_exact(width)) {
+        match depth {
+            Depth::Eight => {
+                let (a, b) = (d[0] as f32, s[0] as f32);
+                d[0] = (a + (b - a) * cover).round().clamp(0.0, 255.0) as u8;
+            }
+            Depth::Sixteen => {
+                let a = u16::from_le_bytes([d[0], d[1]]) as f32;
+                let b = u16::from_le_bytes([s[0], s[1]]) as f32;
+                let v = (a + (b - a) * cover).round().clamp(0.0, 32768.0) as u16;
+                d.copy_from_slice(&v.to_le_bytes());
+            }
+            Depth::ThirtyTwo => {
+                let a = f32::from_le_bytes([d[0], d[1], d[2], d[3]]);
+                let b = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+                d.copy_from_slice(&(a + (b - a) * cover).to_le_bytes());
             }
         }
     }
