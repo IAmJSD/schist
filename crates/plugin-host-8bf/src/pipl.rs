@@ -97,6 +97,32 @@ pub mod key {
 }
 
 /// `'kind'` values, from Resource Guide table 11-3.
+/// Parse a PiPL whose byte order is not known up front.
+///
+/// The Resource Guide says a PiPL's integers are "in native byte order
+/// for a given platform", so the order is the *writing* platform's:
+/// little-endian for a Windows DLL, and either one for a Mac bundle
+/// depending on the era it was built in. Both are tried and the one
+/// whose first property carries Photoshop's vendor code wins, which is
+/// unambiguous — `'8BIM'` byte-swapped is not itself a vendor code.
+///
+/// Discovery and the helper both need this. The helper especially: it is
+/// handed the raw resource exactly as discovery found it, so it has to
+/// be able to read everything discovery could.
+pub fn parse_any_order(raw: &[u8]) -> Option<Pipl> {
+    for endian in [Endian::Little, Endian::Big] {
+        if let Ok(p) = Pipl::parse(raw, endian) {
+            if p.properties
+                .first()
+                .is_some_and(|x| x.vendor == crate::abi::SIG_8BIM)
+            {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 pub mod kind {
     use crate::abi::{fourcc, OSType};
 

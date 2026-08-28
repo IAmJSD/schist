@@ -17,7 +17,7 @@
 
 use schist_plugin_host_8bf::host::{Filter, Image, RunOptions};
 use schist_plugin_host_8bf::ipc::{self, Report, RunRequest};
-use schist_plugin_host_8bf::pipl::{Endian, Pipl};
+use schist_plugin_host_8bf::pipl;
 use std::io::Write;
 use std::net::TcpStream;
 use std::process::ExitCode;
@@ -100,8 +100,11 @@ fn run(port: u16, token: &str) -> Result<(), String> {
 
 /// Run the plug-in, and hand back the parameters block it leaves.
 fn filter(req: &RunRequest, sock: &mut TcpStream) -> Result<Vec<u8>, String> {
-    let pipl = Pipl::parse(&req.pipl, Endian::Little)
-        .map_err(|e| format!("plug-in metadata did not parse: {e}"))?;
+    // Whatever order the resource was written in: a Mac PiPL may be
+    // big-endian, and the helper is handed the bytes discovery found
+    // rather than a re-reading of them.
+    let pipl = pipl::parse_any_order(&req.pipl)
+        .ok_or_else(|| "plug-in metadata did not parse".to_string())?;
     let mut plugin =
         Filter::open(req.plugin.as_ref(), pipl, &req.entry).map_err(|e| e.to_string())?;
 

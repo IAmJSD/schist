@@ -13,15 +13,32 @@
 //! Toolbox*, both of which describe the formats in prose. The PiPL
 //! inside is the same structure `crate::pipl` already parses.
 //!
-//! # Unproven
+//! # Proven, eventually
 //!
-//! Written and unit-tested against fixtures built here; **not yet run
-//! against a real macOS plug-in**, because this machine is Linux. The
-//! Windows path was in exactly this position before Wine, and was wrong
-//! in three places when it finally met one. Treat accordingly.
+//! This was written and unit-tested against fixtures built here, and the
+//! module said so — that it had never been run against a real macOS
+//! plug-in, and that the Windows path had been wrong in three places
+//! when it finally met one.
+//!
+//! It has now been run on a Mac, against bundles built by `clang` and
+//! `Rez` rather than by us, and it was wrong in two:
+//!
+//! * [`architectures`] read the Mach-O header in the opposite byte order
+//!   to the one it is written in, so every real binary looked like a
+//!   PowerPC one and no plug-in was discovered at all. The fixtures had
+//!   the same inversion baked in, which is why they agreed with it —
+//!   see the test that reads this test binary's own header.
+//! * A `.rsrc` was only ever read from a file's data fork, which is
+//!   where `Rez -useDF` puts it and not where `Rez` puts it by default.
+//!   See [`resource_bytes`].
+//!
+//! What is still unproven is the part no fixture can settle: the Mach-O
+//! entry-point property keys (`'mm64'`, `'ma64'`) are still `UNVERIFIED`
+//! in [`crate::pipl::key`], because they were chosen by convention and
+//! no third-party Mac plug-in has been read to confirm them.
 
 use crate::launch::PluginAbi;
-use crate::pipl::{Endian, Pipl};
+use crate::pipl::Pipl;
 use std::path::{Path, PathBuf};
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -68,16 +85,24 @@ fn fat_architectures(bytes: &[u8], sixty_four: bool) -> Vec<PluginAbi> {
 }
 
 /// A single-architecture binary. The magic says the byte order as well
-/// as the width, since a Mach-O is written in its own target's order.
+/// as the width, since a Mach-O is written in its own target's order —
+/// and the rest of the header, `cputype` included, is in that same
+/// order.
+///
+/// `MH_MAGIC_*` is the value the magic has *once read in the file's own
+/// order*, so which of the two spellings appears in the bytes is what
+/// identifies that order. Reading the raw bytes big-endian and getting
+/// `MH_MAGIC_64` therefore means a big-endian file, not a little-endian
+/// one.
 fn thin_architecture(bytes: &[u8]) -> Option<PluginAbi> {
     let magic = be32(bytes, 0)?;
     let cpu = match magic {
-        // Native-endian magic: the header is little-endian, which every
-        // architecture Schist cares about is.
-        MH_MAGIC_64 | MH_MAGIC_32 => le32(bytes, 4)?,
-        // Byte-swapped magic: a big-endian header, which now means only
+        // Bytes `fe ed fa cf`: a big-endian header, which now means only
         // a PowerPC binary, and there is no helper for those.
-        MH_CIGAM_64 | MH_CIGAM_32 => be32(bytes, 4)?,
+        MH_MAGIC_64 | MH_MAGIC_32 => be32(bytes, 4)?,
+        // Bytes `cf fa ed fe`: a little-endian header, which is every
+        // Mac architecture Schist can host.
+        MH_CIGAM_64 | MH_CIGAM_32 => le32(bytes, 4)?,
         _ => return None,
     };
     abi_for(cpu)
@@ -137,6 +162,28 @@ pub fn open_bundle(path: &Path) -> Option<Bundle> {
         executable,
         resource_files,
     })
+}
+
+/// The bytes of a resource file, from whichever fork actually holds them.
+///
+/// `Rez` writes a `.rsrc` into the *data* fork when asked — `-useDF`,
+/// which is what Xcode's build rule passes — and into a genuine resource
+/// fork otherwise. Bundles ship both ways, so both are tried: the data
+/// fork first, being the common one now, and the named fork after.
+///
+/// `..namedfork/rsrc` is how macOS spells a file's resource fork as an
+/// ordinary path, so this needs no API beyond `read`. It is not gated to
+/// macOS because it does not have to be: anywhere else the open simply
+/// fails, which is the same answer as an empty fork.
+pub fn resource_bytes(path: &Path) -> Option<Vec<u8>> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if !bytes.is_empty() {
+            return Some(bytes);
+        }
+    }
+    std::fs::read(path.join("..namedfork/rsrc"))
+        .ok()
+        .filter(|b| !b.is_empty())
 }
 
 /// Every resource of type `want` in a classic Macintosh resource fork.
@@ -208,17 +255,7 @@ pub fn resource_fork(bytes: &[u8], want: [u8; 4]) -> Vec<Vec<u8>> {
 /// whose first property carries Photoshop's vendor code wins — the same
 /// test that settles the framing question on Windows.
 pub fn parse_pipl(raw: &[u8]) -> Option<Pipl> {
-    for endian in [Endian::Big, Endian::Little] {
-        if let Ok(p) = Pipl::parse(raw, endian) {
-            if p.properties
-                .first()
-                .is_some_and(|x| x.vendor == crate::abi::SIG_8BIM)
-            {
-                return Some(p);
-            }
-        }
-    }
-    None
+    crate::pipl::parse_any_order(raw)
 }
 
 /// The resource type a PiPL is stored under.
@@ -227,10 +264,23 @@ pub const PIPL_TYPE: [u8; 4] = *b"PiPL";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipl::Endian;
 
+    /// A little-endian Mach-O, which is what every Mac architecture
+    /// Schist can host writes: the magic goes down as `cf fa ed fe`, and
+    /// the cputype after it in the same order.
     fn thin(cpu: u32) -> Vec<u8> {
-        let mut v = MH_MAGIC_64.to_be_bytes().to_vec();
+        let mut v = MH_MAGIC_64.to_le_bytes().to_vec();
         v.extend_from_slice(&cpu.to_le_bytes());
+        v.extend_from_slice(&[0; 24]);
+        v
+    }
+
+    /// The same header as a big-endian binary would write it, which is
+    /// to say a PowerPC one.
+    fn thin_be(cpu: u32) -> Vec<u8> {
+        let mut v = MH_MAGIC_64.to_be_bytes().to_vec();
+        v.extend_from_slice(&cpu.to_be_bytes());
         v.extend_from_slice(&[0; 24]);
         v
     }
@@ -248,6 +298,33 @@ mod tests {
         // PowerPC and friends are not something there is a helper for.
         assert!(architectures(&thin(0x0000_0012)).is_empty());
         assert!(architectures(b"not a mach-o at all").is_empty());
+        // A big-endian header is read in its own order too, and yields
+        // nothing only because no Mac helper is a PowerPC one.
+        assert!(architectures(&thin_be(0x0000_0012)).is_empty());
+    }
+
+    /// The check the synthetic headers above cannot make: a Mach-O the
+    /// system linker produced, whose architecture is known independently
+    /// because it is the one this test is running as.
+    ///
+    /// The byte order of the header was wrong here until a real bundle
+    /// was finally read on a Mac — the fixtures had encoded the mistake
+    /// as well, so they agreed with it. This one cannot.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_real_mach_o_reports_the_architecture_it_is() {
+        let me = std::env::current_exe().expect("the test binary has a path");
+        let bytes = std::fs::read(&me).expect("and is readable");
+        let want = if cfg!(target_arch = "aarch64") {
+            PluginAbi::MacArm64
+        } else {
+            PluginAbi::MacX86_64
+        };
+        assert!(
+            architectures(&bytes).contains(&want),
+            "{me:?} is a {want} binary, but discovery read {:?}",
+            architectures(&bytes)
+        );
     }
 
     #[test]
@@ -299,6 +376,39 @@ mod tests {
         );
         // And nothing for a type that is not there.
         assert!(resource_fork(&f, *b"ICON").is_empty());
+    }
+
+    /// The second thing a real bundle caught: `Rez` writes a `.rsrc`
+    /// into a genuine resource fork unless told `-useDF`, and reading
+    /// only the data fork finds nothing at all in one that was.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_resource_in_a_named_fork_is_found_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Plugin.rsrc");
+        let body = fork(PIPL_TYPE, b"the pipl bytes");
+
+        // A data fork of nothing, which is what such a file looks like
+        // to anything that does not know about the other one.
+        std::fs::write(&path, b"").unwrap();
+        std::fs::write(path.join("..namedfork/rsrc"), &body).unwrap();
+
+        assert_eq!(resource_bytes(&path).as_deref(), Some(&body[..]));
+        assert_eq!(
+            resource_fork(&resource_bytes(&path).unwrap(), PIPL_TYPE),
+            vec![b"the pipl bytes".to_vec()]
+        );
+
+        // And the data fork still wins when it has something in it.
+        let plain = dir.path().join("Plain.rsrc");
+        std::fs::write(&plain, &body).unwrap();
+        assert_eq!(resource_bytes(&plain).as_deref(), Some(&body[..]));
+
+        // A file with nothing in either fork is nothing, not an empty
+        // vector that later parses as a fork with no types.
+        let empty = dir.path().join("Empty.rsrc");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(resource_bytes(&empty).is_none());
     }
 
     #[test]

@@ -16,8 +16,14 @@ use schist_plugin_host_8bf::pipl::{key, kind};
 use std::path::Path;
 
 /// A 64-bit Mach-O header for `cpu`, which is all discovery reads.
+///
+/// Little-endian throughout, magic included: a Mach-O is written in its
+/// own target's byte order, and every Mac architecture Schist can host
+/// is little-endian. Writing the magic the other way round — which this
+/// did until a real bundle was read on a Mac — describes a PowerPC
+/// binary instead.
 fn macho(cpu: u32) -> Vec<u8> {
-    let mut v = 0xfeed_facfu32.to_be_bytes().to_vec();
+    let mut v = 0xfeed_facfu32.to_le_bytes().to_vec();
     v.extend_from_slice(&cpu.to_le_bytes());
     v.extend_from_slice(&[0u8; 24]);
     v

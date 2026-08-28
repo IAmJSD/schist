@@ -306,7 +306,7 @@ pub fn inspect_bundle(path: &Path) -> Result<Vec<Found>, DiscoverError> {
 
     let mut found = Vec::new();
     for resources in &bundle.resource_files {
-        let Ok(bytes) = std::fs::read(resources) else {
+        let Some(bytes) = macos::resource_bytes(resources) else {
             continue;
         };
         for raw in macos::resource_fork(&bytes, macos::PIPL_TYPE) {

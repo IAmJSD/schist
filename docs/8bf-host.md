@@ -26,7 +26,7 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 |---|---|---|
 | **Loading and running** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
 | **Isolation and depth** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
-| **Platforms** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery is written but unproven, packaging still to do |
+| **Platforms** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **Wine path and macOS done**: bundle discovery, the native and Rosetta helpers, the Filter menu and the manager all run on an Apple Silicon Mac; packaging still to do |
 | **Reaching the editor** | Folder scan, Filter menu and gallery entries, the plug-in manager, MCP | **done**, see below |
 | **Scripting and scale** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules need a source that documents `FormatRecord`, and the API Guide does not |
 
@@ -70,6 +70,19 @@ waits. `src/launch.rs` holds the policy and `src/remote.rs` drives it.
 | macOS x86-64 | Intel | helper, directly |
 | macOS x86-64 | Apple Silicon | not possible — Rosetta goes Intel to Arm, not back |
 | anywhere | the other OS's plug-ins | not possible |
+
+The two `macOS arm64` rows have been run on an Apple Silicon Mac against
+`.plugin` bundles built by `clang` and `Rez`: an Arm bundle in the native
+helper, an Intel one under Rosetta, and a universal one preferring the
+slice that needs no translation. A Windows `.8bf` on that Mac was listed
+with its reason rather than offered, as the last-but-one row says it
+should be. The two `macOS x86-64` rows need an Intel Mac, which there was
+none of, and rest on the policy tests in `launch.rs` alone.
+
+Discovery was wrong in two places when it first met a real bundle, both
+now fixed and both described in `crates/plugin-host-8bf/src/macos.rs`:
+the Mach-O header was read in the wrong byte order, and a `.rsrc` was
+only read from a file's data fork and not from a real resource fork.
 
 Three things follow from the process split, none of which can be had in
 process:
