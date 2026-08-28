@@ -79,6 +79,22 @@ typedef struct PSPixelMap {
     int32_t maskPhaseCol;
 } PSPixelMap;
 
+/* colorServices, from API Guide table A-3. Naturally aligned, like the
+ * other non-FilterRecord structures. */
+typedef struct ColorServicesInfo {
+    int32_t infoSize;
+    int16_t selector;
+    int16_t sourceSpace;
+    int16_t resultSpace;
+    MacBoolean resultGamutInfoValid;
+    MacBoolean resultInGamut;
+    void *reservedSourceSpaceInfo;
+    void *reservedResultSpaceInfo;
+    int16_t colorComponents[4];
+    void *reserved;
+    uintptr_t selectorParameter;
+} ColorServicesInfo;
+
 typedef struct PlatformData {
     void *hwnd;
 } PlatformData;
@@ -169,7 +185,7 @@ typedef struct FilterRecord {
     char reservedByte;
     Fixed inputRate;
     Fixed maskRate;
-    void *colorServices;
+    OSErr (*colorServices)(ColorServicesInfo *info);
     int16_t inLayerPlanes;
     int16_t inTransparencyMask;
     int16_t inLayerMasks;
@@ -603,6 +619,68 @@ EXPORT void entry_display(int16_t selector, void *pb, intptr_t *data, int16_t *r
     fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
     fr->outRect = fr->inRect;
     fr->maskRect = fr->inRect;
+}
+
+/* ---- colorServices ----------------------------------------------------
+ *
+ * Convert a known colour, ask for the foreground, and sample a pixel.
+ * Each has its own failure code so a break says which part broke.
+ */
+
+#define colorNoCallback   (-30130)
+#define colorConvertFail  (-30131)
+#define colorConvertWrong (-30132)
+#define colorSpecialFail  (-30133)
+#define colorSampleFail   (-30134)
+#define colorAcceptedJunk (-30135)
+
+EXPORT void entry_color(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (fr->colorServices == NULL) { *result = colorNoCallback; return; }
+
+    ColorServicesInfo info;
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+
+    /* Pure red to HSB is hue 0, full saturation, full brightness. */
+    info.selector = 1; /* convertColor */
+    info.sourceSpace = 0; /* RGB */
+    info.resultSpace = 1; /* HSB */
+    info.colorComponents[0] = 255;
+    info.colorComponents[1] = 0;
+    info.colorComponents[2] = 0;
+    if (fr->colorServices(&info) != 0) { *result = colorConvertFail; return; }
+    if (info.colorComponents[0] != 0 || info.colorComponents[1] != 255 ||
+        info.colorComponents[2] != 255) { *result = colorConvertWrong; return; }
+
+    /* Foreground, back in RGB. */
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+    info.selector = 3; /* getSpecialColor */
+    info.resultSpace = 0;
+    info.selectorParameter = 0; /* foreground */
+    if (fr->colorServices(&info) != 0) { *result = colorSpecialFail; return; }
+
+    /* The pixel at (1,0), which the test knows the value of. */
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+    info.selector = 2; /* samplePoint */
+    info.resultSpace = 0;
+    Point pt; pt.h = 1; pt.v = 0;
+    info.selectorParameter = (uintptr_t)&pt;
+    if (fr->colorServices(&info) != 0) { *result = colorSampleFail; return; }
+    if (info.colorComponents[0] != 7) { *result = colorSampleFail; return; }
+
+    /* A reserved field left non-null must be refused. */
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+    info.selector = 1;
+    info.sourceSpace = 0; info.resultSpace = 4;
+    info.reserved = (void *)fr;
+    if (fr->colorServices(&info) == 0) { *result = colorAcceptedJunk; return; }
 }
 
 /* ---- error reporting -------------------------------------------------- */

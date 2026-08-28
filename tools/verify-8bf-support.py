@@ -76,6 +76,51 @@ def fetch_fm():
     return 0
 
 
+SDK_REPO = 'templeblock/ArchiveGit'
+SDK_DIR = 'Clients/MGX/PP/PluginTest/Plugins'
+SDK_FILES = ['DissolveSans.8bf', 'ColorMunger.8bf']
+
+
+def fetch_sdk():
+    """Adobe's own SDK samples. Dissolve is the canonical filter, and
+    ColorMunger is a colour-space conversion tester — which makes it the
+    thing that exercises colorServices."""
+    import urllib.parse
+    import urllib.request
+    for name in SDK_FILES:
+        if os.path.exists(name):
+            continue
+        url = (f'https://raw.githubusercontent.com/{SDK_REPO}/HEAD/'
+               + urllib.parse.quote(f'{SDK_DIR}/{name}'))
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                open(name, 'wb').write(r.read())
+        except Exception as e:
+            print(f'skip: could not fetch {name}: {e}')
+            return 1
+    return 0
+
+
+def check_dissolved(out, label):
+    """A dissolve replaces a random scatter of pixels, so the test is
+    that roughly half changed — not none, and not all."""
+    try:
+        before, after = pixels('in.ppm'), pixels(out)
+    except FileNotFoundError:
+        print(f'FAIL ({label}): no output written')
+        return 1
+    if len(before) != len(after):
+        print(f'FAIL ({label}): output is the wrong size')
+        return 1
+    same = sum(1 for a, b in zip(before, after) if a == b)
+    fraction = same / len(before)
+    if not 0.2 < fraction < 0.9:
+        print(f'FAIL ({label}): {fraction:.0%} of bytes unchanged, expected a dissolve')
+        return 1
+    print(f'ok ({label}): dissolved, {fraction:.0%} of bytes untouched')
+    return 0
+
+
 def square():
     """64x64, because a Fourier transform wants power-of-two sides."""
     w = h = 64
@@ -196,6 +241,10 @@ if __name__ == '__main__':
         sys.exit(fetch_ft())
     elif cmd == 'fetch-fm':
         sys.exit(fetch_fm())
+    elif cmd == 'fetch-sdk':
+        sys.exit(fetch_sdk())
+    elif cmd == 'check-dissolved':
+        sys.exit(check_dissolved(sys.argv[2], sys.argv[3]))
     elif cmd == 'square':
         square()
     elif cmd == 'check-changed':

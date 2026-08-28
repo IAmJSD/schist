@@ -149,6 +149,66 @@ pub type AdvanceStateProc = unsafe extern "C" fn() -> OSErr;
 /// Host-defined escape hatch. UNVERIFIED signature; always null here.
 pub type HostProc = unsafe extern "C" fn(selector: i16, data: *mut c_void);
 
+/// Colour spaces `colorServices` converts between, numbered in API
+/// Guide table A-3.
+pub mod color_space {
+    pub const RGB: i16 = 0;
+    pub const HSB: i16 = 1;
+    pub const CMYK: i16 = 2;
+    pub const LAB: i16 = 3;
+    pub const GRAY: i16 = 4;
+    pub const HSL: i16 = 5;
+    pub const XYZ: i16 = 6;
+    /// Only meaningful as a `result_space` for the choose-colour
+    /// selector, where it means "whichever space the user picked" and is
+    /// written back with the answer. It collides with [`HSB`] by value,
+    /// which is why it is only ever read in that one context.
+    pub const CHOSEN: i16 = 1;
+}
+
+/// `colorServices` operations, numbered in API Guide table A-3.
+pub mod color_services {
+    pub const CHOOSE_COLOR: i16 = 0;
+    pub const CONVERT_COLOR: i16 = 1;
+    pub const SAMPLE_POINT: i16 = 2;
+    pub const GET_SPECIAL_COLOR: i16 = 3;
+}
+
+/// `selectorParameter.specialColorID` values.
+pub mod special_color {
+    pub const FOREGROUND: i32 = 0;
+    pub const BACKGROUND: i32 = 1;
+}
+
+/// The parameter block for `colorServices`, from API Guide table A-3.
+///
+/// Component ranges are table A-4's, and CMYK is stored **inverted** —
+/// 0 meaning 100% ink. See [`crate::color`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ColorServicesInfo {
+    pub info_size: i32,
+    pub selector: i16,
+    pub source_space: i16,
+    pub result_space: i16,
+    pub result_gamut_info_valid: MacBoolean,
+    pub result_in_gamut: MacBoolean,
+    pub reserved_source_space_info: *mut c_void,
+    pub reserved_result_space_info: *mut c_void,
+    pub color_components: [i16; 4],
+    pub reserved: *mut c_void,
+    /// A union of `Str255 *pickerPrompt`, `Point *globalSamplePoint` and
+    /// `int32 specialColorID`, read according to `selector`.
+    pub selector_parameter: usize,
+}
+
+/// `MACPASCAL OSErr (*ColorServicesProc)(ColorServicesInfo *info)`.
+pub type ColorServicesProc = unsafe extern "C" fn(info: *mut ColorServicesInfo) -> OSErr;
+
+/// Classic Mac `paramErr`, which the API Guide names as what
+/// `colorServices` returns for a malformed request.
+pub const PARAM_ERR: OSErr = -50;
+
 /// One mask in a [`PSPixelMap`]'s chain, from API Guide table A-2.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

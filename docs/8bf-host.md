@@ -142,9 +142,9 @@ make no sense for the slot it landed on.
   for everything, which is what makes a plug-in take its compatible path
   instead of misreading a zero.
 - **Format, automation, selection and parser modules.** Filters only.
-- **Most callback suites.** See above. `colorServices` and
-  `propertyProcs` are the two that still block plug-ins;
-  `docs/8bf-abi-provenance.md` has the evidence and the shortlist.
+- **Most callback suites.** See above. `propertyProcs` is the one still
+  known to block a plug-in; `docs/8bf-abi-provenance.md` has the
+  evidence.
 - **Crash isolation.** A plug-in fault kills the process.
 
 ### Previews
@@ -165,6 +165,24 @@ or later functionality" — and FilterMeister is what a great deal of the
 freeware world is built with.
 
 Unlike `FilterRecord`, `PSPixelMap` is naturally aligned.
+
+### Colour services
+
+Plug-ins ask the host to convert between colour spaces, because in
+Photoshop the host is the one holding the document's profile.
+`crates/plugin-host-8bf/src/color.rs` converts between RGB, HSB, HSL,
+CMYK, Lab, XYZ and greyscale in Adobe's component ranges — one of which
+is a trap, since **CMYK is stored inverted**, 0 meaning 100% ink.
+
+There is no colour management here yet, so RGB, HSB, HSL and greyscale
+are exact and CMYK, Lab and XYZ are textbook sRGB/D65 approximations of
+what a profile would give. Worth knowing before trusting a CMYK number
+that came back through this.
+
+The host also answers "what is the foreground colour" and "what is the
+pixel at this point", and refuses to choose a colour, since that wants a
+picker this crate has no UI for — which lets a plug-in fall back to its
+own.
 
 ### Loading
 
@@ -243,6 +261,8 @@ targets, and runs them under Wine.
   is what guards the search-path flag.
 - Two FilterMeister builds have to get past their capability check and
   draw a preview, which is what guards `displayPixels`.
+- Adobe's own Dissolve has to dissolve, and its ColorMunger has to reach
+  `colorServices`.
 
 Only the shipped binaries are used; no project's source is read. Three
 families are covered: Filter Foundry, G'MIC-Qt, and a set of Fourier

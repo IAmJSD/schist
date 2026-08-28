@@ -442,3 +442,18 @@ fn the_host_draws_a_plug_in_preview() {
         .apply(&mut image, &bf::RunOptions::default())
         .expect("the host should be able to draw a plug-in's pixels");
 }
+
+#[test]
+fn the_host_answers_colour_service_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_color", dir.path()) else {
+        return;
+    };
+    // gradient() puts (x*7 + y*3 + plane*11) % 256 in each byte, so the
+    // red of pixel (1,0) is 7 — which is what the fixture checks the
+    // sample-point answer against.
+    let mut image = gradient(8, 4, 3);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("colour services should work");
+}

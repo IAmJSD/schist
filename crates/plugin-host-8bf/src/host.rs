@@ -408,6 +408,75 @@ unsafe extern "C" fn abort_thunk() -> abi::MacBoolean {
     with_active(|s| u8::from(s.abort.load(Ordering::Relaxed))).unwrap_or(0)
 }
 
+/// Common colour services: convert between spaces, hand back the
+/// foreground or background colour, or report the pixel under a sample
+/// point.
+///
+/// Choosing a colour is refused — that wants a colour picker, and this
+/// crate has no UI — which lets a plug-in fall back to its own.
+unsafe extern "C" fn color_services_thunk(info: *mut abi::ColorServicesInfo) -> OSErr {
+    use abi::{color_services, color_space, special_color};
+
+    let Some(info) = info.as_mut() else {
+        return abi::PARAM_ERR;
+    };
+    // Adobe documents all three reserved fields as "= NULL, otherwise
+    // returns parameter error".
+    if !info.reserved_source_space_info.is_null()
+        || !info.reserved_result_space_info.is_null()
+        || !info.reserved.is_null()
+    {
+        return abi::PARAM_ERR;
+    }
+    let (selector, source, result) = (info.selector, info.source_space, info.result_space);
+    crate::suites::trace!(
+        "colorServices selector={selector} {source} -> {result} {:?}",
+        info.color_components
+    );
+    // Output-only, and this host never has gamut information to give.
+    info.result_gamut_info_valid = 0;
+    info.result_in_gamut = 0;
+
+    let (from, components) = match selector {
+        color_services::CONVERT_COLOR => (source, info.color_components),
+        color_services::GET_SPECIAL_COLOR => {
+            let which = info.selector_parameter as i32;
+            let Some(c) = with_active(|s| match which {
+                special_color::FOREGROUND => Some(s.fore_color),
+                special_color::BACKGROUND => Some(s.back_color),
+                _ => None,
+            }) else {
+                return abi::PARAM_ERR;
+            };
+            let Some(c) = c else {
+                return abi::PARAM_ERR;
+            };
+            (color_space::RGB, [c[0] as i16, c[1] as i16, c[2] as i16, 0])
+        }
+        color_services::SAMPLE_POINT => {
+            let point = info.selector_parameter as *const Point;
+            let Some(point) = point.as_ref() else {
+                return abi::PARAM_ERR;
+            };
+            let Some(Some(c)) = with_active(|s| s.sample(point.h, point.v)) else {
+                return abi::PARAM_ERR;
+            };
+            (color_space::RGB, c)
+        }
+        // No picker here, so say so rather than inventing a colour.
+        color_services::CHOOSE_COLOR => return abi::PARAM_ERR,
+        _ => return abi::PARAM_ERR,
+    };
+
+    match crate::color::convert(from, result, components) {
+        Some(out) => {
+            info.color_components = out;
+            abi::NO_ERR
+        }
+        None => abi::PARAM_ERR,
+    }
+}
+
 /// Draw a plug-in's preview. Self-contained from its arguments, so
 /// unlike the other callbacks it needs no session: a plug-in calls this
 /// from its dialog's paint handler, on whatever thread that runs on.
@@ -467,6 +536,9 @@ struct Session<'a> {
     /// An error raised inside `advanceState`, where the ABI only lets us
     /// return an `OSErr`, kept so the real cause survives.
     deferred_error: Option<HostError>,
+    /// Foreground and background, kept for `colorServices` to hand back.
+    fore_color: [u8; 4],
+    back_color: [u8; 4],
     /// Last seen padding request, so the trace reports only changes —
     /// which is what shows whether a plug-in asked for anything.
     declared_padding: (i16, i16, i16),
@@ -555,6 +627,7 @@ impl<'a> Session<'a> {
         // to run at all without it, and that is most of the freeware
         // world. See `crate::display`.
         record.display_pixels = display_pixels_thunk as *mut c_void;
+        record.color_services = color_services_thunk as *mut c_void;
 
         // Offer wide coordinates even though this stage's images fit in
         // the narrow ones. A plug-in built against the CS or later SDK
@@ -645,6 +718,8 @@ impl<'a> Session<'a> {
             abort: Arc::clone(&opts.abort),
             progress: opts.progress.as_deref(),
             deferred_error: None,
+            fore_color: opts.foreground,
+            back_color: opts.background,
             declared_padding: (
                 abi::padding::WANTS_ERROR_ON_BOUNDS_EXCEPTION,
                 abi::padding::WANTS_ERROR_ON_BOUNDS_EXCEPTION,
@@ -739,6 +814,20 @@ impl<'a> Session<'a> {
     /// Rather than guess it, this reports whatever the plug-in wrote —
     /// a non-empty buffer only happens because the plug-in filled it, so
     /// the string is the signal and the code does not need to be known.
+    /// The pixel at a document point, as RGB components, for
+    /// `plugIncolorServicesSamplePoint`.
+    fn sample(&self, x: i16, y: i16) -> Option<crate::color::Components> {
+        if x < 0 || y < 0 || x as u32 >= self.dest.width || y as u32 >= self.dest.height {
+            return None;
+        }
+        let i = self.dest.index(x as u32, y as u32);
+        let px = self.source.get(i..i + self.planes as usize)?;
+        Some(match self.planes {
+            1 => [px[0] as i16, px[0] as i16, px[0] as i16, 0],
+            _ => [px[0] as i16, px[1] as i16, px[2] as i16, 0],
+        })
+    }
+
     fn error_message(&self) -> Option<String> {
         let s = &self.error_string;
         let len = s[0] as usize;

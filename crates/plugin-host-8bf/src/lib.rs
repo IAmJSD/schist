@@ -30,6 +30,7 @@
 //! at their definition and collected in `docs/8bf-abi-provenance.md`.
 
 pub mod abi;
+pub mod color;
 pub mod display;
 pub mod host;
 pub mod pe;

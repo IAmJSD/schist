@@ -190,6 +190,29 @@ if [ "$have32" = 1 ]; then
 fi
 
 echo
+echo "== Adobe's own SDK samples =="
+if python3 "$root/tools/verify-8bf-support.py" fetch-sdk && [ "$have32" = 1 ]; then
+  timeout 60 wine "$exe32" apply "$(winpath "$work/DissolveSans.8bf")" \
+    "$(winpath "$work/in.ppm")" "$(winpath "$work/dissolve-out.ppm")" --no-dialog \
+    >sdk-dissolve.log 2>&1
+  python3 "$root/tools/verify-8bf-support.py" check-dissolved dissolve-out.ppm dissolve || fail=1
+
+  # ColorMunger is a colour-space conversion tester, so it is what
+  # exercises colorServices — without it, it hangs on the null pointer.
+  ( timeout 40 wine "$exe32" apply "$(winpath "$work/ColorMunger.8bf")" \
+      "$(winpath "$work/in.ppm")" "$(winpath "$work/cm-out.ppm")" >sdk-color.log 2>&1 & )
+  sleep 18
+  if grep -q 'colorServices' sdk-color.log; then
+    echo "ok (ColorMunger): asked the host to convert colours"
+  else
+    echo "FAIL (ColorMunger): never reached colorServices"; fail=1
+  fi
+  pkill -x wine >/dev/null 2>&1; sleep 2
+else
+  echo "skip: no 32-bit host, or the samples could not be fetched"
+fi
+
+echo
 echo "== FilterMeister: the plug-in preview =="
 # These check for "Photoshop 2.5.2 functionality" before they will run,
 # and what they mean by it is displayPixels. Without it they put up an

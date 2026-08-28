@@ -123,11 +123,11 @@ found by a plug-in refusing to run. In rough order of how much they buy:
 | Missing | What it blocks | Evidence |
 |---|---|---|
 | ~~`displayPixels`~~ — **now implemented** | Was blocking **FilterMeister**, and so a large slice of the freeware world | All eight Graphic-Filters plug-ins refused with "This plug-in requires Adobe Photoshop 2.5.2 or later functionality", and `displayPixels` alone was the field they checked. All eight now draw previews, and Filter Foundry's own preview pane — blank until this landed — shows the image on both architectures |
-| `colorServices` | ColorMunger, and presumably anything that converts or picks colours | Hangs inside `filterSelectorStart` after reading its parameters |
+| ~~`colorServices`~~ — **now implemented** | Was hanging ColorMunger | ColorMunger is Adobe's colour-space conversion tester, so it doubles as an oracle. Fed pure green it now reports HSB 120/255/255, CMYK 0/255/0/255, Lab 224/42/211, Gray 150, HSL 120/255/128 and XYZ 91/182/30 — every one matching the textbook value, including CMYK's inverted storage |
 | `propertyProcs` | Propetizer, and anything asking the host about the document | Faults reading `NULL + 4` |
 
-`displayPixels` was done first and is described in `docs/8bf-host.md`.
-`colorServices` and `propertyProcs` remain.
+`displayPixels` and `colorServices` are done and described in
+`docs/8bf-host.md`. `propertyProcs` remains.
 
 ## Settling a suite's member order
 
