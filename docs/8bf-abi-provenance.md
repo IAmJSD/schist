@@ -92,7 +92,7 @@ all but one.
 | Fact | How it was settled |
 |---|---|
 | **`BufferProcs` version and routine count** — 2 and 5 | Chapter 3 heads each suite with both: "Buffer suite. Current version: 2; Adobe Photoshop: 5.0; Routines: 5" |
-| **`BufferProcs` member order** — Allocate, Lock, Unlock, Free, Space | Read off a real plug-in. G'MIC was handed five interchangeable probes, one per slot, each logging the arguments it received; slot 0 arrived with `(3072, <stack pointer>)`, and 3072 is exactly one plane of the image it was filtering — unmistakably `AllocateBufferProc(size, &buffer)`. With the order restored, G'MIC allocates, locks, writes three planes, unlocks and frees, and its output is correct |
+| **`BufferProcs` member order** — Allocate, Lock, Unlock, Free, Space | Read off a real plug-in. G'MIC was handed five interchangeable probes, one per slot, each logging the arguments it received; slot 0 arrived with `(3072, <stack pointer>)`, and 3072 is exactly one plane of the image it was filtering — unmistakably `AllocateBufferProc(size, &buffer)`. With the order restored, G'MIC allocates, locks, writes three planes, unlocks and frees, and its output is correct. Corroborated since by a second, unrelated family: FilterMeister builds allocate the image size plus a few bytes, then lock, unlock and free the same buffer, and their output is right too |
 | **`handleProcsVersion` = 1, `numHandleProcs` = 7** | The same suite headers, printed in the prose. The host had been claiming 8 |
 | **The API Guide's narrative order is *not* generally the struct order** | The Handle suite's prose order — New, Dispose, GetSize, SetSize, Lock, Unlock, RecoverSpace — happens to match what a plug-in was seen calling. Treating that single match as a rule and applying it to the Buffer suite put a **wrong order in this host for one commit**; the prose there runs Space, Allocate, Free, Lock, Unlock and the struct does not. Each suite's order has to be established on its own evidence. The Handle suite's is; the Buffer suite's now is too; neither licenses the other |
 | **The padding constants stopped mattering** | Rather than guess three numbers the prose never prints, the host fills for the documented 0..=255 and replicates the edge for anything else. Replication satisfies `plugInWantsEdgeReplication` outright, is a valid answer to `plugInDoesNotWantPadding` ("leave the data random"), and beats the error `plugInWantsErrorOnBoundsException` asks for, which exists only because older hosts could not serve the region. A fixture requests a rectangle overhanging every edge under a mode the host has never heard of and still gets usable pixels |
@@ -144,8 +144,11 @@ it was calling — `(small int, pointer)` is an allocate, `(pointer, 0|1)`
 is a lock, a bare pointer is a free or an unlock, nothing meaningful is a
 space query. Then run a plug-in that uses the suite and read the log.
 
-`SCHIST_8BF_BUFPROBE=1` does this for `BufferProcs`; `suites.rs` has the
-machinery to point it at another.
+`SCHIST_8BF_BUFPROBE=1` does this for `BufferProcs`, and
+`SCHIST_8BF_SPPROBE=1` for the unverified slots of `SPBasicSuite` — the
+latter keeping `AcquireSuite` and `ReleaseSuite` real, since both are
+confirmed and leaving them working is what lets a plug-in get far enough
+to reach the rest.
 
 Finding a plug-in that exercises the suite at all is the hard part. Both
 plug-ins here had to be driven through their own UI before either touched

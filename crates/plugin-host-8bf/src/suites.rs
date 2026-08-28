@@ -515,7 +515,11 @@ unsafe fn cstr(p: *const c_char) -> String {
 }
 
 pub(crate) unsafe extern "C" fn is_equal(a: *const c_char, b: *const c_char) -> u8 {
-    trace!("pica.is_equal({:?}, {:?})", cstr(a), cstr(b));
+    // Logged as raw pointers rather than as strings on purpose. If the
+    // member order of this suite is ever wrong, this slot receives
+    // something that is not a string, and a trace that dereferenced it
+    // would turn a diagnosable mistake into a crash.
+    trace!("pica.is_equal({a:p}, {b:p})");
     if a.is_null() || b.is_null() {
         return u8::from(a == b);
     }
@@ -575,7 +579,71 @@ pub(crate) unsafe extern "C" fn undefined() -> i32 {
     SP_SUITE_NOT_FOUND
 }
 
+/// Five interchangeable probes for the slots of [`SPBasicSuite`] past
+/// the two that are confirmed, enabled with `SCHIST_8BF_SPPROBE`.
+///
+/// `AcquireSuite` and `ReleaseSuite` stay real: both are confirmed by
+/// position — a plug-in was observed acquiring a suite by name through
+/// the first and releasing it through the second — and leaving them
+/// working means a plug-in still gets far enough to reach the rest.
+///
+/// The argument shape says which routine the plug-in thought it was
+/// calling: two pointers is `IsEqual`, `(small int, pointer)` is
+/// `AllocateBlock`, a bare pointer is `FreeBlock`,
+/// `(pointer, small int, pointer)` is `ReallocateBlock`, and nothing
+/// meaningful is `Undefined`.
+///
+/// This exists because the member order past slot 1 is the last
+/// unverified thing in the ABI, and the Buffer suite has already shown
+/// once that guessing it from the documentation's prose order is wrong.
+unsafe extern "C" fn sp_probe(slot: u64, a: u64, b: u64, c: u64) -> u64 {
+    trace!("spslot {slot}: arg1={a:#x} arg2={b:#x} arg3={c:#x}");
+    0
+}
+
+macro_rules! sp_slot_probe {
+    ($name:ident, $n:literal) => {
+        unsafe extern "C" fn $name(a: u64, b: u64, c: u64) -> u64 {
+            sp_probe($n, a, b, c)
+        }
+    };
+}
+sp_slot_probe!(sp_probe2, 2);
+sp_slot_probe!(sp_probe3, 3);
+sp_slot_probe!(sp_probe4, 4);
+sp_slot_probe!(sp_probe5, 5);
+sp_slot_probe!(sp_probe6, 6);
+
+fn probing_sp_basic_suite() -> SPBasicSuite {
+    // SAFETY: as for the buffer probes — every one of these fn types is
+    // extern "C" and passes its arguments in the same registers.
+    unsafe {
+        SPBasicSuite {
+            acquire_suite: Some(acquire_suite),
+            release_suite: Some(release_suite),
+            is_equal: Some(std::mem::transmute::<*const (), IsEqualProc>(
+                sp_probe2 as *const (),
+            )),
+            allocate_block: Some(std::mem::transmute::<*const (), AllocateBlockProc>(
+                sp_probe3 as *const (),
+            )),
+            free_block: Some(std::mem::transmute::<*const (), FreeBlockProc>(
+                sp_probe4 as *const (),
+            )),
+            reallocate_block: Some(std::mem::transmute::<*const (), ReallocateBlockProc>(
+                sp_probe5 as *const (),
+            )),
+            undefined: Some(std::mem::transmute::<*const (), UndefinedProc>(
+                sp_probe6 as *const (),
+            )),
+        }
+    }
+}
+
 pub fn sp_basic_suite() -> SPBasicSuite {
+    if std::env::var("SCHIST_8BF_SPPROBE").is_ok() {
+        return probing_sp_basic_suite();
+    }
     SPBasicSuite {
         acquire_suite: Some(acquire_suite),
         release_suite: Some(release_suite),
