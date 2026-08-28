@@ -78,7 +78,7 @@ def fetch_fm():
 
 SDK_REPO = 'templeblock/ArchiveGit'
 SDK_DIR = 'Clients/MGX/PP/PluginTest/Plugins'
-SDK_FILES = ['DissolveSans.8bf', 'ColorMunger.8bf']
+SDK_FILES = ['DissolveSans.8bf', 'ColorMunger.8bf', 'Propetizer.8bf']
 
 
 def fetch_sdk():

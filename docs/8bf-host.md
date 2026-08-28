@@ -142,9 +142,9 @@ make no sense for the slot it landed on.
   for everything, which is what makes a plug-in take its compatible path
   instead of misreading a zero.
 - **Format, automation, selection and parser modules.** Filters only.
-- **Most callback suites.** See above. `propertyProcs` is the one still
-  known to block a plug-in; `docs/8bf-abi-provenance.md` has the
-  evidence.
+- **Some callback suites.** PseudoResource, Image Services, Channel
+  Ports and the descriptor sub-suites are still null. Nothing tested so
+  far needs them; `docs/8bf-abi-provenance.md` tracks what does.
 - **Crash isolation.** A plug-in fault kills the process.
 
 ### Previews
@@ -183,6 +183,16 @@ The host also answers "what is the foreground colour" and "what is the
 pixel at this point", and refuses to choose a colour, since that wants a
 picker this crate has no UI for — which lets a plug-in fall back to its
 own.
+
+### Document properties
+
+A plug-in asks the host about the document through the Property suite —
+how many channels, what they are called, the ruler units, the grid. This
+host answers what it honestly knows and returns
+`errPlugInPropertyUndefined` for the rest, including the serial number,
+which plug-ins ask for to implement copy protection: inventing one would
+be answering a question about a Photoshop licence that does not exist.
+A plug-in can act on "I don't know" and cannot act on a plausible lie.
 
 ### Loading
 
@@ -261,8 +271,9 @@ targets, and runs them under Wine.
   is what guards the search-path flag.
 - Two FilterMeister builds have to get past their capability check and
   draw a preview, which is what guards `displayPixels`.
-- Adobe's own Dissolve has to dissolve, and its ColorMunger has to reach
-  `colorServices`.
+- Adobe's own Dissolve has to dissolve, its ColorMunger has to reach
+  `colorServices`, and its Propetizer has to walk the property table
+  without faulting.
 
 Only the shipped binaries are used; no project's source is read. Three
 families are covered: Filter Foundry, G'MIC-Qt, and a set of Fourier

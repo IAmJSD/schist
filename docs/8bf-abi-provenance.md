@@ -103,6 +103,7 @@ all but one.
 | **The PICA handle suite layout** | Chapter 4: "Suite PEA Handle suite. Current version: 1; Routines: 6" over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace. Filter Foundry acquires it by name, calls `SetLock` with `lock=1` and later `lock=0`, and its pixels stay correct |
 | `bigDocumentData` and `descriptorParameters` are not *required* | Explicitly nulling either changed nothing for both plug-ins. They are provided anyway because Photoshop always does, and because stage 4 needs the descriptor block regardless |
 | **`PSPixelMap` is naturally aligned**, unlike `FilterRecord` | Filter Foundry's 64-bit preview draws correctly through it, and a 32-bit FilterMeister build does too. If the map were packed like the record, `base_addr` would be read four bytes early on 64-bit and the preview would be noise or a fault |
+| **An overhanging *output* rectangle has to be served, not refused** | Adobe says the output rectangle must be a subset of `filterRect`. Propetizer asks for a row above the top edge anyway. Refusing leaves `outData` null, and Propetizer does not check — it writes through it and faults. Serving a buffer of the size asked for and clipping on commit is what survives real plug-ins |
 | **Plug-ins really do write the negative padding modes** | FilterMeister sets `inputPadding`, `outputPadding` and `maskPadding` all to -2. Which named mode that is remains unknown and, by design, does not matter: the host replicates the edge for any value outside 0..=255 |
 | **A plug-in must be loaded with its own directory on the DLL search path** | Not an ABI fact but a loading one, and it fails just as hard. The Fourier family ships FFTW beside it, and Windows does not search a module's own directory: all twelve failed at `LoadLibraryExW` with nothing to say why. `LOAD_WITH_ALTERED_SEARCH_PATH` over a canonicalised path fixes the lot |
 
@@ -117,14 +118,15 @@ all but one.
 
 ## Gaps that block real plug-ins
 
-Not ABI questions — things this host simply does not implement yet, each
-found by a plug-in refusing to run. In rough order of how much they buy:
+Not ABI questions — things this host did not implement, each found by a
+plug-in refusing to run. All three are now closed; the table is kept
+because the evidence is the interesting part.
 
 | Missing | What it blocks | Evidence |
 |---|---|---|
 | ~~`displayPixels`~~ — **now implemented** | Was blocking **FilterMeister**, and so a large slice of the freeware world | All eight Graphic-Filters plug-ins refused with "This plug-in requires Adobe Photoshop 2.5.2 or later functionality", and `displayPixels` alone was the field they checked. All eight now draw previews, and Filter Foundry's own preview pane — blank until this landed — shows the image on both architectures |
 | ~~`colorServices`~~ — **now implemented** | Was hanging ColorMunger | ColorMunger is Adobe's colour-space conversion tester, so it doubles as an oracle. Fed pure green it now reports HSB 120/255/255, CMYK 0/255/0/255, Lab 224/42/211, Gray 150, HSL 120/255/128 and XYZ 91/182/30 — every one matching the textbook value, including CMYK's inverted storage |
-| `propertyProcs` | Propetizer, and anything asking the host about the document | Faults reading `NULL + 4` |
+| ~~`propertyProcs`~~ — **now implemented** | Was faulting Propetizer | Propetizer is Adobe's property tester, so it doubles as an oracle too: it now reads ruler units "pixels", big nudge 10.0/10.0, ruler origin 0.0/0.0 and grid 1.0/4 — the 16.16 fixed-point values decoding exactly — and refuses the serial number and title it cannot know, without faulting |
 
 `displayPixels` and `colorServices` are done and described in
 `docs/8bf-host.md`. `propertyProcs` remains.

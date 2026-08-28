@@ -208,6 +208,21 @@ if python3 "$root/tools/verify-8bf-support.py" fetch-sdk && [ "$have32" = 1 ]; t
     echo "FAIL (ColorMunger): never reached colorServices"; fail=1
   fi
   pkill -x wine >/dev/null 2>&1; sleep 2
+
+  # Propetizer walks the whole property table and asks for an output
+  # rectangle that overhangs the image, so it covers propertyProcs and
+  # the clipping together.
+  ( timeout 40 wine "$exe32" apply "$(winpath "$work/Propetizer.8bf")" \
+      "$(winpath "$work/in.ppm")" "$(winpath "$work/prop-out.ppm")" >sdk-prop.log 2>&1 & )
+  sleep 18
+  if grep -q 'page fault' sdk-prop.log; then
+    echo "FAIL (Propetizer): faulted"; fail=1
+  elif grep -q 'getProperty' sdk-prop.log; then
+    echo "ok (Propetizer): read the document properties without faulting"
+  else
+    echo "FAIL (Propetizer): never reached the property suite"; fail=1
+  fi
+  pkill -x wine >/dev/null 2>&1; sleep 2
 else
   echo "skip: no 32-bit host, or the samples could not be fetched"
 fi

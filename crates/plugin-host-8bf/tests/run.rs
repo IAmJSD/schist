@@ -457,3 +457,38 @@ fn the_host_answers_colour_service_requests() {
         .apply(&mut image, &bf::RunOptions::default())
         .expect("colour services should work");
 }
+
+#[test]
+fn the_host_answers_questions_about_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_property", dir.path()) else {
+        return;
+    };
+    let mut image = gradient(8, 4, 3);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .expect("the property suite should answer");
+}
+
+#[test]
+fn an_output_rectangle_overhanging_the_image_is_served_and_clipped() {
+    // Adobe says the output rectangle must be a subset of filterRect,
+    // and real plug-ins ask for more anyway — Propetizer asks for a row
+    // above the top edge. Refusing leaves outData null, which a plug-in
+    // that ignores the error then writes through. Serving the buffer at
+    // the size asked for and clipping on commit is what a host that
+    // wants to survive real plug-ins does.
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut filter) = load("entry_out_of_bounds", dir.path()) else {
+        return;
+    };
+    let mut image = gradient(16, 12, 3);
+    filter
+        .apply(&mut image, &bf::RunOptions::default())
+        .unwrap();
+    assert!(
+        image.data.iter().all(|&b| b == 42),
+        "every in-bounds pixel should have been written"
+    );
+    assert_eq!(image.data.len(), 16 * 12 * 3, "and nothing outside it");
+}

@@ -71,6 +71,8 @@ pub struct RunOptions {
     pub abort: Arc<AtomicBool>,
     /// Called with `(done, total)` as the plug-in reports progress.
     pub progress: Option<Box<dyn Fn(i32, i32)>>,
+    /// The document's name, answered to `propTitle`.
+    pub document_title: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -83,6 +85,7 @@ impl Default for RunOptions {
             show_dialog: true,
             abort: Arc::new(AtomicBool::new(false)),
             progress: None,
+            document_title: None,
         }
     }
 }
@@ -408,6 +411,153 @@ unsafe extern "C" fn abort_thunk() -> abi::MacBoolean {
     with_active(|s| u8::from(s.abort.load(Ordering::Relaxed))).unwrap_or(0)
 }
 
+/// Answer a question about the document.
+///
+/// A property this host does not know is refused with
+/// `errPlugInPropertyUndefined` rather than answered with a zero: a
+/// plug-in can act on "I don't know", and cannot act on a plausible
+/// lie. The serial number is refused for the same reason — plug-ins ask
+/// for it to implement copy protection, and inventing one would be
+/// answering a question about a Photoshop licence this host does not
+/// have.
+unsafe extern "C" fn get_property_thunk(
+    signature: abi::OSType,
+    key: abi::OSType,
+    index: i32,
+    simple: *mut i32,
+    complex: *mut abi::Handle,
+) -> OSErr {
+    use abi::{interpolation, property};
+
+    crate::suites::trace!(
+        "getProperty {} {} index={index}",
+        abi::fourcc_str(signature),
+        abi::fourcc_str(key)
+    );
+    // Cleared before anything can fail, so a plug-in that ignores the
+    // error code finds a null handle rather than whatever was on its
+    // stack. Propetizer is exactly that plug-in.
+    if !complex.is_null() {
+        complex.write(std::ptr::null_mut());
+    }
+    if signature != abi::SIG_8BIM {
+        return abi::ERR_PLUG_IN_PROPERTY_UNDEFINED;
+    }
+    let Some(doc) = with_active(|s| (s.planes, s.record.image_mode, s.watch_suspension)) else {
+        return abi::ERR_PLUG_IN_PROPERTY_UNDEFINED;
+    };
+    let (planes, image_mode, watch) = doc;
+
+    /// 16.16 fixed point, which several of these are documented to use.
+    fn fixed16(v: f32) -> i32 {
+        (v * 65536.0) as i32
+    }
+
+    let value = match key {
+        property::NUMBER_OF_CHANNELS => planes as i32,
+        property::IMAGE_MODE => image_mode as i32,
+        property::NUMBER_OF_PATHS => 0,
+        // "-1 = no path"; the guide's table drops the minus sign.
+        property::WORK_PATH_INDEX | property::CLIPPING_PATH_INDEX | property::TARGET_PATH_INDEX => {
+            -1
+        }
+        // "The default value is ten pixels."
+        property::BIG_NUDGE_H | property::BIG_NUDGE_V => fixed16(10.0),
+        property::INTERPOLATION_METHOD => interpolation::BICUBIC,
+        property::RULER_UNITS => 0,
+        property::RULER_ORIGIN_H | property::RULER_ORIGIN_V => 0,
+        property::GRID_MAJOR => fixed16(1.0),
+        property::GRID_MINOR => 4,
+        property::WATCH_SUSPENSION => watch,
+        property::COPYRIGHT | property::COPYRIGHT_2 | property::WATERMARK => 0,
+
+        // Complex properties come back in a handle the plug-in disposes.
+        property::CHANNEL_NAME => {
+            let Some(name) = channel_name(image_mode, planes, index) else {
+                return abi::ERR_PLUG_IN_PROPERTY_UNDEFINED;
+            };
+            return complex_string(complex, name.as_bytes());
+        }
+        property::TITLE => {
+            let title = with_active(|s| s.title.clone()).flatten();
+            let Some(title) = title else {
+                return abi::ERR_PLUG_IN_PROPERTY_UNDEFINED;
+            };
+            return complex_string(complex, title.as_bytes());
+        }
+        _ => return abi::ERR_PLUG_IN_PROPERTY_UNDEFINED,
+    };
+
+    if simple.is_null() {
+        return abi::PARAM_ERR;
+    }
+    simple.write(value);
+    abi::NO_ERR
+}
+
+/// Hand back a string in a host handle. "There is no length byte, nor
+/// is the string zero terminated" — the length is the handle's size.
+unsafe fn complex_string(out: *mut abi::Handle, bytes: &[u8]) -> OSErr {
+    if out.is_null() {
+        return abi::PARAM_ERR;
+    }
+    let Ok(len) = i32::try_from(bytes.len()) else {
+        return abi::PARAM_ERR;
+    };
+    let handle = suites::new_handle(len);
+    if handle.is_null() {
+        return abi::PARAM_ERR;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), handle.read(), bytes.len());
+    out.write(handle);
+    abi::NO_ERR
+}
+
+/// The name of channel `index`, in the order the guide gives: composite
+/// channels first, then transparency, layer mask and alpha channels —
+/// of which a flat image has none.
+fn channel_name(image_mode: i16, planes: u16, index: i32) -> Option<&'static str> {
+    if index < 0 || index >= planes as i32 {
+        return None;
+    }
+    Some(match (image_mode, index) {
+        (mode::GRAY_SCALE, 0) => "Gray",
+        (mode::RGB_COLOR, 0) => "Red",
+        (mode::RGB_COLOR, 1) => "Green",
+        (mode::RGB_COLOR, 2) => "Blue",
+        _ => return None,
+    })
+}
+
+/// Update something about the document.
+///
+/// Only the properties this host actually tracks are accepted; the rest
+/// are refused rather than silently dropped, so a plug-in that checks
+/// finds out its setting did not take.
+unsafe extern "C" fn set_property_thunk(
+    signature: abi::OSType,
+    key: abi::OSType,
+    _index: i32,
+    simple: i32,
+    _complex: abi::Handle,
+) -> OSErr {
+    crate::suites::trace!(
+        "setProperty {} {} = {simple}",
+        abi::fourcc_str(signature),
+        abi::fourcc_str(key)
+    );
+    if signature != abi::SIG_8BIM {
+        return abi::ERR_PLUG_IN_PROPERTY_UNDEFINED;
+    }
+    match key {
+        abi::property::WATCH_SUSPENSION => match with_active(|s| s.watch_suspension = simple) {
+            Some(()) => abi::NO_ERR,
+            None => abi::ERR_PLUG_IN_PROPERTY_UNDEFINED,
+        },
+        _ => abi::ERR_PLUG_IN_PROPERTY_UNDEFINED,
+    }
+}
+
 /// Common colour services: convert between spaces, hand back the
 /// foreground or background colour, or report the pixel under a sample
 /// point.
@@ -536,6 +686,12 @@ struct Session<'a> {
     /// An error raised inside `advanceState`, where the ABI only lets us
     /// return an `OSErr`, kept so the real cause survives.
     deferred_error: Option<HostError>,
+    /// The document's name, if the caller gave one, for `propTitle`.
+    title: Option<String>,
+    /// `propWatchSuspension`, which a plug-in may set and read back.
+    /// Adobe: "It is reset to zero at the beginning of each call from
+    /// the host to the plug-in."
+    watch_suspension: i32,
     /// Foreground and background, kept for `colorServices` to hand back.
     fore_color: [u8; 4],
     back_color: [u8; 4],
@@ -549,6 +705,7 @@ struct Session<'a> {
     _sp_basic: Box<suites::SPBasicSuite>,
     big_doc: Box<BigDocumentStruct>,
     _descriptor_params: Box<PIDescriptorParameters>,
+    _property_procs: Box<abi::PropertyProcs>,
     _platform: Box<PlatformData>,
     error_string: Box<[u8; 256]>,
 }
@@ -569,6 +726,12 @@ impl<'a> Session<'a> {
         let mut error_string = Box::new([0u8; 256]);
         let mut big_doc = Box::new(BigDocumentStruct::default());
         let mut descriptor_params = Box::new(PIDescriptorParameters::default());
+        let mut property_procs = Box::new(abi::PropertyProcs {
+            property_procs_version: 1,
+            num_property_procs: 2,
+            get_proc: Some(get_property_thunk),
+            set_proc: Some(set_property_thunk),
+        });
         let mut platform = Box::new(PlatformData {
             hwnd: opts.parent_window,
         });
@@ -628,6 +791,11 @@ impl<'a> Session<'a> {
         // world. See `crate::display`.
         record.display_pixels = display_pixels_thunk as *mut c_void;
         record.color_services = color_services_thunk as *mut c_void;
+        record.property_procs = &mut *property_procs as *mut _ as *mut c_void;
+        // The direct callback the Property suite superseded. Adobe kept
+        // the field "for backwards compatibility" and the signature is
+        // identical, so older plug-ins get the same answers.
+        record.get_property = get_property_thunk as *mut c_void;
 
         // Offer wide coordinates even though this stage's images fit in
         // the narrow ones. A plug-in built against the CS or later SDK
@@ -718,6 +886,8 @@ impl<'a> Session<'a> {
             abort: Arc::clone(&opts.abort),
             progress: opts.progress.as_deref(),
             deferred_error: None,
+            title: opts.document_title.clone(),
+            watch_suspension: 0,
             fore_color: opts.foreground,
             back_color: opts.background,
             declared_padding: (
@@ -730,6 +900,7 @@ impl<'a> Session<'a> {
             _sp_basic: sp_basic,
             big_doc,
             _descriptor_params: descriptor_params,
+            _property_procs: property_procs,
             _platform: platform,
             error_string,
         }
@@ -766,6 +937,9 @@ impl<'a> Session<'a> {
 
     fn call(&mut self, entry: EntryProc, sel: i16, data: &mut isize) -> Result<(), HostError> {
         let mut result: i16 = 0;
+        // "It is reset to zero at the beginning of each call from the
+        // host to the plug-in."
+        self.watch_suspension = 0;
         crate::suites::trace!("-> selector {sel}");
         {
             let _guard = ActiveGuard::set(self as *mut Session<'_>);
@@ -915,15 +1089,13 @@ impl<'a> Session<'a> {
 
         let out_rect = self.requested_out();
         if !out_rect.is_empty() {
-            if out_rect.left < 0
-                || out_rect.top < 0
-                || out_rect.right as i64 > self.dest.width as i64
-                || out_rect.bottom as i64 > self.dest.height as i64
-            {
-                return Err(HostError::BadRequest(format!(
-                    "output rectangle {out_rect:?} is outside the image"
-                )));
-            }
+            // An overhanging output rectangle is served rather than
+            // refused. The plug-in gets a buffer of exactly the size it
+            // asked for, so its own stride arithmetic holds; only the
+            // part landing inside the image is committed. Refusing is
+            // worse than useless — a plug-in that ignores the error goes
+            // on to write through the null `outData` it was left with,
+            // which is a fault rather than a diagnostic.
             let (lo, hi) = self.plane_range(self.record.out_lo_plane, self.record.out_hi_plane)?;
             let n = (hi - lo + 1) as usize;
             let row_bytes = out_rect.width() as usize * n;
@@ -970,18 +1142,29 @@ impl<'a> Session<'a> {
         Ok((lo, hi))
     }
 
-    /// Write whatever the plug-in put in `out_buf` back into the image.
+    /// Write whatever the plug-in put in `out_buf` back into the image,
+    /// clipped to it. The plug-in may have asked for a rectangle that
+    /// overhangs an edge; it gets the buffer it asked for, and the part
+    /// falling outside is dropped here rather than wrapping onto a
+    /// neighbouring row.
     fn commit_pending(&mut self) {
         let Some((rect, lo, hi)) = self.pending.take() else {
             return;
         };
         let n = (hi - lo + 1) as usize;
         let src_row = rect.width() as usize * n;
+        let (w, h) = (self.dest.width as i32, self.dest.height as i32);
         for y in 0..rect.height() {
-            let dy = rect.top as u32 + y as u32;
+            let dy = rect.top as i32 + y;
+            if dy < 0 || dy >= h {
+                continue;
+            }
             for x in 0..rect.width() {
-                let dx = rect.left as u32 + x as u32;
-                let di = self.dest.index(dx, dy);
+                let dx = rect.left as i32 + x;
+                if dx < 0 || dx >= w {
+                    continue;
+                }
+                let di = self.dest.index(dx as u32, dy as u32);
                 let si = y as usize * src_row + x as usize * n;
                 for p in 0..n {
                     self.dest.data[di + lo as usize + p] = self.out_buf[si + p];

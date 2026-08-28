@@ -149,6 +149,80 @@ pub type AdvanceStateProc = unsafe extern "C" fn() -> OSErr;
 /// Host-defined escape hatch. UNVERIFIED signature; always null here.
 pub type HostProc = unsafe extern "C" fn(selector: i16, data: *mut c_void);
 
+/// `MACPASCAL OSErr (*GetPropertyProc)(OSType signature, OSType key,
+/// int32 index, int32 *simpleProperty, Handle *complexProperty)`.
+pub type GetPropertyProc = unsafe extern "C" fn(
+    signature: OSType,
+    key: OSType,
+    index: i32,
+    simple: *mut i32,
+    complex: *mut Handle,
+) -> OSErr;
+
+/// `MACPASCAL OSErr (*SetPropertyProc)(OSType signature, OSType key,
+/// int32 index, int32 simpleProperty, Handle complexProperty)`.
+pub type SetPropertyProc = unsafe extern "C" fn(
+    signature: OSType,
+    key: OSType,
+    index: i32,
+    simple: i32,
+    complex: Handle,
+) -> OSErr;
+
+/// Member order and header from API Guide chapter 3: "Property suite.
+/// Current version: 1; Adobe Photoshop: 5.0; Routines: 2."
+///
+/// Propetizer faulting at `NULL + 4` on 32-bit is what a null suite
+/// looks like from here, and it puts `get_proc` at offset 4 — which is
+/// where this layout puts it.
+#[repr(C)]
+pub struct PropertyProcs {
+    pub property_procs_version: i16,
+    pub num_property_procs: i16,
+    pub get_proc: Option<GetPropertyProc>,
+    pub set_proc: Option<SetPropertyProc>,
+}
+
+/// Property keys, from API Guide table 39. A property is identified by
+/// a signature — always `'8BIM'` for Photoshop's own — and a key, plus
+/// a zero-based index for the ones that are indexed.
+pub mod property {
+    use super::{fourcc, OSType};
+
+    pub const NUMBER_OF_CHANNELS: OSType = fourcc(b"nuch");
+    pub const CHANNEL_NAME: OSType = fourcc(b"nmch");
+    pub const IMAGE_MODE: OSType = fourcc(b"mode");
+    pub const NUMBER_OF_PATHS: OSType = fourcc(b"nupa");
+    pub const PATH_NAME: OSType = fourcc(b"nmpa");
+    pub const WORK_PATH_INDEX: OSType = fourcc(b"wkpa");
+    pub const CLIPPING_PATH_INDEX: OSType = fourcc(b"clpa");
+    pub const TARGET_PATH_INDEX: OSType = fourcc(b"tgpa");
+    pub const BIG_NUDGE_H: OSType = fourcc(b"bndH");
+    pub const BIG_NUDGE_V: OSType = fourcc(b"bndV");
+    pub const INTERPOLATION_METHOD: OSType = fourcc(b"intp");
+    pub const RULER_UNITS: OSType = fourcc(b"rulr");
+    pub const RULER_ORIGIN_H: OSType = fourcc(b"rorH");
+    pub const RULER_ORIGIN_V: OSType = fourcc(b"rorV");
+    pub const GRID_MAJOR: OSType = fourcc(b"grmj");
+    pub const GRID_MINOR: OSType = fourcc(b"grmn");
+    pub const SERIAL_STRING: OSType = fourcc(b"sstr");
+    pub const WATCH_SUSPENSION: OSType = fourcc(b"wtch");
+    pub const COPYRIGHT: OSType = fourcc(b"cpyr");
+    pub const COPYRIGHT_2: OSType = fourcc(b"cpyR");
+    pub const TITLE: OSType = fourcc(b"titl");
+    pub const WATERMARK: OSType = fourcc(b"watr");
+}
+
+/// `propInterpolationMethod` values, from table 39.
+pub mod interpolation {
+    pub const POINT_SAMPLE: i32 = 1;
+    pub const BILINEAR: i32 = 2;
+    pub const BICUBIC: i32 = 3;
+}
+
+/// The host does not know that property. From API Guide table 2-4.
+pub const ERR_PLUG_IN_PROPERTY_UNDEFINED: OSErr = -30901;
+
 /// Colour spaces `colorServices` converts between, numbered in API
 /// Guide table A-3.
 pub mod color_space {

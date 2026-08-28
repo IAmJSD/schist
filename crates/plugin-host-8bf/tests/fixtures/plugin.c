@@ -81,6 +81,15 @@ typedef struct PSPixelMap {
 
 /* colorServices, from API Guide table A-3. Naturally aligned, like the
  * other non-FilterRecord structures. */
+typedef struct PropertyProcs {
+    int16_t propertyProcsVersion;
+    int16_t numPropertyProcs;
+    OSErr (*getPropertyProc)(OSType signature, OSType key, int32_t index,
+                             int32_t *simpleProperty, Handle *complexProperty);
+    OSErr (*setPropertyProc)(OSType signature, OSType key, int32_t index,
+                             int32_t simpleProperty, Handle complexProperty);
+} PropertyProcs;
+
 typedef struct ColorServicesInfo {
     int32_t infoSize;
     int16_t selector;
@@ -212,7 +221,7 @@ typedef struct FilterRecord {
 
     /* new in 3.0.4 */
     void *imageServicesProcs;
-    void *propertyProcs;
+    PropertyProcs *propertyProcs;
     int16_t inTileHeight;
     int16_t inTileWidth;
     Point inTileOrigin;
@@ -514,6 +523,39 @@ static void run_padding(int16_t selector, FilterRecord *fr, intptr_t *data,
     fr->maskRect = fr->inRect;
 }
 
+/* Ask for an output rectangle that overhangs the top-left corner. The
+ * host has to serve the buffer at the size asked for and commit only
+ * the part that lands inside the image. */
+EXPORT void entry_out_of_bounds(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    fr->inRect.top = (int16_t)(fr->filterRect.top - 4);
+    fr->inRect.left = (int16_t)(fr->filterRect.left - 4);
+    fr->inRect.bottom = fr->filterRect.bottom;
+    fr->inRect.right = fr->filterRect.right;
+    fr->outRect = fr->inRect;
+    fr->inLoPlane = fr->outLoPlane = 0;
+    fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+    if (fr->outData == NULL) { *result = filterBadParameters; return; }
+
+    int planes = fr->planes;
+    int w = fr->outRect.right - fr->outRect.left;
+    int h = fr->outRect.bottom - fr->outRect.top;
+    for (int y = 0; y < h; y++) {
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        for (int i = 0; i < w * planes; i++) dst[i] = 42;
+    }
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
 EXPORT void entry_pad_replicate(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
     run_padding(selector, (FilterRecord *)pb, data, result, -1);
 }
@@ -681,6 +723,64 @@ EXPORT void entry_color(int16_t selector, void *pb, intptr_t *data, int16_t *res
     info.sourceSpace = 0; info.resultSpace = 4;
     info.reserved = (void *)fr;
     if (fr->colorServices(&info) == 0) { *result = colorAcceptedJunk; return; }
+}
+
+/* ---- property suite --------------------------------------------------- */
+
+#define propNoSuite     (-30140)
+#define propBadVersion  (-30141)
+#define propWrongCount  (-30142)
+#define propWrongName   (-30143)
+#define propAcceptedJunk (-30144)
+#define propWatchFailed (-30145)
+
+#define SIG_8BIM 0x3842494DU
+
+EXPORT void entry_property(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+
+    PropertyProcs *pp = fr->propertyProcs;
+    if (pp == NULL || pp->getPropertyProc == NULL || pp->setPropertyProc == NULL) {
+        *result = propNoSuite; return;
+    }
+    if (pp->propertyProcsVersion != 1) { *result = propBadVersion; return; }
+    if (pp->numPropertyProcs < 2) { *result = propBadVersion; return; }
+
+    /* Channel count must agree with what the record already says. */
+    int32_t n = 0;
+    if (pp->getPropertyProc(SIG_8BIM, 0x6E756368 /* nuch */, 0, &n, NULL) != 0) {
+        *result = propNoSuite; return;
+    }
+    if (n != fr->planes) { *result = propWrongCount; return; }
+
+    /* Channel 1 of an RGB document is Green. The string comes back in a
+     * handle with no terminator, so its length is the handle's size. */
+    Handle h = NULL;
+    if (pp->getPropertyProc(SIG_8BIM, 0x6E6D6368 /* nmch */, 1, NULL, &h) != 0 || h == NULL) {
+        *result = propWrongName; return;
+    }
+    int32_t len = fr->handleProcs->getSizeProc(h);
+    const char *name = (const char *)*h;
+    if (len != 5 || memcmp(name, "Green", 5) != 0) { *result = propWrongName; return; }
+    fr->handleProcs->disposeProc(h);
+
+    /* A property the host cannot know must be refused, not guessed. */
+    int32_t junk = 12345;
+    if (pp->getPropertyProc(SIG_8BIM, 0x73737472 /* sstr */, 0, &junk, NULL) == 0) {
+        *result = propAcceptedJunk; return;
+    }
+
+    /* Watch suspension is settable and reads back. */
+    if (pp->setPropertyProc(SIG_8BIM, 0x77746368 /* wtch */, 0, 1, NULL) != 0) {
+        *result = propWatchFailed; return;
+    }
+    int32_t watch = 0;
+    if (pp->getPropertyProc(SIG_8BIM, 0x77746368, 0, &watch, NULL) != 0 || watch != 1) {
+        *result = propWatchFailed; return;
+    }
 }
 
 /* ---- error reporting -------------------------------------------------- */
