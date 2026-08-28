@@ -131,6 +131,35 @@ def square():
     open('square.ppm', 'wb').write(b'P6\n%d %d\n255\n' % (w, h) + bytes(data))
 
 
+def crasher(root):
+    """Build a plug-in that dereferences null, so the crash-isolation
+    claim is checked rather than asserted."""
+    import subprocess
+    if os.path.exists('Crasher.8bf'):
+        return 0
+    src = os.path.join(root, 'crates/plugin-host-8bf/tests/fixtures/plugin.c')
+    props = [('kind', b'8BFM'[::-1]), ('vers', (4 << 16).to_bytes(4, 'little')),
+             ('name', bytes([7]) + b'Crasher'), ('catg', bytes([6]) + b'Schist'),
+             ('mode', bytes([0b01010000, 0])), ('8664', b'entry_crash\0'),
+             ('fici', bytes([1, 1, 0, 0]) * 7)]
+    out = (0).to_bytes(4, 'little') + len(props).to_bytes(4, 'little')
+    for key, data in props:
+        out += (0x3842494D).to_bytes(4, 'little')
+        out += int.from_bytes(key.encode(), 'big').to_bytes(4, 'little')
+        out += (0).to_bytes(4, 'little') + len(data).to_bytes(4, 'little') + data
+        while len(out) % 4:
+            out += b'\0'
+    open('pipl.bin', 'wb').write(out)
+    open('crash.rc', 'w').write('16000 PiPL "pipl.bin"\n')
+    for cmd in (['x86_64-w64-mingw32-windres', '-i', 'crash.rc', '-o', 'crash.res.o'],
+                ['x86_64-w64-mingw32-gcc', '-shared', '-O1', '-o', 'Crasher.8bf',
+                 src, 'crash.res.o']):
+        if subprocess.run(cmd, capture_output=True).returncode != 0:
+            print('skip: could not build the crashing fixture')
+            return 1
+    return 0
+
+
 def check_changed(out, label):
     """The transform's maths is its own business; what the host has to
     get right is a full-size buffer that is not the input."""
@@ -247,6 +276,8 @@ if __name__ == '__main__':
         sys.exit(check_dissolved(sys.argv[2], sys.argv[3]))
     elif cmd == 'square':
         square()
+    elif cmd == 'crasher':
+        sys.exit(crasher(sys.argv[2]))
     elif cmd == 'check-changed':
         sys.exit(check_changed(sys.argv[2], sys.argv[3]))
     elif cmd == 'check':

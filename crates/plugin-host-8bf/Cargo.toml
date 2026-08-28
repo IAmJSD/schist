@@ -8,6 +8,16 @@ description = "Host for Adobe Photoshop filter plug-ins (.8bf)"
 
 [dependencies]
 libloading.workspace = true
+# The shared pixel buffer between Schist and a helper process. Both map
+# the same file, so an image crosses the process boundary once.
+memmap2 = "0.9"
+
+# The out-of-process plug-in host. Cross-compiled to every architecture
+# a plug-in might be built for, which is what lets an x86-64 filter run
+# on an Apple Silicon Mac and a Windows filter run on Linux.
+[[bin]]
+name = "schist-8bf-helper"
+path = "src/bin/helper.rs"
 
 [dev-dependencies]
 tempfile = "3"

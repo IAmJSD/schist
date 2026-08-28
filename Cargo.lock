@@ -5862,6 +5862,7 @@ name = "schist-plugin-host-8bf"
 version = "0.6.0"
 dependencies = [
  "libloading",
+ "memmap2",
  "tempfile",
 ]
 

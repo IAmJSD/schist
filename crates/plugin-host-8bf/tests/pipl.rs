@@ -156,14 +156,21 @@ fn finds_the_pipl_inside_a_real_dll() {
         Some("entry_advance")
     );
 
-    // On a non-Windows build the entry point for the *running*
-    // architecture is absent, and the blocker says why in a way a user
-    // could act on.
-    if cfg!(windows) {
-        assert!(f.blocker().is_none());
-    } else {
-        assert_eq!(f.blocker(), Some(bf::Blocker::WrongPlatform));
-        assert!(f.blocker().unwrap().to_string().contains("Wine"));
+    // The entry point resolves from the plug-in's own machine, not the
+    // host's — a helper is built to match the plug-in — so it is present
+    // wherever this test runs.
+    assert_eq!(f.entry_point.as_deref(), Some("entry_advance"));
+    assert_eq!(f.abi(), Some(bf::launch::PluginAbi::WindowsX86_64));
+
+    // On Windows nothing more is needed. Everywhere else the blocker is
+    // either "install Wine" or nothing, depending on the machine — and
+    // never a flat refusal, because a helper can run this.
+    match f.blocker() {
+        None => {}
+        Some(bf::Blocker::NeedsInstalling(reqs)) => {
+            assert!(!reqs.is_empty());
+        }
+        other => panic!("a Windows plug-in should be runnable or installable, got {other:?}"),
     }
 }
 

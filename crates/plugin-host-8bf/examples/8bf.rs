@@ -18,12 +18,16 @@ fn main() -> ExitCode {
         Some("inspect") if args.len() == 2 => inspect(Path::new(&args[1])),
         Some("apply") if args.len() >= 4 => apply(&args[1..]),
         Some("about") if args.len() >= 2 => about(&args[1..]),
+        Some("run") if args.len() >= 4 => run_remote(&args[1..]),
         _ => {
             eprintln!(
                 "usage:\n  \
                  8bf inspect <plug-in or directory>\n  \
                  8bf apply <plug-in> <in.ppm> <out.ppm> [--entry NAME] [--no-dialog]\n  \
-                 8bf about <plug-in> [--entry NAME]"
+                 8bf about <plug-in> [--entry NAME]\n  \
+                 8bf run <plug-in> <in.ppm> <out.ppm> [--helpers DIR] [--no-dialog]\n\n\
+                 apply loads the plug-in in this process; run puts it in a helper,\n\
+                 which is how Schist itself does it."
             );
             return ExitCode::FAILURE;
         }
@@ -68,6 +72,66 @@ fn inspect(path: &Path) -> Res {
             None => println!("  runnable"),
         }
     }
+    Ok(())
+}
+
+/// Run a plug-in the way Schist does: in a helper process, chosen and
+/// wrapped for whatever architecture the plug-in turns out to be.
+fn run_remote(args: &[String]) -> Res {
+    let plugin = PathBuf::from(&args[0]);
+    let input = PathBuf::from(&args[1]);
+    let output = PathBuf::from(&args[2]);
+    let mut helper_dir = None;
+    let mut show_dialog = true;
+    let mut rest = args[3..].iter();
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--helpers" => helper_dir = rest.next().map(PathBuf::from),
+            "--no-dialog" => show_dialog = false,
+            other => return Err(format!("unknown option {other}").into()),
+        }
+    }
+
+    let found = bf::inspect_file(&plugin)?;
+    let first = found.into_iter().next().ok_or("no filter in that file")?;
+    println!("{}", first.menu_name());
+    println!(
+        "  plug-in is {}",
+        match first.abi() {
+            Some(a) => a.to_string(),
+            None => format!("{}", first.machine),
+        }
+    );
+    if let Some(b) = first.blocker() {
+        return Err(format!("{b}").into());
+    }
+    let host = bf::launch::Host::current().ok_or("unknown platform")?;
+    let plan = bf::launch::plan(host, first.abi().unwrap())?;
+    let needs: Vec<&str> = plan.needs.iter().map(|r| r.name()).collect();
+    println!(
+        "  helper is {} {}",
+        plan.helper.file_name(),
+        if needs.is_empty() {
+            "(run directly)".to_string()
+        } else {
+            format!("(under {})", needs.join(" under "))
+        }
+    );
+
+    let mut image = read_ppm(&input)?;
+    let opts = bf::remote::RemoteOptions {
+        show_dialog,
+        helper_dir,
+        progress: Some(Box::new(|done, total| {
+            if total > 0 {
+                eprint!("\r{:3}%", done * 100 / total);
+            }
+        })),
+        ..Default::default()
+    };
+    bf::remote::apply(&first, &mut image, &opts)?;
+    eprintln!("\rdone ");
+    write_ppm(&output, &image)?;
     Ok(())
 }
 

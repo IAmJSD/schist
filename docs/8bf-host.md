@@ -24,10 +24,60 @@ loop from there: it sets `inRect`, the host fills `inData`, it writes
 
 | Stage | Scope | State |
 |---|---|---|
-| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog, Windows only, in-process | **this crate**, verified against two shipping plug-ins on 32- and 64-bit |
-| 2 | Out-of-process helper with shared-memory tiles, macOS, 16/32-bit, all modes, selections and transparency, buffer/handle/property suites | not started |
-| 3 | Wine helper on Linux, 32-bit Windows helper, Rosetta helper on Apple Silicon, packaging | not started |
+| **1** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
+| **2** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites | **helper done**; 16/32-bit, selections and transparency still to do |
+| **3** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **policy and Wine path done**; macOS discovery and packaging still to do |
 | 4 | ActionManager / descriptor recording, format plug-ins, big-document coordinates | not started |
+
+## Where a plug-in runs
+
+Schist does not load a `.8bf` itself. It writes the pixels into a file,
+starts a **helper process** built for the plug-in's own architecture, and
+waits. `src/launch.rs` holds the policy and `src/remote.rs` drives it.
+
+| Schist runs on | plug-in is | how it runs |
+|---|---|---|
+| Windows x86-64 | Windows x86-64 | helper, directly |
+| Windows x86-64 | Windows x86 | 32-bit helper, on WOW64 |
+| Linux x86-64 | either Windows | helper under **Wine** |
+| Linux arm64 | either Windows | helper under **Wine** under **[FEX-Emu](https://github.com/FEX-Emu/FEX)** |
+| macOS arm64 | Apple Silicon | helper, directly |
+| macOS arm64 | Intel | Intel helper under **Rosetta** |
+| macOS x86-64 | Intel | helper, directly |
+| macOS x86-64 | Apple Silicon | not possible — Rosetta goes Intel to Arm, not back |
+| anywhere | the other OS's plug-ins | not possible |
+
+Three things follow from the process split, none of which can be had in
+process:
+
+* **A plug-in fault costs a filter, not a document.** The helper catches
+  it and says what happened — "the plug-in read or wrote memory it does
+  not own at 0x…, and was stopped" — rather than leaving Schist to infer
+  a crash from a process that vanished. The image is left as it was.
+* **A plug-in runs in a helper built for *its* architecture.** That is
+  what lets an Intel filter run on an Apple Silicon Mac at all, and it is
+  simply not expressible in one address space.
+* **The emulator wraps a command line.** Wine, FEX and Rosetta are
+  wrappers around the helper's argv and nothing else in Schist knows
+  they exist.
+
+What is missing gets reported as something to do rather than a failure:
+a plug-in that needs Wine on a machine without it is listed with "needs
+Wine installed" and a link, not hidden or broken.
+
+### The wire
+
+Pixels go in a file both processes map, so an image crosses once however
+large it is. Everything else — the request, progress, the ending — is a
+length-prefixed frame on a loopback TCP socket, chosen because it works
+identically for a native helper, a Windows helper under Wine, and an
+Intel helper under Rosetta. Schist listens and the helper connects back,
+so the helper needs no address of its own; a random token sent first
+keeps a stray local connection out.
+
+Cancelling is killing the helper. That is both simpler and more reliable
+than asking a plug-in to stop, because a plug-in stuck in its own loop
+never reads a message.
 
 Stage 1 is deliberately in-process even though the eventual design is
 not. Running a twenty-year-old binary inside the editor is not something

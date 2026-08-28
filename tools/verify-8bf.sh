@@ -47,6 +47,47 @@ winpath() { printf 'Z:%s' "${1//\//\\}"; }
 python3 "$root/tools/verify-8bf-support.py" gradient
 
 echo
+echo "== the helper process =="
+# The shipping path: Schist writes pixels to a file, starts a helper
+# built for the plug-in's architecture, and waits. Here that means a
+# Linux binary driving a Windows plug-in through Wine.
+helpers=$work/helpers
+mkdir -p "$helpers"
+built_helpers=0
+if ( cd "$root" && cargo build -q -p schist-plugin-host-8bf --bin schist-8bf-helper \
+       --target x86_64-pc-windows-gnu ); then
+  cp "$root/target/x86_64-pc-windows-gnu/debug/schist-8bf-helper.exe" \
+     "$helpers/schist-8bf-helper-x86_64.exe"
+  built_helpers=1
+fi
+if [ "$built_helpers" = 1 ]; then
+  python3 "$root/tools/verify-8bf-support.py" square
+  if "$root"/target/debug/examples/8bf run "$work/Ft2DF.8bf" "$work/square.ppm" \
+       "$work/remote-out.ppm" --helpers "$helpers" --no-dialog >remote.log 2>&1; then
+    python3 "$root/tools/verify-8bf-support.py" check-changed remote-out.ppm remote || fail=1
+    if cmp -s "$work/Ft2DF-out.ppm" "$work/remote-out.ppm" 2>/dev/null; then
+      echo "ok: the helper produced byte-identical pixels to the in-process run"
+    fi
+  else
+    echo "FAIL: the helper run did not complete"; sed -n '1,4p' remote.log; fail=1
+  fi
+
+  # And the reason for all of this: a plug-in that faults should cost a
+  # filter, not the process.
+  python3 "$root/tools/verify-8bf-support.py" crasher "$root" && {
+    out=$("$root"/target/debug/examples/8bf run "$work/Crasher.8bf" "$work/square.ppm" \
+            "$work/crash-out.ppm" --helpers "$helpers" --no-dialog 2>&1 | tail -1)
+    case "$out" in
+      *"memory it does not own"*)
+        echo "ok: a crashing plug-in was caught and reported, and Schist lived" ;;
+      *) echo "FAIL: a crashing plug-in was not reported cleanly: $out"; fail=1 ;;
+    esac
+  }
+else
+  echo "skip: could not build the Windows helper"
+fi
+
+echo
 echo "== discovery (no code runs) =="
 for p in FilterFoundry64.8bf GmicPlugin.8bf; do
   "$root"/target/debug/examples/8bf inspect "$work/$p" || fail=1

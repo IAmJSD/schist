@@ -33,8 +33,11 @@ pub mod abi;
 pub mod color;
 pub mod display;
 pub mod host;
+pub mod ipc;
+pub mod launch;
 pub mod pe;
 pub mod pipl;
+pub mod remote;
 pub mod suites;
 
 pub use host::{Filter, HostError, Image, RunOptions};
@@ -52,14 +55,28 @@ pub const FILTER_EXTENSIONS: &[&str] = &["8bf"];
 pub struct Found {
     pub path: PathBuf,
     pub pipl: Pipl,
+    /// The raw PiPL resource, kept so a helper process parses exactly
+    /// what was discovered rather than a summary of it.
+    pub raw_pipl: Vec<u8>,
     /// The machine the containing image was built for.
     pub machine: pe::Machine,
-    /// Entry point for the architecture we are running as, when the
-    /// plug-in carries code for it.
+    /// Entry point for the plug-in's **own** architecture — not the
+    /// host's. A helper is built to match the plug-in, so what matters
+    /// is the code descriptor for the machine the binary actually is.
     pub entry_point: Option<String>,
 }
 
 impl Found {
+    /// Which architecture this plug-in is, in the terms
+    /// [`launch::plan`] reasons about.
+    pub fn abi(&self) -> Option<launch::PluginAbi> {
+        match self.machine {
+            pe::Machine::Amd64 => Some(launch::PluginAbi::WindowsX86_64),
+            pe::Machine::I386 => Some(launch::PluginAbi::WindowsX86),
+            _ => None,
+        }
+    }
+
     /// `Category > Name`, as it would read in the Filter menu.
     pub fn menu_name(&self) -> String {
         match (self.pipl.category(), self.pipl.name()) {
@@ -81,16 +98,24 @@ impl Found {
         if host.is_some_and(|h| h != abi::SIG_8BIM) {
             return Some(Blocker::WrongHost(host.unwrap()));
         }
-        let Some(native) = CodeArch::native() else {
-            return Some(Blocker::WrongPlatform);
-        };
         if self.entry_point.is_none() {
-            return Some(Blocker::WrongArch {
-                wanted: native,
+            return Some(Blocker::NoEntryPoint {
                 has: self.pipl.code_archs(),
             });
         }
-        None
+        let Some(abi) = self.abi() else {
+            return Some(Blocker::UnknownArch(self.machine));
+        };
+        let Some(here) = launch::Host::current() else {
+            return Some(Blocker::CannotRun(launch::Unsupported::UnknownHost));
+        };
+        match launch::plan(here, abi) {
+            Err(u) => Some(Blocker::CannotRun(u)),
+            Ok(plan) => {
+                let missing = launch::missing(&plan);
+                (!missing.is_empty()).then_some(Blocker::NeedsInstalling(missing))
+            }
+        }
     }
 
     /// Load and resolve the entry point. Fails with
@@ -107,17 +132,21 @@ impl Found {
     }
 }
 
-/// Why a discovered plug-in is not runnable in this process.
+/// Why a discovered plug-in is not runnable here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blocker {
     NotAFilter,
     WrongHost(abi::OSType),
-    /// This build cannot load a Windows DLL at all.
-    WrongPlatform,
-    WrongArch {
-        wanted: CodeArch,
+    /// The binary is for a machine, but its PiPL carries no code
+    /// descriptor naming an entry point for that machine.
+    NoEntryPoint {
         has: Vec<CodeArch>,
     },
+    UnknownArch(pe::Machine),
+    /// No way to run this plug-in's architecture on this machine.
+    CannotRun(launch::Unsupported),
+    /// It could run, with something installed that is not.
+    NeedsInstalling(Vec<launch::Requirement>),
 }
 
 impl fmt::Display for Blocker {
@@ -127,17 +156,24 @@ impl fmt::Display for Blocker {
             Blocker::WrongHost(h) => {
                 write!(f, "requires host '{}'", abi::fourcc_str(*h))
             }
-            Blocker::WrongPlatform => write!(
-                f,
-                "this build cannot load Windows plug-ins; \
-                 running them under Wine is stage 3"
-            ),
-            Blocker::WrongArch { wanted, has } => {
+            Blocker::NoEntryPoint { has } => {
                 if has.is_empty() {
-                    write!(f, "carries no Windows code descriptor")
+                    write!(f, "carries no code descriptor at all")
                 } else {
-                    write!(f, "built for {has:?}, this process needs {wanted:?}")
+                    write!(f, "carries code descriptors only for {has:?}")
                 }
+            }
+            Blocker::UnknownArch(m) => write!(f, "built for {m}, which Schist cannot run"),
+            Blocker::CannotRun(u) => write!(f, "{u}"),
+            Blocker::NeedsInstalling(r) => {
+                let names: Vec<&str> = r.iter().map(|x| x.name()).collect();
+                write!(f, "needs {} installed", names.join(" and "))?;
+                for req in r {
+                    if let Some(url) = req.url() {
+                        write!(f, " ({url})")?;
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -184,7 +220,14 @@ pub fn inspect_file(path: &Path) -> Result<Vec<Found>, DiscoverError> {
     if resources.is_empty() {
         return Err(DiscoverError::NoPipl);
     }
-    let native = CodeArch::native();
+    // The entry point wanted is the one for the *plug-in's* machine: a
+    // helper is built to match the plug-in, so what Schist happens to be
+    // running as does not come into it.
+    let wanted = match image.machine {
+        pe::Machine::Amd64 => Some(CodeArch::Win64X86),
+        pe::Machine::I386 => Some(CodeArch::Win32X86),
+        _ => None,
+    };
     let mut found = Vec::new();
     for raw in resources {
         // Windows PiPLs are little-endian; the byte order is the
@@ -192,10 +235,11 @@ pub fn inspect_file(path: &Path) -> Result<Vec<Found>, DiscoverError> {
         let Ok(pipl) = Pipl::parse(&raw, Endian::Little) else {
             continue;
         };
-        let entry_point = native.and_then(|a| pipl.entry_point(a));
+        let entry_point = wanted.and_then(|a| pipl.entry_point(a));
         found.push(Found {
             path: path.to_path_buf(),
             pipl,
+            raw_pipl: raw,
             machine: image.machine,
             entry_point,
         });

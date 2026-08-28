@@ -783,6 +783,19 @@ EXPORT void entry_property(int16_t selector, void *pb, intptr_t *data, int16_t *
     }
 }
 
+/* ---- a plug-in that crashes ------------------------------------------
+ *
+ * The reason the plug-in lives in another process. Twenty-year-old
+ * binaries fault; when this one does, Schist should lose a filter and
+ * not a document.
+ */
+EXPORT void entry_crash(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    (void)pb; (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    *(volatile int *)0 = 1;
+}
+
 /* ---- error reporting -------------------------------------------------- */
 
 EXPORT void entry_error_string(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
