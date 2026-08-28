@@ -35,7 +35,10 @@ they will not break the plugin ABI or saved files.
    moved).
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
 3. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-4. The release workflow builds Linux AppImages for x86_64 and aarch64, a
+4. The release workflow builds, for x86_64 and aarch64, a Linux AppImage
+   plus the native packages `packaging/linux/packages.sh` emits (`.deb`,
+   `.rpm` and a binary `.pkg.tar.zst` — the last one is a convenience
+   build, not the AUR package from step 5), a
    macOS `Schist.zip` (signed and notarized when the secrets below
    exist), and a Windows installer, then drafts the release. Each
    platform also ships the `schist-mcp` server from the same build: a

@@ -187,6 +187,7 @@ release: stage-helpers
 	@mkdir -p dist
 ifeq ($(HOST),linux)
 	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' ./packaging/linux/appimage.sh
+	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' ./packaging/linux/packages.sh
 else ifeq ($(HOST),macos)
 	SCHIST_BUNDLED_HELPERS='$(HELPER_STAGE)' ./packaging/macos/bundle.sh $(PROFILE)
 else ifeq ($(HOST),windows)
