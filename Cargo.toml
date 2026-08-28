@@ -19,6 +19,7 @@ members = [
     "crates/vector",
     "crates/text-engine",
     "crates/adjustments",
+    "crates/plugin-host-8bf",
     "crates/plugin-host-wasm",
     "crates/plugin-sdk",
     "crates/colormgmt",
@@ -67,6 +68,7 @@ ruzstd = "0.9"
 crc32fast = "1.5"
 schist-text-engine = { path = "crates/text-engine" }
 schist-adjustments = { path = "crates/adjustments" }
+schist-plugin-host-8bf = { path = "crates/plugin-host-8bf" }
 schist-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
 schist-plugin-sdk = { path = "crates/plugin-sdk" }
 schist-colormgmt = { path = "crates/colormgmt" }
@@ -120,3 +122,14 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 debug = 1
+
+# The .8bf plug-in helpers. They ship compressed inside the app binary,
+# so their size is worth caring about in a way the app's own is not, and
+# `debug = 1` costs a great deal here: a helper is 2.8 MB with debug info
+# and 390 KB without. Nothing reads it — the crash handler reports a raw
+# fault address belonging to the *plug-in*, and never symbolises anything
+# — so it goes.
+[profile.helper]
+inherits = "release"
+debug = false
+strip = true

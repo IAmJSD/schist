@@ -919,6 +919,35 @@ fn describe(sess: &Session, what: &str) -> Result<Value> {
             })
             .collect()
     };
+    // Photoshop plug-ins are ordinary filters once loaded, so they are
+    // already in `filters`. This section is the other half: what was
+    // found, and why anything missing from that list is missing.
+    let photoshop_plugins = || -> Value {
+        json!({
+            "folders": sess
+                .photoshop
+                .dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>(),
+            "plugins": sess
+                .photoshop
+                .entries
+                .iter()
+                .map(|e| {
+                    json!({
+                        "id": e.id,
+                        "name": e.name,
+                        "file": e.container.display().to_string(),
+                        "architecture": e.architecture,
+                        "enabled": e.enabled,
+                        "available": e.blocker.is_none() && e.enabled,
+                        "unavailable_because": e.blocker,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
+    };
     let blend_modes = || -> Value {
         BLEND_MODES
             .iter()
@@ -932,6 +961,7 @@ fn describe(sess: &Session, what: &str) -> Result<Value> {
         "codecs" => json!({"codecs": codecs()}),
         "adjustments" => json!({"adjustments": adjustments()}),
         "blend_modes" => json!({"blend_modes": blend_modes()}),
+        "photoshop_plugins" => json!({"photoshop_plugins": photoshop_plugins()}),
         "all" => json!({
             "tools": tools(),
             "commands": commands(),
@@ -939,10 +969,11 @@ fn describe(sess: &Session, what: &str) -> Result<Value> {
             "codecs": codecs(),
             "adjustments": adjustments(),
             "blend_modes": blend_modes(),
+            "photoshop_plugins": photoshop_plugins(),
         }),
         other => bail!(
             "unknown section {other:?} (tools, commands, filters, codecs, adjustments, \
-             blend_modes or all)"
+             blend_modes, photoshop_plugins or all)"
         ),
     })
 }
@@ -1002,7 +1033,16 @@ fn tool_defs() -> Value {
                 "session": session_prop,
                 "what": {
                     "type": "string",
-                    "enum": ["tools", "commands", "filters", "codecs", "adjustments", "blend_modes", "all"],
+                    "enum": [
+                        "tools",
+                        "commands",
+                        "filters",
+                        "codecs",
+                        "adjustments",
+                        "blend_modes",
+                        "photoshop_plugins",
+                        "all"
+                    ],
                     "description": "Section to list (default all)",
                 },
             }),

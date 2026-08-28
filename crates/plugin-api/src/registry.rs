@@ -12,7 +12,10 @@ pub struct PluginRegistry {
     /// to hold the codec beyond the registry borrow.
     codecs: Vec<Arc<dyn CodecPlugin>>,
     commands: Vec<Command>,
-    filters: Vec<Box<dyn FilterPlugin>>,
+    /// `Arc` for the same reason as `codecs`: a filter that runs out of
+    /// process is driven from a background thread, which needs to hold
+    /// it beyond the registry borrow.
+    filters: Vec<Arc<dyn FilterPlugin>>,
 }
 
 impl PluginRegistry {
@@ -38,7 +41,7 @@ impl PluginRegistry {
     }
 
     pub fn register_filter(&mut self, filter: Box<dyn FilterPlugin>) {
-        self.filters.push(filter);
+        self.filters.push(Arc::from(filter));
     }
 
     pub fn tools(&self) -> impl Iterator<Item = &dyn ToolPlugin> {
@@ -86,6 +89,12 @@ impl PluginRegistry {
 
     pub fn filters(&self) -> impl Iterator<Item = &dyn FilterPlugin> {
         self.filters.iter().map(|f| f.as_ref())
+    }
+
+    /// One filter, held beyond the registry borrow, for running it on a
+    /// background thread.
+    pub fn shared_filter(&self, id: &str) -> Option<Arc<dyn FilterPlugin>> {
+        self.filters.iter().find(|f| f.id() == id).cloned()
     }
 }
 

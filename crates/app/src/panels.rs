@@ -241,7 +241,7 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Vanishing Point", VanishingPointItem, None),
                 Sep,
             ];
-            out.extend(filter_menu_entries());
+            out.extend(filter_menu_entries(ws));
             out
         }),
         (
@@ -275,11 +275,11 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
 }
 
 /// Filters grouped by category, in registration order.
-fn filter_menu_entries() -> Vec<MenuEntry> {
+fn filter_menu_entries(ws: &Workspace) -> Vec<MenuEntry> {
     // The ids are static strings owned by the plugins; the menu resolves
     // names from the registry at render time. Categories nest, as in
     // Photoshop's Filter menu.
-    FILTER_GROUPS
+    let mut groups: Vec<MenuEntry> = FILTER_GROUPS
         .iter()
         .map(|(name, ids)| {
             let mut entries: Vec<MenuEntry> = ids.iter().map(|id| MenuEntry::Filter(id)).collect();
@@ -294,7 +294,36 @@ fn filter_menu_entries() -> Vec<MenuEntry> {
             }
             MenuEntry::Sub(name, entries)
         })
-        .collect()
+        .collect();
+    add_photoshop_plugins(ws, &mut groups);
+    groups
+}
+
+/// Fold Photoshop plug-ins into the category submenus, by the category
+/// their own PiPL declares.
+///
+/// Straight into the Filter menu rather than under a "Photoshop" branch,
+/// for two reasons. It is what Photoshop does — a plug-in declaring
+/// "Blur" belongs beside the other blurs, and vendors choose their
+/// category expecting exactly that. And the menu only nests one level:
+/// a submenu inside a submenu cannot be reached with the mouse, so
+/// grouping them under a wrapper would have put every plug-in one level
+/// past where the pointer can go.
+fn add_photoshop_plugins(ws: &Workspace, groups: &mut Vec<MenuEntry>) {
+    for filter in ws.registry.filters().filter(|f| f.runs_out_of_process()) {
+        let category = filter.category();
+        let existing = groups.iter_mut().find_map(|g| match g {
+            MenuEntry::Sub(name, entries) if *name == category => Some(entries),
+            _ => None,
+        });
+        match existing {
+            Some(entries) => entries.push(MenuEntry::Filter(filter.id())),
+            None => groups.push(MenuEntry::Sub(
+                category,
+                vec![MenuEntry::Filter(filter.id())],
+            )),
+        }
+    }
 }
 
 /// The Layer Comps submenu: capture a new one, then the existing comps,

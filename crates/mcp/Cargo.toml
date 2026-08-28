@@ -18,6 +18,7 @@ schist-layer-fx.workspace = true
 schist-adjustments.workspace = true
 schist-codec-psd.workspace = true
 schist-plugin-host-wasm.workspace = true
+schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
 schist-codecs-common.workspace = true
 schist-tools-basic.workspace = true
 schist-tools-paint.workspace = true

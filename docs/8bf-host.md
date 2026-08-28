@@ -1,0 +1,613 @@
+# Hosting Photoshop plug-ins
+
+A Photoshop plug-in is a native shared library with a renamed extension
+— `.8bf` for a filter, `.8bi`/`.8be` for format import/export, `.8ba`
+for automation. On Windows it is a DLL; on macOS a bundle. What makes it
+a plug-in rather than a library is a **PiPL** resource: a small property
+list naming the module's kind, its menu name and category, the image
+modes it handles, and the entry point symbol to call.
+
+The entry point is one C function:
+
+```c
+void ENTRYPOINT(short selector, FilterRecordPtr fr, intptr_t *data, short *result);
+```
+
+The host calls it with six selectors — About, Parameters, Prepare,
+Start, Continue, Finish — and hands it a `FilterRecord`: a large
+fixed-layout struct of rectangles, plane counts, colours, and pointers to
+callback suites the *host* has to implement. The plug-in drives the pixel
+loop from there: it sets `inRect`, the host fills `inData`, it writes
+`outData`, and it repeats until it leaves an empty rectangle behind.
+
+## What works
+
+| Area | Scope | State |
+|---|---|---|
+| **Loading and running** | PiPL parse, filter selectors, `advanceState`, 8-bit RGB, the plug-in's own dialog | **done**, verified against nine plug-in families on 32- and 64-bit |
+| **Isolation and depth** | Out-of-process helper, shared pixel buffer, the buffer/handle/property/colour suites, 16- and 32-bit, selections and transparency | **done** |
+| **Platforms** | Wine on Linux, 32-bit helper, FEX on Arm Linux, Rosetta on Apple Silicon, packaging | **Wine path and macOS done**: bundle discovery, the native and Rosetta helpers, the Filter menu and the manager all run on an Apple Silicon Mac; packaging still to do |
+| **Reaching the editor** | Folder scan, Filter menu and gallery entries, the plug-in manager, MCP | **done**, see below |
+| **Scripting and scale** | Descriptor recording, format plug-ins, big-document coordinates | **big documents done**; descriptors written but not served, see below; format modules need a source that documents `FormatRecord`, and the API Guide does not |
+
+### Scripting
+
+Recording a filter's parameters and playing them back — what Last Filter
+and actions are made of — is written, tested and **not served**. The read
+and write sub-suites of `PIDescriptorParameters` are null.
+
+The reason is the member order. Adobe documents every routine's
+signature and no struct, and lists the routines alphabetically after Open
+and Close, which is not the layout: handed the read suite in that order,
+Filter Foundry opened a descriptor and then called slot 2 a million and a
+half times without stopping. It was iterating keys, so `GetKey` is the
+third member — one position of eighteen, and the write suite counts
+sixteen routines while naming thirteen.
+
+Serving a suite whose slots are in the wrong places is worse than not
+serving one: a plug-in that works today stops. Null is the documented way
+to say scripting is unavailable, and plug-ins fall back to keeping
+parameters in the `parameters` handle, which is what they already do.
+
+What would settle it is a plug-in whose recorded keys are known, so the
+getter it reaches for can be identified the way `GetKey` was.
+`SCHIST_8BF_TRACE` names whichever slot gets called.
+
+## Where a plug-in runs
+
+Schist does not load a `.8bf` itself. It writes the pixels into a file,
+starts a **helper process** built for the plug-in's own architecture, and
+waits. `src/launch.rs` holds the policy and `src/remote.rs` drives it.
+
+| Schist runs on | plug-in is | how it runs |
+|---|---|---|
+| Windows x86-64 | Windows x86-64 | helper, directly |
+| Windows x86-64 | Windows x86 | 32-bit helper, on WOW64 |
+| Linux x86-64 | either Windows | helper under **Wine** |
+| Linux arm64 | either Windows | helper under **Wine** under **[FEX-Emu](https://github.com/FEX-Emu/FEX)** |
+| macOS arm64 | Apple Silicon | helper, directly |
+| macOS arm64 | Intel | Intel helper under **Rosetta** |
+| macOS x86-64 | Intel | helper, directly |
+| macOS x86-64 | Apple Silicon | not possible — Rosetta goes Intel to Arm, not back |
+| anywhere | the other OS's plug-ins | not possible |
+
+The two `macOS arm64` rows have been run on an Apple Silicon Mac against
+`.plugin` bundles built by `clang` and `Rez`: an Arm bundle in the native
+helper, an Intel one under Rosetta, and a universal one preferring the
+slice that needs no translation. A Windows `.8bf` on that Mac was listed
+with its reason rather than offered, as the last-but-one row says it
+should be. The two `macOS x86-64` rows need an Intel Mac, which there was
+none of, and rest on the policy tests in `launch.rs` alone.
+
+Discovery was wrong in two places when it first met a real bundle, both
+now fixed and both described in `crates/plugin-host-8bf/src/macos.rs`:
+the Mach-O header was read in the wrong byte order, and a `.rsrc` was
+only read from a file's data fork and not from a real resource fork.
+
+Three things follow from the process split, none of which can be had in
+process:
+
+* **A plug-in fault costs a filter, not a document.** The helper catches
+  it and says what happened — "the plug-in read or wrote memory it does
+  not own at 0x…, and was stopped" — rather than leaving Schist to infer
+  a crash from a process that vanished. The image is left as it was.
+* **A plug-in runs in a helper built for *its* architecture.** That is
+  what lets an Intel filter run on an Apple Silicon Mac at all, and it is
+  simply not expressible in one address space.
+* **The emulator wraps a command line.** Wine, FEX and Rosetta are
+  wrappers around the helper's argv and nothing else in Schist knows
+  they exist.
+
+What is missing gets reported as something to do rather than a failure:
+a plug-in that needs Wine on a machine without it is listed with "needs
+Wine installed" and a link, not hidden or broken.
+
+### The wire
+
+Pixels go in a file both processes map, so an image crosses once however
+large it is. Everything else — the request, progress, the ending — is a
+length-prefixed frame on a loopback TCP socket, chosen because it works
+identically for a native helper, a Windows helper under Wine, and an
+Intel helper under Rosetta. Schist listens and the helper connects back,
+so the helper needs no address of its own; a random token sent first
+keeps a stray local connection out.
+
+Cancelling is killing the helper. That is both simpler and more reliable
+than asking a plug-in to stop, because a plug-in stuck in its own loop
+never reads a message.
+
+The ABI was established in-process first, deliberately. Running a
+twenty-year-old binary inside the editor is not something to ship — it
+will segfault and take the document with it — but proving the ABI was a
+prerequisite for the process split, and doing it in one address space
+kept the failures legible while the layout was still being established.
+The in-process path is still here, and is what the unit tests drive; it
+is `remote::apply` that shipping code should call.
+
+## Building the helpers
+
+A plug-in is a binary for one OS and architecture, and it is routinely
+not the one Schist was compiled for. So an install is one app binary
+beside *several* helpers, and something has to run cargo once per
+architecture — cargo builds a single target per invocation. That is what
+the root `Makefile` is for:
+
+```sh
+make helpers                # for this platform, into target/release/
+make helpers PROFILE=debug  # beside a debug build
+make install-helpers DESTDIR=some/dir
+```
+
+Which helpers get built follows the host, matching the table in
+`launch.rs`:
+
+| Building on | Helpers built | Hosts |
+|---|---|---|
+| Linux | `x86_64-pc-windows-gnu`, `i686-pc-windows-gnu` | Windows plug-ins, through Wine |
+| Windows | `x86_64-pc-windows-msvc`, `i686-pc-windows-msvc` | Windows plug-ins, natively |
+| macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | Mac plug-ins, Intel ones through Rosetta |
+
+Linux and Windows build the same *pair* because Wine runs the same PE
+binary a real Windows does; only the linker differs. Nothing here builds
+a helper for a platform it is not running on — a Linux box cannot produce
+the macOS helpers, and does not try.
+
+This is cheap enough to be unremarkable: the helper links `libloading` and
+`memmap2` and nothing else — no GPUI, no wgpu — so each one is about five
+seconds and under 3 MB. Cargo remains the incremental build system; the
+make rules depend on a phony target rather than restating cargo's
+dependency graph, because a second, worse copy of it would go stale the
+first time a file was added.
+
+### Carried inside the app
+
+`make build` goes one step further and embeds the staged helpers in the
+Schist binary, which then unpacks one the first time a plug-in actually
+needs it — for most people, never. The point is that **what you share is
+one executable**: no loose files beside it, nothing for an installer to
+place or a signature to cover, and a Linux or Windows build that hosts
+plug-ins for every architecture it can reach with nothing else present.
+
+They are stripped and deflated on the way in, which matters more than it
+sounds like it should:
+
+| | per pair |
+|---|---|
+| as built, `release` profile | 5.68 MB |
+| stripped (the `helper` profile) | 826 KB |
+| stripped and deflated | **423 KB** |
+
+Almost all of that is the strip, not the compression: debug info is 86%
+of a helper, and nothing reads it — the crash handler reports a raw fault
+address belonging to the *plug-in* and never symbolises anything. What
+survives packs to roughly half again, with `miniz_oxide`, which is pure
+Rust and so cross-compiles to every helper target without a C toolchain.
+Something stronger than deflate would save perhaps another 60 KB and is
+not worth a heavier dependency.
+
+```
+make build      # helpers, then an app carrying them
+make release    # ... and package it into dist/
+```
+
+`build.rs` reads `SCHIST_BUNDLED_HELPERS`, a directory of
+`schist-8bf-helper-*` files, and emits an `include_bytes!` for each. It is
+an environment variable rather than a cargo feature deliberately: a
+feature would make `cargo test --workspace` depend on artifacts only the
+Makefile knows how to produce. Unset, nothing is embedded, a plain `cargo
+build` works with no setup, and the host falls back to looking beside the
+executable.
+
+Unpacking goes to the per-user cache — XDG on Unix, local app data on
+Windows — in a directory named after a hash of the bundle's contents, so
+an upgrade never reuses the previous version's binaries. A helper already
+there with the right length is used as it stands, so the common path
+never inflates anything. Writes go
+through a temporary file and a rename, because two Schist windows can
+unpack the same helper at the same moment; the worst case is redundant
+work rather than a half-written binary. A helper already there with the
+right length is left alone.
+
+Where a helper is looked for, in order: an explicit `helper_dir` in
+`RemoteOptions`, taken at its word and not second-guessed; then beside
+the executable, which is where a package shipping them loose puts them;
+then unpacked from the bundle.
+
+One trap worth knowing about. The payload is `#[used]`, because without
+it the optimiser is entirely within its rights to notice that a binary
+which only ever reads the helper *names* never touches the bytes, fold
+the names into constants, and drop the rest. A thin-LTO release build was
+measured doing exactly that — the app came out byte-identical to one
+built with no bundle at all. With `#[used]` it grows by the 5.7 MB the
+two helpers actually weigh.
+
+The orchestration is deliberately **not a `build.rs`** driving cargo: a
+build script that shells out to cargo re-enters a cargo already holding
+the lock on `target/`, and blocks until it gives up. The build script that
+does exist only reads files somebody else has already produced.
+
+`make release` hands the staged directory to the platform's existing
+packaging script, which runs its own cargo build and picks the bundle up
+from the environment — so the AppImage, the `.app` and the NSIS installer
+all carry the helpers without any change to those scripts.
+
+A missing helper is reported rather than guessed at: `RemoteError::NoHelper`
+says which directory it looked in.
+
+## Reaching the editor
+
+A plug-in is only useful once it is in a menu. `manager.rs` — behind the
+crate's `registry` feature, so the cross-compiled helper never builds the
+editor's plugin API — scans the plug-in folders and hands what it finds to
+the same `PluginRegistry` a first-party filter registers with. Everything
+downstream follows from that: the Filter menu, the Filter Gallery and the
+MCP server all read the registry and need no knowledge of `.8bf` at all.
+
+Plug-ins load from `<config>/schist/photoshop-plugins` — XDG on Unix,
+local app data on Windows — plus every folder named in `SCHIST_8BF_PATH`,
+separated the way the platform separates `PATH`. The environment variable
+matters because people who own these plug-ins already keep them in a
+folder belonging to some other host, and copying is not the only
+reasonable answer. File ▸ Plugins… installs into the first folder;
+`disabled.txt` beside them lists what the user switched off, and only the
+first folder is ever written to, since the others may not be ours.
+
+Each filter becomes one registry entry, id `8bf.<file>.<entry point>`,
+named and categorised from its PiPL. The category goes straight into the
+Filter menu, merging with a built-in group of the same name — a plug-in
+declaring "Blur" lands beside the other blurs, which is what Photoshop
+does and what vendors choose their category expecting. It is also what
+the menu can actually show: it nests one level, and a submenu inside a
+submenu cannot be reached with the pointer.
+
+**Only what can run here is registered.** `remote::readiness` is asked
+once per plug-in during the scan — the architecture is runnable, Wine is
+installed if it is needed, and the helper for it exists — and anything
+that fails is listed in the manager with the reason instead of being
+offered. "Install Wine" is a better answer than a menu entry that fails
+when clicked. Readiness does not *unpack* a carried helper, only notice
+that it is carried: a folder scan has no business writing to the cache.
+
+Two hosts, one difference. A `.8bf` publishes no parameter list — its own
+dialog is its entire UI — so the app runs it with `show_dialog` on and
+the MCP server runs it off, where nobody could dismiss one. That is what
+`manager::Interactive` selects, and it is the only thing the two callers
+disagree about. Over MCP the plug-ins appear in `describe filters` like
+any other, and `describe photoshop_plugins` reports the folders scanned,
+each plug-in's architecture, and why anything unavailable is unavailable.
+
+**Settings survive between runs.** The descriptor suites are null, so
+nothing records through them — but plug-ins fall back to the `parameters`
+handle, and that does work. The helper reads whatever the plug-in left
+there and sends it back; the next run installs it before the first
+selector. That is what makes a plug-in's dialog open on what you last
+chose, and what makes a second silent run over MCP repeat the first. The
+bytes are the plug-in's own structure and are never interpreted. Only a
+run that applied updates them: Last Filter replays the last settings that
+landed, not the last a cancelled dialog saw.
+
+**A plug-in never blocks the window.** `FilterPlugin::runs_out_of_process`
+marks a filter whose `apply` waits on something outside this process, and
+the app runs those on a background thread behind a modal that holds the
+document still — a filter dialog is open for as long as someone takes to
+answer it, and a frozen window is not the right way to say so. The same
+flag keeps them out of the Filter Gallery, which is a live-preview stack:
+previewing a Photoshop plug-in means launching a helper and raising its
+dialog, which is not something to do per keystroke. They appear in the
+Filter menu, as they do in Photoshop.
+
+Because the helper can fail where an ordinary filter cannot — a crash, a
+refusal, a dialog the user cancelled — `FilterPlugin::last_error` reports
+what went wrong, and both hosts decline to record an edit when it is set.
+The alternative is a history entry that undoes nothing and a report that
+the filter was applied when it was not.
+
+## The pieces
+
+```
+crates/plugin-host-8bf
+├── pe.rs       PE/COFF resource walk — pure bytes, no OS calls
+├── pipl.rs     property list parsing, both byte orders
+├── abi.rs      FilterRecord and the selector/mode/case constants
+├── suites.rs   the handle, buffer and PICA-basic callbacks
+└── host.rs     the selector sequence, advanceState, pixel marshalling
+```
+
+A PiPL that overstates its property count is read as far as it goes
+rather than refused: shipping plug-ins do it, and everything that
+matters is in the part that parses.
+
+Discovery is host-independent: `pe.rs` and `pipl.rs` are byte parsers, so
+a Linux build can list a folder of Windows plug-ins, print what each one
+declares, and say exactly why it cannot run it. Only `Filter::open`
+needs the platform to match.
+
+```sh
+cargo run -p schist-plugin-host-8bf --example 8bf -- inspect ~/Plug-Ins
+cargo run -p schist-plugin-host-8bf --example 8bf -- apply Twirl.8bf in.ppm out.ppm
+```
+
+```
+Schist > Invert
+  file      /tmp/Invert.8bf
+  machine   x86-64
+  interface 4.0
+  code      [Win64X86]
+  enable    in(PSHOP_ImageMode, RGBMode, GrayScaleMode)
+  BLOCKED   needs Wine installed (https://www.winehq.org)
+```
+
+### The pixel loop
+
+`advanceState` and the `Continue` loop are the same operation seen from
+two sides — commit the last output, hand over the next input — so
+`Session::advance` serves both. A plug-in that uses `advanceState` does
+all its work inside `Start` and never sees a `Continue`; one that does
+not leaves rectangles behind and the host services them between calls.
+Either way the last output is committed after the loop, because the host
+writes back a region only when the plug-in asks for a different one.
+
+Images come in as 8-bit interleaved planes and go back the same way.
+`inColumnBytes`/`inPlaneBytes` are set explicitly rather than left zero,
+because the API Guide says a zero there means "the host has not set it".
+
+### The dialog
+
+Filters draw their own modal dialogs with raw Win32 and expect a live
+native event loop. `platformData` does not carry the window handle: it
+points at a `PlatformData` whose first member is the `HWND`. Passing the
+handle itself makes a plug-in fault reading at the handle's own numeric
+value, which is how that was pinned down.
+
+This does work off Windows, which was a surprise. Cross-compiling the
+host to `x86_64-pc-windows-gnu` and running it under Wine on a headless
+Xvfb display gets a real plug-in's real dialog on screen, and `xdotool`
+can drive it. `tools/verify-8bf.sh` does exactly that.
+
+### Padding
+
+A plug-in may ask for a region that overhangs the image, and says in
+`inputPadding` what it wants there: Adobe documents 0..=255 as a literal
+fill value and names three other modes without ever printing their
+numbers. Rather than guess, this host fills for 0..=255 and replicates
+the edge for anything else — which satisfies `plugInWantsEdgeReplication`
+outright, is a valid answer to `plugInDoesNotWantPadding` ("leave the
+data random"), and is more useful than the error the third mode asks for,
+which exists only because older hosts could not serve the region at all.
+So the constants are recorded and not depended on, and a mode the host
+has never seen still comes back with real pixels.
+
+### Tracing
+
+`SCHIST_8BF_TRACE=1` logs every selector call, every host callback the
+plug-in makes, and every rectangle the host serves, with arguments:
+
+```
+[8bf] -> selector 3
+[8bf] pica.acquire_suite("Photoshop Handle Suite for Plug-ins", 2)
+[8bf] handle.new(1)
+[8bf] handle.lock(0x7ffffea99490)
+[8bf] handle.set_size(0x7ffffea99490, 129)
+```
+
+This is the only way to see what an uncooperative plug-in is asking for.
+`SCHIST_8BF_BUFPROBE=1` goes further and replaces the buffer suite with
+one interchangeable probe per slot, which is how that suite's member
+order was established — a wrong order shows up as a call whose arguments
+make no sense for the slot it landed on.
+
+## What it does not do
+
+- **The descriptor / scripting suites.** `descriptorParameters` is
+  provided, because plug-ins write through it without checking, but both
+  sub-suites are null, so nothing records or plays back. The routines are
+  written and tested in `descriptor.rs`; serving them needs a member
+  order the API Guide does not give. `AcquireSuite` reports "not found"
+  for what is left, which is what makes a plug-in take its compatible
+  path instead of misreading a zero.
+- **Format, automation, selection and parser modules.** Filters only.
+  `FormatRecord` is not in the API Guide — its contents run from Filter
+  Modules straight to Selection Modules — so there is nothing to write
+  one from.
+- **Some callback suites.** PseudoResource, Image Services and Channel
+  Ports are still null. `docs/8bf-abi-provenance.md` tracks what asks for
+  them and why Channel Ports in particular cannot be written from the
+  published prose.
+
+### Previews
+
+A filter with a preview pane builds a `PSPixelMap` over its own working
+pixels and asks the *host* to draw them — the host owns colour
+management, so it is the one that knows how. `crates/plugin-host-8bf/src/display.rs`
+reads the map (honouring `rowBytes`/`colBytes`/`planeBytes`, so planar
+and interleaved layouts both work, and undoing any matte so transparent
+edges do not show the colour they were composited against) and blits it
+with `StretchDIBits`. Modes it cannot draw are refused rather than drawn
+wrong, which is what the API Guide means by "Nonsuccess is generally due
+to unsupported color modes".
+
+This is not optional. Every FilterMeister-built plug-in checks for it and
+refuses to run without it — "This plug-in requires Adobe Photoshop 2.5.2
+or later functionality" — and FilterMeister is what a great deal of the
+freeware world is built with.
+
+Unlike `FilterRecord`, `PSPixelMap` is naturally aligned.
+
+### Depth
+
+8-, 16- and 32-bit images all go through, as grayscale or RGB — six
+modes in all, since Photoshop treats each depth as a different mode
+rather than as an attribute of one.
+
+**16-bit runs 0..=32768, not 0..=65535.** Photoshop's range spans 32769
+values so that half-way is exactly representable, and a host that hands
+over 65535-scaled data gives a plug-in colours twice as bright as
+intended across the whole top half. `Depth::Sixteen` says so and the
+fixture inverts about 32768 to prove it. Previews scale the same way,
+and 32-bit float previews clamp at 1.0 because scene-referred values
+above white have nowhere else to go.
+
+One thing this taught: a plug-in that supports 16-bit may not say so in
+its `'mode'` flags. G'MIC declares only Grayscale and RGB there and
+handles depth through `'enbl'`'s `PSHOP_ImageDepth` test instead. So only
+the *base* mode is grounds for refusal; a missing deep-mode flag is not.
+
+### Layers and selections
+
+A trailing plane is transparency, not colour: four planes is RGB plus
+alpha, two is grayscale plus alpha. A layer is offered as the editable
+transparency case, and if the plug-in says it cannot filter that, the
+protected case, and failing that as a flat image — losing the
+transparency but running, which is what Adobe describes and beats
+refusing.
+
+A selection arrives as one byte per pixel, 255 meaning fully selected,
+and is handed to the plug-in as mask data for whatever rectangle it asks
+for. `autoMask` is the host's job: the plug-in filters the whole
+rectangle and the host blends the result back through the selection, so
+a half-selected pixel moves half way rather than being switched. A
+plug-in that wants to do its own masking turns `autoMask` off and the
+host stops.
+
+Adobe's table says of mask data "0=no mask (selected) and 255=masked
+(not selected)", which contradicts the rest of the same page and what
+Photoshop does. It is coverage: 255 is selected.
+
+### Colour services
+
+Plug-ins ask the host to convert between colour spaces, because in
+Photoshop the host is the one holding the document's profile.
+`crates/plugin-host-8bf/src/color.rs` converts between RGB, HSB, HSL,
+CMYK, Lab, XYZ and greyscale in Adobe's component ranges — one of which
+is a trap, since **CMYK is stored inverted**, 0 meaning 100% ink.
+
+There is no colour management here yet, so RGB, HSB, HSL and greyscale
+are exact and CMYK, Lab and XYZ are textbook sRGB/D65 approximations of
+what a profile would give. Worth knowing before trusting a CMYK number
+that came back through this.
+
+The host also answers "what is the foreground colour" and "what is the
+pixel at this point", and refuses to choose a colour, since that wants a
+picker this crate has no UI for — which lets a plug-in fall back to its
+own.
+
+### Document properties
+
+A plug-in asks the host about the document through the Property suite —
+how many channels, what they are called, the ruler units, the grid. This
+host answers what it honestly knows and returns
+`errPlugInPropertyUndefined` for the rest, including the serial number,
+which plug-ins ask for to implement copy protection: inventing one would
+be answering a question about a Photoshop licence that does not exist.
+A plug-in can act on "I don't know" and cannot act on a plausible lie.
+
+### Loading
+
+A plug-in is loaded with `LOAD_WITH_ALTERED_SEARCH_PATH` over a
+canonicalised path, so DLLs sitting beside it resolve. Plug-ins ship
+helper libraries in their own folder as a matter of course — an FFT
+filter next to its FFTW build, say — and Windows does not search a
+module's own directory when loading it. Without the flag those plug-ins
+fail at `LoadLibraryExW` with nothing to explain why.
+
+### Suites
+
+`handleProcs` and `bufferProcs` are implemented; `sSPBasic` serves the
+PICA handle and buffer suites by name and reports every other suite
+absent, which is what makes a plug-in take its compatible path instead of
+misreading a zero. Both PICA suites exist because a real plug-in asked
+for them by name, not on spec. Everything else — PseudoResource, Property, Image Services,
+Channel Ports, the descriptor sub-suites — is null, the documented way to
+say "unavailable".
+
+Member order inside a suite is the one thing Adobe never prints — and it
+cannot be inferred from the order the prose introduces the routines in.
+The Handle suite's narrative order happens to match its struct order; the
+Buffer suite's does not, and assuming otherwise put a wrong order in this
+host for a commit. Both are now established the same way, separately: by
+handing a real plug-in one interchangeable probe per slot and reading
+which slot received arguments shaped like which routine. See
+`SCHIST_8BF_BUFPROBE` and the note in `docs/8bf-abi-provenance.md`.
+
+### Packing
+
+`FilterRecord` is `#[repr(C, packed(4))]`: 560 bytes, with a pointer
+following an `int32` and no hole between them. This is not what a naive
+reading of the declaration gives you. Natural alignment inserts 4-byte
+holes before `inData` and before `outData`, and by `platformData` the
+record is 8 bytes too long — far enough that a real plug-in reads a
+pointer out of the middle of the monitor record and faults on whatever
+happens to be there. That was the single most expensive thing to find and
+the single most important thing to get right.
+
+The callback suites are the opposite: **not** packed. Both plug-ins drove
+a naturally aligned `HandleProcs` correctly, and packing it segfaults
+immediately. Different headers, different pragmas.
+
+## Testing
+
+The fixture is a C plug-in, `tests/fixtures/plugin.c`, compiled at test
+time. Writing it in C is the point: it declares `FilterRecord`
+independently and exports its own `offsetof` table, so `tests/layout.rs`
+can check that Rust and a C compiler agree on the same 560-byte record,
+field for field. It also carries the packing asymmetry — `#pragma
+pack(push, 4)` around the record and nothing else — so a regression in
+either direction fails a test rather than a plug-in.
+
+`tests/pipl.rs` links a real x86-64 Windows DLL with mingw-w64, carrying
+a PiPL resource built by the same code path a plug-in author's would use,
+and walks it back out. `tests/run.rs` drives both entry points — one
+using `advanceState`, one using the `Continue` loop — over a gradient and
+checks every byte, including the partial tiles at the right and bottom
+edges.
+
+None of that involves Adobe, so `tools/verify-8bf.sh` does: it downloads
+Filter Foundry and G'MIC-Qt, cross-compiles the host to both Windows
+targets, and runs them under Wine.
+
+- G'MIC has to get through `Prepare`, use the handle suite and call
+  `advanceState`.
+- The about selector has to return without faulting.
+- Filter Foundry has to open its dialog, accept `255-r` typed into all
+  three channel fields, and come back with every output channel equal to
+  255 minus the input's red — on the 64-bit host, and again with the
+  32-bit host driving the 32-bit build of the plug-in.
+- Serving the PICA handle suite has to make the plug-in acquire, use and
+  release it.
+
+- A plug-in that ships a helper DLL beside it has to load at all, which
+  is what guards the search-path flag.
+- Two FilterMeister builds have to get past their capability check and
+  draw a preview, which is what guards `displayPixels`.
+- Adobe's own Dissolve has to dissolve, its ColorMunger has to reach
+  `colorServices`, and its Propetizer has to walk the property table
+  without faulting.
+
+Only the shipped binaries are used; no project's source is read. Three
+families are covered: Filter Foundry, G'MIC-Qt, and a set of Fourier
+transforms whose only job here is to depend on a sibling DLL.
+
+Tests that need a toolchain skip with a printed reason rather than
+failing, but a toolchain that is *present and broken* is a hard failure:
+a silent skip that reads as a pass is worse than no test.
+
+## Provenance
+
+Everything was derived from Adobe's published prose documentation, not
+from the Photoshop SDK headers, which are licensed and are not vendored
+here. [`8bf-abi-provenance.md`](8bf-abi-provenance.md) lists every ABI
+fact and where it came from.
+
+Twelve of them the prose did not pin down. All but one are now settled —
+by running two real plug-ins as black boxes and watching where they read,
+what they called and where they faulted, and by reading the suite headers
+in chapter 3 more carefully. That closed the packing question, the suite
+member orders, the selector numbers, the image-mode ordinals, the
+`'mode'` flag set's bit order (which was backwards, and was making this
+host refuse plug-ins that were willing to run), the `platformData`
+indirection, the `AboutRecord`, the 32-bit path, and the two-byte prelude
+on a Windows PiPL resource. Two more were closed by making a wrong guess
+harmless rather than by guessing better — see the padding note above.
+
+What remains is `SPBasicSuite` past its first two members, which the
+guide documents nowhere and neither plug-in called.

@@ -439,4 +439,26 @@ pub trait FilterPlugin: Send + Sync {
     fn info(&self) -> Option<String> {
         None
     }
+
+    /// Whether `apply` blocks on something outside this process — a
+    /// helper, a dialog someone has to answer, a network call. A host
+    /// with a UI thread should run these off it; one without can ignore
+    /// this. Filters that own their pixels return `false` and are run
+    /// inline, which is both faster and what every caller already
+    /// expected.
+    fn runs_out_of_process(&self) -> bool {
+        false
+    }
+
+    /// Why the last [`FilterPlugin::apply`] did nothing, if it did
+    /// nothing. `apply` has no return value because a filter that owns
+    /// its pixels cannot fail -- but one that hands them to a separate
+    /// process can, and a host that recorded "applied" for a run the
+    /// user cancelled would be lying to them.
+    ///
+    /// Checked immediately after `apply`, so an implementation only has
+    /// to remember the most recent run.
+    fn last_error(&self) -> Option<String> {
+        None
+    }
 }

@@ -49,6 +49,39 @@ jobs:
             libxkbcommon-x11-dev libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev \
             clang mold
+          # Links the Photoshop plug-in helpers, which are Windows
+          # binaries even when Schist itself is not.
+          sudo apt-get install -y gcc-mingw-w64
+
+      # The .8bf helpers are binaries for the architectures a plug-in may
+      # be built for, so they cannot come out of the same cargo build as
+      # the app. They are staged first and carried inside it; every later
+      # cargo build here, including the ones inside the packaging scripts,
+      # reads SCHIST_BUNDLED_HELPERS and embeds them.
+      - name: Stage the plug-in helpers
+        if: runner.os != 'Windows'
+        run: |
+          make install-helpers DESTDIR="$PWD/target/helper-bundle/release" PROFILE=release
+          echo "SCHIST_BUNDLED_HELPERS=$PWD/target/helper-bundle/release" >> "$GITHUB_ENV"
+
+      # Without make: MSYS make would hand build.rs a /d/a/... path that a
+      # native Windows build cannot open. The two names here are the same
+      # ones the Makefile uses, and `Helper::file_name` pins both.
+      - name: Stage the plug-in helpers (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "$PWD/target/helper-bundle/release"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          foreach ($h in @(
+            @{ target = 'x86_64-pc-windows-msvc'; name = 'schist-8bf-helper-x86_64.exe' },
+            @{ target = 'i686-pc-windows-msvc';   name = 'schist-8bf-helper-x86.exe' })) {
+            rustup target add $h.target
+            cargo build --release -p schist-plugin-host-8bf --bin schist-8bf-helper --target $h.target
+            if ($LASTEXITCODE -ne 0) { throw "helper $($h.target) failed to build" }
+            Copy-Item "target/$($h.target)/release/schist-8bf-helper.exe" "$stage/$($h.name)"
+          }
+          "SCHIST_BUNDLED_HELPERS=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build
         # The MCP server ships next to the app, so it is built in the same

@@ -25,7 +25,10 @@ sudo apt-get install build-essential pkg-config libfontconfig-dev \
 cargo run --release -p schist-app -- [file.psd|file.png|…]
 ```
 
-`cargo test --workspace` runs everything. Packaging scripts for macOS,
+`cargo test --workspace` runs everything. `make helpers` cross-compiles
+the Photoshop plug-in helpers, which are separate binaries for the
+architectures a `.8bf` plug-in might be built for — see
+[docs/8bf-host.md](docs/8bf-host.md#building-the-helpers). Packaging scripts for macOS,
 Windows and Linux live in [packaging/](packaging); tagging `vX.Y.Z` builds
 them all in CI, signing and notarizing the macOS bundle when the
 [signing secrets](docs/versioning.md#signing-secrets) are set. All three

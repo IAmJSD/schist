@@ -220,6 +220,9 @@ pub struct Workspace {
     pub default_action: Option<crate::ui::DialogAction>,
     /// Third-party plugin registry state.
     pub plugins: schist_plugin_host_wasm::PluginManager,
+    /// Discovered Photoshop plug-ins, including the ones this machine
+    /// cannot run — the manager lists those with the reason.
+    pub photoshop_plugins: schist_plugin_host_8bf::manager::PluginManager,
     /// Plugin enable/disable requested from the manager UI, applied on the
     /// next render pass (the checkbox callback has no context to do it).
     pub pending_plugin_toggle: Option<(String, bool)>,
@@ -601,6 +604,11 @@ pub enum Modal {
         params: Box<schist_adjustments::Params>,
         preview: bool,
     },
+    /// A filter running outside this process — a Photoshop plug-in, whose
+    /// own dialog is where the interaction is happening. Carries no
+    /// controls: it exists to hold the document still until the plug-in
+    /// is done, and closes itself when it is.
+    FilterRunning { name: String },
     /// Filter ▸ Filter Gallery: a stack of filters applied in order.
     FilterGallery {
         /// Applied bottom to top, as in Photoshop's stack.
@@ -775,6 +783,7 @@ impl Workspace {
     pub fn new(
         registry: PluginRegistry,
         plugins: schist_plugin_host_wasm::PluginManager,
+        photoshop_plugins: schist_plugin_host_8bf::manager::PluginManager,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut ws = Workspace {
@@ -834,6 +843,7 @@ impl Workspace {
             field_fresh: false,
             default_action: None,
             plugins,
+            photoshop_plugins,
             pending_plugin_toggle: None,
             view: load_view_options(),
             preferences_snapshot: None,
@@ -2592,7 +2602,7 @@ impl Workspace {
             .registry
             .filters()
             .find(|f| f.category() == "Stylize")
-            .or_else(|| self.registry.filters().next());
+            .or_else(|| self.registry.filters().find(|f| !f.runs_out_of_process()));
         let stack = first
             .map(|f| {
                 vec![GalleryEntry {
@@ -4168,6 +4178,7 @@ impl Workspace {
             }
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
+            | Modal::FilterRunning { .. }
             | Modal::ConfirmCloseTab
             | Modal::DropImage { .. }
             | Modal::HeifSupport { .. }
@@ -4257,6 +4268,12 @@ impl Workspace {
             self.focused_field = None;
             self.field_buffer.clear();
             cx.notify();
+            return;
+        }
+        // Not this one: the run is not ours to cancel, and dropping the
+        // overlay would let the document be edited underneath a filter
+        // that is about to write to it.
+        if matches!(self.modal, Some(Modal::FilterRunning { .. })) {
             return;
         }
         if self.modal.is_some() {
@@ -5181,12 +5198,87 @@ impl Workspace {
             self.status = "Filter went away".into();
             return;
         };
+        // A filter that runs outside this process blocks for as long as
+        // its own dialog is open — which is until someone answers it. Run
+        // it on a background thread so the window keeps painting, behind
+        // a modal that holds the document still meanwhile.
+        if filter.runs_out_of_process() {
+            let Some(filter) = self.registry.shared_filter(id) else {
+                return;
+            };
+            let values = values.clone();
+            let (w, h) = (region.width() as usize, region.height() as usize);
+            self.open_modal(Modal::FilterRunning { name: name.clone() }, cx);
+            cx.spawn(async move |this, cx| {
+                let (buf, failure) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        filter.apply(&mut buf, w, h, &values);
+                        let failure = filter.last_error();
+                        (buf, failure)
+                    })
+                    .await;
+                this.update(cx, |ws, cx| {
+                    ws.modal = None;
+                    ws.finish_external_filter(layer_id, region, original, buf, name, failure, cx);
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         filter.apply(
             &mut buf,
             region.width() as usize,
             region.height() as usize,
             values,
         );
+        // A Photoshop plug-in runs in another process and can refuse, or
+        // be cancelled from its own dialog. Recording an edit for a run
+        // that did nothing would put an entry in the history that undoes
+        // nothing.
+        if let Some(err) = filter.last_error() {
+            self.status = format!("{name}: {err}").into();
+            cx.notify();
+            return;
+        }
+        self.write_region(layer_id, region, &original, &buf, &name, true);
+        self.status = name.into();
+        self.after_change(cx);
+    }
+
+    /// Land the result of a filter that ran off the main thread.
+    ///
+    /// The layer is looked up again rather than assumed: the run took as
+    /// long as someone took to answer a dialog, and the document it
+    /// started against may not be the one in front of us now.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_external_filter(
+        &mut self,
+        layer_id: schist_core::LayerId,
+        region: IntRect,
+        original: Vec<f32>,
+        buf: Vec<f32>,
+        name: String,
+        failure: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(err) = failure {
+            self.status = format!("{name}: {err}").into();
+            cx.notify();
+            return;
+        }
+        let still_there = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.tree.find(layer_id))
+            .and_then(|l| l.as_raster())
+            .is_some();
+        if !still_there {
+            self.status = format!("{name}: the layer it filtered is gone").into();
+            cx.notify();
+            return;
+        }
         self.write_region(layer_id, region, &original, &buf, &name, true);
         self.status = name.into();
         self.after_change(cx);
@@ -5389,8 +5481,23 @@ impl Workspace {
         self.open_modal(Modal::MissingFonts { fonts }, cx);
     }
 
-    /// Enable or disable a third-party plugin.
+    /// Enable or disable a third-party plugin. The id says which host it
+    /// belongs to: Photoshop plug-ins are the ones the 8BF host found.
     pub fn set_plugin_enabled(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
+        if id.starts_with("8bf.") {
+            let Some(dir) = schist_plugin_host_8bf::manager::PluginManager::plugin_dir() else {
+                return;
+            };
+            self.photoshop_plugins.set_enabled(&id, enabled, &dir);
+            self.status = format!(
+                "{} {} — restart to apply",
+                id,
+                if enabled { "enabled" } else { "disabled" }
+            )
+            .into();
+            cx.notify();
+            return;
+        }
         let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
             return;
         };
@@ -5404,14 +5511,38 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Install a plugin file into the plugin directory.
+    /// Install a plugin file into the plugin directory. A `.8bf` or a
+    /// `.plugin` bundle goes to the Photoshop folder, anything else to
+    /// the WebAssembly one, so one Install button serves both.
     pub fn install_plugin(&mut self, source: PathBuf, cx: &mut Context<Self>) {
-        let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
-            return;
-        };
-        self.status = match schist_plugin_host_wasm::PluginManager::install(&source, &dir) {
-            Ok(path) => format!("Installed {} — restart to load", path.display()).into(),
-            Err(err) => format!("Plugin rejected: {err}").into(),
+        let photoshop = source
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| {
+                schist_plugin_host_8bf::FILTER_EXTENSIONS
+                    .iter()
+                    .any(|w| e.eq_ignore_ascii_case(w))
+            });
+        self.status = if photoshop {
+            match schist_plugin_host_8bf::manager::PluginManager::plugin_dir() {
+                Some(dir) => {
+                    match schist_plugin_host_8bf::manager::PluginManager::install(&source, &dir) {
+                        Ok(path) => {
+                            format!("Installed {} — restart to load", path.display()).into()
+                        }
+                        Err(err) => format!("Plug-in rejected: {err}").into(),
+                    }
+                }
+                None => return,
+            }
+        } else {
+            let Some(dir) = schist_plugin_host_wasm::PluginManager::plugin_dir() else {
+                return;
+            };
+            match schist_plugin_host_wasm::PluginManager::install(&source, &dir) {
+                Ok(path) => format!("Installed {} — restart to load", path.display()).into(),
+                Err(err) => format!("Plugin rejected: {err}").into(),
+            }
         };
         cx.notify();
     }
