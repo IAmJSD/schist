@@ -15,7 +15,7 @@ the editor.
 crate-type = ["cdylib"]
 
 [dependencies]
-schist-plugin-sdk = { git = "https://github.com/IAmJSD/schist" }
+schist-plugin-sdk = { git = "https://github.com/Infrawrench/schist" }
 serde_json = "1"
 ```
 

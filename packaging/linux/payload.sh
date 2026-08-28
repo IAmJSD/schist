@@ -23,12 +23,12 @@ stage_payload() {
     # The desktop entry looks its icon up by the Icon= key, so the file has
     # to carry the app ID as its name rather than the source's.
     install -Dm644 "$payload_dir/schist.png" \
-        "$dest/usr/share/icons/hicolor/256x256/apps/place.astrid.schist.png"
+        "$dest/usr/share/icons/hicolor/256x256/apps/com.infrawrench.schist.png"
     # The Affinity MIME types the desktop entry names; without them the
     # entry associates with nothing. update-mime-database compiles them at
     # install time.
-    install -Dm644 "$payload_dir/place.astrid.schist.mime.xml" \
-        "$dest/usr/share/mime/packages/place.astrid.schist.xml"
+    install -Dm644 "$payload_dir/com.infrawrench.schist.mime.xml" \
+        "$dest/usr/share/mime/packages/com.infrawrench.schist.xml"
     install -Dm644 "$payload_root/LICENSE" \
         "$dest/usr/share/licenses/schist/LICENSE"
 }

@@ -123,8 +123,8 @@ pub fn current_version() -> &'static str {
 }
 
 /// Where releases are published.
-const RELEASES_API: &str = "https://api.github.com/repos/IAmJSD/schist/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/IAmJSD/schist/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/Infrawrench/schist/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/Infrawrench/schist/releases";
 
 /// The outcome of an update check.
 #[derive(Debug, Clone, PartialEq)]

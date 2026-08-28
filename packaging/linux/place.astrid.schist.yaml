@@ -1,6 +1,6 @@
 # Flatpak manifest. Build with:
-#   flatpak-builder --user --install build packaging/linux/place.astrid.schist.yaml
-app-id: place.astrid.schist
+#   flatpak-builder --user --install build packaging/linux/com.infrawrench.schist.yaml
+app-id: com.infrawrench.schist
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
@@ -26,11 +26,11 @@ modules:
       - cargo --offline build --release -p schist-app
       - install -Dm755 target/release/schist /app/bin/schist
       - install -Dm644 packaging/linux/schist.desktop
-          /app/share/applications/place.astrid.schist.desktop
-      - install -Dm644 packaging/linux/place.astrid.schist.mime.xml
-          /app/share/mime/packages/place.astrid.schist.xml
+          /app/share/applications/com.infrawrench.schist.desktop
+      - install -Dm644 packaging/linux/com.infrawrench.schist.mime.xml
+          /app/share/mime/packages/com.infrawrench.schist.xml
       - install -Dm644 packaging/linux/schist.png
-          /app/share/icons/hicolor/256x256/apps/place.astrid.schist.png
+          /app/share/icons/hicolor/256x256/apps/com.infrawrench.schist.png
     sources:
       - type: dir
         path: ../..

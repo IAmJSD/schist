@@ -23,10 +23,10 @@ version="$payload_version"
 # version that has already shipped. The AUR PKGBUILD's pkgrel is its own.
 release=1
 summary="Layered image editor with PSD and Affinity support"
-url="https://github.com/IAmJSD/schist"
+url="https://github.com/Infrawrench/schist"
 # Both a .deb's Maintainer and a pacman package's packager want
 # "Name <email>", so there is no useful "unknown" to fall back to.
-packager="${PACKAGER:-Astrid <astrid@infrawrench.com>}"
+packager="${PACKAGER:-Infrawrench LLC <astrid@infrawrench.com>}"
 builddate="${SOURCE_DATE_EPOCH:-$(date +%s)}"
 
 machine="$(uname -m)"
@@ -173,8 +173,8 @@ cp -a %{payload}/. %{buildroot}/
 %license %{_datadir}/licenses/schist/LICENSE
 %{_bindir}/schist
 %{_datadir}/applications/schist.desktop
-%{_datadir}/icons/hicolor/256x256/apps/place.astrid.schist.png
-%{_datadir}/mime/packages/place.astrid.schist.xml
+%{_datadir}/icons/hicolor/256x256/apps/com.infrawrench.schist.png
+%{_datadir}/mime/packages/com.infrawrench.schist.xml
 
 %post
 update-desktop-database -q %{_datadir}/applications &>/dev/null || :

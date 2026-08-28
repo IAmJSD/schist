@@ -20,8 +20,8 @@ stage_payload "$appdir"
 # appimagetool reads the desktop entry from the AppDir root and looks the
 # icon up there by its Icon= key, so both are duplicated out of usr/.
 cp "$appdir/usr/share/applications/schist.desktop" "$appdir/schist.desktop"
-cp "$appdir/usr/share/icons/hicolor/256x256/apps/place.astrid.schist.png" \
-   "$appdir/place.astrid.schist.png"
+cp "$appdir/usr/share/icons/hicolor/256x256/apps/com.infrawrench.schist.png" \
+   "$appdir/com.infrawrench.schist.png"
 
 cat > "$appdir/AppRun" <<'RUN'
 #!/bin/sh

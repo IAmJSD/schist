@@ -1,10 +1,10 @@
-# Maintainer: Astrid <astrid@infrawrench.com>
+# Maintainer: Infrawrench LLC <astrid@infrawrench.com>
 pkgname=schist
 pkgver=0.7.1
 pkgrel=1
 pkgdesc="Layered image editor with PSD and Affinity support"
 arch=(x86_64 aarch64)
-url="https://github.com/IAmJSD/schist"
+url="https://github.com/Infrawrench/schist"
 license=(MIT)
 # fontconfig/wayland/vulkan-icd-loader are dlopen'd, so namcap flags them
 # "may not be needed" — they are.
@@ -36,10 +36,10 @@ package() {
   install -Dm755 target/release/schist "$pkgdir/usr/bin/schist"
   install -Dm644 packaging/linux/schist.desktop \
     "$pkgdir/usr/share/applications/schist.desktop"
-  # The desktop entry looks the icon up as its Icon= key, place.astrid.schist.
+  # The desktop entry looks the icon up as its Icon= key, com.infrawrench.schist.
   install -Dm644 packaging/linux/schist.png \
-    "$pkgdir/usr/share/icons/hicolor/256x256/apps/place.astrid.schist.png"
-  install -Dm644 packaging/linux/place.astrid.schist.mime.xml \
-    "$pkgdir/usr/share/mime/packages/place.astrid.schist.xml"
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/com.infrawrench.schist.png"
+  install -Dm644 packaging/linux/com.infrawrench.schist.mime.xml \
+    "$pkgdir/usr/share/mime/packages/com.infrawrench.schist.xml"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

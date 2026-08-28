@@ -116,7 +116,7 @@ _ = done.wait(timeout: .now() + 30)
 ```
 
 Each extension renders into its own sandbox container, so
-`~/Library/Containers/place.astrid.schist.quicklook-*/Data/tmp/schist-quicklook`
+`~/Library/Containers/com.infrawrench.schist.quicklook-*/Data/tmp/schist-quicklook`
 holds exactly the PNGs it handed Quick Look — the quickest way to see
 what a provider actually produced.
 
