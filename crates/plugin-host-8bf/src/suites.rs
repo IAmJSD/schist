@@ -452,6 +452,102 @@ pub const PICA_HANDLE_SUITE_NAME: &str = "Photoshop Handle Suite for Plug-ins";
 /// The only version documented, and so the only one served.
 pub const PICA_HANDLE_SUITE_VERSION: i32 = 1;
 
+// --- PICA buffer suite --------------------------------------------------
+//
+// The PICA twin of `BufferProcs`, and a different shape: it hands back
+// raw pointers rather than opaque ids, and asks for a size range rather
+// than a size. Order and count from API Guide chapter 4: "Suite PEA
+// Buffer suite. Current version: 1; Adobe Photoshop: 5.0; Routines: 4",
+// over New, Dispose, GetSize, GetSpace.
+//
+// Serving this is not speculative: a real plug-in asks for it by name.
+
+/// `Ptr (*BufferNewProc)(size_t *pRequestedSize, size_t minimumSize)`.
+pub type BufferNewProc = unsafe extern "C" fn(requested: *mut usize, minimum: usize) -> *mut u8;
+/// `void (*BufferDisposeProc)(Ptr *ppBuffer)`.
+pub type BufferDisposeProc = unsafe extern "C" fn(buffer: *mut *mut u8);
+/// `size_t (*BufferGetSizeProc)(Ptr pBuffer)`.
+pub type BufferGetSizeProc = unsafe extern "C" fn(buffer: *mut u8) -> usize;
+/// `size_t (*BufferGetSpaceProc)(void)`.
+pub type BufferGetSpaceProc = unsafe extern "C" fn() -> usize;
+
+#[repr(C)]
+pub struct PicaBufferSuite {
+    pub new_proc: Option<BufferNewProc>,
+    pub dispose_proc: Option<BufferDisposeProc>,
+    pub get_size_proc: Option<BufferGetSizeProc>,
+    pub get_space_proc: Option<BufferGetSpaceProc>,
+}
+
+// SAFETY: plain function pointers, immutable for the life of the process.
+unsafe impl Sync for PicaBufferSuite {}
+
+/// Allocate `*requested` bytes, or the largest amount above `minimum`
+/// that will fit, writing back what was actually taken. A null
+/// `requested` means "exactly `minimum`, or fail".
+pub(crate) unsafe extern "C" fn pica_buffer_new(requested: *mut usize, minimum: usize) -> *mut u8 {
+    let want = if requested.is_null() {
+        minimum
+    } else {
+        requested.read().max(minimum)
+    };
+    trace!("pica.buffer.new(requested={want}, minimum={minimum})");
+    let p = block_alloc(want);
+    if p.is_null() {
+        // The contract is to fall back to anything at or above the
+        // minimum before giving up.
+        if want > minimum {
+            let p = block_alloc(minimum);
+            if !p.is_null() {
+                if !requested.is_null() {
+                    requested.write(minimum);
+                }
+                return p;
+            }
+        }
+        return std::ptr::null_mut();
+    }
+    if !requested.is_null() {
+        requested.write(want);
+    }
+    p
+}
+
+pub(crate) unsafe extern "C" fn pica_buffer_dispose(buffer: *mut *mut u8) {
+    if buffer.is_null() {
+        return;
+    }
+    let p = buffer.read();
+    trace!("pica.buffer.dispose({p:p})");
+    // "Does nothing if the buffer pointer is already NULL", and sets the
+    // caller's variable to NULL afterwards.
+    if !p.is_null() {
+        block_free(p);
+        buffer.write(std::ptr::null_mut());
+    }
+}
+
+pub(crate) unsafe extern "C" fn pica_buffer_get_size(buffer: *mut u8) -> usize {
+    if buffer.is_null() {
+        return 0;
+    }
+    block_size(buffer)
+}
+
+pub(crate) unsafe extern "C" fn pica_buffer_get_space() -> usize {
+    REPORTED_BUFFER_SPACE as usize
+}
+
+static PICA_BUFFER_SUITE: PicaBufferSuite = PicaBufferSuite {
+    new_proc: Some(pica_buffer_new),
+    dispose_proc: Some(pica_buffer_dispose),
+    get_size_proc: Some(pica_buffer_get_size),
+    get_space_proc: Some(pica_buffer_get_space),
+};
+
+pub const PICA_BUFFER_SUITE_NAME: &str = "Photoshop Buffer Suite for Plug-ins";
+pub const PICA_BUFFER_SUITE_VERSION: i32 = 1;
+
 // --- PICA basic suite ---------------------------------------------------
 
 pub type AcquireSuiteProc =
@@ -493,6 +589,11 @@ pub(crate) unsafe extern "C" fn acquire_suite(
     if wanted == PICA_HANDLE_SUITE_NAME && version == PICA_HANDLE_SUITE_VERSION {
         suite.write(&PICA_HANDLE_SUITE as *const _ as *const c_void);
         trace!("   -> served the handle suite");
+        return NO_ERR as i32;
+    }
+    if wanted == PICA_BUFFER_SUITE_NAME && version == PICA_BUFFER_SUITE_VERSION {
+        suite.write(&PICA_BUFFER_SUITE as *const _ as *const c_void);
+        trace!("   -> served the buffer suite");
         return NO_ERR as i32;
     }
     // Everything else is genuinely absent, and saying so is what makes a
@@ -713,6 +814,40 @@ mod tests {
             let name = c"Photoshop Action Descriptor Suite";
             assert_eq!(acquire_suite(name.as_ptr(), 2, &mut suite), -1);
             assert!(suite.is_null());
+        }
+    }
+
+    #[test]
+    fn the_pica_buffer_suite_is_served_and_reports_what_it_gave() {
+        unsafe {
+            let name = c"Photoshop Buffer Suite for Plug-ins";
+            let mut suite: *const c_void = std::ptr::null();
+            assert_eq!(acquire_suite(name.as_ptr(), 1, &mut suite), 0);
+            let s = &*(suite as *const PicaBufferSuite);
+
+            // A null requested-size means "exactly the minimum".
+            let p = (s.new_proc.unwrap())(std::ptr::null_mut(), 512);
+            assert!(!p.is_null());
+            assert_eq!((s.get_size_proc.unwrap())(p), 512);
+            p.write_bytes(0x33, 512);
+            let mut held = p;
+            (s.dispose_proc.unwrap())(&mut held);
+            assert!(held.is_null(), "dispose must null the caller's pointer");
+
+            // Otherwise it takes what was asked for and says so.
+            let mut want = 4096usize;
+            let p = (s.new_proc.unwrap())(&mut want, 64);
+            assert!(!p.is_null());
+            assert_eq!(want, 4096);
+            assert_eq!((s.get_size_proc.unwrap())(p), 4096);
+            let mut held = p;
+            (s.dispose_proc.unwrap())(&mut held);
+
+            // Disposing an already-null pointer "does nothing".
+            let mut none: *mut u8 = std::ptr::null_mut();
+            (s.dispose_proc.unwrap())(&mut none);
+            assert_eq!((s.get_size_proc.unwrap())(std::ptr::null_mut()), 0);
+            assert!((s.get_space_proc.unwrap())() > 0);
         }
     }
 

@@ -54,6 +54,11 @@ Three families, fifteen binaries:
 - **Adobe's own SDK samples** (Dissolve with and without AppleScript,
   ColorMunger, Propetizer), 32-bit, recovered from an archive repository
 - **hayabuzo/Graphic-Filters**, eight 32-bit FilterMeister builds
+- **bognikol/Smart-Gradients**, 32- and 64-bit, a managed (.NET) plug-in
+- **pluginguy/plugins** (GREYCstoration, Unsharp Mask 2), 64-bit
+- **fersatgit/EscherTwist** and **Seam-Carving**, hand-written assembly,
+  32- and 64-bit — and the only things seen so far carrying *no* PiPL
+  resource at all, so this host cannot identify them
 
 Only the shipped **binaries** were used; no project's source was read, so
 the clean-room line holds. GitHub code search was used once, purely as an
@@ -92,7 +97,7 @@ all but one.
 | Fact | How it was settled |
 |---|---|
 | **`BufferProcs` version and routine count** — 2 and 5 | Chapter 3 heads each suite with both: "Buffer suite. Current version: 2; Adobe Photoshop: 5.0; Routines: 5" |
-| **`BufferProcs` member order** — Allocate, Lock, Unlock, Free, Space | Read off a real plug-in. G'MIC was handed five interchangeable probes, one per slot, each logging the arguments it received; slot 0 arrived with `(3072, <stack pointer>)`, and 3072 is exactly one plane of the image it was filtering — unmistakably `AllocateBufferProc(size, &buffer)`. With the order restored, G'MIC allocates, locks, writes three planes, unlocks and frees, and its output is correct. Corroborated since by a second, unrelated family: FilterMeister builds allocate the image size plus a few bytes, then lock, unlock and free the same buffer, and their output is right too |
+| **`BufferProcs` member order** — Allocate, Lock, Unlock, Free, Space | Read off a real plug-in. G'MIC was handed five interchangeable probes, one per slot, each logging the arguments it received; slot 0 arrived with `(3072, <stack pointer>)`, and 3072 is exactly one plane of the image it was filtering — unmistakably `AllocateBufferProc(size, &buffer)`. With the order restored, G'MIC allocates, locks, writes three planes, unlocks and frees, and its output is correct. Corroborated since by two more unrelated families: FilterMeister builds allocate the image size plus a few bytes then lock, unlock and free the same buffer, and Smart Gradients takes 80 KB and then 30 MB through it |
 | **`handleProcsVersion` = 1, `numHandleProcs` = 7** | The same suite headers, printed in the prose. The host had been claiming 8 |
 | **The API Guide's narrative order is *not* generally the struct order** | The Handle suite's prose order — New, Dispose, GetSize, SetSize, Lock, Unlock, RecoverSpace — happens to match what a plug-in was seen calling. Treating that single match as a rule and applying it to the Buffer suite put a **wrong order in this host for one commit**; the prose there runs Space, Allocate, Free, Lock, Unlock and the struct does not. Each suite's order has to be established on its own evidence. The Handle suite's is; the Buffer suite's now is too; neither licenses the other |
 | **The padding constants stopped mattering** | Rather than guess three numbers the prose never prints, the host fills for the documented 0..=255 and replicates the edge for anything else. Replication satisfies `plugInWantsEdgeReplication` outright, is a valid answer to `plugInDoesNotWantPadding` ("leave the data random"), and beats the error `plugInWantsErrorOnBoundsException` asks for, which exists only because older hosts could not serve the region. A fixture requests a rectangle overhanging every edge under a mode the host has never heard of and still gets usable pixels |
@@ -130,6 +135,28 @@ because the evidence is the interesting part.
 
 `displayPixels` and `colorServices` are done and described in
 `docs/8bf-host.md`. `propertyProcs` remains.
+
+## The PICA suites
+
+Plug-ins acquire these by name through `AcquireSuite`. Two are served:
+
+| Suite | Documented as | Asked for by |
+|---|---|---|
+| `Photoshop Handle Suite for Plug-ins` v1 | ch. 4, "version 1, routines 6", over New, Dispose, SetLock, GetSize, SetSize, RecoverSpace | Filter Foundry |
+| `Photoshop Buffer Suite for Plug-ins` v1 | ch. 4, "version 1, routines 4", over New, Dispose, GetSize, GetSpace | Smart Gradients |
+
+Both were implemented because a real plug-in asked, not on spec. The
+buffer one is a different shape from the `FilterRecord` suite of the same
+name: it hands back raw pointers rather than opaque ids, and takes a size
+*range* rather than a size.
+
+Still refused, and known to be wanted:
+
+- `Photoshop ChannelPorts Suite for Plug-ins` v3 — Smart Gradients asks
+  for it first and falls back when refused. Reading other channels is
+  stage 2 work.
+- A GUID-named suite, `61e608b0-40fd-11d1-8da3-00c04fd5f7ee` — both of
+  pluginguy's filters ask for it and carry on without it.
 
 ## Settling a suite's member order
 

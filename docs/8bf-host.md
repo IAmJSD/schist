@@ -206,9 +206,10 @@ fail at `LoadLibraryExW` with nothing to explain why.
 ### Suites
 
 `handleProcs` and `bufferProcs` are implemented; `sSPBasic` serves the
-PICA handle suite by name and reports every other suite absent, which is
-what makes a plug-in take its compatible path instead of misreading a
-zero. Everything else — PseudoResource, Property, Image Services,
+PICA handle and buffer suites by name and reports every other suite
+absent, which is what makes a plug-in take its compatible path instead of
+misreading a zero. Both PICA suites exist because a real plug-in asked
+for them by name, not on spec. Everything else — PseudoResource, Property, Image Services,
 Channel Ports, the descriptor sub-suites — is null, the documented way to
 say "unavailable".
 
