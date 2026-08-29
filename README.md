@@ -253,59 +253,6 @@ Remap anything in `~/.config/schist/keymap.json`:
   is a protocol of its own rather than an axis on the pointer, so binding
   it means synthesising the whole mouse event stream from the tool, tip
   and barrel buttons included. Reports from real hardware welcome.
-- **All fifteen of Photoshop's Neural Filters are here, twelve of them
-  run a network, and none of those networks are Adobe's.** Super Zoom,
-  JPEG Artifact Removal, Colorize, Photo Restoration and Sketch to
-  Portrait use models trained for this application — `tools/train/`,
-  between 39k and 466k parameters, shipped inside the binary because
-  they are small enough to be; the first two were fitted to the Kodak
-  suite, the colouriser to twenty thousand CC BY photographs from Open
-  Images, and the portrait network to sixteen thousand faces cut out of
-  them. Style Transfer uses the fast neural-style networks from the ONNX
-  Model Zoo, Depth Blur and Landscape Mixer use MiDaS, and Skin
-  Smoothing, Face to Caricature, Smart Portrait, Makeup Transfer and
-  Sketch to Portrait use UltraFace; those are somebody else's work and
-  run from one megabyte to sixty-six, so they are fetched on demand from
-  Filter ▸ Neural Filters ▸ Manage Models and checked against the hash
-  this build expects. Inference is
-  [`tract`](https://github.com/sonos/tract) — pure Rust, nothing to
-  install.
-
-  The three of Adobe's that are generative are the three where the gap
-  is worth stating plainly, because a generative model does not fit in a
-  filter and is not going to. **Smart Portrait** warps and relights
-  rather than redrawing: a smile is the corners of the mouth lifted,
-  surprise is the brows raised, age is skin texture added or taken away,
-  and the light comes off the surface the depth model measures. It works
-  on a face looking at the camera and falls apart on a profile, because
-  that is where its assumptions about where the features are stop
-  holding. **Makeup Transfer** moves colour, not texture, from a face on
-  the layer below — it will give you someone else's lipstick and
-  eyeshadow and not their eyeliner. **Sketch to Portrait** does not
-  invent a photograph; it was trained to invert *this build's own Photo
-  to Sketch*, which is a far smaller question, so it fills in a sketch
-  this application made and does something in the same spirit and rather
-  worse with a pencil drawing.
-
-  What each of the others is honest about differs. Colorize knows what
-  sky, foliage, wood and skin usually look like and is deliberately
-  cautious about anything whose colour is a choice, which reads as
-  desaturated rather than as wrong. Skin Smoothing's *smoothing* is
-  frequency separation, which is what a retoucher does by hand; the
-  network's job there is to say where the faces are, and it has opinions
-  about dogs.
-
-  Colour Transfer, Harmonization and Landscape Mixer need a second
-  picture, and the one a filter can be handed without a file picker is
-  the layer underneath: they take their reference from whatever the
-  document composites to below the layer being filtered, which is what
-  Photoshop's Harmonization asks you to pick by hand. Moving one colour
-  distribution onto another is arithmetic and that arithmetic is all
-  here; what Adobe's networks add is matching the two *by subject*, so
-  that a reference's sky lands on your sky. Landscape Mixer gets closest
-  to that by matching band by band through the depth model. Each filter
-  says in its own dialog which path it took, and the model-backed ones
-  fall back to a classical implementation rather than failing.
 - **Object Selection and Content-Aware Fill are heuristics**, not the
   models Photoshop uses — background sampling and diffusion inpainting
   respectively. They degrade predictably (blurry over texture) rather
