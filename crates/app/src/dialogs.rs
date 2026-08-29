@@ -21,10 +21,10 @@ fn step_dim(current: u32, delta: f32) -> u32 {
 
 /// Workspace state the dialog widgets read while rendering.
 #[derive(Clone)]
-struct DialogState {
-    open_popup: Option<Popup>,
-    focused_field: Option<&'static str>,
-    field_buffer: String,
+pub(crate) struct DialogState {
+    pub(crate) open_popup: Option<Popup>,
+    pub(crate) focused_field: Option<&'static str>,
+    pub(crate) field_buffer: String,
 }
 
 /// Render whichever modal is open, if any.
@@ -104,6 +104,8 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
         Modal::DropImage { path } => drop_image(path, cx).into_any_element(),
         Modal::HeifSupport { path } => heif_support(ws, path, cx).into_any_element(),
+        #[cfg(feature = "imagegen")]
+        Modal::ImageGen(dialog) => crate::imagegen::render(&state, *dialog, cx),
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
         Modal::ModelManager => model_manager(ws, cx).into_any_element(),
         Modal::MissingFonts { fonts } => missing_fonts(ws, &fonts, cx).into_any_element(),

@@ -63,8 +63,8 @@ const PREFETCH_TICK_MS: u64 = 30;
 /// is 256 KiB (twice that when colour-managed), so 2048 tiles bounds the
 /// prefetch at roughly 0.5-1 GiB -- a ~134 MP document end to end.
 const PREFETCH_TILE_BUDGET: usize = 2048;
-/// Where view preferences are stored.
-fn prefs_path() -> Option<PathBuf> {
+/// Schist's own directory under the user's configuration directory.
+pub(crate) fn config_dir() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
@@ -73,7 +73,12 @@ fn prefs_path() -> Option<PathBuf> {
                 .ok()
                 .map(|h| PathBuf::from(h).join(".config"))
         })?;
-    Some(base.join("schist/preferences.json"))
+    Some(base.join("schist"))
+}
+
+/// Where view preferences are stored.
+fn prefs_path() -> Option<PathBuf> {
+    Some(config_dir()?.join("preferences.json"))
 }
 
 pub(crate) fn load_view_options() -> ViewOptions {
@@ -97,6 +102,10 @@ struct DocTab {
 
 pub struct Workspace {
     pub registry: PluginRegistry,
+    /// The image-generation account, and whether it has been read yet.
+    /// Outlives the dialog, which is why it is not in the modal.
+    #[cfg(feature = "imagegen")]
+    pub imagegen: crate::imagegen::Session,
     pub editor: EditorState,
     pub doc: Option<Document>,
     /// The other open documents, in tab order with a gap at `active_tab`
@@ -650,6 +659,11 @@ pub enum Modal {
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
     HeifSupport { path: PathBuf },
+    /// File > Generate Images. Boxed because the provider's form, its
+    /// values and a generation's progress all ride inside it, and every
+    /// other variant would pay for the size.
+    #[cfg(feature = "imagegen")]
+    ImageGen(Box<crate::imagegen::Dialog>),
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -788,6 +802,8 @@ impl Workspace {
     ) -> Self {
         let mut ws = Workspace {
             registry,
+            #[cfg(feature = "imagegen")]
+            imagegen: crate::imagegen::Session::default(),
             editor: EditorState::default(),
             doc: None,
             background_tabs: Vec::new(),
@@ -4018,10 +4034,11 @@ impl Workspace {
             return false;
         };
         let fresh = std::mem::take(&mut self.field_fresh);
-        // Text fields (layer and document names) take any printable
-        // character; the picker's hex field takes hex digits up to a full
-        // triplet; numeric fields only digits.
-        let textual = id == "layer-name" || id == "new-doc-name";
+        // Text fields (layer and document names, and the generation
+        // dialog's "ig-" fields) take any printable character; the
+        // picker's hex field takes hex digits up to a full triplet;
+        // numeric fields only digits.
+        let textual = id == "layer-name" || id == "new-doc-name" || id.starts_with("ig-");
         let hex = id == "cp-hex";
         match key {
             "space" if textual => self.field_buffer.push(' '),
@@ -4070,6 +4087,10 @@ impl Workspace {
 
     fn commit_field_value(&mut self, id: &'static str) {
         let buffer = self.field_buffer.clone();
+        #[cfg(feature = "imagegen")]
+        if crate::imagegen::commit_field(self, id, buffer.clone()) {
+            return;
+        }
         if id == "layer-name" {
             self.update_modal(|m| {
                 if let Modal::LayerProperties { name, .. } = m {
@@ -4150,6 +4171,9 @@ impl Workspace {
                     *height = value as u32;
                 }
             }
+            // Its fields are text, and were taken before this point.
+            #[cfg(feature = "imagegen")]
+            Modal::ImageGen(_) => {}
             Modal::LayerProperties { name, .. } => {
                 if id == "layer-name" {
                     *name = buffer;

@@ -66,9 +66,8 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;
     vec![
-        (
-            "File",
-            vec![
+        ("File", {
+            let mut out = vec![
                 App("New", New, Some("cmd-n")),
                 App("Open…", Open, Some("cmd-o")),
                 App("Close", Close, Some("cmd-w")),
@@ -84,13 +83,23 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
                     ],
                 ),
                 Sep,
+            ];
+            // Absent, rather than disabled, in a build without the
+            // feature: there is nothing behind it to enable.
+            #[cfg(feature = "imagegen")]
+            {
+                out.push(App("Generate Images…", GenerateImages, None));
+                out.push(Sep);
+            }
+            out.extend([
                 App("Plugins…", Plugins, None),
                 App("Missing Fonts…", ManageFonts, None),
                 App("Check for Updates…", CheckForUpdates, None),
                 Sep,
                 App("Quit", Quit, Some("cmd-q")),
-            ],
-        ),
+            ]);
+            out
+        }),
         (
             "Edit",
             vec![
@@ -755,6 +764,8 @@ pub(crate) fn run_app_item(
             }
         }
         AppItem::CheckForUpdates => ws.check_for_update(cx),
+        #[cfg(feature = "imagegen")]
+        AppItem::GenerateImages => ws.open_image_gen(cx),
         AppItem::FreeTransform => ws.activate_tool("transform", cx),
         AppItem::Crop => {
             let rect = ws

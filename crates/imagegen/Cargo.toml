@@ -1,0 +1,23 @@
+[package]
+name = "schist-imagegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+url = "2.5"
+# The same client the update check and font fetch already use.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+# The generation stream is a websocket, which ureq has no notion of.
+# Blocking, like the rest of this crate: the app drives it from a thread.
+tungstenite = { version = "0.30", default-features = false, features = [
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+# The OAuth-shaped `state` has to be unguessable, so it comes from the
+# OS entropy pool rather than the clock.
+getrandom = "0.3"

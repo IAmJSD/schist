@@ -63,6 +63,14 @@ Section "Schist"
   !insertmacro AssociateExt "afdesign" "Affinity Designer Document"
   !insertmacro AssociateExt "afpub" "Affinity Publisher Document"
   !insertmacro AssociateExt "af" "Affinity Document"
+  ; The image-generation sign-in comes back to schist://ig-callback. A
+  ; URL protocol is registered by its own key rather than by extension:
+  ; the shell launches schist.exe with the URL as its argument, which
+  ; hands it to whichever Schist is waiting for it.
+  WriteRegStr HKCR "schist" "" "URL:Schist Protocol"
+  WriteRegStr HKCR "schist" "URL Protocol" ""
+  WriteRegStr HKCR "schist\DefaultIcon" "" "$INSTDIR\schist.ico"
+  WriteRegStr HKCR "schist\shell\open\command" "" '"$INSTDIR\schist.exe" "%1"'
   ; SHCNE_ASSOCCHANGED: pick the new associations up now rather than at the
   ; next sign-in, so the icons and the Open With menu are right immediately.
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
@@ -86,5 +94,6 @@ Section "Uninstall"
   !insertmacro UnassociateExt "afdesign"
   !insertmacro UnassociateExt "afpub"
   !insertmacro UnassociateExt "af"
+  DeleteRegKey HKCR "schist"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
 SectionEnd

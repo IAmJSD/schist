@@ -8,6 +8,8 @@ mod curve_editor;
 mod dialogs;
 mod fonts;
 mod gallery;
+#[cfg(feature = "imagegen")]
+mod imagegen;
 mod keymap;
 mod native_menu;
 mod panels;
@@ -202,7 +204,36 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(out).ok()?))
 }
 
+/// The document named on argv: a plain path, or a `file://` URL.
+///
+/// The Linux desktop entry passes `%u` rather than `%f`, so that the same
+/// entry can register the `schist://` scheme; a local file still arrives
+/// as a path from a shell, and as a URL from a file manager that took the
+/// `%u` at its word.
+fn document_arg(arg: &str) -> Option<PathBuf> {
+    if arg.starts_with("file://") {
+        return path_from_url(arg);
+    }
+    // Any other scheme is a URL we have no document for. Bare Windows
+    // paths ("C:\\x.psd") are not one, colon notwithstanding.
+    if arg.contains("://") {
+        return None;
+    }
+    Some(PathBuf::from(arg))
+}
+
 fn main() {
+    // The browser's `schist://ig-callback` goes to whatever the OS has
+    // registered for the scheme, which on every platform but macOS is a
+    // fresh process rather than the one waiting on the dialog. Hand it
+    // over and leave: a second window is not what was asked for.
+    #[cfg(feature = "imagegen")]
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|arg| imagegen::deliver_callback(&arg))
+    {
+        return;
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // Opt-in: SCHIST_CRASH_REPORTS=1, or the preference file's
     // crash_reports flag once the user enables it in Preferences.
@@ -217,6 +248,15 @@ fn main() {
     app.on_open_urls({
         let requests = requests.clone();
         move |urls| {
+            // macOS hands over the sign-in callback here rather than on
+            // argv. It goes to the same drop point either way, so the
+            // dialog has one thing to watch.
+            #[cfg(feature = "imagegen")]
+            let urls: Vec<String> = urls
+                .iter()
+                .filter(|u| !imagegen::deliver_callback(u))
+                .cloned()
+                .collect();
             let paths: Vec<PathBuf> = urls.iter().filter_map(|u| path_from_url(u)).collect();
             if paths.is_empty() {
                 return;
@@ -261,8 +301,10 @@ fn main() {
                             log::info!("recovering {} snapshot(s)", recoveries.len());
                             ws.recover_all(recoveries, cx);
                         }
-                        if let Some(path) = std::env::args().nth(1) {
-                            ws.load_file(path.into(), cx);
+                        if let Some(path) =
+                            std::env::args().nth(1).as_deref().and_then(document_arg)
+                        {
+                            ws.load_file(path, cx);
                         }
                         ws
                     });
@@ -336,8 +378,27 @@ fn open_all(paths: Vec<PathBuf>, window: WindowHandle<Workspace>, cx: &mut App) 
 
 #[cfg(test)]
 mod tests {
-    use super::path_from_url;
+    use super::{document_arg, path_from_url};
     use std::path::PathBuf;
+
+    #[test]
+    fn argv_takes_a_path_or_a_file_url() {
+        assert_eq!(
+            document_arg("/tmp/moss.psd"),
+            Some(PathBuf::from("/tmp/moss.psd"))
+        );
+        assert_eq!(
+            document_arg("file:///tmp/two%20words.psd"),
+            Some(PathBuf::from("/tmp/two words.psd"))
+        );
+        assert_eq!(
+            document_arg("relative.psd"),
+            Some(PathBuf::from("relative.psd"))
+        );
+        // A scheme we have no document behind.
+        assert_eq!(document_arg("schist://ig-callback?state=a&code=b"), None);
+        assert_eq!(document_arg("https://example.com/a.psd"), None);
+    }
 
     #[test]
     fn finder_urls_become_paths() {

@@ -8,6 +8,15 @@ license.workspace = true
 name = "schist"
 path = "src/main.rs"
 
+[features]
+default = ["imagegen"]
+# File > Generate Images: the image-generation protocol client and the
+# dialog that drives it. On by default; `cargo build --no-default-features`
+# leaves the whole feature, and its network dependencies, out of the
+# binary. Schist has no other features, so that flag means exactly this
+# one thing.
+imagegen = ["dep:schist-imagegen"]
+
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true
@@ -50,3 +59,4 @@ schist-plugin-host-wasm.workspace = true
 # other than this one and are unpacked on first use. See the Makefile.
 schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
 schist-colormgmt.workspace = true
+schist-imagegen = { workspace = true, optional = true }

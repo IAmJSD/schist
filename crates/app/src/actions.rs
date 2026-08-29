@@ -158,6 +158,10 @@ pub enum AppItem {
     FilterGalleryItem,
     ManageModels,
     ManageFonts,
+    /// File > Generate Images. Only reachable in a build with the
+    /// `imagegen` feature, which is what puts it in the menu.
+    #[cfg(feature = "imagegen")]
+    GenerateImages,
     NewLayerComp,
     ExportArtboards,
     ExportSlices,

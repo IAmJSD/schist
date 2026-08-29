@@ -274,6 +274,26 @@ Drop the `.wasm` in `~/.config/schist/plugins/` — or use **File ▸
 Plugins…**, which also shows why anything failed to load. Full instructions
 and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 
+## Image generation
+
+**File ▸ Generate Images** signs in to a generation provider, draws
+whatever form the provider asks for, and streams the images back into the
+document as layers — one per layout part, or a group per part when it
+generates several, in a single undoable step.
+
+The provider is a domain. [schist.app](https://schist.app) is the default
+and anything else the user types goes through the same flow: a discovery
+document at `/.schist/auth-urls.json`, an OAuth-shaped browser sign-in
+returning to `schist://ig-callback`, a provider-described form, and a
+websocket that streams the finished images back. Nothing is baked in
+beyond the default domain, and the protocol is written up in
+[docs/image-generation.md](docs/image-generation.md).
+
+It is a compile flag — the `imagegen` feature of `schist-app`, on by
+default. `cargo build --release -p schist-app --no-default-features`
+leaves the feature, its network dependencies and the menu item out
+entirely.
+
 ## MCP
 
 `schist-mcp` is a [Model Context
@@ -289,4 +309,5 @@ schist-mcp` builds it from source. See [docs/mcp.md](docs/mcp.md).
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
 * [docs/mcp.md](docs/mcp.md) — the MCP server
 * [docs/quicklook.md](docs/quicklook.md) — the macOS Quick Look extensions
+* [docs/image-generation.md](docs/image-generation.md) — the image-generation protocol
 * [docs/versioning.md](docs/versioning.md) — compatibility and releases
