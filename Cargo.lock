@@ -6318,8 +6318,11 @@ dependencies = [
 name = "schist-tools-retouch"
 version = "0.7.1"
 dependencies = [
+ "log",
+ "rayon",
  "schist-color",
  "schist-core",
+ "schist-neural",
  "schist-plugin-api",
 ]
 
@@ -6327,8 +6330,10 @@ dependencies = [
 name = "schist-tools-select"
 version = "0.7.1"
 dependencies = [
+ "log",
  "schist-color",
  "schist-core",
+ "schist-neural",
  "schist-pixel-ops",
  "schist-plugin-api",
 ]

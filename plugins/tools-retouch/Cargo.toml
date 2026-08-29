@@ -8,3 +8,6 @@ license.workspace = true
 schist-core.workspace = true
 schist-color.workspace = true
 schist-plugin-api.workspace = true
+schist-neural.workspace = true
+log.workspace = true
+rayon.workspace = true

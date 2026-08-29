@@ -85,17 +85,26 @@ pixels for now.
 
 **Selecting.** Rectangular and elliptical marquee; free, polygonal and
 magnetic lassos; magic wand with tolerance and contiguity; quick selection
-that grows to match what you paint over; object selection that finds a
-subject inside a drawn box. Then Modify (expand, contract, border, smooth,
-feather), Grow, Similar, Colour Range, and save/load. Marching ants trace
-the selection's real boundary — holes and all.
+that grows to match what you paint over; object selection that runs a
+segmentation network — U^2-Net, from Filter ▸ Neural Filters ▸ Manage
+Models — over the box you drew and cuts round what it finds, settling the
+boundary against the picture's own colours, and falls back to reading the
+box's border as background when there is no model or nothing in the box.
+Then Modify (expand, contract, border, smooth, feather), Grow, Similar,
+Colour Range, and save/load. Marching ants trace the selection's real
+boundary — holes and all.
 
 **Painting and retouching.** Brush, pencil, eraser, background eraser,
 magic eraser, clone stamp, history brush, gradient, paint bucket,
 dodge/burn/sponge, blur, sharpen, smudge; spot healing and healing brushes,
 patch, content-aware move and red eye. Healing takes texture from the
 source and colour from around the edge, so patching a blemish gives you
-skin rather than a blurred blemish.
+skin rather than a blurred blemish. Content-Aware Fill is a network and
+a patch search working together — the network, trained here and shipped
+in the binary, says what should be behind the hole, and the search finds
+that in the photograph and copies it in, so what lands there is real
+texture arranged the right way rather than either one's idea of an
+average.
 
 **Vector.** Pen, freeform pen and curvature pen draw paths that are
 *stored*, so Path Selection and Direct Selection can edit them and Layer ▸
@@ -253,10 +262,6 @@ Remap anything in `~/.config/schist/keymap.json`:
   is a protocol of its own rather than an axis on the pointer, so binding
   it means synthesising the whole mouse event stream from the tool, tip
   and barrel buttons included. Reports from real hardware welcome.
-- **Object Selection and Content-Aware Fill are heuristics**, not the
-  models Photoshop uses — background sampling and diffusion inpainting
-  respectively. They degrade predictably (blurry over texture) rather
-  than mysteriously.
 - **CMYK and Lab edit in RGB.** Files open, edit and save in their own
   mode, converting at the boundaries; the editing in between is RGB, so
   individual ink channels are not separately editable.

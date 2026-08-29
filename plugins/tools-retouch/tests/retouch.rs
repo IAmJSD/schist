@@ -211,3 +211,79 @@ fn patch_takes_texture_from_the_source_and_colour_from_the_destination() {
         "took the source's brightness instead of the destination's: {patched:?}"
     );
 }
+
+#[test]
+fn content_aware_fill_puts_texture_back_rather_than_an_average() {
+    // The whole point, and the one thing diffusion could never do: a
+    // hole in a textured surface has to come back textured. A fill that
+    // relaxed the boundary inwards would leave the middle of this
+    // perfectly smooth, which is exactly what the assertion below
+    // measures and what it used to fail.
+    let doc = doc_with(|doc, id| {
+        let mut seed = 0x9e37_79b9u32;
+        for y in 0..120 {
+            for x in 0..120 {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let n = (seed >> 8) as f32 / u32::MAX as f32;
+                // Coarse stripes with grain on top: structure to follow
+                // and texture to reproduce.
+                let base = 0.35 + 0.25 * (((x + y) / 7) % 2) as f32;
+                let v = (base + n * 0.22).clamp(0.0, 1.0);
+                set(doc, id, x, y, Rgba::new(v, v * 0.9, v * 0.7, 1.0));
+            }
+        }
+    });
+    let tiles = doc
+        .tree
+        .iter()
+        .next()
+        .unwrap()
+        .as_raster()
+        .unwrap()
+        .tiles
+        .clone();
+    let rect = IntRect::new(20, 20, 100, 100);
+    let (w, h) = (80usize, 80usize);
+    let mut hole = vec![false; w * h];
+    for y in 20..60 {
+        for x in 20..60 {
+            hole[y * w + x] = true;
+        }
+    }
+    let filled = schist_tools_retouch::inpaint(&tiles, rect, &hole);
+
+    // Mean absolute difference between neighbouring pixels, well inside
+    // the hole against the same measure on real pixels.
+    let rough = |x0: usize, y0: usize| {
+        let (mut acc, mut n) = (0.0f32, 0.0f32);
+        for y in y0..y0 + 16 {
+            for x in x0..x0 + 16 {
+                acc += (filled[y * w + x].r - filled[y * w + x + 1].r).abs();
+                acc += (filled[y * w + x].r - filled[(y + 1) * w + x].r).abs();
+                n += 2.0;
+            }
+        }
+        acc / n
+    };
+    let (inside, outside) = (rough(32, 32), rough(2, 2));
+    assert!(
+        inside > outside * 0.5,
+        "the hole came back smooth: {inside:.4} against {outside:.4} outside it"
+    );
+    // And it is the picture's texture, not invented brightness.
+    let mean = |x0: usize, y0: usize| {
+        let mut acc = 0.0f32;
+        for y in y0..y0 + 16 {
+            for x in x0..x0 + 16 {
+                acc += filled[y * w + x].r;
+            }
+        }
+        acc / 256.0
+    };
+    assert!(
+        (mean(32, 32) - mean(2, 2)).abs() < 0.12,
+        "the fill is the wrong brightness: {:.3} against {:.3}",
+        mean(32, 32),
+        mean(2, 2)
+    );
+}

@@ -1091,12 +1091,17 @@ fn destructive_adjustment_dialog(
 
 /// Filter ▸ Neural Filters ▸ Manage Models.
 ///
-/// The style-transfer, depth and face networks are somebody else's work
-/// and up to sixty-six megabytes of it, so they are fetched here rather
-/// than shipped. The ones trained for this application are small enough
-/// to live in the binary, and are listed as built in rather than being
-/// hidden: which filter has which model is exactly what somebody opens
-/// this dialog to find out.
+/// The style-transfer, depth, face and segmentation networks are
+/// somebody else's work and up to sixty-six megabytes of it, so they are
+/// fetched here rather than shipped. The ones trained for this
+/// application are small enough to live in the binary, and are listed as
+/// built in rather than being hidden: which filter has which model is
+/// exactly what somebody opens this dialog to find out.
+///
+/// Two of the models are not a filter's. Object Selection and
+/// Content-Aware Fill are tools, and this is still where their networks
+/// live, because one list of every model in the build is more useful
+/// than a tidy division by which menu asked for it.
 fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let downloading = ws.model_downloads.clone();
     let rows: Vec<gpui::AnyElement> = schist_neural::CATALOG
