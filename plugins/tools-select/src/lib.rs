@@ -150,6 +150,25 @@ fn drag_rect(ax: f32, ay: f32, bx: f32, by: f32, square: bool) -> IntRect {
     )
 }
 
+/// The ellipse inscribed in `rect`, as a closed polygon in document
+/// space, for the drag overlay to trace with marching ants.
+///
+/// Segment count follows the rect's size so a small ellipse costs little
+/// and a large one still reads as a curve rather than a polygon.
+fn ellipse_points(rect: IntRect) -> Vec<(f32, f32)> {
+    let rx = rect.width() as f32 / 2.0;
+    let ry = rect.height() as f32 / 2.0;
+    let cx = rect.left as f32 + rx;
+    let cy = rect.top as f32 + ry;
+    let steps = ((rx + ry) as usize).clamp(24, 256);
+    (0..=steps)
+        .map(|i| {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            (cx + rx * a.cos(), cy + ry * a.sin())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarqueeShape {
     Rect,
@@ -284,9 +303,15 @@ impl ToolPlugin for MarqueeTool {
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
-        match self.current {
-            Some(rect) => vec![Overlay::AntsRect(rect)],
-            None => Vec::new(),
+        // The overlay shows the shape that will be committed, so the
+        // elliptical marquee traces its ellipse rather than the rect it
+        // was dragged out of.
+        match (self.current, self.shape) {
+            (Some(rect), MarqueeShape::Rect) => vec![Overlay::AntsRect(rect)],
+            (Some(rect), MarqueeShape::Ellipse) if !rect.is_empty() => {
+                vec![Overlay::AntsPolygon(ellipse_points(rect))]
+            }
+            _ => Vec::new(),
         }
     }
 }

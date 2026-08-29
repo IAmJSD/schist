@@ -6926,7 +6926,7 @@ impl Workspace {
         // Active tool overlays.
         for overlay in overlays {
             match overlay {
-                Overlay::Rect(r) | Overlay::AntsRect(r) => {
+                Overlay::Rect(r) => {
                     job.outlines.push((
                         Bounds {
                             origin: to_screen(r.left as f32, r.top as f32),
@@ -6934,6 +6934,17 @@ impl Workspace {
                         },
                         gpui::rgb(0x44AAFF).into(),
                     ));
+                }
+                Overlay::AntsRect(r) => {
+                    let (l, t) = (r.left as f32, r.top as f32);
+                    let (rt, b) = (r.right as f32, r.bottom as f32);
+                    // Closed: the last point repeats the first so the
+                    // dashes carry round the final corner.
+                    let pts: Vec<Point<Pixels>> = [(l, t), (rt, t), (rt, b), (l, b), (l, t)]
+                        .iter()
+                        .map(|&(x, y)| to_screen(x, y))
+                        .collect();
+                    push_ants(&mut job.ants, &pts, ant_phase);
                 }
                 Overlay::AntsPolygon(points) => {
                     let pts: Vec<Point<Pixels>> =
