@@ -108,6 +108,11 @@ fn every_filter_does_something_at_its_defaults() {
         "filter.neural.harmonization",
         "filter.neural.landscape_mixer",
         "filter.neural.face_to_caricature",
+        // Lens Correction opens with every correction at zero, because
+        // there is no lens profile to prefill it from and guessing would
+        // be worse than leaving it alone. Photoshop's does the same
+        // without a profile.
+        "filter.lens_correction",
     ];
     let (w, h) = (33usize, 21usize);
     for f in registry().filters() {

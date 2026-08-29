@@ -236,7 +236,9 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
             // they do in Photoshop's Filter menu.
             let mut out = vec![
                 App("Filter Gallery…", FilterGalleryItem, None),
+                Filter("filter.adaptive_wide_angle"),
                 Filter("filter.camera_raw"),
+                Filter("filter.lens_correction"),
                 App("Liquify", LiquifyItem, None),
                 App("Vanishing Point", VanishingPointItem, None),
                 Sep,
@@ -398,7 +400,19 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
             "filter.lens_blur",
             "filter.motion_blur",
             "filter.radial_blur",
+            "filter.shape_blur",
+            "filter.smart_blur",
             "filter.surface_blur",
+        ],
+    ),
+    (
+        "Blur Gallery",
+        &[
+            "filter.field_blur",
+            "filter.iris_blur",
+            "filter.tilt_shift",
+            "filter.path_blur",
+            "filter.spin_blur",
         ],
     ),
     (
@@ -456,6 +470,9 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
     (
         "Render",
         &[
+            "filter.flame",
+            "filter.picture_frame",
+            "filter.tree",
             "filter.clouds",
             "filter.difference_clouds",
             "filter.fibers",
@@ -518,6 +535,7 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
             "filter.texturizer",
         ],
     ),
+    ("Video", &["filter.deinterlace", "filter.ntsc_colors"]),
     (
         "Other",
         &[
