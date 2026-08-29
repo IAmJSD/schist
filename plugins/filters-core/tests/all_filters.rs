@@ -226,3 +226,78 @@ fn offset_wraps_the_image_around() {
     assert_eq!(px[i], 1.0, "the marked pixel did not move to (3, 1)");
     assert_eq!(px[0], 0.0, "the original position was not vacated");
 }
+
+#[test]
+fn colorize_puts_colour_into_something_that_has_none() {
+    // Whichever path it takes -- the network or the luminance ramp -- the
+    // one thing Colorize must do is leave a greyscale image not grey,
+    // without moving its luminance while it does.
+    let (w, h) = (64usize, 64usize);
+    let mut px = vec![0.0f32; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            // A ramp with a disc cut through it, so there is something to
+            // recognise as well as something to shade.
+            let disc = ((x as f32 - 32.0).hypot(y as f32 - 32.0)) < 18.0;
+            let v = if disc { 0.7 } else { x as f32 / w as f32 };
+            px[i] = v;
+            px[i + 1] = v;
+            px[i + 2] = v;
+            px[i + 3] = 1.0;
+        }
+    }
+    let before = px.clone();
+    let reg = registry();
+    let f = reg
+        .filters()
+        .find(|f| f.id() == "filter.neural.colorize")
+        .expect("colorize");
+    f.apply(&mut px, w, h, &FilterValues::defaults(&f.params()));
+
+    let luma = |p: &[f32]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    let mut coloured = 0;
+    for (a, b) in px.as_chunks::<4>().0.iter().zip(before.as_chunks::<4>().0) {
+        let spread = a[0].max(a[1]).max(a[2]) - a[0].min(a[1]).min(a[2]);
+        if spread > 0.01 {
+            coloured += 1;
+        }
+        assert!(
+            (luma(a) - luma(b)).abs() < 0.05,
+            "the luminance moved: {:.3} -> {:.3}",
+            luma(b),
+            luma(a)
+        );
+    }
+    assert!(
+        coloured > w * h / 4,
+        "only {coloured} of {} pixels got any colour",
+        w * h
+    );
+}
+
+#[test]
+fn skin_smoothing_leaves_things_that_are_not_skin_alone() {
+    // The filter is gated twice over -- on faces when the model is
+    // installed, and on skin colour either way -- so a blue-green image
+    // has to come back untouched however it is run.
+    let (w, h) = (48usize, 48usize);
+    let mut px = vec![0.0f32; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            px[i] = 0.1;
+            px[i + 1] = 0.4 + 0.4 * ((x / 4) % 2) as f32;
+            px[i + 2] = 0.8;
+            px[i + 3] = 1.0;
+        }
+    }
+    let before = px.clone();
+    let reg = registry();
+    let f = reg
+        .filters()
+        .find(|f| f.id() == "filter.neural.skin_smoothing")
+        .expect("skin smoothing");
+    f.apply(&mut px, w, h, &FilterValues::defaults(&f.params()));
+    assert_eq!(px, before, "it smoothed something that was not skin");
+}

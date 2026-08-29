@@ -22,6 +22,7 @@ use schist_plugin_api::{
 };
 use smallvec::smallvec;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
@@ -94,6 +95,16 @@ struct DocTab {
     offset: Point<Pixels>,
     rotation: f32,
 }
+/// A model fetch in flight.
+///
+/// The counter is shared with the thread doing the fetching, which is the
+/// only way the dialog can say how much has arrived: the fetch runs on
+/// the background executor and knows nothing about views.
+#[derive(Clone)]
+pub struct ModelDownload {
+    pub id: &'static str,
+    pub got: Arc<AtomicU64>,
+}
 
 pub struct Workspace {
     pub registry: PluginRegistry,
@@ -160,7 +171,7 @@ pub struct Workspace {
     pub rotation: f32,
     /// Models currently being fetched, so the dialog can say so and a
     /// second click does not start a second download.
-    pub model_downloads: Vec<&'static str>,
+    pub model_downloads: Vec<ModelDownload>,
     /// Font families currently downloading, so a second click does not
     /// start a second download.
     pub font_downloads: Vec<String>,
@@ -1274,7 +1285,11 @@ impl Workspace {
                     // License texts first: the library must not land
                     // without them.
                     for file in managed.licenses.iter().chain([&managed.library]) {
-                        let bytes = fetch_model(file.url)
+                        // Nothing reads the byte count on this path --
+                        // the status line says what it is doing and
+                        // there is no per-file row to update -- so the
+                        // counter is a sink.
+                        let bytes = fetch_model(file.url, &AtomicU64::new(0))
                             .map_err(|e| anyhow::anyhow!("{}: {e}", file.name))?;
                         schist_codecs_common::heif::install(file, &bytes)?;
                     }
@@ -2914,26 +2929,50 @@ impl Workspace {
 
     /// Download a Neural Filters model and install it.
     ///
-    /// Runs off the UI thread: these are megabytes over the network, and
-    /// the window should stay usable while one arrives.
+    /// Runs off the UI thread: these are megabytes over the network --
+    /// sixty-six of them for the depth model -- and the window should
+    /// stay usable while one arrives.
     pub fn download_model(&mut self, id: &'static str, cx: &mut Context<Self>) {
         let Some(spec) = schist_neural::spec(id) else {
             return;
         };
         let Some(url) = spec.url else { return };
-        if self.model_downloads.contains(&id) {
+        if self.model_downloads.iter().any(|d| d.id == id) {
             return;
         }
-        self.model_downloads.push(id);
+        let got = Arc::new(AtomicU64::new(0));
+        self.model_downloads.push(ModelDownload {
+            id,
+            got: got.clone(),
+        });
         self.status = format!("Downloading {}\u{2026}", spec.name).into();
         cx.notify();
+        // A repaint every so often while it runs, so the dialog's count
+        // climbs. The fetch itself cannot ask for one: it is on a
+        // background thread and has no handle on the view.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let running = this.update(cx, |ws, cx| {
+                let running = ws.model_downloads.iter().any(|d| d.id == id);
+                if running {
+                    cx.notify();
+                }
+                running
+            });
+            if !matches!(running, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             let fetched = cx
                 .background_executor()
-                .spawn(async move { fetch_model(url) })
+                .spawn(async move { fetch_model(url, &got) })
                 .await;
             this.update(cx, |ws, cx| {
-                ws.model_downloads.retain(|d| *d != id);
+                ws.model_downloads.retain(|d| d.id != id);
                 let Some(spec) = schist_neural::spec(id) else {
                     return;
                 };
@@ -7040,10 +7079,10 @@ fn decode_file(
 }
 
 /// Fetch a model over HTTP. Blocking, so it runs on a background thread.
-fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
+fn fetch_model(url: &str, got: &AtomicU64) -> Result<Vec<u8>, String> {
     use std::io::Read as _;
-    // Models are single-digit megabytes; the cap is a guard against a
-    // redirect to something enormous, not a real limit.
+    // The largest model in the catalogue is 66 MB; the cap is a guard
+    // against a redirect to something enormous, not a real limit.
     const MAX: u64 = 256 << 20;
     let mut response = ureq::get(url)
         .header("User-Agent", "schist-model-fetch")
@@ -7051,9 +7090,19 @@ fn fetch_model(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     let reader = response.body_mut().as_reader();
-    std::io::Read::take(reader, MAX)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+    let mut reader = std::io::Read::take(reader, MAX);
+    // A chunk at a time rather than `read_to_end`, so the dialog can say
+    // how far along a sixty-megabyte download is instead of sitting on
+    // "Downloading..." for a minute.
+    let mut chunk = vec![0u8; 64 << 10];
+    loop {
+        let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        got.store(bytes.len() as u64, Ordering::Relaxed);
+    }
     if bytes.is_empty() {
         return Err("empty response".into());
     }

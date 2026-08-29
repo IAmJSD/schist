@@ -12,15 +12,18 @@
 
 use rayon::prelude::*;
 
-use crate::Model;
+use crate::{Input, Model};
 
 /// Apply `model` across an interleaved RGB f32 image, in place.
 ///
 /// `blend` scales how much of the result replaces the original, so a
 /// filter can offer a strength slider without running the network twice.
 pub fn run_tiled(model: &Model, rgb: &mut [f32], width: usize, height: usize, blend: f32) {
-    let t = model.spec.tile;
-    let overlap = model.spec.overlap.min(t / 4);
+    let Input::Tiles { size: t, overlap } = model.spec.input else {
+        log::warn!("{} is not a tiled model", model.spec.id);
+        return;
+    };
+    let overlap = overlap.min(t / 4);
     if width == 0 || height == 0 || rgb.len() < width * height * 3 || t == 0 {
         return;
     }
