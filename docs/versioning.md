@@ -27,6 +27,43 @@ they will not break the plugin ABI or saved files.
 * Releases are cut by tagging `vX.Y.Z` on `main`, which triggers
   `.github/workflows/release.yml` to build and attach installers.
 
+## Updating
+
+Schist checks GitHub for the latest release from Check for Updates —
+under File, or the application menu on macOS — and once a day at launch while the "Check for new releases at
+launch" preference is on (it is on by default; turning it off stops every
+unattended request). The check sends nothing but the request, and a
+download only starts when the user presses Update.
+
+What happens next depends on the platform:
+
+* **macOS** downloads `Schist.zip`, unpacks it beside the running bundle
+  with `ditto`, and swaps it in with a rename. The new bundle is refused
+  unless it is signed at least as well as the one it replaces: a signed
+  copy only takes an update signed by the same team, and a signature that
+  fails `codesign --verify --strict` is never installed. A relauncher
+  waits for the editor to exit and opens the new bundle.
+* **Windows** downloads `Schist-<version>-setup.exe` and hands it to a
+  detached process that waits for the editor to exit — a running
+  `schist.exe` cannot be overwritten — then runs it silently (`/S`,
+  elevated, which is one UAC prompt) and starts the result. The installer
+  is unsigned for now, so the download is only as good as its HTTPS
+  connection and the SHA-256 GitHub records for the asset, which is
+  checked when present.
+* **Linux** installs nothing itself. A copy from `pacman`, `apt`, `dnf` or
+  an AppImage belongs to whatever put it there, so the dialog names the
+  new version and links to the release.
+
+Self-updating only offers itself where the copy is one Schist may
+replace: inside a writable `.app` bundle on macOS, and next to the
+`uninstall.exe` the installer writes on Windows. A loose `schist.exe` or a
+`cargo run` build is left alone.
+
+The updater picks its download out of the release by asset name —
+`Schist.zip` and `Schist-<version>-setup.exe`, matched in
+`crates/app/src/update.rs`. Renaming either in `release.yml` without
+changing it there ends self-updating silently, so keep the two together.
+
 ## Releasing
 
 1. Update the version in the root `Cargo.toml`, `packaging/macos/Info.plist`

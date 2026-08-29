@@ -1,10 +1,9 @@
-//! Opt-in crash reporting and update checks.
+//! Opt-in crash reporting.
 //!
-//! Both are off until the user turns them on, and neither sends anything
-//! anywhere by default: a crash writes a local report file, and the update
-//! check is an explicit HTTPS request the user asks for. That keeps the
-//! privacy story simple — an image editor has no business phoning home
-//! unasked.
+//! Off until the user turns it on, and nothing is sent anywhere even
+//! then: a crash writes a local report file next to the recovery
+//! snapshots and that is all. Update checks, the one thing here that
+//! ever spoke to the network, live in [`crate::update`].
 
 use std::path::PathBuf;
 
@@ -84,115 +83,9 @@ fn write_report(info: &std::panic::PanicHookInfo<'_>) {
     eprintln!("schist: crash report written to {}", path.display());
 }
 
-/// A release published upstream.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-pub struct Release {
-    pub tag_name: String,
-    #[serde(default)]
-    pub html_url: String,
-}
-
-/// Compare two `x.y.z` version strings. Returns true when `candidate` is
-/// newer than `current`; anything unparseable compares as "not newer" so a
-/// malformed tag never nags the user.
-pub fn is_newer(current: &str, candidate: &str) -> bool {
-    fn parts(v: &str) -> Option<(u32, u32, u32)> {
-        let v = v.trim().trim_start_matches('v');
-        let mut it = v.split('.');
-        let major = it.next()?.parse().ok()?;
-        let minor = it.next().unwrap_or("0").parse().ok()?;
-        // Trailing pre-release suffixes ("1.2.3-beta") are ignored.
-        let patch = it
-            .next()
-            .unwrap_or("0")
-            .split(['-', '+'])
-            .next()?
-            .parse()
-            .ok()?;
-        Some((major, minor, patch))
-    }
-    match (parts(current), parts(candidate)) {
-        (Some(a), Some(b)) => b > a,
-        _ => false,
-    }
-}
-
-/// This build's version.
-pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-/// Where releases are published.
-const RELEASES_API: &str = "https://api.github.com/repos/Infrawrench/schist/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/Infrawrench/schist/releases";
-
-/// The outcome of an update check.
-#[derive(Debug, Clone, PartialEq)]
-pub enum UpdateStatus {
-    UpToDate,
-    Available { version: String, url: String },
-    Failed(String),
-}
-
-/// Ask GitHub for the latest release. Blocking — call it off the UI thread.
-///
-/// One of the two requests Schist makes over the network — the other
-/// fetches a missing font — and, like it, only when the user asks.
-pub fn check_for_update() -> UpdateStatus {
-    let response = ureq::get(RELEASES_API)
-        .header("User-Agent", "schist-update-check")
-        .header("Accept", "application/vnd.github+json")
-        .call();
-    let release: Release = match response {
-        Ok(mut r) => match r.body_mut().read_json() {
-            Ok(v) => v,
-            Err(err) => return UpdateStatus::Failed(format!("unreadable response: {err}")),
-        },
-        Err(err) => return UpdateStatus::Failed(format!("{err}")),
-    };
-    if is_newer(current_version(), &release.tag_name) {
-        UpdateStatus::Available {
-            version: release.tag_name.trim_start_matches('v').to_string(),
-            url: if release.html_url.is_empty() {
-                RELEASES_PAGE.to_string()
-            } else {
-                release.html_url
-            },
-        }
-    } else {
-        UpdateStatus::UpToDate
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn version_comparison() {
-        assert!(is_newer("0.1.0", "0.2.0"));
-        assert!(is_newer("0.1.0", "v0.1.1"));
-        assert!(is_newer("1.9.0", "1.10.0"));
-        assert!(!is_newer("0.2.0", "0.1.9"));
-        assert!(!is_newer("0.1.0", "0.1.0"));
-        // Pre-release suffixes compare on the numeric part.
-        assert!(is_newer("0.1.0", "0.1.1-beta"));
-    }
-
-    #[test]
-    fn malformed_versions_never_claim_an_update() {
-        assert!(!is_newer("0.1.0", "not-a-version"));
-        assert!(!is_newer("", "1.0.0"));
-        assert!(!is_newer("0.1.0", ""));
-    }
-
-    #[test]
-    fn release_json_parses() {
-        let json = r#"{"tag_name":"v0.3.0","html_url":"https://example.com/r"}"#;
-        let release: Release = serde_json::from_str(json).unwrap();
-        assert_eq!(release.tag_name, "v0.3.0");
-        assert!(is_newer("0.2.0", &release.tag_name));
-    }
+    use super::crash_dir;
 
     #[test]
     fn crash_dir_is_under_the_state_directory() {

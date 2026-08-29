@@ -13,6 +13,7 @@ mod native_menu;
 mod panels;
 mod style_dialog;
 mod ui;
+mod update;
 mod workspace;
 
 use actions::{HideApp, HideOthers, Quit, ShowAll};

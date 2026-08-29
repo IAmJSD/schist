@@ -178,6 +178,10 @@ pub struct Workspace {
     /// Whether the HEIC decode library is currently downloading, so a
     /// second HEIC open does not start a second download.
     pub heif_download: bool,
+    /// How far along the update the user asked for is, if one is
+    /// running. Its presence is also what stops a second click starting
+    /// a second download.
+    pub update_progress: Option<UpdateProgress>,
     /// Families already offered this session. Opening three documents
     /// that all want the same missing font should ask once, not thrice.
     pub fonts_offered: std::collections::HashSet<String>,
@@ -490,6 +494,11 @@ pub struct ViewOptions {
     /// GPU path can't express, and entirely when this is off.
     #[serde(default = "default_true")]
     pub gpu_compositing: bool,
+    /// Ask GitHub for the latest release at launch, at most once a day.
+    /// The one request Schist makes without being clicked, which is why
+    /// it is a preference; it sends nothing but the request itself.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
 }
 
 fn default_true() -> bool {
@@ -509,6 +518,7 @@ impl Default for ViewOptions {
             zoom_with_scroll: false,
             crash_reports: false,
             gpu_compositing: true,
+            check_updates: true,
         }
     }
 }
@@ -575,6 +585,17 @@ struct ViewportKey {
     /// The surround outside the document is baked into the image, so a
     /// theme change must invalidate it.
     surround: u32,
+}
+
+/// How far along an update the user asked for is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateProgress {
+    /// `total` is what the release says the download weighs; it is never
+    /// zero, since an asset that lists no size is not offered.
+    Downloading { received: u64, total: u64 },
+    /// Unpacking and swapping the bundle (macOS), or handing the
+    /// installer over (Windows). Short, and not interruptible.
+    Installing,
 }
 
 /// Which modal dialog is open.
@@ -674,6 +695,10 @@ pub enum Modal {
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
     HeifSupport { path: PathBuf },
+    /// A release newer than this build. On macOS and Windows it offers
+    /// to install itself and restart; everywhere else it points at the
+    /// release page, since the copy came from a package manager.
+    UpdateAvailable { update: crate::update::Update },
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -844,6 +869,7 @@ impl Workspace {
             model_downloads: Vec::new(),
             font_downloads: Vec::new(),
             heif_download: false,
+            update_progress: None,
             fonts_offered: std::collections::HashSet::new(),
             ant_phase: 0,
             tool_has_overlay: false,
@@ -888,6 +914,20 @@ impl Workspace {
             proof_transform: None,
         };
         ws.rebuild_tool_groups();
+        // A launch-time update check, when the preference allows one and
+        // the last one was long enough ago. Delayed: the first seconds
+        // after launch belong to opening whatever the user
+        // double-clicked, not to a network round trip.
+        if ws.view.check_updates && crate::update::check_due() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                this.update(cx, |ws, cx| ws.check_for_update_quietly(cx))
+                    .ok();
+            })
+            .detach();
+        }
         // The workspace starts empty; File ▸ New asks for the document's
         // settings before creating anything.
         // Periodic crash-recovery snapshot; the task ends with the entity.
@@ -4026,6 +4066,12 @@ impl Workspace {
         if matches!(self.modal, Some(Modal::Preferences)) {
             self.revert_preferences(cx);
         }
+        // Same for escaping the update dialog while its download is
+        // running: dismissing the thing that asked must not leave an
+        // update to land on its own.
+        if matches!(self.modal, Some(Modal::UpdateAvailable { .. })) {
+            self.update_progress = None;
+        }
         // Closing the picker uncovers the dialog it was opened from.
         self.modal = self.modal_stack.pop();
         self.default_action = None;
@@ -4258,6 +4304,7 @@ impl Workspace {
             | Modal::Preferences
             | Modal::Export { .. }
             | Modal::MissingFonts { .. }
+            | Modal::UpdateAvailable { .. }
             | Modal::Profile { .. } => {}
         });
     }
@@ -5695,33 +5742,187 @@ impl Workspace {
     pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
         self.status = "Checking for updates…".into();
         cx.notify();
+        self.run_update_check(false, cx);
+    }
+
+    /// The launch-time check. Silent unless there is something to say:
+    /// nobody opening a document wants to be told their editor is
+    /// current, and a machine that is offline at login should not be
+    /// shown a failure it never asked for.
+    pub fn check_for_update_quietly(&mut self, cx: &mut Context<Self>) {
+        self.run_update_check(true, cx);
+    }
+
+    fn run_update_check(&mut self, quiet: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let status = cx
                 .background_executor()
-                .spawn(async { crate::crash::check_for_update() })
+                .spawn(async {
+                    let status = crate::update::check();
+                    // A check that never reached GitHub is not one, so a
+                    // machine that was offline at launch tries again at
+                    // the next one rather than in a day.
+                    if !matches!(status, crate::update::UpdateStatus::Failed(_)) {
+                        crate::update::mark_checked();
+                    }
+                    status
+                })
                 .await;
             this.update(cx, |ws, cx| {
-                ws.status = match status {
-                    crate::crash::UpdateStatus::UpToDate => {
-                        format!("Schist {} is up to date", crate::crash::current_version()).into()
+                match status {
+                    crate::update::UpdateStatus::Available(update) => {
+                        log::info!("update {} available at {}", update.version, update.page);
+                        ws.status = format!("Schist {} is available", update.version).into();
+                        // The launch-time check lands five seconds in,
+                        // by which time the user may be in a dialog of
+                        // their own. Theirs wins; the status line still
+                        // says an update is there, and File ▸ Check for
+                        // Updates brings this back.
+                        if !quiet || ws.modal.is_none() {
+                            ws.open_modal(Modal::UpdateAvailable { update }, cx);
+                        }
                     }
-                    crate::crash::UpdateStatus::Available { version, url } => {
-                        log::info!("update {version} available at {url}");
-                        format!(
-                            "Version {version} is available — see {}",
-                            crate::crash::RELEASES_PAGE
-                        )
-                        .into()
+                    crate::update::UpdateStatus::UpToDate if !quiet => {
+                        ws.status =
+                            format!("Schist {} is up to date", crate::update::current_version())
+                                .into();
                     }
-                    crate::crash::UpdateStatus::Failed(err) => {
-                        format!("Update check failed: {err}").into()
+                    crate::update::UpdateStatus::Failed(err) if !quiet => {
+                        ws.status = format!("Update check failed: {err}").into();
                     }
-                };
+                    _ => {}
+                }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Download the release and install it over this copy, then quit so
+    /// the relauncher can start the new build.
+    ///
+    /// The dialog stays up throughout: it is what shows the progress,
+    /// and there is nothing useful to do in an editor whose executable
+    /// is being replaced underneath it.
+    pub fn start_update(&mut self, update: crate::update::Update, cx: &mut Context<Self>) {
+        let Some(installer) = update.install.clone() else {
+            return;
+        };
+        if self.update_progress.is_some() {
+            return;
+        }
+        self.update_progress = Some(UpdateProgress::Downloading {
+            received: 0,
+            total: installer.size,
+        });
+        self.status = format!("Downloading Schist {}\u{2026}", update.version).into();
+        cx.notify();
+
+        // The download runs on a background thread and counts bytes into
+        // this; the dialog reads it on a timer, rather than that thread
+        // reaching into the entity once per 64 KiB.
+        let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        cx.spawn({
+            let received = received.clone();
+            async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let downloading = this.update(cx, |ws, cx| {
+                    let Some(UpdateProgress::Downloading { received: got, .. }) =
+                        ws.update_progress.as_mut()
+                    else {
+                        return false;
+                    };
+                    *got = received.load(std::sync::atomic::Ordering::Relaxed);
+                    cx.notify();
+                    true
+                });
+                if !matches!(downloading, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let fetched = {
+                let received = received.clone();
+                cx.background_executor()
+                    .spawn(async move { crate::update::download(&installer, &received) })
+                    .await
+            };
+            let file = match fetched {
+                Ok(file) => file,
+                Err(err) => {
+                    this.update(cx, |ws, cx| ws.update_failed(&format!("{err:#}"), cx))
+                        .ok();
+                    return;
+                }
+            };
+            // Nothing is installed if the user cancelled while it was
+            // coming down: `update_progress` is cleared by Cancel, and
+            // that is what says the download was still wanted.
+            let wanted = this.update(cx, |ws, cx| {
+                if ws.update_progress.is_none() {
+                    return false;
+                }
+                ws.update_progress = Some(UpdateProgress::Installing);
+                ws.status = "Installing the update\u{2026}".into();
+                cx.notify();
+                true
+            });
+            if !matches!(wanted, Ok(true)) {
+                crate::update::clean_downloads();
+                return;
+            }
+            let installed = cx
+                .background_executor()
+                .spawn(async move { crate::update::install_and_restart(&file) })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.update_progress = None;
+                match installed {
+                    Ok(()) => {
+                        ws.close_modal(cx);
+                        // Quitting takes the usual route, so unsaved work
+                        // is still asked about. Backing out of one of
+                        // those prompts leaves the update staged rather
+                        // than lost: it lands whenever this process does
+                        // exit.
+                        ws.status =
+                            format!("Restarting into Schist {}\u{2026}", update.version).into();
+                        ws.request_quit(cx);
+                    }
+                    Err(err) => ws.update_failed(&format!("{err:#}"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Abandon a download in progress.
+    ///
+    /// The transfer itself is left to run out into the temporary
+    /// directory, since a blocking read cannot be interrupted, but its
+    /// result is dropped and nothing is installed.
+    pub fn cancel_update(&mut self, cx: &mut Context<Self>) {
+        self.update_progress = None;
+        self.status = "Update cancelled".into();
+        self.close_modal(cx);
+        cx.notify();
+    }
+
+    /// Give up on an update, leaving the user where they were.
+    fn update_failed(&mut self, err: &str, cx: &mut Context<Self>) {
+        log::error!("update failed: {err}");
+        crate::update::clean_downloads();
+        self.update_progress = None;
+        self.status = format!("Update failed: {err}").into();
+        self.close_modal(cx);
+        cx.notify();
     }
 
     /// Fetch a font family and set every layer that wanted it.
