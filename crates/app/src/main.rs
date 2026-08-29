@@ -65,24 +65,10 @@ impl PluginManifest for PsdPlugin {
     }
 }
 
-/// Crash reporting stays off unless the user opts in.
-fn crash_reports_enabled() -> bool {
-    if std::env::var("SCHIST_CRASH_REPORTS").is_ok_and(|v| v == "1") {
-        return true;
-    }
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".config"))
-        })
-        .map(|d| d.join("schist/preferences.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|v| v.get("crash_reports").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+/// Whether an opt-in diagnostic is on: the preference, or the environment
+/// variable that overrides it for one run.
+fn opted_in(preference: bool, var: &str) -> bool {
+    preference || std::env::var(var).is_ok_and(|v| v == "1")
 }
 
 /// Assemble the first-party plugin set. Every entry here is optional — the
@@ -205,10 +191,20 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    // Opt-in: SCHIST_CRASH_REPORTS=1, or the preference file's
-    // crash_reports flag once the user enables it in Preferences.
-    crash::install_handler(crash_reports_enabled());
-    workspace::init_compositor_backend(workspace::load_view_options().gpu_compositing);
+    let options = workspace::load_view_options();
+    // Both diagnostics are opt-in, and separately so: writing a report to
+    // this machine and sending one to ours are not the same decision.
+    // SCHIST_CRASH_REPORTS=1 and SCHIST_CRASH_UPLOAD=1 turn them on for a
+    // single run without touching preferences.
+    //
+    // Sentry goes first because it installs a panic hook and
+    // `install_handler` chains in front of whichever hook it finds: the
+    // local report is written before the upload is attempted, so a failing
+    // network never costs the user the report on disk. `_reporter` has to
+    // outlive the app -- dropping it is what flushes the queue.
+    let _reporter = crash::start_reporting(opted_in(options.crash_upload, "SCHIST_CRASH_UPLOAD"));
+    crash::install_handler(opted_in(options.crash_reports, "SCHIST_CRASH_REPORTS"));
+    workspace::init_compositor_backend(options.gpu_compositing);
     let (registry, plugin_manager, photoshop_plugins) = build_registry();
 
     let requests: Rc<RefCell<OpenRequests>> = Rc::default();

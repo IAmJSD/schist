@@ -271,6 +271,25 @@ Remap anything in `~/.config/schist/keymap.json`:
   below a couple of megapixels, where its row-by-row scan costs more in
   dispatches than it saves.
 
+## Diagnostics
+
+Schist does not phone home. There are three things it can send over the
+network and each is off until you turn it on: **Check for Updates**, the
+on-demand font and model downloads, and crash reporting.
+
+Crash reporting is two separate ticks in **Preferences ▸ Diagnostics**.
+The first writes a report next to the crash-recovery snapshot in
+`~/.local/state/schist/crashes/` and sends nothing anywhere. The second
+also uploads it to the project's Sentry, and only appears on the official
+releases — a build from source is given no DSN, so the code that would
+report has nowhere to report to and never starts. Uploads carry no
+personal data, no hostname and no breadcrumbs, and the panic message has
+your home directory rewritten to `~` before it leaves, because a panic
+tends to quote the path it choked on and that path is your work.
+
+Set `SCHIST_CRASH_REPORTS=1` or `SCHIST_CRASH_UPLOAD=1` to turn either on
+for a single run without changing preferences.
+
 ## Plugins
 
 Third-party plugins are sandboxed WebAssembly — no filesystem, network or

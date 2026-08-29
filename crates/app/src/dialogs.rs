@@ -2420,6 +2420,29 @@ fn preferences(
                 cx,
             ),
         ))
+        // Only the official releases are built with a DSN. Everywhere else
+        // this would be a checkbox that sends reports nowhere, so it is not
+        // offered -- and the preference it would set stays false.
+        .children(crate::crash::reporting_available().then(|| {
+            ui::field_row(
+                "",
+                ui::checkbox(
+                    "Also send it to the developers",
+                    view.crash_upload,
+                    |ws, _cx| {
+                        ws.view.crash_upload = !ws.view.crash_upload;
+                        ws.save_view_options();
+                    },
+                    cx,
+                ),
+            )
+        }))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child("Diagnostics take effect when Schist next starts."),
+        )
         .child(ui::field_row(
             "Updates",
             ui::checkbox(
