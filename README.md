@@ -246,10 +246,15 @@ Remap anything in `~/.config/schist/keymap.json`:
   than as wrong. Skin Smoothing's *smoothing* is frequency separation,
   which is what a retoucher does by hand; the network's job there is to
   say where the faces are, and it has opinions about dogs. Colour
-  Transfer has no model and is not missing one — moving one image's
-  colour distribution onto another's is arithmetic. Each filter says in
-  its own dialog which path it took, and the model-backed ones fall back
-  to a classical implementation rather than failing.
+  Transfer is the one that is genuinely short: Photoshop's takes the
+  palette from a *reference photograph* and matches it up scene to
+  scene, and this one aims at a hue you pick, because a filter here is
+  handed one buffer and a list of numbers and there is no way to hand it
+  a second image. The arithmetic that moves one colour distribution onto
+  another is all there; the picture to take the distribution from is
+  not. Each filter says in its own dialog which path it took, and the
+  model-backed ones fall back to a classical implementation rather than
+  failing.
 - **Object Selection and Content-Aware Fill are heuristics**, not the
   models Photoshop uses — background sampling and diffusion inpainting
   respectively. They degrade predictably (blurry over texture) rather

@@ -8,13 +8,14 @@
 //! demand. Everything runs through `schist-neural`, which is `tract` --
 //! pure Rust, so there is no runtime to install.
 //!
-//! The two that are not networks are not networks for a reason. Colour
-//! Transfer is a statistic -- moving one image's colour distribution onto
-//! another's is arithmetic, and a network would be a slower way to get
-//! the same numbers. Skin Smoothing's *smoothing* is frequency
-//! separation, which is what a retoucher does by hand; the network's job
-//! there is to say where the faces are, which is the part that needs to
-//! know what a face is.
+//! The two that are not networks are not networks for different reasons.
+//! Skin Smoothing's *smoothing* is frequency separation, which is what a
+//! retoucher does by hand; the network's job there is to say where the
+//! faces are, which is the part that needs to know what a face is.
+//! Colour Transfer is short of the real thing: Photoshop's takes the
+//! palette from a reference photograph, and this one aims at a hue,
+//! because the filter interface hands a filter one buffer and a list of
+//! numbers with no way to pass it a second image.
 //!
 //! Every model-backed filter also works without its model, falling back
 //! to the classical path and saying so in its dialog. Nothing here is a
@@ -676,13 +677,15 @@ simple_filter!(
         param("contrast", "Match Contrast", 0.0, 100.0, 50.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Reinhard-style colour transfer, aimed at a hue rather than a
-        // reference image: shift the image's mean chroma towards the
-        // target and optionally normalise its spread. There is no model
-        // here and there is no missing one -- moving one distribution
-        // onto another is arithmetic, and Photoshop's own network is
-        // doing the *segmentation* around it, which Object Selection is
-        // the filter for.
+        // Reinhard-style colour transfer, aimed at a hue rather than at
+        // a reference image: shift the image's mean chroma towards the
+        // target and optionally normalise its spread. Moving one
+        // distribution onto another is arithmetic and this is that
+        // arithmetic; what Photoshop has and this does not is the
+        // reference photograph to read a distribution *from*, and a
+        // network matching the two scene by scene so that its sky lands
+        // on this sky. A filter is handed one buffer and a list of
+        // numbers, so the second picture has nowhere to arrive.
         let _ = (w, h);
         let strength = v.get("strength") / 100.0;
         let match_contrast = v.get("contrast") / 100.0;
