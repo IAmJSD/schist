@@ -896,9 +896,12 @@ fn destructive_adjustment_dialog(
 
 /// Filter ▸ Neural Filters ▸ Manage Models.
 ///
-/// The style-transfer networks are megabytes each and are somebody else's
-/// work, so they are fetched here rather than shipped. The one that was
-/// trained for this application is built in and cannot be removed.
+/// The style-transfer, depth and face networks are somebody else's work
+/// and up to sixty-six megabytes of it, so they are fetched here rather
+/// than shipped. The ones trained for this application are small enough
+/// to live in the binary, and are listed as built in rather than being
+/// hidden: which filter has which model is exactly what somebody opens
+/// this dialog to find out.
 fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let downloading = ws.model_downloads.clone();
     let rows: Vec<gpui::AnyElement> = schist_neural::CATALOG
@@ -906,14 +909,32 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
         .map(|spec| {
             let id = spec.id;
             let installed = schist_neural::installed(id);
-            let busy = downloading.contains(&id);
+            let busy = downloading.iter().find(|d| d.id == id);
+            // Kilobytes below a megabyte: two of the built-in models
+            // round to "0.2 MB", which reads as a rounding error rather
+            // than as a size.
+            let size_of = |bytes: f64| {
+                if bytes < (1 << 20) as f64 {
+                    format!("{:.0} KB", bytes / (1 << 10) as f64)
+                } else {
+                    format!("{:.1} MB", bytes / (1 << 20) as f64)
+                }
+            };
             let size = schist_neural::installed_size(spec)
-                .map(|b| format!("{:.1} MB", b as f64 / (1 << 20) as f64))
-                .unwrap_or_else(|| format!("{:.1} MB", spec.bytes as f64 / (1 << 20) as f64));
+                .map(|b| size_of(b as f64))
+                .unwrap_or_else(|| size_of(spec.bytes as f64));
             let state = if spec.built_in() {
-                "Built in".to_string()
-            } else if busy {
-                "Downloading\u{2026}".to_string()
+                format!("Built in \u{b7} {size}")
+            } else if let Some(download) = busy {
+                // Against the size this build expects rather than the
+                // one the server declared: they are the same file, and
+                // the hash check afterwards is what says so.
+                let got = download.got.load(std::sync::atomic::Ordering::Relaxed);
+                format!(
+                    "Downloading\u{2026} {} of {}",
+                    size_of(got as f64),
+                    size_of(spec.bytes as f64)
+                )
             } else if installed {
                 format!("Installed \u{b7} {size}")
             } else {
@@ -921,7 +942,7 @@ fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             };
             let action: gpui::AnyElement = if spec.built_in() {
                 div().into_any_element()
-            } else if busy {
+            } else if busy.is_some() {
                 div()
                     .text_size(px(11.0))
                     .text_color(gpui::rgb(ui::palette().text_dim))

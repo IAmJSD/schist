@@ -5769,6 +5769,7 @@ dependencies = [
 name = "schist-filters-core"
 version = "0.7.1"
 dependencies = [
+ "log",
  "schist-color",
  "schist-fx",
  "schist-neural",

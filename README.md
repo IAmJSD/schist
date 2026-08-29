@@ -225,17 +225,31 @@ Remap anything in `~/.config/schist/keymap.json`:
   is a protocol of its own rather than an axis on the pointer, so binding
   it means synthesising the whole mouse event stream from the tool, tip
   and barrel buttons included. Reports from real hardware welcome.
-- **Only two Neural Filters run a network.** Super Zoom uses a small
-  residual CNN trained for this application (`tools/train/detail.py`,
-  39k parameters and 153 KB, shipped in the binary); Style Transfer uses
-  the fast neural-style networks from the ONNX Model Zoo, downloaded on demand
-  from Filter ▸ Neural Filters ▸ Manage Models. Inference is
-  [`tract`](https://github.com/sonos/tract) — pure Rust, nothing to
-  install. The rest are signal processing: Skin Smoothing does not know
-  what a face is, it does frequency separation on pixels whose colour
-  falls in the skin-tone range. Each filter says in its own dialog which
-  path it took, and the model-backed ones fall back to the classical one
-  rather than failing.
+- **Five of the seven Neural Filters run a network, and they are not
+  Photoshop's networks.** Super Zoom, JPEG Artifact Removal and Colorize
+  use models trained for this application — `tools/train/`, between 39k
+  and 466k parameters, shipped inside the binary because they are small
+  enough to be; the first two were fitted to the Kodak suite and the
+  colouriser to twenty thousand CC BY photographs from Open Images,
+  which `tools/train/photos.py` will fetch again. Style Transfer uses the fast neural-style networks from
+  the ONNX Model Zoo, Depth Blur uses MiDaS and Skin Smoothing uses
+  UltraFace; those are somebody else's work and run from one megabyte to
+  sixty-six, so they are fetched on demand from Filter ▸ Neural
+  Filters ▸ Manage Models and checked against the hash this build
+  expects.
+  Inference is [`tract`](https://github.com/sonos/tract) — pure Rust,
+  nothing to install.
+
+  What each one is honest about differs. Colorize knows what sky, foliage,
+  wood and skin usually look like and is deliberately cautious about
+  anything whose colour is a choice, which reads as desaturated rather
+  than as wrong. Skin Smoothing's *smoothing* is frequency separation,
+  which is what a retoucher does by hand; the network's job there is to
+  say where the faces are, and it has opinions about dogs. Colour
+  Transfer has no model and is not missing one — moving one image's
+  colour distribution onto another's is arithmetic. Each filter says in
+  its own dialog which path it took, and the model-backed ones fall back
+  to a classical implementation rather than failing.
 - **Object Selection and Content-Aware Fill are heuristics**, not the
   models Photoshop uses — background sampling and diffusion inpainting
   respectively. They degrade predictably (blurry over texture) rather

@@ -37,21 +37,33 @@ VALIDATION = {"kodim05", "kodim13", "kodim19", "kodim23"}
 
 
 class DetailNet(nn.Module):
-    """A small residual CNN: four 3x3 convolutions and a skip.
+    """A small residual CNN: six 3x3 convolutions and a skip.
 
-    Kept deliberately tiny -- about 21k parameters, 84 KB as float32 --
-    because it ships inside the application and runs on the CPU over
-    however many megapixels the user points it at. Everything about the
-    shape is a cost/quality trade rather than a copy of a paper.
+    Kept deliberately tiny -- 39k parameters, 153 KB as float32 -- because
+    it ships inside the application and runs on the CPU over however many
+    megapixels the user points it at. Everything about the shape is a
+    cost/quality trade rather than a copy of a paper.
+
+    Normalised, and Kaiming-initialised rather than left on PyTorch's
+    default, which matters more than it sounds: the default shrinks the
+    activations by about a third a layer, so what arrives at the
+    zero-initialised tail is small enough that the network learns very
+    slowly and, at this depth, can sit at the identity for thousands of
+    steps. Fixing that is worth about half a decibel here and is the
+    difference between working and not in `dejpeg.py`.
     """
 
-    def __init__(self, channels: int = 32, layers: int = 4) -> None:
+    def __init__(self, channels: int = 32, layers: int = 6) -> None:
         super().__init__()
         assert layers >= 2
         body = [nn.Conv2d(3, channels, 3, padding=1)]
         body += [nn.Conv2d(channels, channels, 3, padding=1) for _ in range(layers - 2)]
         self.body = nn.ModuleList(body)
+        self.norm = nn.ModuleList([nn.BatchNorm2d(channels) for _ in body])
         self.tail = nn.Conv2d(channels, 3, 3, padding=1)
+        for conv in self.body:
+            nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
+            nn.init.zeros_(conv.bias)
         # Start the tail at zero so the untrained network is exactly the
         # identity. Without this the first epochs are spent undoing random
         # noise the network added to the image.
@@ -60,8 +72,8 @@ class DetailNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = x
-        for conv in self.body:
-            h = F.relu(conv(h))
+        for conv, norm in zip(self.body, self.norm):
+            h = F.relu(norm(conv(h)))
         return x + self.tail(h)
 
 
@@ -124,11 +136,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--steps", type=int, default=4000)
+    ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--patch", type=int, default=64)
     ap.add_argument("--channels", type=int, default=32)
-    ap.add_argument("--layers", type=int, default=4)
+    ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
