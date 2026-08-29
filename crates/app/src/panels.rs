@@ -565,6 +565,9 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
             "filter.neural.photo_restoration",
             "filter.neural.photo_to_sketch",
             "filter.neural.face_to_caricature",
+            "filter.neural.smart_portrait",
+            "filter.neural.makeup_transfer",
+            "filter.neural.sketch_to_portrait",
         ],
     ),
 ];

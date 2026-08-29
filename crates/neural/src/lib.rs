@@ -36,16 +36,19 @@ mod colour;
 mod compat;
 mod depth;
 mod faces;
+mod framed;
 mod tile;
 pub use colour::{chroma, recolour};
 pub use depth::depth_map;
 pub use faces::{faces, Face};
+pub use framed::run_framed;
 pub use tile::run_tiled;
 
 /// The models shipped inside the binary.
 const DETAIL_ONNX: &[u8] = include_bytes!("../models/detail.onnx");
 const DEJPEG_ONNX: &[u8] = include_bytes!("../models/dejpeg.onnx");
 const COLORIZE_ONNX: &[u8] = include_bytes!("../models/colorize.onnx");
+const PORTRAIT_ONNX: &[u8] = include_bytes!("../models/portrait.onnx");
 
 /// How a model wants its pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -210,6 +213,26 @@ pub const CATALOG: &[ModelSpec] = &[
         note: "Predicts colour for a greyscale photograph. Trained on \
                20,000 CC BY photographs from Open Images; see \
                tools/train/colorize.py.",
+    },
+    ModelSpec {
+        id: "portrait",
+        name: "Portrait (Sketch to Portrait)",
+        file: "portrait.onnx",
+        url: None,
+        sha256: None,
+        bytes: PORTRAIT_ONNX.len(),
+        // A face at a time, whole: filling in a drawing means knowing
+        // what the drawing is of, and no tile of a face knows that.
+        input: Input::Frame {
+            width: 128,
+            height: 128,
+            fit: Fit::Stretch,
+        },
+        range: Range::Unit,
+        license: "Trained for Schist; same licence as the app",
+        note: "Puts the tone and colour back into a sketch of a face. \
+               Trained to invert this build's own Photo to Sketch on CC BY \
+               faces from Open Images; see tools/train/portrait.py.",
     },
     ModelSpec {
         id: "style-mosaic",
@@ -495,6 +518,7 @@ fn load(spec: &'static ModelSpec) -> Result<Model> {
             "detail" => DETAIL_ONNX,
             "dejpeg" => DEJPEG_ONNX,
             "colorize" => COLORIZE_ONNX,
+            "portrait" => PORTRAIT_ONNX,
             other => bail!("no built-in model named {other}"),
         };
         return Model::from_bytes(spec, bytes);
