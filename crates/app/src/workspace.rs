@@ -583,7 +583,7 @@ pub enum Modal {
     ImageSize {
         width: u32,
         height: u32,
-        filter: schist_core::Filter,
+        resample: schist_tools_transform::Resample,
         link: bool,
     },
     CanvasSize {
@@ -626,7 +626,13 @@ pub enum Modal {
     /// own dialog is where the interaction is happening. Carries no
     /// controls: it exists to hold the document still until the plug-in
     /// is done, and closes itself when it is.
-    FilterRunning { name: String },
+    /// Something slow is running and the document must hold still until
+    /// it finishes. Not dismissable: see the Escape handler.
+    Busy {
+        title: String,
+        what: String,
+        note: String,
+    },
     /// Filter ▸ Filter Gallery: a stack of filters applied in order.
     FilterGallery {
         /// Applied bottom to top, as in Photoshop's stack.
@@ -4232,7 +4238,7 @@ impl Workspace {
             }
             // These dialogs have no typed fields.
             Modal::DestructiveAdjustment { .. }
-            | Modal::FilterRunning { .. }
+            | Modal::Busy { .. }
             | Modal::ConfirmCloseTab
             | Modal::DropImage { .. }
             | Modal::HeifSupport { .. }
@@ -4325,9 +4331,9 @@ impl Workspace {
             return;
         }
         // Not this one: the run is not ours to cancel, and dropping the
-        // overlay would let the document be edited underneath a filter
+        // overlay would let the document be edited underneath something
         // that is about to write to it.
-        if matches!(self.modal, Some(Modal::FilterRunning { .. })) {
+        if matches!(self.modal, Some(Modal::Busy { .. })) {
             return;
         }
         if self.modal.is_some() {
@@ -5448,7 +5454,16 @@ impl Workspace {
             };
             let values = values.clone();
             let (w, h) = (region.width() as usize, region.height() as usize);
-            self.open_modal(Modal::FilterRunning { name: name.clone() }, cx);
+            self.open_modal(
+                Modal::Busy {
+                    title: "Photoshop plug-in".into(),
+                    what: format!("Running {name}"),
+                    note: "The plug-in runs in its own process. If it opens a \
+                           window, answer that to continue."
+                        .into(),
+                },
+                cx,
+            );
             cx.spawn(async move |this, cx| {
                 let (buf, failure) = cx
                     .background_executor()
@@ -5507,6 +5522,84 @@ impl Workspace {
     /// long as someone took to answer a dialog, and the document it
     /// started against may not be the one in front of us now.
     #[allow(clippy::too_many_arguments)]
+    /// Image Size through a neural upscaler.
+    ///
+    /// The network costs seconds per input megapixel, so it runs on a
+    /// background thread behind a modal that holds the document still --
+    /// the same arrangement an out-of-process filter gets, and for the
+    /// same reason.
+    pub fn resize_image_neural(
+        &mut self,
+        width: u32,
+        height: u32,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let name = schist_tools_transform::Resample::Neural(id).display_name();
+        let done = format!("Image size: {width} × {height}");
+        let Some(doc) = self.doc.as_ref() else { return };
+        if width == 0 || height == 0 || (width == doc.width && height == doc.height) {
+            self.close_modal(cx);
+            return;
+        }
+        let plan = schist_tools_transform::plan_neural(doc, width, height, id);
+        // Both classical outcomes are quick enough to do inline; only the
+        // network needs to get off this thread.
+        let bicubic = |ws: &mut Self, status: String, cx: &mut Context<Self>| {
+            if let Some(doc) = ws.doc.as_mut() {
+                schist_tools_transform::resize_image(
+                    doc,
+                    width,
+                    height,
+                    schist_core::Filter::Bicubic,
+                );
+            }
+            ws.status = status.into();
+            ws.close_modal(cx);
+            ws.after_change(cx);
+            ws.fit_to_view();
+        };
+        match plan {
+            schist_tools_transform::Plan::NoModel => bicubic(
+                self,
+                format!("{done} — the {name} model would not load, so bicubic stood in"),
+                cx,
+            ),
+            schist_tools_transform::Plan::Classical => bicubic(self, done, cx),
+            schist_tools_transform::Plan::Neural(plan) => {
+                let mp = plan.megapixels();
+                self.open_modal(
+                    Modal::Busy {
+                        title: "Image Size".into(),
+                        what: format!("Upscaling with {name}"),
+                        note: format!(
+                            "{mp:.1} megapixels through the network, at a few \
+                             seconds each. The document is held until it finishes."
+                        ),
+                    },
+                    cx,
+                );
+                cx.spawn(async move |this, cx| {
+                    let up = cx
+                        .background_executor()
+                        .spawn(async move { plan.run() })
+                        .await;
+                    this.update(cx, |ws, cx| {
+                        ws.modal = None;
+                        if let Some(doc) = ws.doc.as_mut() {
+                            schist_tools_transform::apply_upscaled(doc, up);
+                        }
+                        ws.status = done.into();
+                        ws.after_change(cx);
+                        ws.fit_to_view();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     fn finish_external_filter(
         &mut self,
         layer_id: schist_core::LayerId,
@@ -7076,7 +7169,7 @@ impl Render for Workspace {
                     let modal = Modal::ImageSize {
                         width: doc.width,
                         height: doc.height,
-                        filter: ws.editor.resample,
+                        resample: schist_tools_transform::Resample::Classic(ws.editor.resample),
                         link: true,
                     };
                     ws.open_modal(modal, cx);

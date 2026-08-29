@@ -510,7 +510,9 @@ fn tint_by_luminance(px: &mut [f32], warmth: f32, strength: f32) {
 ///
 /// A filter cannot resize its own buffer, so this is the second half of
 /// an upscale -- enlarge with Image Size, then run this to put the high
-/// frequencies back.
+/// frequencies back. (Image Size can also do the whole thing at once now,
+/// resampling through waifu2x; this stays for enlargements made
+/// elsewhere, and for its slider.)
 pub struct SuperZoom;
 
 impl FilterPlugin for SuperZoom {
