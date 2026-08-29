@@ -3,7 +3,8 @@
 //! [`crate::run_tiled`] is for models that work on pixels: it cuts the
 //! image into tiles at full resolution because the answer is local. This
 //! is for the other kind, where the answer is about *the whole subject* --
-//! filling in a drawing of a face means knowing it is a face -- so the
+//! filling in a drawing of a face means knowing it is a face, and filling
+//! in a hole means knowing what is on the other side of it -- so the
 //! picture goes in as one frame at whatever size the model was trained
 //! at, and the result is resampled back out.
 //!
@@ -11,8 +12,9 @@
 //! this way do: the result cannot carry more detail than the frame held.
 
 use anyhow::{bail, Context as _, Result};
+use tract_onnx::prelude::*;
 
-use crate::{frame, Model};
+use crate::{frame, Framing, Model};
 
 /// Run a whole-image model and return its result at the image's size.
 ///
@@ -23,7 +25,19 @@ pub fn run_framed(model: &Model, rgb: &[f32], width: usize, height: usize) -> Re
     }
     let (input, framing) = frame(model.spec, rgb, width, height);
     let out = model.run(&input)?;
-    let view = out[0].to_plain_array_view::<f32>()?;
+    unframe(&out[0], model, framing, width, height)
+}
+
+/// Resample a model's `[1, 3, H, W]` output back to the image it came
+/// from, given how the image was fitted into the frame.
+pub(crate) fn unframe(
+    out: &TValue,
+    model: &Model,
+    framing: Framing,
+    width: usize,
+    height: usize,
+) -> Result<Vec<f32>> {
+    let view = out.to_plain_array_view::<f32>()?;
     let [1, 3, fh, fw] = view.shape()[..] else {
         bail!("expected a 1x3xHxW image out, got {:?}", view.shape());
     };

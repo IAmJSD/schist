@@ -1,4 +1,5 @@
-//! Neural network inference for the Neural Filters.
+//! Neural network inference: the Neural Filters, and the two tools that
+//! need a model as much as any of them.
 //!
 //! Runs ONNX models through [`tract`], which is pure Rust -- no ONNX
 //! Runtime, no C toolchain, nothing to install. That matters here: a paint
@@ -7,14 +8,15 @@
 //!
 //! Two kinds of model:
 //!
-//! * **Built in.** `detail.onnx`, `dejpeg.onnx`, `colorize.onnx` and the
-//!   waifu2x upscalers ship inside the binary, a few megabytes between
-//!   them -- ours were trained small on purpose (see `tools/train/`), and
-//!   waifu2x's upconv_7 came small.
-//! * **Downloaded.** The style-transfer, depth and face networks are
-//!   megabytes to tens of megabytes each and are somebody else's work, so
-//!   they are fetched on demand into the user's data directory and
-//!   checked against a known hash.
+//! * **Built in.** `detail.onnx`, `dejpeg.onnx`, `colorize.onnx`,
+//!   `portrait.onnx`, `inpaint.onnx` and the waifu2x upscalers ship
+//!   inside the binary, a few megabytes between them -- ours were
+//!   trained small on purpose (see `tools/train/`), and waifu2x's
+//!   upconv_7 came small.
+//! * **Downloaded.** The style-transfer, depth, face and segmentation
+//!   networks are megabytes to tens of megabytes each and are somebody
+//!   else's work, so they are fetched on demand into the user's data
+//!   directory and checked against a known hash.
 //!
 //! And two ways of feeding one, which is what [`Input`] distinguishes: a
 //! model that *changes* an image sees it in tiles at full resolution,
@@ -22,9 +24,10 @@
 //! faces are, what is near -- sees the whole thing resampled into one
 //! fixed frame.
 //!
-//! Every filter that uses a model also works without it. The classical
-//! implementation is not a stub -- it is the fallback, and the filter says
-//! which one it used.
+//! Every filter that uses a model also works without it, and so does
+//! every tool. The classical implementation is not a stub -- it is the
+//! fallback, and it is what runs when the model is missing, when it
+//! fails, or when it looks at the picture and has nothing to say.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,11 +41,15 @@ mod compat;
 mod depth;
 mod faces;
 mod framed;
+mod inpaint;
+mod segment;
 mod tile;
 pub use colour::{chroma, recolour};
 pub use depth::depth_map;
 pub use faces::{faces, Face};
 pub use framed::run_framed;
+pub use inpaint::inpaint;
+pub use segment::segment;
 pub use tile::{run_scaled, run_tiled};
 
 /// The models shipped inside the binary.
@@ -50,6 +57,7 @@ const DETAIL_ONNX: &[u8] = include_bytes!("../models/detail.onnx");
 const DEJPEG_ONNX: &[u8] = include_bytes!("../models/dejpeg.onnx");
 const COLORIZE_ONNX: &[u8] = include_bytes!("../models/colorize.onnx");
 const PORTRAIT_ONNX: &[u8] = include_bytes!("../models/portrait.onnx");
+const INPAINT_ONNX: &[u8] = include_bytes!("../models/inpaint.onnx");
 const WAIFU2X_ART_ONNX: &[u8] = include_bytes!("../models/waifu2x-art.onnx");
 const WAIFU2X_PHOTO_ONNX: &[u8] = include_bytes!("../models/waifu2x-photo.onnx");
 
@@ -254,6 +262,27 @@ pub const CATALOG: &[ModelSpec] = &[
                faces from Open Images; see tools/train/portrait.py.",
     },
     ModelSpec {
+        id: "inpaint",
+        name: "Fill (Content-Aware Fill)",
+        file: "inpaint.onnx",
+        url: None,
+        sha256: None,
+        bytes: INPAINT_ONNX.len(),
+        // The region whole, because the answer for a pixel in the middle
+        // of a hole is not anywhere near it -- there is nothing near it --
+        // it is at the far side, and no tile of a hole can see that.
+        input: Input::Frame {
+            width: 160,
+            height: 160,
+            fit: Fit::Stretch,
+        },
+        range: Range::Unit,
+        license: "Trained for Schist; same licence as the app",
+        note: "Predicts what was behind a hole, from the picture round \
+               it. Trained on CC BY photographs from Open Images; see \
+               tools/train/inpaint.py.",
+    },
+    ModelSpec {
         id: "waifu2x-art",
         name: "waifu2x ×2 (Art)",
         file: "waifu2x-art.onnx",
@@ -339,6 +368,20 @@ pub const CATALOG: &[ModelSpec] = &[
                the photograph alone (Ranftl et al.).",
     },
     ModelSpec {
+        id: "segment",
+        name: "Objects (Object Selection)",
+        file: "segment.onnx",
+        url: Some("https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"),
+        sha256: Some("309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8"),
+        bytes: 4_574_861,
+        input: Input::Frame { width: 320, height: 320, fit: Fit::Stretch },
+        range: IMAGENET,
+        license: "U^2-Net, Qin et al., Apache-2.0",
+        note: "Separates the subject of a picture from its background, so \
+               Object Selection can cut round an object instead of round \
+               everything that is not the colour behind it.",
+    },
+    ModelSpec {
         id: "face",
         name: "Faces (Skin Smoothing)",
         file: "face.onnx",
@@ -382,7 +425,33 @@ pub fn installed(id: &str) -> bool {
 /// A loaded model, ready to run.
 pub struct Model {
     plan: Arc<TypedSimplePlan>,
+    /// Planes the graph's input takes, which is three for everything
+    /// that sees only colour.
+    channels: usize,
     pub spec: &'static ModelSpec,
+}
+
+/// The channel count an ONNX graph declares on its first input, when it
+/// declares a fixed one.
+fn declared_channels(proto: &tract_onnx::pb::ModelProto) -> Option<usize> {
+    let dim = proto
+        .graph
+        .as_ref()?
+        .input
+        .first()?
+        .r#type
+        .as_ref()?
+        .value
+        .as_ref()?;
+    let tract_onnx::pb::type_proto::Value::TensorType(t) = dim;
+    let dims = &t.shape.as_ref()?.dim;
+    let d = dims.get(1)?.value.as_ref()?;
+    match d {
+        tract_onnx::pb::tensor_shape_proto::dimension::Value::DimValue(v) if *v > 0 => {
+            Some(*v as usize)
+        }
+        _ => None,
+    }
 }
 
 impl Model {
@@ -398,15 +467,49 @@ impl Model {
         if compat::modernise(&mut proto) {
             log::debug!("{}: rewrote a pre-opset-10 graph", spec.id);
         }
+        // Almost every vision model takes three planes of colour, but an
+        // inpainting one takes four -- the fourth says which pixels are
+        // missing, and it has to be a channel rather than a convention
+        // because "black" and "gone" are otherwise the same pixel. Ask
+        // the graph rather than assuming.
+        let channels = declared_channels(&proto).unwrap_or(3);
         let plan = onnx
             .model_for_proto_model(&proto)
             .context("not a model tract can parse")?
-            .with_input_fact(0, f32::fact([1, 3, h, w]).into())
-            .context("model does not take a 1x3xHxW float input")?
+            .with_input_fact(0, f32::fact([1, channels, h, w]).into())
+            .context("model does not take a 1xCxHxW float input")?
             .into_optimized()
             .context("model uses an operator tract cannot run")?
             .into_runnable()?;
-        Ok(Model { plan, spec })
+        Ok(Model {
+            plan,
+            channels,
+            spec,
+        })
+    }
+
+    /// How many planes the graph wants.
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Run the graph on planes the caller has already separated, for a
+    /// model whose input is not simply three of colour.
+    pub(crate) fn run_planes(&self, planes: &[&[f32]]) -> Result<TVec<TValue>> {
+        let (w, h) = self.spec.input.dims();
+        if planes.len() != self.channels || planes.iter().any(|p| p.len() != w * h) {
+            bail!(
+                "expected {} planes of {} floats, got {:?}",
+                self.channels,
+                w * h,
+                planes.iter().map(|p| p.len()).collect::<Vec<_>>()
+            );
+        }
+        let input = tract_ndarray::Array4::<f32>::from_shape_fn(
+            (1, self.channels, h, w),
+            |(_, c, y, x)| planes[c][y * w + x],
+        );
+        self.plan.run(tvec!(input.into_tensor().into()))
     }
 
     /// Run the graph over one frame of interleaved RGB in 0..=1, sized
@@ -577,6 +680,7 @@ fn load(spec: &'static ModelSpec) -> Result<Model> {
             "dejpeg" => DEJPEG_ONNX,
             "colorize" => COLORIZE_ONNX,
             "portrait" => PORTRAIT_ONNX,
+            "inpaint" => INPAINT_ONNX,
             "waifu2x-art" => WAIFU2X_ART_ONNX,
             "waifu2x-photo" => WAIFU2X_PHOTO_ONNX,
             other => bail!("no built-in model named {other}"),

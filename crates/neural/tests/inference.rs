@@ -685,3 +685,120 @@ fn sketch_of(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
     }
     out
 }
+
+#[test]
+fn the_segmentation_model_cuts_round_a_subject() {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("segment") else {
+        eprintln!("skipping: the segmentation model is not installed");
+        return;
+    };
+    // One object on one background is the whole question the network was
+    // trained to answer, so a disc on a field is a fair -- if easy --
+    // statement of it, and it needs no photograph in the repository.
+    let (w, h) = (320usize, 240usize);
+    let (cx, cy, radius) = (160.0f32, 120.0, 70.0);
+    let mut rgb = vec![0.35f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            if (x as f32 - cx).hypot(y as f32 - cy) < radius {
+                rgb[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&[0.85, 0.15, 0.1]);
+            }
+        }
+    }
+    let map = neural::segment(&model, &rgb, w, h).expect("runs");
+    assert_eq!(map.len(), w * h);
+    let (mut hit, mut miss, mut area) = (0usize, 0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            let inside = (x as f32 - cx).hypot(y as f32 - cy) < radius;
+            let said = map[y * w + x] > 0.5;
+            area += inside as usize;
+            hit += (inside && said) as usize;
+            miss += (!inside && said) as usize;
+        }
+    }
+    assert!(
+        hit * 10 >= area * 9 && miss * 5 < area,
+        "cut {hit} of {area} disc pixels and {miss} outside it"
+    );
+}
+
+#[test]
+fn the_segmentation_model_finds_nothing_in_a_picture_of_nothing() {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("segment") else {
+        eprintln!("skipping: the segmentation model is not installed");
+        return;
+    };
+    // This is the answer the tool needs in order to fall back rather
+    // than select noise: fine grain with no subject in it has to come
+    // back as a map of nothing, which is why the map is left as the
+    // probability the network emitted rather than stretched over its own
+    // range the way the reference implementation stretches it.
+    let (w, h) = (320usize, 240usize);
+    let mut seed = 0x1234_5678u32;
+    let noise: Vec<f32> = (0..w * h * 3)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            0.5 + (seed >> 8) as f32 / u32::MAX as f32 * 0.06
+        })
+        .collect();
+    let map = neural::segment(&model, &noise, w, h).expect("runs");
+    let claimed = map.iter().filter(|&&v| v > 0.5).count();
+    assert!(
+        claimed * 20 < w * h,
+        "found a subject in {claimed} of {} noise pixels",
+        w * h
+    );
+}
+
+#[test]
+fn the_inpainting_model_fills_a_hole_with_the_right_kind_of_thing() {
+    let _guard = model_dir_lock();
+    let model = neural::get("inpaint").expect("built in");
+    assert_eq!(model.channels(), 4, "the mask is the fourth plane");
+    // A picture in two halves, and a hole in one of them. Getting this
+    // right needs nothing clever -- but it does need the mask to have
+    // arrived, because the punched-out hole is black and the answer is
+    // not, and a network that ignored the fourth plane would say black.
+    let (w, h) = (192usize, 128usize);
+    let mut rgb = vec![0.0f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let c = match y < h / 2 {
+                true => [0.2, 0.4, 0.8],
+                false => [0.3, 0.6, 0.2],
+            };
+            rgb[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&c);
+        }
+    }
+    let hole: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            (60..130).contains(&x) && (70..110).contains(&y)
+        })
+        .collect();
+    let filled = neural::inpaint(&model, &rgb, w, h, &hole).expect("runs");
+    assert_eq!(filled.len(), w * h * 3);
+    assert!(filled.iter().all(|v| (0.0..=1.0).contains(v)));
+
+    // The hole is entirely in the lower half, so the answer is the lower
+    // half's colour -- nearer to it, at least, than to the black it was
+    // handed or to the colour of the other half.
+    let (mut mine, mut n) = ([0f32; 3], 0f32);
+    for (i, &gone) in hole.iter().enumerate() {
+        if gone {
+            for c in 0..3 {
+                mine[c] += filled[i * 3 + c];
+            }
+            n += 1.0;
+        }
+    }
+    let got = [mine[0] / n, mine[1] / n, mine[2] / n];
+    let away = |want: [f32; 3]| (0..3).map(|c| (got[c] - want[c]).abs()).sum::<f32>();
+    assert!(
+        away([0.3, 0.6, 0.2]) < away([0.2, 0.4, 0.8]) && away([0.3, 0.6, 0.2]) < away([0.0; 3]),
+        "filled the grass with {got:?}"
+    );
+}
