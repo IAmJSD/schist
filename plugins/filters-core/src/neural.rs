@@ -1,20 +1,28 @@
 //! Photoshop's Neural Filters.
 //!
-//! Five of the seven run a real network. Super Zoom, JPEG Artifact
-//! Removal and Colorize use models trained for this application and
-//! shipped inside the binary (`tools/train/`); Style Transfer uses the
-//! fast neural-style networks from the ONNX Model Zoo, Depth Blur uses
-//! MiDaS and Skin Smoothing uses UltraFace, all three downloaded on
+//! Twelve of them, nine of which run a real network. Super Zoom, JPEG
+//! Artifact Removal, Colorize and Photo Restoration use models trained
+//! for this application and shipped inside the binary (`tools/train/`);
+//! Style Transfer uses the fast neural-style networks from the ONNX
+//! Model Zoo, Depth Blur and Landscape Mixer use MiDaS, and Skin
+//! Smoothing and Face to Caricature use UltraFace, all downloaded on
 //! demand. Everything runs through `schist-neural`, which is `tract` --
 //! pure Rust, so there is no runtime to install.
 //!
-//! The two that are not networks are not networks for a reason. Colour
-//! Transfer is a statistic -- moving one image's colour distribution onto
-//! another's is arithmetic, and a network would be a slower way to get
-//! the same numbers. Skin Smoothing's *smoothing* is frequency
-//! separation, which is what a retoucher does by hand; the network's job
-//! there is to say where the faces are, which is the part that needs to
-//! know what a face is.
+//! The three that are not networks are not networks for different
+//! reasons. Skin Smoothing's *smoothing* is frequency separation, which
+//! is what a retoucher does by hand; the network's job there is to say
+//! where the faces are, which is the part that needs to know what a face
+//! is. Colour Transfer and Harmonization move one image's colour
+//! distribution onto another's, which is arithmetic -- what Adobe's
+//! networks add is matching the two *by subject*, so that a reference's
+//! sky lands on your sky rather than on your whole picture.
+//!
+//! Three of these need a second image, and the one a filter can be
+//! handed without a file picker is the layer underneath: Colour
+//! Transfer, Harmonization and Landscape Mixer take their reference from
+//! whatever the document composites to below this layer, which is asked
+//! for with [`FilterPlugin::wants_backdrop`].
 //!
 //! Every model-backed filter also works without its model, falling back
 //! to the classical path and saying so in its dialog. Nothing here is a
@@ -22,7 +30,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::util::{at, gaussian_rgba, luma, put, sample};
+use crate::util::{at, gaussian_rgba, luma, put, sample, warp};
 use crate::{choice, param, simple_filter};
 use schist_neural::Face;
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
@@ -665,32 +673,95 @@ fn colour_shift(px: &mut [f32], hue: f32, strength: f32) {
     }
 }
 
-simple_filter!(
-    ColorTransfer,
-    "filter.neural.color_transfer",
-    "Color Transfer",
-    "Neural Filters",
-    [
-        param("hue", "Target Hue", 0.0, 360.0, 30.0, "\u{b0}"),
-        param("strength", "Strength", 0.0, 100.0, 60.0, ""),
-        param("contrast", "Match Contrast", 0.0, 100.0, 50.0, "")
-    ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Reinhard-style colour transfer, aimed at a hue rather than a
-        // reference image: shift the image's mean chroma towards the
-        // target and optionally normalise its spread. There is no model
-        // here and there is no missing one -- moving one distribution
-        // onto another is arithmetic, and Photoshop's own network is
-        // doing the *segmentation* around it, which Object Selection is
-        // the filter for.
-        let _ = (w, h);
-        let strength = v.get("strength") / 100.0;
-        let match_contrast = v.get("contrast") / 100.0;
-        let hue = v.get("hue").to_radians();
+/// Colour Transfer: take another photograph's palette.
+///
+/// Photoshop's reads the palette from a reference image you choose. This
+/// reads it from the layer underneath -- the one second image a filter
+/// can be handed without a file picker -- and falls back to a hue you
+/// pick when there is nothing under it.
+///
+/// The transfer itself is Reinhard: match the mean and spread of tone
+/// and chroma. What Adobe's network adds is matching them *by subject*,
+/// so that the reference's sky lands on your sky; this moves the whole
+/// distribution at once, which is right for a mood and wrong for a
+/// scene. Landscape Mixer is the one that splits it up.
+pub struct ColorTransfer;
+
+impl FilterPlugin for ColorTransfer {
+    fn id(&self) -> &'static str {
+        "filter.neural.color_transfer"
+    }
+    fn name(&self) -> &'static str {
+        "Color Transfer"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("hue", "Target Hue", 0.0, 360.0, 30.0, "\u{b0}"),
+            param("strength", "Strength", 0.0, 100.0, 60.0, ""),
+            param("contrast", "Match Contrast", 0.0, 100.0, 50.0, ""),
+        ]
+    }
+
+    fn wants_backdrop(&self) -> bool {
+        true
+    }
+
+    fn info(&self) -> Option<String> {
+        Some(
+            "Takes its palette from the layer underneath. With nothing \
+             underneath it aims at the Target Hue instead."
+                .to_string(),
+        )
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        self.apply_over(px, None, width, height, values);
+    }
+
+    fn apply_over(
+        &self,
+        px: &mut [f32],
+        backdrop: Option<&[f32]>,
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let strength = (values.get("strength") / 100.0).clamp(0.0, 1.0);
+        let match_contrast = (values.get("contrast") / 100.0).clamp(0.0, 1.0);
         if strength <= 0.0 {
             return;
         }
-        // Mean and spread of luminance, and mean chroma.
+        if let Some(reference) = backdrop {
+            if let (Some(mine), Some(theirs)) =
+                (stats_of(px, |_| true), stats_of(reference, |_| true))
+            {
+                // Match Contrast decides whether the *spread* of tone
+                // comes across as well as its middle: at zero the
+                // picture keeps its own contrast and only borrows the
+                // colour.
+                let theirs = Stats {
+                    mean: theirs.mean,
+                    sd: [
+                        mine.sd[0] + (theirs.sd[0] - mine.sd[0]) * match_contrast,
+                        theirs.sd[1],
+                        theirs.sd[2],
+                    ],
+                };
+                for p in px.as_chunks_mut::<4>().0.iter_mut() {
+                    restat(p, mine, theirs, strength);
+                }
+                return;
+            }
+        }
+        // No reference: aim at the hue instead. Shift the image's mean
+        // chroma towards it and optionally normalise its spread.
+        let hue = values.get("hue").to_radians();
         let n = (px.len() / 4).max(1) as f32;
         let (mut mean_l, mut mean_a, mut mean_b) = (0.0f32, 0.0f32, 0.0f32);
         for p in px.as_chunks::<4>().0.iter() {
@@ -707,7 +778,6 @@ simple_filter!(
             var_l += (luma(p) - mean_l).powi(2);
         }
         let sd_l = (var_l / n).sqrt().max(1e-4);
-        // The target chroma direction.
         let (ta, tb) = (hue.cos() * 0.18, hue.sin() * 0.18);
         let gain = 1.0 + match_contrast * (0.25 / sd_l - 1.0).clamp(-0.5, 0.5);
         for p in px.as_chunks_mut::<4>().0.iter_mut() {
@@ -726,7 +796,7 @@ simple_filter!(
             }
         }
     }
-);
+}
 
 /// Depth Blur: throw the background out of focus.
 ///
@@ -836,6 +906,599 @@ fn defocus(px: &mut [f32], w: usize, h: usize, plane: &[f32], focus: f32, streng
     }
 }
 
+/// Mean and spread of a buffer's luminance and chroma.
+///
+/// The currency of every "make this look like that" filter: two images
+/// match when these six numbers match, which is Reinhard et al.'s
+/// observation and is why colour transfer is arithmetic rather than
+/// magic.
+#[derive(Clone, Copy)]
+struct Stats {
+    mean: [f32; 3],
+    sd: [f32; 3],
+}
+
+fn stats_of(px: &[f32], mask: impl Fn(usize) -> bool) -> Option<Stats> {
+    let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
+    for (i, p) in px.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] <= 0.01 || !mask(i) {
+            continue;
+        }
+        let l = luma(p);
+        sum[0] += l;
+        sum[1] += p[0] - l;
+        sum[2] += p[2] - l;
+        n += 1.0;
+    }
+    if n < 8.0 {
+        return None;
+    }
+    let mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+    let mut var = [0.0f32; 3];
+    for (i, p) in px.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] <= 0.01 || !mask(i) {
+            continue;
+        }
+        let l = luma(p);
+        let v = [l - mean[0], (p[0] - l) - mean[1], (p[2] - l) - mean[2]];
+        for c in 0..3 {
+            var[c] += v[c] * v[c];
+        }
+    }
+    Some(Stats {
+        mean,
+        sd: [
+            (var[0] / n).sqrt().max(1e-4),
+            (var[1] / n).sqrt().max(1e-4),
+            (var[2] / n).sqrt().max(1e-4),
+        ],
+    })
+}
+
+/// Move a pixel from one distribution to another.
+fn restat(p: &mut [f32], from: Stats, to: Stats, amount: f32) {
+    let l = luma(p);
+    let (ca, cb) = (p[0] - l, p[2] - l);
+    let moved = [
+        (l - from.mean[0]) / from.sd[0] * to.sd[0] + to.mean[0],
+        (ca - from.mean[1]) / from.sd[1] * to.sd[1] + to.mean[1],
+        (cb - from.mean[2]) / from.sd[2] * to.sd[2] + to.mean[2],
+    ];
+    let target = schist_neural::recolour(&[moved[0], moved[0], moved[0]], [moved[1], moved[2]]);
+    for c in 0..3 {
+        p[c] = (p[c] + (target[c] - p[c]) * amount).clamp(0.0, 1.0);
+    }
+}
+
+/// Harmonization: make this layer look like it belongs on the one below.
+///
+/// Photoshop's asks you to pick the layer to match; this takes the one
+/// thing a filter can be handed without a file picker -- what the
+/// document composites to underneath -- which is the same answer for the
+/// case the filter exists for, a cut-out pasted onto a background.
+///
+/// The matching itself is Reinhard: move the layer's tone and colour
+/// distribution onto the backdrop's. What Adobe's network adds is knowing
+/// *which parts* correspond, which is the part this cannot do and does
+/// not claim to.
+pub struct Harmonization;
+
+impl FilterPlugin for Harmonization {
+    fn id(&self) -> &'static str {
+        "filter.neural.harmonization"
+    }
+    fn name(&self) -> &'static str {
+        "Harmonization"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("strength", "Strength", 0.0, 100.0, 75.0, ""),
+            param("tone", "Match Tone", 0.0, 100.0, 100.0, ""),
+        ]
+    }
+
+    fn wants_backdrop(&self) -> bool {
+        true
+    }
+
+    fn info(&self) -> Option<String> {
+        Some(
+            "Matches this layer to whatever is underneath it. With nothing \
+             underneath there is nothing to match to and this does nothing."
+                .to_string(),
+        )
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        self.apply_over(px, None, width, height, values);
+    }
+
+    fn apply_over(
+        &self,
+        px: &mut [f32],
+        backdrop: Option<&[f32]>,
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let strength = (values.get("strength") / 100.0).clamp(0.0, 1.0);
+        let tone = (values.get("tone") / 100.0).clamp(0.0, 1.0);
+        let Some(backdrop) = backdrop else { return };
+        let (Some(mine), Some(theirs)) = (stats_of(px, |_| true), stats_of(backdrop, |_| true))
+        else {
+            return;
+        };
+        // Match Tone at zero leaves the luminance alone and moves only
+        // the colour, which is what you want when the cut-out is lit
+        // correctly and merely the wrong temperature.
+        let theirs = Stats {
+            mean: [
+                mine.mean[0] + (theirs.mean[0] - mine.mean[0]) * tone,
+                theirs.mean[1],
+                theirs.mean[2],
+            ],
+            sd: [
+                mine.sd[0] + (theirs.sd[0] - mine.sd[0]) * tone,
+                theirs.sd[1],
+                theirs.sd[2],
+            ],
+        };
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
+            restat(p, mine, theirs, strength);
+        }
+    }
+}
+
+/// Landscape Mixer: take the season, the hour and the weather from
+/// another photograph.
+///
+/// Photoshop's generates the new landscape outright. This one moves
+/// colour, and moves it *by distance*: sky matched to sky, ground matched
+/// to ground, because a landscape's palette is stratified by depth and a
+/// single global match turns the grass the colour of the sky. The depth
+/// model is what splits the bands; without it the match is global, and
+/// the dialog says so.
+pub struct LandscapeMixer {
+    depth: Memo<Vec<f32>>,
+    reference: Memo<Vec<f32>>,
+}
+
+impl LandscapeMixer {
+    pub const fn new() -> LandscapeMixer {
+        LandscapeMixer {
+            depth: Memo::new(),
+            reference: Memo::new(),
+        }
+    }
+}
+
+impl Default for LandscapeMixer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FilterPlugin for LandscapeMixer {
+    fn id(&self) -> &'static str {
+        "filter.neural.landscape_mixer"
+    }
+    fn name(&self) -> &'static str {
+        "Landscape Mixer"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("strength", "Strength", 0.0, 100.0, 70.0, ""),
+            param("bands", "Depth Bands", 1.0, 5.0, 3.0, ""),
+        ]
+    }
+
+    fn wants_backdrop(&self) -> bool {
+        true
+    }
+
+    fn info(&self) -> Option<String> {
+        Some(if schist_neural::installed("depth") {
+            "Takes its palette from the layer underneath, matched band by \
+             band using Depth (Depth Blur)."
+                .to_string()
+        } else {
+            "Takes its palette from the layer underneath. Install Depth \
+             (Depth Blur) to match sky to sky and ground to ground rather \
+             than the picture as a whole."
+                .to_string()
+        })
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        self.apply_over(px, None, width, height, values);
+    }
+
+    fn apply_over(
+        &self,
+        px: &mut [f32],
+        backdrop: Option<&[f32]>,
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let strength = (values.get("strength") / 100.0).clamp(0.0, 1.0);
+        let bands = (values.get("bands").round().max(1.0) as usize).min(5);
+        let Some(backdrop) = backdrop else { return };
+
+        // Depth for both pictures, if there is a model. Two memos: the
+        // reference does not change while the sliders move either.
+        let model = schist_neural::get("depth");
+        let depth_of = |memo: &Memo<Vec<f32>>, buf: &[f32]| -> Option<Arc<Vec<f32>>> {
+            let model = model.clone()?;
+            let key = fingerprint(buf, width, height);
+            memo.get(key, || {
+                let rgb = rgb_of(buf);
+                schist_neural::depth_map(&model, &rgb, width, height)
+                    .map_err(|e| log::warn!("landscape depth: {e:#}"))
+                    .ok()
+            })
+        };
+        let mine = depth_of(&self.depth, px);
+        let theirs = depth_of(&self.reference, backdrop);
+
+        for band in 0..bands {
+            let lo = band as f32 / bands as f32;
+            let hi = (band + 1) as f32 / bands as f32;
+            // Without depth there is one band covering everything, which
+            // is an ordinary colour transfer.
+            let in_band = |map: &Option<Arc<Vec<f32>>>, i: usize| -> bool {
+                match map {
+                    Some(d) => d[i] >= lo && (d[i] < hi || hi >= 1.0),
+                    None => band == 0,
+                }
+            };
+            let (Some(from), Some(to)) = (
+                stats_of(px, |i| in_band(&mine, i)),
+                stats_of(backdrop, |i| in_band(&theirs, i)),
+            ) else {
+                continue;
+            };
+            for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                if !in_band(&mine, i) {
+                    continue;
+                }
+                restat(p, from, to, strength);
+            }
+        }
+    }
+}
+
+/// Photo Restoration: an old photograph, cleaned up.
+///
+/// Adobe's is one network doing everything. This is the set of things
+/// that network is doing, done separately and in the order a restorer
+/// would: take the scratches out, take the grain and the compression
+/// out, put the detail back, and open the tones up again. Two of those
+/// steps are models this build already ships, which is why this filter
+/// exists here at all -- it is mostly composition.
+pub struct PhotoRestoration;
+
+impl FilterPlugin for PhotoRestoration {
+    fn id(&self) -> &'static str {
+        "filter.neural.photo_restoration"
+    }
+    fn name(&self) -> &'static str {
+        "Photo Restoration"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("enhance", "Photo Enhancement", 0.0, 100.0, 50.0, ""),
+            param("scratches", "Scratch Reduction", 0.0, 100.0, 30.0, ""),
+            param("tone", "Restore Tone", 0.0, 100.0, 60.0, ""),
+        ]
+    }
+
+    fn info(&self) -> Option<String> {
+        let mut have: Vec<&str> = Vec::new();
+        if schist_neural::installed("dejpeg") {
+            have.push("Deblock");
+        }
+        if schist_neural::installed("detail") {
+            have.push("Detail");
+        }
+        Some(if have.is_empty() {
+            "Cleaning up without a model.".to_string()
+        } else {
+            format!("Using {} \u{b7} trained for Schist.", have.join(" and "))
+        })
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let enhance = (values.get("enhance") / 100.0).clamp(0.0, 1.0);
+        let scratches = (values.get("scratches") / 100.0).clamp(0.0, 1.0);
+        let tone = (values.get("tone") / 100.0).clamp(0.0, 1.0);
+
+        if scratches > 0.0 {
+            despeckle(px, width, height, scratches);
+        }
+        if enhance > 0.0 {
+            // Grain first, then the deblocker for what a scan of a print
+            // puts in, then the detail model to put back the edges that
+            // removing them cost. In that order: sharpening before
+            // denoising sharpens the noise.
+            denoise(px, width, height, enhance);
+            if let Some(model) = schist_neural::get("dejpeg") {
+                through_rgb(px, |rgb| {
+                    schist_neural::run_tiled(&model, rgb, width, height, enhance);
+                });
+            }
+            if let Some(model) = schist_neural::get("detail") {
+                through_rgb(px, |rgb| {
+                    schist_neural::run_tiled(&model, rgb, width, height, enhance * 0.5);
+                });
+            } else {
+                edge_directed_sharpen(px, width, height, enhance * 0.5);
+            }
+        }
+        if tone > 0.0 {
+            restore_tone(px, tone);
+        }
+    }
+}
+
+/// Take out the specks and hairline scratches a print picks up.
+///
+/// A pixel that disagrees with the *median* of its neighbours is damage;
+/// one that disagrees with their mean might merely be an edge. The
+/// distinction matters here more than anywhere else in the filter set,
+/// because a scratch is a thin bright line and so is a highlight on a
+/// wire. The radius follows the slider: a speck needs one pixel of
+/// context to be outvoted, a hairline scratch needs three.
+fn despeckle(px: &mut [f32], w: usize, h: usize, amount: f32) {
+    let src = px.to_vec();
+    let radius = 1 + (amount * 2.5) as i32;
+    let threshold = 0.16 - amount * 0.1;
+    let mut ring: Vec<f32> = Vec::with_capacity(((2 * radius + 1) * (2 * radius + 1)) as usize);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let here = at(&src, w, h, x, y);
+            let mut out = here;
+            let mut damaged = 0.0f32;
+            for c in 0..3 {
+                ring.clear();
+                for dy in -radius..=radius {
+                    for dx in -radius..=radius {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        ring.push(at(&src, w, h, x + dx, y + dy)[c]);
+                    }
+                }
+                ring.sort_by(f32::total_cmp);
+                let median = ring[ring.len() / 2];
+                damaged = damaged.max((here[c] - median).abs());
+                out[c] = median;
+            }
+            if damaged > threshold {
+                let mix = ((damaged - threshold) * 8.0).clamp(0.0, 1.0) * amount;
+                for c in 0..3 {
+                    out[c] = here[c] + (out[c] - here[c]) * mix;
+                }
+                put(px, w, x as usize, y as usize, out);
+            }
+        }
+    }
+}
+
+/// Take the grain out without taking the picture with it.
+///
+/// A print that has been scanned carries the film's grain, the paper's
+/// texture and the scanner's own noise, none of which the detail model
+/// should be asked to sharpen. Smoothing only where the difference is
+/// small enough to be noise is the cheapest thing that works.
+fn denoise(px: &mut [f32], w: usize, h: usize, amount: f32) {
+    let mut soft = px.to_vec();
+    gaussian_rgba(&mut soft, w, h, 0.6 + amount * 1.2);
+    let threshold = 0.04 + amount * 0.06;
+    for (p, s) in px
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(soft.as_chunks::<4>().0.iter())
+    {
+        for c in 0..3 {
+            let d = (p[c] - s[c]).abs();
+            if d < threshold {
+                // Fully towards the smooth version for the finest
+                // differences, tapering off as they start to look like
+                // something that was in the room.
+                let mix = (1.0 - d / threshold) * amount;
+                p[c] += (s[c] - p[c]) * mix;
+            }
+        }
+    }
+}
+
+/// Open the tones back up: an old print has faded towards its middle.
+fn restore_tone(px: &mut [f32], amount: f32) {
+    let n = (px.len() / 4).max(1) as f32;
+    let (mut lo, mut hi, mut mean) = (1.0f32, 0.0f32, 0.0f32);
+    for p in px.as_chunks::<4>().0.iter() {
+        let l = luma(p);
+        lo = lo.min(l);
+        hi = hi.max(l);
+        mean += l;
+    }
+    mean /= n;
+    let span = (hi - lo).max(1e-3);
+    for p in px.as_chunks_mut::<4>().0.iter_mut() {
+        for v in p.iter_mut().take(3) {
+            // Stretch to the full range, and take the sepia out by
+            // nudging each channel towards where the middle should be.
+            let stretched = ((*v - lo) / span).clamp(0.0, 1.0);
+            let neutral = stretched + (mean - (lo + hi) / 2.0) * 0.15;
+            *v = (*v + (neutral - *v) * amount).clamp(0.0, 1.0);
+        }
+    }
+}
+
+simple_filter!(
+    PhotoToSketch,
+    "filter.neural.photo_to_sketch",
+    "Photo to Sketch",
+    "Neural Filters",
+    [
+        param("detail", "Detail", 0.0, 100.0, 50.0, ""),
+        param("weight", "Line Weight", 0.0, 100.0, 50.0, ""),
+        param("shading", "Shading", 0.0, 100.0, 40.0, "")
+    ],
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+        // The pencil-sketch construction every drawing tutorial teaches,
+        // because it is the one that works: invert the picture, blur it,
+        // and divide the original by it. Where the two agree the quotient
+        // saturates to white and the paper is left blank; where an edge
+        // makes them disagree, a line appears exactly as wide as the
+        // blur.
+        let detail = v.get("detail") / 100.0;
+        let weight = v.get("weight") / 100.0;
+        let shading = v.get("shading") / 100.0;
+        let plane = crate::util::luma_map(px, w, h);
+        let mut soft: Vec<f32> = plane.iter().map(|l| 1.0 - l).collect();
+        crate::util::blur_plane(&mut soft, w, h, 1.0 + (1.0 - detail) * 12.0);
+        let mut out = vec![0.0f32; w * h];
+        for i in 0..w * h {
+            let dodge = (plane[i] / (1.0 - soft[i]).max(1e-3)).min(1.0);
+            // Line Weight decides how dark a disagreement has to be
+            // before it counts as a line.
+            let line = 1.0 - ((1.0 - dodge) * (0.5 + weight * 3.0)).min(1.0);
+            // Shading lays the original tone back underneath, which is
+            // the difference between a line drawing and a pencil
+            // rendering.
+            out[i] = (line - (1.0 - plane[i]) * shading * 0.6).clamp(0.0, 1.0);
+        }
+        crate::util::from_luma(px, &out, 0.0);
+    }
+);
+
+/// Face to Caricature: exaggerate what is already there.
+///
+/// Adobe's redraws the face outright. This one warps it, and warps it
+/// from the detector's box plus the proportions a face has when it is
+/// looking at the camera -- eyes a little above the middle, mouth three
+/// quarters down. So it does not *find* the features, it assumes where
+/// they usually are, which is why it works on a portrait and falls apart
+/// on a profile. Without the face model it has nothing to work from and
+/// does nothing.
+pub struct FaceToCaricature {
+    faces: Memo<Vec<Face>>,
+}
+
+impl FaceToCaricature {
+    pub const fn new() -> FaceToCaricature {
+        FaceToCaricature { faces: Memo::new() }
+    }
+}
+
+impl Default for FaceToCaricature {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FilterPlugin for FaceToCaricature {
+    fn id(&self) -> &'static str {
+        "filter.neural.face_to_caricature"
+    }
+    fn name(&self) -> &'static str {
+        "Face to Caricature"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("eyes", "Eyes", -100.0, 100.0, 60.0, ""),
+            param("mouth", "Mouth", -100.0, 100.0, 40.0, ""),
+            param("head", "Head", -100.0, 100.0, 25.0, ""),
+        ]
+    }
+
+    fn info(&self) -> Option<String> {
+        model_note(
+            "face",
+            "so this does nothing \u{2014} there is nothing to caricature.",
+        )
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let eyes = values.get("eyes") / 100.0;
+        let mouth = values.get("mouth") / 100.0;
+        let head = values.get("head") / 100.0;
+        let Some(model) = schist_neural::get("face") else {
+            return;
+        };
+        let key = fingerprint(px, width, height);
+        let faces = self.faces.get(key, || {
+            let rgb = rgb_of(px);
+            schist_neural::faces(&model, &rgb, width, height)
+                .map_err(|e| log::warn!("caricature: {e:#}"))
+                .ok()
+        });
+        let Some(faces) = faces else { return };
+        if faces.is_empty() {
+            return;
+        }
+        // Each feature is a bubble in the coordinate map: pull the
+        // sampling point towards a centre to enlarge what is there, push
+        // it away to shrink it.
+        let mut pulls: Vec<(f32, f32, f32, f32)> = Vec::new();
+        for f in faces.iter() {
+            let (cx, cy) = (f.x + f.width / 2.0, f.y + f.height / 2.0);
+            let eye_y = f.y + f.height * 0.40;
+            let mouth_y = f.y + f.height * 0.75;
+            let span = f.width.max(1.0);
+            pulls.push((cx - span * 0.22, eye_y, span * 0.30, eyes));
+            pulls.push((cx + span * 0.22, eye_y, span * 0.30, eyes));
+            pulls.push((cx, mouth_y, span * 0.32, mouth));
+            pulls.push((cx, cy, span * 0.95, head));
+        }
+        warp(px, width, height, |x, y| {
+            let (mut sx, mut sy) = (x, y);
+            for (fx, fy, radius, amount) in pulls.iter() {
+                let (dx, dy) = (x - fx, y - fy);
+                let d = dx.hypot(dy) / radius.max(1.0);
+                if d >= 1.0 {
+                    continue;
+                }
+                // A smooth bubble, strongest in the middle and zero at
+                // the rim, so the rest of the face is untouched and there
+                // is no seam.
+                let falloff = (1.0 - d * d).powi(2);
+                let scale = 1.0 - amount * 0.45 * falloff;
+                sx = fx + (sx - fx) * scale;
+                sy = fy + (sy - fy) * scale;
+            }
+            (sx, sy)
+        });
+    }
+}
+
 pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(SkinSmoothing::new()));
     registry.register_filter(Box::new(JpegArtifactRemoval));
@@ -844,4 +1507,9 @@ pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(StyleTransfer));
     registry.register_filter(Box::new(ColorTransfer));
     registry.register_filter(Box::new(DepthBlur::new()));
+    registry.register_filter(Box::new(Harmonization));
+    registry.register_filter(Box::new(LandscapeMixer::new()));
+    registry.register_filter(Box::new(PhotoRestoration));
+    registry.register_filter(Box::new(PhotoToSketch));
+    registry.register_filter(Box::new(FaceToCaricature::new()));
 }

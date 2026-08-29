@@ -678,7 +678,16 @@ fn filter_dialog(
         .map(|f| (f.name().to_string(), f.params()))
         .unwrap_or_else(|| (id.to_string(), Vec::new()));
 
-    let mut body = div().flex().flex_col().gap_1();
+    // Scrolls, because Custom is a five-by-five kernel and Lighting
+    // Effects has a dozen sliders: a filter dialog is a list of whatever
+    // the filter declares, and some filters declare a lot.
+    let mut body = div()
+        .id("filter-params")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .max_h(px(420.0))
+        .overflow_y_scroll();
     for spec in specs {
         let key = spec.key;
         body = body.child(param_slider(

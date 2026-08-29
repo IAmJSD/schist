@@ -11,13 +11,17 @@
 
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry};
 
+pub mod artistic;
+pub mod brush;
 pub mod camera_raw;
 pub mod distort;
 pub mod neural;
 pub mod other;
 pub mod pixelate;
 pub mod render;
+pub mod sketch;
 pub mod stylize;
+pub mod texture;
 pub mod util;
 
 /// A `FilterParam` without the struct-literal noise.
@@ -490,12 +494,16 @@ impl PluginManifest for CoreFiltersPlugin {
         registry.register_filter(Box::new(UnsharpMask));
         registry.register_filter(Box::new(AddNoise));
         registry.register_filter(Box::new(Median));
+        artistic::register(registry);
+        brush::register(registry);
         camera_raw::register(registry);
         neural::register(registry);
         distort::register(registry);
         pixelate::register(registry);
         render::register(registry);
+        sketch::register(registry);
         stylize::register(registry);
+        texture::register(registry);
         other::register(registry);
     }
 }

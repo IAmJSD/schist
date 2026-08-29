@@ -368,9 +368,31 @@ fn destructive_adjustment_entries() -> Vec<MenuEntry> {
 /// Menu grouping for the built-in filters.
 const FILTER_GROUPS: &[(&str, &[&str])] = &[
     (
+        "Artistic",
+        &[
+            "filter.colored_pencil",
+            "filter.cutout",
+            "filter.dry_brush",
+            "filter.film_grain",
+            "filter.fresco",
+            "filter.neon_glow",
+            "filter.paint_daubs",
+            "filter.palette_knife",
+            "filter.plastic_wrap",
+            "filter.poster_edges",
+            "filter.rough_pastels",
+            "filter.smudge_stick",
+            "filter.sponge",
+            "filter.underpainting",
+            "filter.watercolor",
+        ],
+    ),
+    (
         "Blur",
         &[
             "filter.average",
+            "filter.blur",
+            "filter.blur_more",
             "filter.box_blur",
             "filter.gaussian_blur",
             "filter.lens_blur",
@@ -380,9 +402,25 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Brush Strokes",
+        &[
+            "filter.accented_edges",
+            "filter.angled_strokes",
+            "filter.crosshatch",
+            "filter.dark_strokes",
+            "filter.ink_outlines",
+            "filter.spatter",
+            "filter.sprayed_strokes",
+            "filter.sumi_e",
+        ],
+    ),
+    (
         "Distort",
         &[
+            "filter.diffuse_glow",
             "filter.displace",
+            "filter.glass",
+            "filter.ocean_ripple",
             "filter.pinch",
             "filter.polar",
             "filter.ripple",
@@ -422,6 +460,7 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
             "filter.difference_clouds",
             "filter.fibers",
             "filter.lens_flare",
+            "filter.lighting_effects",
         ],
     ),
     (
@@ -429,8 +468,28 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
         &[
             "filter.sharpen",
             "filter.sharpen_edges",
+            "filter.sharpen_more",
             "filter.smart_sharpen",
             "filter.unsharp_mask",
+        ],
+    ),
+    (
+        "Sketch",
+        &[
+            "filter.bas_relief",
+            "filter.chalk_charcoal",
+            "filter.charcoal",
+            "filter.chrome",
+            "filter.conte_crayon",
+            "filter.graphic_pen",
+            "filter.halftone_pattern",
+            "filter.note_paper",
+            "filter.photocopy",
+            "filter.plaster",
+            "filter.reticulation",
+            "filter.stamp",
+            "filter.torn_edges",
+            "filter.water_paper",
         ],
     ),
     (
@@ -449,9 +508,22 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Texture",
+        &[
+            "filter.craquelure",
+            "filter.grain",
+            "filter.mosaic_tiles",
+            "filter.patchwork",
+            "filter.stained_glass",
+            "filter.texturizer",
+        ],
+    ),
+    (
         "Other",
         &[
+            "filter.custom",
             "filter.high_pass",
+            "filter.hsb_hsl",
             "filter.maximum",
             "filter.minimum",
             "filter.offset",
@@ -467,6 +539,11 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
             "filter.neural.super_zoom",
             "filter.neural.color_transfer",
             "filter.neural.depth_blur",
+            "filter.neural.harmonization",
+            "filter.neural.landscape_mixer",
+            "filter.neural.photo_restoration",
+            "filter.neural.photo_to_sketch",
+            "filter.neural.face_to_caricature",
         ],
     ),
 ];

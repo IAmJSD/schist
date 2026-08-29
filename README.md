@@ -117,11 +117,15 @@ glow, satin, colour overlay, gradient overlay, outer glow and drop shadow,
 with Photoshop's Fill-vs-Opacity semantics so "Fill 0% plus a drop shadow"
 does what you expect.
 
-**Filters.** Fifty-seven across ten categories — Blur, Distort, Noise,
-Pixelate, Render, Sharpen, Stylize, Other, Camera Raw and Neural Filters
-— all previewing live on the canvas inside the selection, with Cancel
-restoring exactly. The **Filter Gallery** stacks several and previews the
-result of the lot.
+**Filters.** A hundred and fifteen across fourteen categories —
+Artistic, Blur, Brush Strokes, Distort, Noise, Pixelate, Render, Sharpen,
+Sketch, Stylize, Texture, Other, Camera Raw and Neural Filters — all
+previewing live on the canvas inside the selection, with Cancel restoring
+exactly. That includes the forty-six effects Photoshop keeps *inside* the
+Filter Gallery — Watercolor, Sumi-e, Chrome, Stained Glass and the rest —
+which are ordinary filters here as well, so they can be run from the menu
+or stacked in the **Filter Gallery**, which previews the result of the
+lot.
 
 **Warping.** Liquify with all seven brushes, Puppet Warp (Moving Least
 Squares, so pins hold and nothing shears), Content-Aware Scale (seam
@@ -225,31 +229,43 @@ Remap anything in `~/.config/schist/keymap.json`:
   is a protocol of its own rather than an axis on the pointer, so binding
   it means synthesising the whole mouse event stream from the tool, tip
   and barrel buttons included. Reports from real hardware welcome.
-- **Five of the seven Neural Filters run a network, and they are not
-  Photoshop's networks.** Super Zoom, JPEG Artifact Removal and Colorize
-  use models trained for this application — `tools/train/`, between 39k
-  and 466k parameters, shipped inside the binary because they are small
-  enough to be; the first two were fitted to the Kodak suite and the
-  colouriser to twenty thousand CC BY photographs from Open Images,
-  which `tools/train/photos.py` will fetch again. Style Transfer uses the fast neural-style networks from
-  the ONNX Model Zoo, Depth Blur uses MiDaS and Skin Smoothing uses
-  UltraFace; those are somebody else's work and run from one megabyte to
-  sixty-six, so they are fetched on demand from Filter ▸ Neural
-  Filters ▸ Manage Models and checked against the hash this build
-  expects.
-  Inference is [`tract`](https://github.com/sonos/tract) — pure Rust,
-  nothing to install.
+- **Nine of the twelve Neural Filters run a network, and they are not
+  Photoshop's networks.** Super Zoom, JPEG Artifact Removal, Colorize and
+  Photo Restoration use models trained for this application —
+  `tools/train/`, between 39k and 466k parameters, shipped inside the
+  binary because they are small enough to be; the first two were fitted
+  to the Kodak suite and the colouriser to twenty thousand CC BY
+  photographs from Open Images, which `tools/train/photos.py` will fetch
+  again. Style Transfer uses the fast neural-style networks from the ONNX
+  Model Zoo, Depth Blur and Landscape Mixer use MiDaS, and Skin Smoothing
+  and Face to Caricature use UltraFace; those are somebody else's work
+  and run from one megabyte to sixty-six, so they are fetched on demand
+  from Filter ▸ Neural Filters ▸ Manage Models and checked against the
+  hash this build expects. Inference is
+  [`tract`](https://github.com/sonos/tract) — pure Rust, nothing to
+  install.
 
   What each one is honest about differs. Colorize knows what sky, foliage,
   wood and skin usually look like and is deliberately cautious about
   anything whose colour is a choice, which reads as desaturated rather
   than as wrong. Skin Smoothing's *smoothing* is frequency separation,
   which is what a retoucher does by hand; the network's job there is to
-  say where the faces are, and it has opinions about dogs. Colour
-  Transfer has no model and is not missing one — moving one image's
-  colour distribution onto another's is arithmetic. Each filter says in
-  its own dialog which path it took, and the model-backed ones fall back
-  to a classical implementation rather than failing.
+  say where the faces are, and it has opinions about dogs. Face to
+  Caricature does not find your features either — it assumes they are
+  where a face looking at the camera keeps them, which is why it works on
+  a portrait and falls apart on a profile.
+
+  Colour Transfer, Harmonization and Landscape Mixer need a second
+  picture, and the one a filter can be handed without a file picker is
+  the layer underneath: they take their reference from whatever the
+  document composites to below the layer being filtered, which is what
+  Photoshop's Harmonization asks you to pick by hand. Moving one colour
+  distribution onto another is arithmetic and that arithmetic is all
+  here; what Adobe's networks add is matching the two *by subject*, so
+  that a reference's sky lands on your sky. Landscape Mixer gets closest
+  to that by matching band by band through the depth model. Each filter
+  says in its own dialog which path it took, and the model-backed ones
+  fall back to a classical implementation rather than failing.
 - **Object Selection and Content-Aware Fill are heuristics**, not the
   models Photoshop uses — background sampling and diffusion inpainting
   respectively. They degrade predictably (blurry over texture) rather

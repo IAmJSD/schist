@@ -1,8 +1,8 @@
 //! Filter ▸ Other, plus the extra Blur, Sharpen and Noise entries that did
 //! not exist yet.
 
-use crate::util::{at, gaussian_rgba, premultiply, put, unpremultiply, value_noise};
-use crate::{param, simple_filter};
+use crate::util::{at, convolve3, gaussian_rgba, premultiply, put, unpremultiply, value_noise};
+use crate::{choice, param, simple_filter};
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
@@ -446,6 +446,249 @@ simple_filter!(
     }
 );
 
+/// Photoshop's one-shot blurs: no dialog, a fixed small radius each.
+///
+/// They are the oldest filters in the program and they survive because
+/// "a bit softer" is a thing people want without deciding how much.
+/// Blur More is Blur about four times over.
+fn fixed_blur(px: &mut [f32], w: usize, h: usize, sigma: f32) {
+    // `gaussian_rgba` premultiplies for itself, as the other blurs here
+    // rely on; doing it again outside would divide the edges twice.
+    gaussian_rgba(px, w, h, sigma);
+}
+
+simple_filter!(
+    Blur,
+    "filter.blur",
+    "Blur",
+    "Blur",
+    [],
+    |px: &mut [f32], w: usize, h: usize, _v: &FilterValues| {
+        fixed_blur(px, w, h, 0.6);
+    }
+);
+
+simple_filter!(
+    BlurMore,
+    "filter.blur_more",
+    "Blur More",
+    "Blur",
+    [],
+    |px: &mut [f32], w: usize, h: usize, _v: &FilterValues| {
+        fixed_blur(px, w, h, 1.7);
+    }
+);
+
+simple_filter!(
+    SharpenMore,
+    "filter.sharpen_more",
+    "Sharpen More",
+    "Sharpen",
+    [],
+    |px: &mut [f32], w: usize, h: usize, _v: &FilterValues| {
+        // The same 3x3 Laplacian as Sharpen with the centre weighted
+        // harder, which is exactly what Photoshop's More variants are.
+        convolve3(
+            px,
+            w,
+            h,
+            [0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0],
+            0.0,
+        );
+        convolve3(
+            px,
+            w,
+            h,
+            [0.0, -0.5, 0.0, -0.5, 3.0, -0.5, 0.0, -0.5, 0.0],
+            0.0,
+        );
+    }
+);
+
+/// Filter ▸ Other ▸ Custom: a 5x5 convolution the user writes themselves.
+///
+/// Twenty-five weights, a scale to divide the sum by and an offset to add
+/// afterwards, which between them cover blur, sharpen, emboss, edge
+/// detection and every hand-rolled kernel that has been passed around on
+/// forums since Photoshop 3. It starts as the identity -- centre one,
+/// everything else zero -- so opening it and touching nothing does
+/// nothing, as it does in Photoshop.
+pub struct Custom;
+
+/// The keys of the kernel, row by row. Static so `params` can hand out
+/// `&'static str` keys.
+const CUSTOM_KEYS: [&str; 25] = [
+    "k00", "k01", "k02", "k03", "k04", "k10", "k11", "k12", "k13", "k14", "k20", "k21", "k22",
+    "k23", "k24", "k30", "k31", "k32", "k33", "k34", "k40", "k41", "k42", "k43", "k44",
+];
+const CUSTOM_LABELS: [&str; 25] = [
+    "1,1", "1,2", "1,3", "1,4", "1,5", "2,1", "2,2", "2,3", "2,4", "2,5", "3,1", "3,2", "3,3",
+    "3,4", "3,5", "4,1", "4,2", "4,3", "4,4", "4,5", "5,1", "5,2", "5,3", "5,4", "5,5",
+];
+
+impl FilterPlugin for Custom {
+    fn id(&self) -> &'static str {
+        "filter.custom"
+    }
+    fn name(&self) -> &'static str {
+        "Custom"
+    }
+    fn category(&self) -> &'static str {
+        "Other"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        let mut out: Vec<FilterParam> = (0..25)
+            .map(|i| {
+                param(
+                    CUSTOM_KEYS[i],
+                    CUSTOM_LABELS[i],
+                    -999.0,
+                    999.0,
+                    // The centre tap is the identity; the rest are silent.
+                    if i == 12 { 1.0 } else { 0.0 },
+                    "",
+                )
+            })
+            .collect();
+        out.push(param("scale", "Scale", 1.0, 999.0, 1.0, ""));
+        // In Photoshop's 0..255 units, because that is what every kernel
+        // anyone has ever written down assumes.
+        out.push(param("offset", "Offset", -255.0, 255.0, 0.0, ""));
+        out
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let mut k = [0.0f32; 25];
+        for (i, key) in CUSTOM_KEYS.iter().enumerate() {
+            k[i] = values.get(key);
+        }
+        let scale = values.get("scale").abs().max(1e-3);
+        let offset = values.get("offset") / 255.0;
+        let src = px.to_vec();
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                let mut acc = [0.0f32; 3];
+                for (i, weight) in k.iter().enumerate() {
+                    if *weight == 0.0 {
+                        continue;
+                    }
+                    let p = at(
+                        &src,
+                        width,
+                        height,
+                        x + (i % 5) as i32 - 2,
+                        y + (i / 5) as i32 - 2,
+                    );
+                    for c in 0..3 {
+                        acc[c] += p[c] * weight;
+                    }
+                }
+                let a = at(&src, width, height, x, y)[3];
+                put(
+                    px,
+                    width,
+                    x as usize,
+                    y as usize,
+                    [
+                        (acc[0] / scale + offset).clamp(0.0, 1.0),
+                        (acc[1] / scale + offset).clamp(0.0, 1.0),
+                        (acc[2] / scale + offset).clamp(0.0, 1.0),
+                        a,
+                    ],
+                );
+            }
+        }
+    }
+}
+
+/// Hue, saturation and brightness *as channels*.
+///
+/// Not an adjustment -- it changes nothing about how the image looks
+/// except by lying about what its channels mean. It is a utility for
+/// channel work: convert to HSB, edit the resulting "red" channel, which
+/// is now hue, and convert back. Photoshop has shipped it as a plug-in
+/// with no dialog since version 3; the round trip is why it has two
+/// directions.
+const HSB_MODES: &[&str] = &["RGB to HSB", "RGB to HSL", "HSB to RGB", "HSL to RGB"];
+
+fn to_hs(r: f32, g: f32, b: f32, lightness: bool) -> [f32; 3] {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let c = max - min;
+    let h = if c <= 1e-6 {
+        0.0
+    } else if max == r {
+        (((g - b) / c) % 6.0) / 6.0
+    } else if max == g {
+        ((b - r) / c + 2.0) / 6.0
+    } else {
+        ((r - g) / c + 4.0) / 6.0
+    };
+    let h = if h < 0.0 { h + 1.0 } else { h };
+    if lightness {
+        let l = (max + min) / 2.0;
+        let s = if l <= 0.0 || l >= 1.0 {
+            0.0
+        } else {
+            c / (1.0 - (2.0 * l - 1.0).abs())
+        };
+        [h, s.clamp(0.0, 1.0), l]
+    } else {
+        let s = if max <= 0.0 { 0.0 } else { c / max };
+        [h, s, max]
+    }
+}
+
+fn from_hs(h: f32, s: f32, v: f32, lightness: bool) -> [f32; 3] {
+    let (c, m) = if lightness {
+        let c = (1.0 - (2.0 * v - 1.0).abs()) * s;
+        (c, v - c / 2.0)
+    } else {
+        let c = v * s;
+        (c, v - c)
+    };
+    let hp = (h.rem_euclid(1.0)) * 6.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [
+        (r + m).clamp(0.0, 1.0),
+        (g + m).clamp(0.0, 1.0),
+        (b + m).clamp(0.0, 1.0),
+    ]
+}
+
+simple_filter!(
+    HsbHsl,
+    "filter.hsb_hsl",
+    "HSB/HSL",
+    "Other",
+    [choice("mode", "Mode", HSB_MODES, 0)],
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+        let _ = (w, h);
+        let mode = (v.get("mode").round().max(0.0) as usize).min(3);
+        let lightness = mode == 1 || mode == 3;
+        let forward = mode < 2;
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
+            let out = if forward {
+                to_hs(p[0], p[1], p[2], lightness)
+            } else {
+                from_hs(p[0], p[1], p[2], lightness)
+            };
+            p[..3].copy_from_slice(&out);
+        }
+    }
+);
+
 pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(HighPass));
     registry.register_filter(Box::new(Offset));
@@ -459,5 +702,10 @@ pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(SharpenEdges));
     registry.register_filter(Box::new(Despeckle));
     registry.register_filter(Box::new(DustAndScratches));
+    registry.register_filter(Box::new(Blur));
+    registry.register_filter(Box::new(BlurMore));
+    registry.register_filter(Box::new(SharpenMore));
+    registry.register_filter(Box::new(Custom));
+    registry.register_filter(Box::new(HsbHsl));
     registry.register_filter(Box::new(ReduceNoise));
 }

@@ -94,7 +94,21 @@ fn every_filter_does_something_at_its_defaults() {
     // Two are not: Offset defaults to no shift and Camera Raw to a
     // neutral development, exactly as Photoshop's do -- opening either
     // and touching nothing should leave the image alone.
-    const EXPECTED_NO_OPS: &[&str] = &["filter.offset", "filter.camera_raw"];
+    const EXPECTED_NO_OPS: &[&str] = &[
+        "filter.offset",
+        "filter.camera_raw",
+        // Custom starts as the identity kernel, exactly as Photoshop's
+        // does: it is a kernel editor, and the kernel it opens with is
+        // "leave this alone".
+        "filter.custom",
+        // These three need something this image does not have and no
+        // slider can supply: a layer underneath to match against, or a
+        // face to work on. Photoshop greys the first two out until there
+        // is a layer below; doing nothing is the same answer.
+        "filter.neural.harmonization",
+        "filter.neural.landscape_mixer",
+        "filter.neural.face_to_caricature",
+    ];
     let (w, h) = (33usize, 21usize);
     for f in registry().filters() {
         let before = image(w, h);
@@ -300,4 +314,48 @@ fn skin_smoothing_leaves_things_that_are_not_skin_alone() {
         .expect("skin smoothing");
     f.apply(&mut px, w, h, &FilterValues::defaults(&f.params()));
     assert_eq!(px, before, "it smoothed something that was not skin");
+}
+
+#[test]
+fn the_filters_that_ask_for_a_backdrop_use_it() {
+    // Three filters declare that they want the pixels underneath. Each
+    // has to do nothing without one -- checked by the no-op list above --
+    // and move the image towards the backdrop's colour with one.
+    let (w, h) = (48usize, 48usize);
+    let warm: Vec<f32> = (0..w * h).flat_map(|_| [0.85f32, 0.55, 0.2, 1.0]).collect();
+    let mean = |px: &[f32]| {
+        let n = (px.len() / 4) as f32;
+        let mut acc = [0.0f32; 3];
+        for p in px.as_chunks::<4>().0 {
+            for c in 0..3 {
+                acc[c] += p[c] / n;
+            }
+        }
+        acc
+    };
+    let reg = registry();
+    let mut asked = 0;
+    for f in reg.filters().filter(|f| f.wants_backdrop()) {
+        asked += 1;
+        let before = image(w, h);
+        let mut px = before.clone();
+        let values = FilterValues::defaults(&f.params());
+        f.apply_over(&mut px, Some(&warm), w, h, &values);
+        let (was, now, want) = (mean(&before), mean(&px), mean(&warm));
+        for c in 0..3 {
+            let closer = (now[c] - want[c]).abs() < (was[c] - want[c]).abs();
+            assert!(
+                closer,
+                "{} did not move channel {c} towards the backdrop: {} -> {} (backdrop {})",
+                f.id(),
+                was[c],
+                now[c],
+                want[c]
+            );
+        }
+    }
+    assert!(
+        asked >= 3,
+        "expected the three matching filters, found {asked}"
+    );
 }

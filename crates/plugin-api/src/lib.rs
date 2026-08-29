@@ -433,6 +433,37 @@ pub trait FilterPlugin: Send + Sync {
     /// `width * height` pixels.
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues);
 
+    /// Whether this filter wants to see what is underneath the layer.
+    ///
+    /// Most do not: a filter is a function of its own pixels. The ones
+    /// that match one image to another -- Harmonization, Colour
+    /// Transfer -- need something to match *to*, and the only second
+    /// image a filter dialog can offer without a file picker is the one
+    /// already in the document. Photoshop's Harmonization asks for a
+    /// layer the same way.
+    fn wants_backdrop(&self) -> bool {
+        false
+    }
+
+    /// Apply with the pixels underneath the layer, when the host has
+    /// them.
+    ///
+    /// `backdrop` is the same size as `pixels` and is what the document
+    /// composites to under this layer, or `None` when there is nothing
+    /// below or the host cannot produce one. The default ignores it,
+    /// which is right for every filter that did not ask.
+    fn apply_over(
+        &self,
+        pixels: &mut [f32],
+        backdrop: Option<&[f32]>,
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+    ) {
+        let _ = backdrop;
+        self.apply(pixels, width, height, values);
+    }
+
     /// A line shown in the filter's dialog, for anything the user should
     /// know before running it -- which is mostly whether a neural filter
     /// found its model or is about to use its fallback.
