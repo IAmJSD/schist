@@ -5060,6 +5060,51 @@ impl Workspace {
         Some(buf)
     }
 
+    /// What the document composites to *under* a layer, over a region.
+    ///
+    /// Produced by hiding the layer and everything above it, compositing,
+    /// and putting the visibility back -- which is cheaper than it
+    /// sounds and much cheaper than the alternative, since the
+    /// compositor already knows how to skip an invisible layer. Only
+    /// filters that ask for it pay for it.
+    fn read_backdrop(
+        &mut self,
+        layer_id: schist_core::LayerId,
+        region: IntRect,
+    ) -> Option<Vec<f32>> {
+        let doc = self.doc.as_mut()?;
+        let path = doc.tree.path_of(layer_id)?;
+        // Hide the layer itself and every sibling above it, at every
+        // level of the path: "above" in a nested group means later in
+        // that group *and* later in each of its ancestors.
+        let mut hidden: Vec<(schist_core::LayerId, bool)> = Vec::new();
+        {
+            let mut layers: &mut Vec<schist_core::Layer> = &mut doc.tree.layers;
+            for (depth, &ix) in path.0.iter().enumerate() {
+                let last = depth + 1 == path.0.len();
+                let from = if last { ix } else { ix + 1 };
+                for layer in layers.iter_mut().skip(from) {
+                    hidden.push((layer.id, layer.visible));
+                    layer.visible = false;
+                }
+                if last {
+                    break;
+                }
+                match &mut layers.get_mut(ix)?.kind {
+                    schist_core::LayerKind::Group(g) => layers = &mut g.children,
+                    _ => break,
+                }
+            }
+        }
+        let under = schist_compositor::composite_region_f32(doc, region);
+        for (id, was) in hidden {
+            if let Some(layer) = doc.tree.find_mut(id) {
+                layer.visible = was;
+            }
+        }
+        Some(under)
+    }
+
     /// Blend `filtered` back over `original` through the selection, so
     /// partial coverage feathers the result.
     ///
@@ -5164,7 +5209,15 @@ impl Workspace {
             let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
                 return;
             };
-            filter.apply(&mut buf, w, h, values);
+            let backdrop = if filter.wants_backdrop() {
+                self.read_backdrop(preview.layer, preview.region)
+            } else {
+                None
+            };
+            let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+                return;
+            };
+            filter.apply_over(&mut buf, backdrop.as_deref(), w, h, values);
         }
         self.write_region(
             preview.layer,
@@ -5266,8 +5319,17 @@ impl Workspace {
             .detach();
             return;
         }
-        filter.apply(
+        let backdrop = if filter.wants_backdrop() {
+            self.read_backdrop(layer_id, region)
+        } else {
+            None
+        };
+        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            return;
+        };
+        filter.apply_over(
             &mut buf,
+            backdrop.as_deref(),
             region.width() as usize,
             region.height() as usize,
             values,
