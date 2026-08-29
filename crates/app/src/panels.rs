@@ -649,7 +649,7 @@ pub(crate) fn run_app_item(
                 let modal = Modal::ImageSize {
                     width: doc.width,
                     height: doc.height,
-                    filter: ws.editor.resample,
+                    resample: schist_tools_transform::Resample::Classic(ws.editor.resample),
                     link: true,
                 };
                 ws.open_modal(modal, cx);

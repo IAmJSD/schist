@@ -5994,8 +5994,10 @@ dependencies = [
 name = "schist-tools-transform"
 version = "0.7.1"
 dependencies = [
+ "log",
  "schist-color",
  "schist-core",
+ "schist-neural",
  "schist-plugin-api",
 ]
 

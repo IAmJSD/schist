@@ -757,6 +757,277 @@ pub fn resize_image(doc: &mut Document, width: u32, height: u32, filter: Filter)
     edit.commit();
 }
 
+/// How Image Size gets from one size to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resample {
+    /// One of the classical reconstruction filters.
+    Classic(Filter),
+    /// A neural x2 upscaler from the `schist_neural` catalogue, applied
+    /// until the image is at or past the target, with bicubic covering
+    /// whatever remainder a non-power-of-two target leaves.
+    Neural(&'static str),
+}
+
+impl Resample {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Resample::Classic(f) => f.display_name(),
+            Resample::Neural(id) => schist_neural::spec(id).map_or(id, |s| s.name),
+        }
+    }
+}
+
+/// What a neural resample turns out to need.
+///
+/// Deciding is cheap and needs the document; running is expensive and must
+/// not hold it, because at seconds per megapixel a resize on the UI thread
+/// is a frozen window. So the two are separate, and [`NeuralResize`]
+/// carries the pixels rather than borrowing them.
+pub enum Plan {
+    /// The model would not load. Bicubic is the honest fallback, and the
+    /// caller is expected to say so rather than quietly substitute it.
+    NoModel,
+    /// Nothing here for a network: a downscale, or a target already
+    /// reached. Bicubic, quietly.
+    Classical,
+    /// Run the network, then [`apply_upscaled`] what comes back.
+    Neural(Box<NeuralResize>),
+}
+
+/// A neural resize with its pixels already lifted out of the document.
+pub struct NeuralResize {
+    model: std::sync::Arc<schist_neural::Model>,
+    doublings: u32,
+    from: (u32, u32),
+    to: (u32, u32),
+    depth: schist_color::Depth,
+    doc: schist_core::DocumentId,
+    /// Per layer: which one, its premultiplied RGB, and its alpha.
+    layers: Vec<(LayerId, Vec<f32>, Vec<f32>)>,
+}
+
+/// The result of running one, ready to go back into a document.
+pub struct Upscaled {
+    to: (u32, u32),
+    depth: schist_color::Depth,
+    doc: schist_core::DocumentId,
+    /// Per layer: which one, its straight-alpha RGBA, and the size the
+    /// network actually reached for it -- per layer rather than shared,
+    /// so a layer whose run stopped early still describes its own buffer.
+    layers: Vec<(LayerId, Vec<f32>, (usize, usize))>,
+}
+
+impl NeuralResize {
+    /// Input megapixels the network has to chew through, for a dialog that
+    /// wants to say how much work it just started.
+    pub fn megapixels(&self) -> f32 {
+        let one = self.from.0 as f32 * self.from.1 as f32 / 1e6;
+        // Each doubling quadruples what the next one is fed.
+        (0..self.doublings).map(|i| one * 4f32.powi(i as i32)).sum()
+    }
+
+    /// The expensive half: no document, no UI thread, no borrow of either.
+    pub fn run(self) -> Upscaled {
+        let mut out = Vec::with_capacity(self.layers.len());
+        for (id, mut rgb, mut alpha) in self.layers {
+            let (mut w, mut h) = (self.from.0 as usize, self.from.1 as usize);
+            for _ in 0..self.doublings {
+                let Some(bigger) = schist_neural::run_scaled(&self.model, &rgb, w, h) else {
+                    log::warn!("{}: refused {w}x{h}; bicubic finishes", self.model.spec.id);
+                    break;
+                };
+                rgb = bigger;
+                alpha = double_plane(&alpha, w, h);
+                (w, h) = (w * 2, h * 2);
+            }
+            // Back to the straight alpha the tile maps store.
+            let mut rgba = vec![0.0f32; w * h * 4];
+            for i in 0..w * h {
+                let a = alpha[i].clamp(0.0, 1.0);
+                if a > 1e-6 {
+                    rgba[i * 4] = (rgb[i * 3] / a).clamp(0.0, 1.0);
+                    rgba[i * 4 + 1] = (rgb[i * 3 + 1] / a).clamp(0.0, 1.0);
+                    rgba[i * 4 + 2] = (rgb[i * 3 + 2] / a).clamp(0.0, 1.0);
+                }
+                rgba[i * 4 + 3] = a;
+            }
+            out.push((id, rgba, (w, h)));
+        }
+        Upscaled {
+            to: self.to,
+            depth: self.depth,
+            doc: self.doc,
+            layers: out,
+        }
+    }
+}
+
+/// Decide what a neural resample of `doc` to `width` x `height` involves.
+pub fn plan_neural(doc: &Document, width: u32, height: u32, id: &str) -> Plan {
+    let Some(model) = schist_neural::get(id) else {
+        return Plan::NoModel;
+    };
+    if width == 0 || height == 0 {
+        return Plan::Classical;
+    }
+    // Doublings to reach or pass the target, bounded so an absurd target
+    // asks for a bounded amount of inference and memory. A downscale --
+    // or anything past the bound -- is bicubic's job.
+    let (mut cw, mut ch) = (doc.width as usize, doc.height as usize);
+    let mut doublings = 0u32;
+    while (cw < width as usize || ch < height as usize)
+        && doublings < 3
+        && cw * 2 <= 8192
+        && ch * 2 <= 8192
+    {
+        cw *= 2;
+        ch *= 2;
+        doublings += 1;
+    }
+    if doublings == 0 {
+        return Plan::Classical;
+    }
+
+    let (w, h) = (doc.width as usize, doc.height as usize);
+    let mut layers = Vec::new();
+    for layer in doc.tree.iter() {
+        let (id, Some(raster)) = (layer.id, layer.as_raster()) else {
+            continue;
+        };
+        if raster.tiles.is_empty() {
+            continue;
+        }
+        // Premultiplied, as all resampling here is: interpolating straight
+        // alpha would drag the meaningless colour of fully transparent
+        // pixels into every edge. The network sees the premultiplied
+        // colour; alpha rides along bilinearly beside it, since a coverage
+        // ramp has no detail for a network to invent.
+        let mut rgb = vec![0.0f32; w * h * 3];
+        let mut alpha = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let px = raster.tiles.pixel(x as i32, y as i32);
+                let at = y * w + x;
+                rgb[at * 3] = px.r * px.a;
+                rgb[at * 3 + 1] = px.g * px.a;
+                rgb[at * 3 + 2] = px.b * px.a;
+                alpha[at] = px.a;
+            }
+        }
+        layers.push((id, rgb, alpha));
+    }
+    Plan::Neural(Box::new(NeuralResize {
+        model,
+        doublings,
+        from: (doc.width, doc.height),
+        to: (width, height),
+        depth: doc.depth,
+        doc: doc.id,
+        layers,
+    }))
+}
+
+/// Put a finished upscale back, as one undoable edit.
+///
+/// Does nothing if the document has changed out from under it, which is
+/// why the plan carried its id.
+pub fn apply_upscaled(doc: &mut Document, up: Upscaled) {
+    if doc.id != up.doc {
+        log::warn!("upscale finished for a document that is no longer here");
+        return;
+    }
+    let (width, height) = up.to;
+    let mut edit = doc.begin_edit("Image Size");
+    for (id, rgba, (w, h)) in up.layers {
+        if edit
+            .doc()
+            .tree
+            .find(id)
+            .and_then(|l| l.as_raster())
+            .is_none()
+        {
+            continue;
+        }
+        let mut tiles = TileMap::new();
+        schist_core::blit_rgba_f32(
+            &mut tiles,
+            up.depth,
+            IntRect::from_size(w as u32, h as u32),
+            &rgba,
+        );
+        // Whatever the doublings overshot or fell short of.
+        if (w as u32, h as u32) != (width, height) {
+            tiles = schist_core::resample::resize_tiles(
+                &tiles,
+                (w as u32, h as u32),
+                (width, height),
+                up.depth,
+                Filter::Bicubic,
+            );
+        }
+        edit.replace_layer_tiles(id, tiles);
+    }
+    edit.set_canvas_size(width, height);
+    edit.commit();
+}
+
+/// [`resize_image`], but able to resample through a neural upscaler.
+///
+/// Runs the network inline, so this is the right entry point for a caller
+/// that is already off the UI thread (and the wrong one for a caller that
+/// is not -- see [`plan_neural`]). Returns `false` when a neural resample
+/// was asked for and the model would not load, in which case bicubic stood
+/// in: silently substituting the thing the user specifically did not pick
+/// is worse than telling them.
+pub fn resize_image_with(doc: &mut Document, width: u32, height: u32, how: Resample) -> bool {
+    let id = match how {
+        Resample::Classic(filter) => {
+            resize_image(doc, width, height, filter);
+            return true;
+        }
+        Resample::Neural(id) => id,
+    };
+    if width == 0 || height == 0 || (width == doc.width && height == doc.height) {
+        return true;
+    }
+    match plan_neural(doc, width, height, id) {
+        Plan::NoModel => {
+            resize_image(doc, width, height, Filter::Bicubic);
+            false
+        }
+        Plan::Classical => {
+            resize_image(doc, width, height, Filter::Bicubic);
+            true
+        }
+        Plan::Neural(plan) => {
+            apply_upscaled(doc, plan.run());
+            true
+        }
+    }
+}
+
+/// Double a single plane bilinearly, sampling at pixel centres.
+fn double_plane(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let (ow, oh) = (w * 2, h * 2);
+    let mut out = vec![0.0f32; ow * oh];
+    for y in 0..oh {
+        let fy = (y as f32 + 0.5) / 2.0 - 0.5;
+        let y0 = fy.floor().max(0.0) as usize;
+        let y1 = (y0 + 1).min(h - 1);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..ow {
+            let fx = (x as f32 + 0.5) / 2.0 - 0.5;
+            let x0 = fx.floor().max(0.0) as usize;
+            let x1 = (x0 + 1).min(w - 1);
+            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+            let top = src[y0 * w + x0] * (1.0 - tx) + src[y0 * w + x1] * tx;
+            let bot = src[y1 * w + x0] * (1.0 - tx) + src[y1 * w + x1] * tx;
+            out[y * ow + x] = top * (1.0 - ty) + bot * ty;
+        }
+    }
+    out
+}
+
 /// Change the canvas without rescaling pixels (Canvas Size). `anchor` is the
 /// content's relative position in the new canvas, 0..1 per axis.
 pub fn resize_canvas(doc: &mut Document, width: u32, height: u32, anchor: (f32, f32)) {
@@ -899,6 +1170,64 @@ mod tests {
                 assert_eq!(outside, 255, "without delete it rides along off-canvas");
             }
         }
+    }
+
+    #[test]
+    fn neural_resize_doubles_the_document() {
+        // The model is built into the binary, so this runs the real
+        // network -- over a document small enough to cost one tile.
+        let mut doc = doc_with_square();
+        let id = doc.active_layer.unwrap();
+        let did = resize_image_with(&mut doc, 400, 400, Resample::Neural("waifu2x-photo"));
+        assert!(did, "a built-in model must not fall back");
+        assert_eq!((doc.width, doc.height), (400, 400));
+
+        let tiles = &doc.tree.find(id).unwrap().as_raster().unwrap().tiles;
+        // The square was at 20..60; doubled it covers 40..120. Its middle
+        // must still be its colour (loosely -- the network may round) and
+        // solid, and the far corner must still be empty.
+        let px = tiles.pixel(80, 80).to_u8();
+        assert_eq!(px[3], 255, "the square went translucent: {px:?}");
+        assert!(
+            px[0] < 60 && px[1] > 90 && px[1] < 170 && px[2] > 200,
+            "the square changed colour: {px:?}"
+        );
+        assert_eq!(
+            tiles.pixel(390, 390).to_u8()[3],
+            0,
+            "emptiness stayed empty"
+        );
+
+        assert_eq!(doc.undo().as_deref(), Some("Image Size"));
+        assert_eq!((doc.width, doc.height), (200, 200), "one undoable edit");
+    }
+
+    #[test]
+    fn neural_resize_reaches_a_non_power_of_two_target() {
+        // 200 -> 300 is one doubling and then bicubic back down.
+        let mut doc = doc_with_square();
+        assert!(resize_image_with(
+            &mut doc,
+            300,
+            300,
+            Resample::Neural("waifu2x-art")
+        ));
+        assert_eq!((doc.width, doc.height), (300, 300));
+        let id = doc.active_layer.unwrap();
+        let tiles = &doc.tree.find(id).unwrap().as_raster().unwrap().tiles;
+        assert_eq!(tiles.pixel(60, 60).to_u8()[3], 255);
+    }
+
+    #[test]
+    fn neural_resize_downscale_is_just_bicubic() {
+        let mut doc = doc_with_square();
+        assert!(resize_image_with(
+            &mut doc,
+            100,
+            100,
+            Resample::Neural("waifu2x-photo")
+        ));
+        assert_eq!((doc.width, doc.height), (100, 100));
     }
 
     #[test]

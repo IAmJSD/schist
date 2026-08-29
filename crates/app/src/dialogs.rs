@@ -9,6 +9,7 @@ use gpui::{
 };
 use schist_color::{ColorMode, Depth};
 use schist_core::Filter;
+use schist_tools_transform::Resample;
 
 /// Apply a stepper delta to a pixel dimension.
 ///
@@ -44,10 +45,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::ImageSize {
             width,
             height,
-            filter,
+            resample,
             link,
-        } => image_size(ws, &state, width, height, filter, link, cx).into_any_element(),
-        Modal::FilterRunning { name } => filter_running(&name).into_any_element(),
+        } => image_size(ws, &state, width, height, resample, link, cx).into_any_element(),
+        Modal::Busy { title, what, note } => busy(&title, &what, &note).into_any_element(),
         Modal::CanvasSize {
             width,
             height,
@@ -306,12 +307,17 @@ fn confirm_close_tab(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl In
     )
 }
 
-fn filter_options() -> Vec<(SharedString, Filter)> {
-    vec![
-        (Filter::Bicubic.display_name().into(), Filter::Bicubic),
-        (Filter::Bilinear.display_name().into(), Filter::Bilinear),
-        (Filter::Nearest.display_name().into(), Filter::Nearest),
+fn resample_options() -> Vec<(SharedString, Resample)> {
+    [
+        Resample::Classic(Filter::Bicubic),
+        Resample::Classic(Filter::Bilinear),
+        Resample::Classic(Filter::Nearest),
+        Resample::Neural("waifu2x-photo"),
+        Resample::Neural("waifu2x-art"),
     ]
+    .into_iter()
+    .map(|r| (r.display_name().into(), r))
+    .collect()
 }
 
 fn image_size(
@@ -319,7 +325,7 @@ fn image_size(
     state: &DialogState,
     width: u32,
     height: u32,
-    filter: Filter,
+    resample: Resample,
     link: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -415,15 +421,15 @@ fn image_size(
                 ui::Dropdown {
                     popup: Popup::Field("image-size-filter"),
                     is_open: state.open_popup == Some(Popup::Field("image-size-filter")),
-                    current: filter,
-                    label: (filter.display_name()).into(),
-                    width: 150.0,
-                    options: filter_options(),
+                    current: resample,
+                    label: (resample.display_name()).into(),
+                    width: 170.0,
+                    options: resample_options(),
                 },
                 |ws, value, _cx| {
                     ws.update_modal(|m| {
-                        if let Modal::ImageSize { filter, .. } = m {
-                            *filter = value;
+                        if let Modal::ImageSize { resample, .. } = m {
+                            *resample = value;
                         }
                     });
                 },
@@ -451,8 +457,14 @@ fn image_size(
             "OK",
             true,
             move |ws, _w, cx| {
+                // The neural path closes the dialog itself, because it may
+                // have to put a "working" one up in its place.
+                if let Resample::Neural(id) = resample {
+                    ws.resize_image_neural(width, height, id, cx);
+                    return;
+                }
                 if let Some(doc) = ws.doc.as_mut() {
-                    schist_tools_transform::resize_image(doc, width, height, filter);
+                    schist_tools_transform::resize_image_with(doc, width, height, resample);
                 }
                 ws.status = format!("Image size: {width} × {height}").into();
                 ws.close_modal(cx);
@@ -1942,20 +1954,20 @@ fn photoshop_section(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Vec<gpu
 /// No buttons: the plug-in's dialog is a separate window and answering it
 /// is what ends this. A Cancel here would have to kill the helper, which
 /// is a bigger promise than "the document is busy".
-fn filter_running(name: &str) -> impl IntoElement {
+fn busy(title: &str, what: &str, note: &str) -> impl IntoElement {
     let body = div()
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_size(px(12.0)).child(format!("Running {name}")))
+        .child(div().text_size(px(12.0)).child(what.to_string()))
         .child(
             div()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(ui::palette().text_dim))
-                .child("The plug-in runs in its own process. If it opens a window, answer that to continue."),
+                .child(note.to_string()),
         );
     ui::modal_frame(
-        "Photoshop plug-in",
+        title.to_string(),
         360.0,
         body,
         div().flex().flex_row().gap_2(),

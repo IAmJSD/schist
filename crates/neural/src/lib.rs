@@ -7,9 +7,10 @@
 //!
 //! Two kinds of model:
 //!
-//! * **Built in.** `detail.onnx`, `dejpeg.onnx` and `colorize.onnx` ship
-//!   inside the binary, which between them is a couple of megabytes --
-//!   they were trained small on purpose (see `tools/train/`).
+//! * **Built in.** `detail.onnx`, `dejpeg.onnx`, `colorize.onnx` and the
+//!   waifu2x upscalers ship inside the binary, a few megabytes between
+//!   them -- ours were trained small on purpose (see `tools/train/`), and
+//!   waifu2x's upconv_7 came small.
 //! * **Downloaded.** The style-transfer, depth and face networks are
 //!   megabytes to tens of megabytes each and are somebody else's work, so
 //!   they are fetched on demand into the user's data directory and
@@ -42,13 +43,15 @@ pub use colour::{chroma, recolour};
 pub use depth::depth_map;
 pub use faces::{faces, Face};
 pub use framed::run_framed;
-pub use tile::run_tiled;
+pub use tile::{run_scaled, run_tiled};
 
 /// The models shipped inside the binary.
 const DETAIL_ONNX: &[u8] = include_bytes!("../models/detail.onnx");
 const DEJPEG_ONNX: &[u8] = include_bytes!("../models/dejpeg.onnx");
 const COLORIZE_ONNX: &[u8] = include_bytes!("../models/colorize.onnx");
 const PORTRAIT_ONNX: &[u8] = include_bytes!("../models/portrait.onnx");
+const WAIFU2X_ART_ONNX: &[u8] = include_bytes!("../models/waifu2x-art.onnx");
+const WAIFU2X_PHOTO_ONNX: &[u8] = include_bytes!("../models/waifu2x-photo.onnx");
 
 /// How a model wants its pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,8 +112,14 @@ pub enum Input {
     /// Square tiles cut from the image at full resolution, stitched back
     /// with `overlap` pixels of context trimmed off each edge. What an
     /// image-to-image model wants: it works on pixels, and there are
-    /// however many of those there are.
-    Tiles { size: usize, overlap: usize },
+    /// however many of those there are. `scale` is how many output pixels
+    /// the model makes of each input one -- 1 for a filter, more for an
+    /// upscaler.
+    Tiles {
+        size: usize,
+        overlap: usize,
+        scale: usize,
+    },
     /// One fixed frame the whole image is resampled into. What a model
     /// that answers a question *about* the picture wants -- where the
     /// faces are, how far away things are -- because that answer needs
@@ -128,6 +137,14 @@ impl Input {
         match self {
             Input::Tiles { size, .. } => (size, size),
             Input::Frame { width, height, .. } => (width, height),
+        }
+    }
+
+    /// Output pixels per input pixel.
+    fn scale(self) -> usize {
+        match self {
+            Input::Tiles { scale, .. } => scale,
+            Input::Frame { .. } => 1,
         }
     }
 }
@@ -170,6 +187,7 @@ pub const CATALOG: &[ModelSpec] = &[
         input: Input::Tiles {
             size: 128,
             overlap: 8,
+            scale: 1,
         },
         range: Range::Unit,
         license: "Trained for Schist; same licence as the app",
@@ -186,6 +204,7 @@ pub const CATALOG: &[ModelSpec] = &[
         input: Input::Tiles {
             size: 128,
             overlap: 8,
+            scale: 1,
         },
         range: Range::Unit,
         license: "Trained for Schist; same licence as the app",
@@ -235,13 +254,49 @@ pub const CATALOG: &[ModelSpec] = &[
                faces from Open Images; see tools/train/portrait.py.",
     },
     ModelSpec {
+        id: "waifu2x-art",
+        name: "waifu2x ×2 (Art)",
+        file: "waifu2x-art.onnx",
+        url: None,
+        sha256: None,
+        bytes: WAIFU2X_ART_ONNX.len(),
+        input: Input::Tiles {
+            size: 128,
+            overlap: 8,
+            scale: 2,
+        },
+        range: Range::Unit,
+        note: "Doubles an image's size, drawn edges staying edges. The \
+               upconv_7 art model from the waifu2x project, trained on \
+               illustrations; see tools/train/waifu2x.py.",
+        license: "waifu2x (nagadomi), MIT",
+    },
+    ModelSpec {
+        id: "waifu2x-photo",
+        name: "waifu2x ×2 (Photo)",
+        file: "waifu2x-photo.onnx",
+        url: None,
+        sha256: None,
+        bytes: WAIFU2X_PHOTO_ONNX.len(),
+        input: Input::Tiles {
+            size: 128,
+            overlap: 8,
+            scale: 2,
+        },
+        range: Range::Unit,
+        note: "Doubles an image's size. The upconv_7 photo model from the \
+               waifu2x project, trained on photographs; see \
+               tools/train/waifu2x.py.",
+        license: "waifu2x (nagadomi), MIT",
+    },
+    ModelSpec {
         id: "style-mosaic",
         name: "Style: Mosaic",
         file: "style-mosaic.onnx",
         url: Some("https://github.com/onnx/models/raw/main/validated/vision/style_transfer/fast_neural_style/model/mosaic-9.onnx"),
         sha256: Some("fa646dedade881243f8d5a2ceb7de2b93675b21fc24f7482894ac4851a9a0a47"),
         bytes: 6_728_029,
-        input: Input::Tiles { size: 384, overlap: 32 },
+        input: Input::Tiles { size: 384, overlap: 32, scale: 1 },
         range: Range::Byte,
         license: "ONNX Model Zoo, Apache-2.0",
         note: "Fast neural style transfer (Johnson et al.).",
@@ -253,7 +308,7 @@ pub const CATALOG: &[ModelSpec] = &[
         url: Some("https://github.com/onnx/models/raw/main/validated/vision/style_transfer/fast_neural_style/model/candy-9.onnx"),
         sha256: Some("9d11a3529d1e547da6ae07201d93484dbab2ec0a3614535752c8f40f0fe2968a"),
         bytes: 6_728_029,
-        input: Input::Tiles { size: 384, overlap: 32 },
+        input: Input::Tiles { size: 384, overlap: 32, scale: 1 },
         range: Range::Byte,
         license: "ONNX Model Zoo, Apache-2.0",
         note: "Fast neural style transfer (Johnson et al.).",
@@ -265,7 +320,7 @@ pub const CATALOG: &[ModelSpec] = &[
         url: Some("https://github.com/onnx/models/raw/main/validated/vision/style_transfer/fast_neural_style/model/udnie-9.onnx"),
         sha256: Some("8656b6ce7dec8f22ee13c2d557d6b67bd6f550dde88d0f2e7c9972aeb765cc0d"),
         bytes: 6_728_029,
-        input: Input::Tiles { size: 384, overlap: 32 },
+        input: Input::Tiles { size: 384, overlap: 32, scale: 1 },
         range: Range::Byte,
         license: "ONNX Model Zoo, Apache-2.0",
         note: "Fast neural style transfer (Johnson et al.).",
@@ -370,9 +425,12 @@ impl Model {
     }
 
     /// Run one tile of an image-to-image model. `rgb` is
-    /// `size * size * 3` floats in 0..=1, and so is the result.
+    /// `size * size * 3` floats in 0..=1; the result is the same times the
+    /// spec's scale factor.
     pub fn run_tile(&self, rgb: &[f32]) -> Result<Vec<f32>> {
         let (w, h) = self.spec.input.dims();
+        let scale = self.spec.input.scale();
+        let (w, h) = (w * scale, h * scale);
         let out = self.run(rgb)?;
         let view = out[0].to_plain_array_view::<f32>()?;
         let shape = view.shape();
@@ -519,6 +577,8 @@ fn load(spec: &'static ModelSpec) -> Result<Model> {
             "dejpeg" => DEJPEG_ONNX,
             "colorize" => COLORIZE_ONNX,
             "portrait" => PORTRAIT_ONNX,
+            "waifu2x-art" => WAIFU2X_ART_ONNX,
+            "waifu2x-photo" => WAIFU2X_PHOTO_ONNX,
             other => bail!("no built-in model named {other}"),
         };
         return Model::from_bytes(spec, bytes);

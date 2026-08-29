@@ -18,7 +18,7 @@ fn model_dir_lock() -> std::sync::MutexGuard<'static, ()> {
 /// it.
 fn tiling(model: &neural::Model) -> (usize, usize) {
     match model.spec.input {
-        Input::Tiles { size, overlap } => (size, overlap),
+        Input::Tiles { size, overlap, .. } => (size, overlap),
         other => panic!("{} is {other:?}, not tiled", model.spec.id),
     }
 }
@@ -320,6 +320,7 @@ fn a_pre_opset_10_graph_is_rewritten_and_runs() {
     spec.input = Input::Tiles {
         size: 8,
         overlap: 0,
+        scale: 1,
     };
     spec.range = neural::Range::Unit;
     let spec: &'static neural::ModelSpec = Box::leak(Box::new(spec));
@@ -387,6 +388,63 @@ fn the_deblocker_undoes_some_of_a_jpeg() {
         "jpeg {before:.2} dB -> model {after:.2} dB (+{:.2})",
         after - before
     );
+}
+
+/// Box-halve an image, the degradation the upscaler is asked to undo.
+fn halve(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut small = vec![0.0f32; hw * hh * 3];
+    for y in 0..hh {
+        for x in 0..hw {
+            for c in 0..3 {
+                let mut acc = 0.0;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        acc += src[((y * 2 + dy) * w + x * 2 + dx) * 3 + c];
+                    }
+                }
+                small[(y * hw + x) * 3 + c] = acc / 4.0;
+            }
+        }
+    }
+    small
+}
+
+#[test]
+fn waifu2x_doubles_a_photograph_better_than_interpolation() {
+    // Halve the photograph and ask for it back at size. The claim the
+    // model earns its megabytes with is beating the classical upscale,
+    // so that -- `degrade`, which is the same halving followed by a
+    // bilinear return trip -- is the bar, not merely "ran".
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let small = halve(&truth, w, h);
+    let model = neural::get("waifu2x-photo").expect("model");
+    let doubled = neural::run_scaled(&model, &small, w / 2, h / 2).expect("runs");
+
+    assert_eq!(doubled.len(), w * h * 3);
+    assert!(doubled.iter().all(|v| (0.0..=1.0).contains(v)));
+    let bilinear = degrade(&truth, w, h);
+    let (base, ours) = (psnr(&bilinear, &truth), psnr(&doubled, &truth));
+    println!(
+        "bilinear {base:.2} dB -> waifu2x {ours:.2} dB (+{:.2})",
+        ours - base
+    );
+    assert!(
+        ours > base,
+        "the model lost to bilinear: {base:.2} dB -> {ours:.2} dB"
+    );
+}
+
+#[test]
+fn waifu2x_handles_odd_sizes_and_tiny_images() {
+    let model = neural::get("waifu2x-art").expect("model");
+    for (w, h) in [(1usize, 1usize), (5, 5), (131, 3)] {
+        let px = photo_like(w, h);
+        let out = neural::run_scaled(&model, &px, w, h).expect("runs");
+        assert_eq!(out.len(), w * 2 * h * 2 * 3, "{w}x{h}");
+        assert!(out.iter().all(|v| v.is_finite()), "{w}x{h} produced NaN");
+    }
 }
 
 /// Luminance, the way the filters and the training script both compute
