@@ -1,8 +1,8 @@
 //! Filter ▸ Stylize: filters built on edges and local contrast.
 
 use crate::util::{at, convolve3, gaussian_rgba, luma, put, value_noise};
-use crate::{choice, param, simple_filter};
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use crate::{choice, context_filter, param, simple_filter};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
 /// Sobel gradient magnitude of the luminance at every pixel, 0..~1.
 fn edges(px: &[f32], w: usize, h: usize) -> Vec<f32> {
@@ -258,13 +258,13 @@ simple_filter!(
 /// What Photoshop leaves in the gaps between the tiles.
 const TILE_FILLS: &[&str] = &[
     "Transparent",
-    "Black",
-    "White",
+    "Background Color",
+    "Foreground Color",
     "Inverse Image",
     "Unaltered Image",
 ];
 
-simple_filter!(
+context_filter!(
     Tiles,
     "filter.tiles",
     "Tiles",
@@ -274,7 +274,7 @@ simple_filter!(
         param("offset", "Maximum Offset", 1.0, 99.0, 10.0, "%"),
         choice("fill", "Fill Empty Area With", TILE_FILLS, 0)
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Break the image into tiles and shove each one off its place.
         let count = v.get("count").max(2.0) as usize;
         let offset = v.get("offset") / 100.0;
@@ -282,14 +282,13 @@ simple_filter!(
         let tw = w.div_ceil(count);
         let th = h.div_ceil(count);
         let src = px.to_vec();
-        // What shows through the gaps the tiles leave. Photoshop offers
-        // the foreground and background colours, which a filter cannot
-        // see, so those are black and white here.
+        let (fg, bg) = (ctx.fg(), ctx.bg());
+        // What shows through the gaps the tiles leave.
         for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             match fill {
                 0 => *p = [0.0, 0.0, 0.0, 0.0],
-                1 => *p = [0.0, 0.0, 0.0, 1.0],
-                2 => *p = [1.0, 1.0, 1.0, 1.0],
+                1 => *p = [bg[0], bg[1], bg[2], 1.0],
+                2 => *p = [fg[0], fg[1], fg[2], 1.0],
                 3 => {
                     let o = &src[i * 4..i * 4 + 4];
                     *p = [1.0 - o[0], 1.0 - o[1], 1.0 - o[2], o[3]];

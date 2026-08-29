@@ -57,7 +57,8 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             id,
             values,
             preview,
-        } => filter_dialog(ws, &state, id, values, preview, cx).into_any_element(),
+            map,
+        } => filter_dialog(ws, &state, id, values, preview, map, cx).into_any_element(),
         Modal::Adjustment {
             layer,
             params,
@@ -645,7 +646,10 @@ pub(crate) fn param_slider(
             .child(ui::slider_track(
                 id,
                 ratio,
-                120.0,
+                // A choice's name takes the room its track gives up: the
+                // track is only there to step through half a dozen
+                // options, and the name is the part being read.
+                if snap { 92.0 } else { 120.0 },
                 move |ws, r, cx| {
                     let v = min + r * span;
                     set(ws, if snap { v.round() } else { v }, cx)
@@ -654,7 +658,10 @@ pub(crate) fn param_slider(
             ))
             .child(
                 div()
-                    .w(px(56.0))
+                    // A number needs little room; the name of a choice
+                    // needs enough not to wrap "Repeat Edge Pixels" onto
+                    // three lines, which is what it did.
+                    .w(px(if snap { 146.0 } else { 56.0 }))
                     .flex_none()
                     .text_size(px(11.0))
                     .child(display),
@@ -669,6 +676,7 @@ fn filter_dialog(
     id: &'static str,
     values: schist_plugin_api::FilterValues,
     preview: bool,
+    map: Option<std::sync::Arc<schist_plugin_api::FilterImage>>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let (name, specs) = ws
@@ -720,6 +728,51 @@ fn filter_dialog(
             cx,
         ));
     }
+    // A filter that takes an image gets a row to choose one with. This
+    // is Photoshop's "Choose a displacement map" dialog, except that it
+    // opens from inside the filter rather than in front of it, so the
+    // sliders can be set first and the map swapped without starting
+    // over.
+    if let Some(label) = ws
+        .registry
+        .filters()
+        .find(|f| f.id() == id)
+        .and_then(|f| f.wants_map())
+    {
+        let chosen = map
+            .as_ref()
+            .map(|m| format!("{} \u{d7} {}", m.width, m.height))
+            .unwrap_or_else(|| "None".to_string());
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .w(px(150.0))
+                        .flex_none()
+                        .text_size(px(12.0))
+                        .child(SharedString::from(label)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(ui::palette().text_dim))
+                        .child(SharedString::from(chosen)),
+                )
+                .child(ui::button(
+                    "Choose\u{2026}",
+                    false,
+                    move |ws, window, cx| ws.choose_filter_map(id, window, cx),
+                    cx,
+                )),
+        );
+    }
+
     // Anything the filter wants the user to know before running it --
     // for the neural ones, whether they found their model.
     if let Some(note) = ws

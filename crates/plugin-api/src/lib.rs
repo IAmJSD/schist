@@ -393,6 +393,98 @@ pub struct FilterParam {
     pub choices: &'static [&'static str],
 }
 
+/// An image handed to a filter alongside the layer it is working on.
+///
+/// Straight-alpha RGBA, the same layout as the buffer a filter is given,
+/// but any size: a displacement map is whatever file somebody picked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilterImage {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<f32>,
+}
+
+impl FilterImage {
+    /// Sample at a fraction of the image, stretching it to whatever it is
+    /// being used over. Photoshop calls this Stretch To Fit.
+    pub fn stretched(&self, u: f32, v: f32) -> [f32; 4] {
+        self.texel(u * self.width as f32, v * self.height as f32)
+    }
+
+    /// Sample in the map's own pixels, repeating it. Photoshop calls this
+    /// Tile.
+    pub fn tiled(&self, x: f32, y: f32) -> [f32; 4] {
+        self.texel(
+            x.rem_euclid(self.width.max(1) as f32),
+            y.rem_euclid(self.height.max(1) as f32),
+        )
+    }
+
+    fn texel(&self, x: f32, y: f32) -> [f32; 4] {
+        if self.width == 0 || self.height == 0 {
+            return [0.0; 4];
+        }
+        let x = (x as usize).min(self.width - 1);
+        let y = (y as usize).min(self.height - 1);
+        let i = (y * self.width + x) * 4;
+        [
+            self.pixels[i],
+            self.pixels[i + 1],
+            self.pixels[i + 2],
+            self.pixels[i + 3],
+        ]
+    }
+}
+
+/// Everything a filter can be given beyond its own pixels and numbers.
+///
+/// Photoshop's filters read the toolbox and the open document as freely
+/// as they read the layer: the Sketch group paints in the foreground and
+/// background colours, Clouds renders in them, Displace warps through a
+/// file somebody picked, Flame follows the current path. A filter here is
+/// a plug-in with none of that in reach, so the host gathers whatever
+/// each one asks for and hands it over.
+#[derive(Clone, Copy)]
+pub struct FilterContext<'a> {
+    /// What the document composites to under the layer being filtered.
+    pub backdrop: Option<&'a [f32]>,
+    /// The toolbox's two colours.
+    pub foreground: Rgba,
+    pub background: Rgba,
+    /// The image picked for this run, for filters that take one.
+    pub map: Option<&'a FilterImage>,
+    /// The document's active path, flattened into the filter's own
+    /// coordinates.
+    pub path: Option<&'a [(f32, f32)]>,
+}
+
+impl Default for FilterContext<'_> {
+    fn default() -> Self {
+        FilterContext {
+            backdrop: None,
+            // The swatches a fresh Photoshop opens with, and what every
+            // one of these filters is pictured with.
+            foreground: Rgba::BLACK,
+            background: Rgba::WHITE,
+            map: None,
+            path: None,
+        }
+    }
+}
+
+impl FilterContext<'_> {
+    /// The foreground as a plain array, which is what a filter mixing
+    /// colours wants.
+    pub fn fg(&self) -> [f32; 3] {
+        [self.foreground.r, self.foreground.g, self.foreground.b]
+    }
+
+    /// The background, likewise.
+    pub fn bg(&self) -> [f32; 3] {
+        [self.background.r, self.background.g, self.background.b]
+    }
+}
+
 /// Parameter values keyed by [`FilterParam::key`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FilterValues(pub Vec<(&'static str, f32)>);
@@ -437,30 +529,43 @@ pub trait FilterPlugin: Send + Sync {
     ///
     /// Most do not: a filter is a function of its own pixels. The ones
     /// that match one image to another -- Harmonization, Colour
-    /// Transfer -- need something to match *to*, and the only second
-    /// image a filter dialog can offer without a file picker is the one
-    /// already in the document. Photoshop's Harmonization asks for a
-    /// layer the same way.
+    /// Transfer -- need something to match *to*, and the nearest thing
+    /// to hand is what the document composites to below. Photoshop's
+    /// Harmonization asks for a layer the same way.
     fn wants_backdrop(&self) -> bool {
         false
     }
 
-    /// Apply with the pixels underneath the layer, when the host has
-    /// them.
+    /// The label of the image this filter takes, if it takes one.
     ///
-    /// `backdrop` is the same size as `pixels` and is what the document
-    /// composites to under this layer, or `None` when there is nothing
-    /// below or the host cannot produce one. The default ignores it,
-    /// which is right for every filter that did not ask.
-    fn apply_over(
+    /// Displace warps through a map somebody chose from a file, and
+    /// Photoshop asks for it with a file dialog before the filter runs.
+    /// Returning a label here is what makes the host offer one.
+    fn wants_map(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether this filter wants the document's active path.
+    ///
+    /// Flame draws along one. A filter cannot reach into the document,
+    /// so the host flattens the path and passes the points.
+    fn wants_path(&self) -> bool {
+        false
+    }
+
+    /// Apply with everything the host was able to gather.
+    ///
+    /// The default ignores the context, which is right for every filter
+    /// that asked for nothing -- most of them.
+    fn apply_with(
         &self,
         pixels: &mut [f32],
-        backdrop: Option<&[f32]>,
         width: usize,
         height: usize,
         values: &FilterValues,
+        context: &FilterContext,
     ) {
-        let _ = backdrop;
+        let _ = context;
         self.apply(pixels, width, height, values);
     }
 

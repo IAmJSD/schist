@@ -597,6 +597,13 @@ pub enum Modal {
         values: schist_plugin_api::FilterValues,
         /// Show the result on the canvas while the dialog is open.
         preview: bool,
+        /// The image picked for a filter that takes one -- Displace's
+        /// map. Kept on the modal because it belongs to this run of the
+        /// dialog and nothing else. Compared by identity: two decodes of
+        /// the same file are the same picture, and comparing a few
+        /// megapixels to find that out would be absurd.
+        #[allow(clippy::type_complexity)]
+        map: Option<Arc<schist_plugin_api::FilterImage>>,
     },
     /// Layer effects for one layer. Boxed because the style is by far the
     /// largest thing any dialog carries.
@@ -2647,7 +2654,15 @@ impl Workspace {
             let Some(filter) = self.registry.filters().find(|f| f.id() == entry.id) else {
                 continue;
             };
-            filter.apply(buf, w, h, &entry.values);
+            // The gallery hands over the toolbox colours and nothing
+            // else: a stack has no one layer to read a backdrop for, and
+            // choosing a map per entry would need a picker per entry.
+            let context = schist_plugin_api::FilterContext {
+                foreground: self.editor.foreground,
+                background: self.editor.background,
+                ..Default::default()
+            };
+            filter.apply_with(buf, w, h, &entry.values, &context);
         }
     }
 
@@ -5060,6 +5075,137 @@ impl Workspace {
         Some(buf)
     }
 
+    /// Pick an image for a filter that takes one, and re-preview with it.
+    ///
+    /// Decoded through the same codecs that open documents -- so a map
+    /// can be a PSD, a PNG, or anything else this build reads -- and
+    /// composited flat, because a filter wants pixels and not a layer
+    /// tree.
+    pub fn choose_filter_map(
+        &mut self,
+        id: &'static str,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        let codecs = self.registry.shared_codecs();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else { return };
+            let decoded = cx
+                .background_executor()
+                .spawn(async move {
+                    let doc = decode_file(&codecs, &path)?;
+                    let rect = doc.canvas_rect();
+                    anyhow::Ok(schist_plugin_api::FilterImage {
+                        width: rect.width().max(0) as usize,
+                        height: rect.height().max(0) as usize,
+                        pixels: schist_compositor::composite_region_f32(&doc, rect),
+                    })
+                })
+                .await;
+            this.update_in(cx, |ws, _window, cx| {
+                match decoded {
+                    Ok(image) => {
+                        let image = Arc::new(image);
+                        let mut values = None;
+                        ws.update_modal(|m| {
+                            if let Modal::Filter {
+                                map,
+                                values: v,
+                                preview,
+                                ..
+                            } = m
+                            {
+                                *map = Some(image.clone());
+                                if *preview {
+                                    values = Some(v.clone());
+                                }
+                            }
+                        });
+                        if let Some(values) = values {
+                            ws.preview_filter(id, Some(&values), cx);
+                        }
+                    }
+                    Err(e) => ws.status = format!("{e}").into(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The image the open filter dialog has been given, if any.
+    fn filter_map(&self) -> Option<Arc<schist_plugin_api::FilterImage>> {
+        match &self.modal {
+            Some(Modal::Filter { map, .. }) => map.clone(),
+            _ => None,
+        }
+    }
+
+    /// Everything a filter asked for, gathered.
+    ///
+    /// Each piece costs something -- compositing the layers below,
+    /// flattening a path -- so nothing is fetched for a filter that did
+    /// not ask. The colours are free and are always passed: they are two
+    /// numbers the toolbox already has, and half the Sketch group is
+    /// wrong without them.
+    fn filter_context<'a>(
+        &mut self,
+        filter: &dyn schist_plugin_api::FilterPlugin,
+        layer: schist_core::LayerId,
+        region: IntRect,
+        backdrop: &'a mut Option<Vec<f32>>,
+        path: &'a mut Option<Vec<(f32, f32)>>,
+        map: Option<&'a schist_plugin_api::FilterImage>,
+    ) -> schist_plugin_api::FilterContext<'a> {
+        if filter.wants_backdrop() {
+            *backdrop = self.read_backdrop(layer, region);
+        }
+        if filter.wants_path() {
+            *path = self.active_path_points(region);
+        }
+        schist_plugin_api::FilterContext {
+            backdrop: backdrop.as_deref(),
+            foreground: self.editor.foreground,
+            background: self.editor.background,
+            map,
+            path: path.as_deref(),
+        }
+    }
+
+    /// The document's active path, flattened and moved into the filter's
+    /// own coordinates.
+    ///
+    /// A filter works on a region of a layer and knows nothing about
+    /// where that region sits, so the points arrive already relative to
+    /// it -- and points outside it are kept rather than clipped, because
+    /// a curve that leaves the selection and comes back is still one
+    /// curve.
+    fn active_path_points(&self, region: IntRect) -> Option<Vec<(f32, f32)>> {
+        let doc = self.doc.as_ref()?;
+        let path = doc.active_path.and_then(|i| doc.paths.get(i))?;
+        let flat = schist_tools_vector::paths::flatten(path);
+        // Subpaths run together: a filter drawing along the path wants a
+        // list of points, and where one subpath ends and the next begins
+        // is a distinction none of them make.
+        let points: Vec<(f32, f32)> = flat
+            .subpaths
+            .iter()
+            .flat_map(|sub| sub.iter())
+            .map(|(x, y)| (x - region.left as f32, y - region.top as f32))
+            .collect();
+        (points.len() >= 2).then_some(points)
+    }
+
     /// What the document composites to *under* a layer, over a region.
     ///
     /// Produced by hiding the layer and everything above it, compositing,
@@ -5206,18 +5352,20 @@ impl Workspace {
                 preview.region.width() as usize,
                 preview.region.height() as usize,
             );
-            let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+            let Some(filter) = self.registry.shared_filter(id) else {
                 return;
             };
-            let backdrop = if filter.wants_backdrop() {
-                self.read_backdrop(preview.layer, preview.region)
-            } else {
-                None
-            };
-            let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
-                return;
-            };
-            filter.apply_over(&mut buf, backdrop.as_deref(), w, h, values);
+            let map = self.filter_map();
+            let (mut backdrop, mut path) = (None, None);
+            let context = self.filter_context(
+                filter.as_ref(),
+                preview.layer,
+                preview.region,
+                &mut backdrop,
+                &mut path,
+                map.as_deref(),
+            );
+            filter.apply_with(&mut buf, w, h, values, &context);
         }
         self.write_region(
             preview.layer,
@@ -5319,20 +5467,25 @@ impl Workspace {
             .detach();
             return;
         }
-        let backdrop = if filter.wants_backdrop() {
-            self.read_backdrop(layer_id, region)
-        } else {
-            None
-        };
-        let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
+        let Some(filter) = self.registry.shared_filter(id) else {
             return;
         };
-        filter.apply_over(
+        let map = self.filter_map();
+        let (mut backdrop, mut path) = (None, None);
+        let context = self.filter_context(
+            filter.as_ref(),
+            layer_id,
+            region,
+            &mut backdrop,
+            &mut path,
+            map.as_deref(),
+        );
+        filter.apply_with(
             &mut buf,
-            backdrop.as_deref(),
             region.width() as usize,
             region.height() as usize,
             values,
+            &context,
         );
         // A Photoshop plug-in runs in another process and can refuse, or
         // be cancelled from its own dialog. Recording an edit for a run
@@ -5669,6 +5822,7 @@ impl Workspace {
                 id,
                 values,
                 preview: true,
+                map: None,
             },
             cx,
         );
