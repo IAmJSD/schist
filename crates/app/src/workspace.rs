@@ -5516,12 +5516,6 @@ impl Workspace {
         self.after_change(cx);
     }
 
-    /// Land the result of a filter that ran off the main thread.
-    ///
-    /// The layer is looked up again rather than assumed: the run took as
-    /// long as someone took to answer a dialog, and the document it
-    /// started against may not be the one in front of us now.
-    #[allow(clippy::too_many_arguments)]
     /// Image Size through a neural upscaler.
     ///
     /// The network costs seconds per input megapixel, so it runs on a
@@ -5600,6 +5594,12 @@ impl Workspace {
         }
     }
 
+    /// Land the result of a filter that ran off the main thread.
+    ///
+    /// The layer is looked up again rather than assumed: the run took as
+    /// long as someone took to answer a dialog, and the document it
+    /// started against may not be the one in front of us now.
+    #[allow(clippy::too_many_arguments)]
     fn finish_external_filter(
         &mut self,
         layer_id: schist_core::LayerId,
