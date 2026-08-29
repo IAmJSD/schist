@@ -108,6 +108,12 @@ fn every_filter_does_something_at_its_defaults() {
         "filter.neural.harmonization",
         "filter.neural.landscape_mixer",
         "filter.neural.face_to_caricature",
+        "filter.neural.makeup_transfer",
+        // Smart Portrait opens with every expression at neutral and the
+        // light where it already is, because the picture it was given is
+        // the picture the photographer took: it is a set of adjustments,
+        // and none of them start applied.
+        "filter.neural.smart_portrait",
         // Lens Correction opens with every correction at zero, because
         // there is no lens profile to prefill it from and guessing would
         // be worse than leaving it alone. Photoshop's does the same
@@ -333,9 +339,15 @@ fn skin_smoothing_leaves_things_that_are_not_skin_alone() {
 
 #[test]
 fn the_filters_that_ask_for_a_backdrop_use_it() {
-    // Three filters declare that they want the pixels underneath. Each
-    // has to do nothing without one -- checked by the no-op list above --
-    // and move the image towards the backdrop's colour with one.
+    // The filters that declare they want the pixels underneath each have
+    // to do nothing without one -- checked by the no-op list above -- and
+    // move the image towards the backdrop's colour with one.
+    //
+    // Makeup Transfer is the exception, and not because it ignores the
+    // backdrop: it needs a *face* in both pictures, and neither this
+    // image nor a flat colour has one. What it does in that case is
+    // checked below instead.
+    const NEEDS_A_FACE: &[&str] = &["filter.neural.makeup_transfer"];
     let (w, h) = (48usize, 48usize);
     let warm: Vec<f32> = (0..w * h).flat_map(|_| [0.85f32, 0.55, 0.2, 1.0]).collect();
     let mean = |px: &[f32]| {
@@ -350,7 +362,10 @@ fn the_filters_that_ask_for_a_backdrop_use_it() {
     };
     let reg = registry();
     let mut asked = 0;
-    for f in reg.filters().filter(|f| f.wants_backdrop()) {
+    for f in reg
+        .filters()
+        .filter(|f| f.wants_backdrop() && !NEEDS_A_FACE.contains(&f.id()))
+    {
         asked += 1;
         let before = image(w, h);
         let mut px = before.clone();
@@ -377,6 +392,36 @@ fn the_filters_that_ask_for_a_backdrop_use_it() {
         asked >= 3,
         "expected the three matching filters, found {asked}"
     );
+}
+
+#[test]
+fn makeup_transfer_leaves_a_picture_with_no_face_in_it_alone() {
+    // It moves colour from one face to another, so with no face to move
+    // it to the answer is the picture it was given. Getting this wrong
+    // would tint whole layers the colour of whatever sat underneath --
+    // and a flat backdrop is exactly the case where a filter that
+    // averaged first and looked for a face second would show it.
+    let (w, h) = (48usize, 48usize);
+    let warm: Vec<f32> = (0..w * h).flat_map(|_| [0.85f32, 0.55, 0.2, 1.0]).collect();
+    let before = image(w, h);
+    let mut px = before.clone();
+    let reg = registry();
+    let f = reg
+        .filters()
+        .find(|f| f.id() == "filter.neural.makeup_transfer")
+        .expect("makeup transfer");
+    let context = schist_plugin_api::FilterContext {
+        backdrop: Some(&warm),
+        ..Default::default()
+    };
+    f.apply_with(
+        &mut px,
+        w,
+        h,
+        &FilterValues::defaults(&f.params()),
+        &context,
+    );
+    assert_eq!(px, before, "it made up something that was not a face");
 }
 
 #[test]

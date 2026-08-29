@@ -29,18 +29,37 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-INDEX = (
-    "https://storage.googleapis.com/openimages/2018_04/validation/"
-    "validation-images-with-rotation.csv"
-)
+# The validation split is the default because it is 41,620 images in one
+# 15 MB index instead of nine million in six hundred megabytes of them,
+# and most training here needs variety rather than volume. The train
+# split is there for the jobs that need volume -- the portrait network
+# wants every face it can get.
+SPLITS = {
+    "validation": (
+        "https://storage.googleapis.com/openimages/2018_04/validation/"
+        "validation-images-with-rotation.csv",
+        "https://storage.googleapis.com/openimages/v5/"
+        "validation-annotations-human-imagelabels-boxable.csv",
+    ),
+    "train": (
+        "https://storage.googleapis.com/openimages/2018_04/train/"
+        "train-images-boxable-with-rotation.csv",
+        "https://storage.googleapis.com/openimages/v5/"
+        "train-annotations-human-imagelabels-boxable.csv",
+    ),
+}
+# Open Images' machine id for "Human face". The portrait networks want
+# photographs with one in them, and a random sample of everything is
+# mostly not that.
+HUMAN_FACE = "/m/0dzct"
 LICENCE = "https://creativecommons.org/licenses/by/2.0/"
 AGENT = "schist-training/1.0 (https://github.com/IAmJSD/schist)"
 
 
-def index(cache: Path) -> list[dict]:
+def index(cache: Path, url: str) -> list[dict]:
     if not cache.exists():
         print(f"fetching the index into {cache}")
-        req = urllib.request.Request(INDEX, headers={"User-Agent": AGENT})
+        req = urllib.request.Request(url, headers={"User-Agent": AGENT})
         with urllib.request.urlopen(req, timeout=300) as r:
             cache.write_bytes(r.read())
     with cache.open(newline="") as f:
@@ -49,6 +68,21 @@ def index(cache: Path) -> list[dict]:
     # anything that is not the licence we expect is dropped rather than
     # trusted.
     return [r for r in rows if r["License"] == LICENCE and r["Thumbnail300KURL"]]
+
+
+def with_label(cache: Path, url: str, label: str) -> set[str]:
+    """The image ids carrying a label, from Open Images' own index."""
+    if not cache.exists():
+        print(f"fetching the labels into {cache}")
+        req = urllib.request.Request(url, headers={"User-Agent": AGENT})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            cache.write_bytes(r.read())
+    with cache.open(newline="") as f:
+        return {
+            r["ImageID"]
+            for r in csv.DictReader(f)
+            if r["LabelName"] == label and r["Confidence"] == "1"
+        }
 
 
 def fetch(row: dict, out: Path) -> dict | None:
@@ -79,13 +113,22 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--count", type=int, default=20000)
+    # "--label /m/0dzct" is the one worth knowing: photographs with a
+    # human face in them, which is what tools/train/faces.py wants.
+    ap.add_argument("--label", type=str, default=None)
     ap.add_argument("--jobs", type=int, default=12)
+    ap.add_argument("--split", choices=sorted(SPLITS), default="validation")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    rows = index(args.out / "index.csv")
+    index_url, labels_url = SPLITS[args.split]
+    rows = index(args.out / f"{args.split}-index.csv", index_url)
     print(f"{len(rows)} CC BY 2.0 photographs in the index")
+    if args.label:
+        wanted = with_label(args.out / f"{args.split}-labels.csv", labels_url, args.label)
+        rows = [r for r in rows if r["ImageID"] in wanted]
+        print(f"{len(rows)} of them labelled {args.label}")
     # Deterministic sample, so a re-run fetches the same corpus.
     rows.sort(key=lambda r: r["ImageID"])
     random.Random(args.seed).shuffle(rows)

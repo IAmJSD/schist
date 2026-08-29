@@ -1502,6 +1502,665 @@ impl FilterPlugin for FaceToCaricature {
     }
 }
 
+/// How much of a region a pixel belongs to, given the face it is part of
+/// and its own colour: geometry for the eyes and the skin, geometry and
+/// redness for the lips.
+type Region = fn(&FaceParts, f32, f32, &[f32]) -> f32;
+
+/// Where the features of a face looking at the camera are, as fractions
+/// of the detector's box.
+///
+/// The two filters below are geometry, not recognition: they assume the
+/// eyes are a little above the middle and the mouth three quarters of
+/// the way down, because on a face that is looking at the camera they
+/// are. That is also why both fall apart on a profile, and both say so.
+struct FaceParts {
+    /// Centre of the box and how wide it is.
+    centre: (f32, f32),
+    span: f32,
+    /// The two eyes and the mouth, as centres and radii.
+    eyes: [(f32, f32, f32); 2],
+    mouth: (f32, f32, f32),
+    brows: (f32, f32, f32),
+}
+
+impl FaceParts {
+    fn of(f: &Face) -> FaceParts {
+        let span = f.width.max(1.0);
+        let (cx, cy) = (f.x + f.width / 2.0, f.y + f.height / 2.0);
+        let eye_y = f.y + f.height * 0.40;
+        FaceParts {
+            centre: (cx, cy),
+            span,
+            eyes: [
+                (cx - span * 0.21, eye_y, span * 0.17),
+                (cx + span * 0.21, eye_y, span * 0.17),
+            ],
+            mouth: (cx, f.y + f.height * 0.75, span * 0.26),
+            brows: (cx, f.y + f.height * 0.32, span * 0.34),
+        }
+    }
+
+    /// A soft mask value for a round feature, 1 at the centre and 0 at
+    /// the rim.
+    fn falloff(x: f32, y: f32, part: (f32, f32, f32)) -> f32 {
+        let d = (x - part.0).hypot(y - part.1) / part.2.max(1.0);
+        if d >= 1.0 {
+            0.0
+        } else {
+            (1.0 - d * d).powi(2)
+        }
+    }
+}
+
+/// Smart Portrait: the retouches Photoshop's network makes, made the way
+/// a retoucher would.
+///
+/// Adobe's generates a new face from a latent code, which is how it can
+/// turn a head or change a hairline. Nothing that fits in a filter can do
+/// that. What *can* be done is everything the sliders are actually asked
+/// for on a portrait: a smile is the mouth corners lifted, surprise is
+/// the brows raised, age is skin texture added or taken away, and the
+/// light comes from wherever the shading says it does -- which the depth
+/// model can be asked about.
+///
+/// So the eyes here are warped rather than redrawn, and the filter says
+/// so. It works on a face looking at the camera and falls apart on a
+/// profile, because that is where its assumptions about where things are
+/// stop holding.
+pub struct SmartPortrait {
+    faces: Memo<Vec<Face>>,
+    depth: Memo<Vec<f32>>,
+}
+
+impl SmartPortrait {
+    pub const fn new() -> SmartPortrait {
+        SmartPortrait {
+            faces: Memo::new(),
+            depth: Memo::new(),
+        }
+    }
+}
+
+impl Default for SmartPortrait {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FilterPlugin for SmartPortrait {
+    fn id(&self) -> &'static str {
+        "filter.neural.smart_portrait"
+    }
+    fn name(&self) -> &'static str {
+        "Smart Portrait"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("happiness", "Happiness", -100.0, 100.0, 0.0, ""),
+            param("surprise", "Surprise", -100.0, 100.0, 0.0, ""),
+            param("age", "Facial Age", -100.0, 100.0, 0.0, ""),
+            param("gaze", "Gaze", -100.0, 100.0, 0.0, ""),
+            param("light", "Light Direction", -100.0, 100.0, 0.0, ""),
+        ]
+    }
+
+    fn info(&self) -> Option<String> {
+        model_note(
+            "face",
+            "so this does nothing \u{2014} it has no face to work on.",
+        )
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let happiness = values.get("happiness") / 100.0;
+        let surprise = values.get("surprise") / 100.0;
+        let age = values.get("age") / 100.0;
+        let gaze = values.get("gaze") / 100.0;
+        let light = values.get("light") / 100.0;
+        let Some(model) = schist_neural::get("face") else {
+            return;
+        };
+        let key = fingerprint(px, width, height);
+        let faces = self.faces.get(key, || {
+            let rgb = rgb_of(px);
+            schist_neural::faces(&model, &rgb, width, height)
+                .map_err(|e| log::warn!("smart portrait: {e:#}"))
+                .ok()
+        });
+        let Some(faces) = faces else { return };
+        if faces.is_empty() {
+            return;
+        }
+        let parts: Vec<FaceParts> = faces.iter().map(FaceParts::of).collect();
+
+        // Expression first, because it moves pixels: everything after it
+        // works on where they ended up.
+        if happiness != 0.0 || surprise != 0.0 || gaze != 0.0 {
+            warp(px, width, height, |x, y| {
+                let (mut sx, mut sy) = (x, y);
+                for p in parts.iter() {
+                    // A smile lifts the corners of the mouth and widens
+                    // it; a frown does the opposite. Sampling from lower
+                    // down is what raises what is drawn.
+                    let m = FaceParts::falloff(x, y, p.mouth);
+                    if m > 0.0 && happiness != 0.0 {
+                        let side = ((x - p.mouth.0) / p.mouth.2).clamp(-1.0, 1.0);
+                        sy += happiness * m * side.abs() * p.span * 0.10;
+                        sx -= happiness * m * side * p.span * 0.04;
+                    }
+                    // Surprise raises the brows and opens the eyes.
+                    let b = FaceParts::falloff(x, y, p.brows);
+                    if b > 0.0 && surprise != 0.0 {
+                        sy += surprise * b * p.span * 0.06;
+                    }
+                    for eye in p.eyes.iter() {
+                        let e = FaceParts::falloff(x, y, *eye);
+                        if e <= 0.0 {
+                            continue;
+                        }
+                        if surprise != 0.0 {
+                            // Towards the eye's centre enlarges it.
+                            let scale = 1.0 - surprise * e * 0.35;
+                            sx = eye.0 + (sx - eye.0) * scale;
+                            sy = eye.1 + (sy - eye.1) * scale;
+                        }
+                        if gaze != 0.0 {
+                            // The iris slides; the lids do not.
+                            sx -= gaze * e * eye.2 * 0.35;
+                        }
+                    }
+                }
+                (sx, sy)
+            });
+        }
+
+        // Age: skin is the one thing here that is texture rather than
+        // shape. Younger smooths it and lifts it; older puts the texture
+        // back, harder than it was.
+        if age != 0.0 {
+            let src = px.to_vec();
+            let mut low = px.to_vec();
+            gaussian_rgba(&mut low, width, height, 4.0);
+            for y in 0..height {
+                for x in 0..width {
+                    let i = y * width + x;
+                    let mut inside = 0.0f32;
+                    for p in parts.iter() {
+                        inside = inside.max(FaceParts::falloff(
+                            x as f32,
+                            y as f32,
+                            (p.centre.0, p.centre.1, p.span * 0.85),
+                        ));
+                    }
+                    let skin = inside * skinness(&src[i * 4..i * 4 + 4]);
+                    if skin <= 0.0 {
+                        continue;
+                    }
+                    for c in 0..3 {
+                        let texture = src[i * 4 + c] - low[i * 4 + c];
+                        // Negative age keeps less of the texture and
+                        // lifts the tone; positive keeps more of it and
+                        // deepens it.
+                        let kept = 1.0 + age * 1.4;
+                        let lift = -age * 0.06;
+                        let target = low[i * 4 + c] + texture * kept + lift;
+                        px[i * 4 + c] =
+                            (src[i * 4 + c] + (target - src[i * 4 + c]) * skin).clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+
+        // Light: shade the face by its own surface, which the depth model
+        // knows and nothing else here does. Without the model there is no
+        // relighting -- guessing a normal from luminance would just
+        // sharpen the shadows that are already there.
+        if light != 0.0 {
+            let depth = schist_neural::get("depth").and_then(|model| {
+                let key = fingerprint(px, width, height);
+                self.depth.get(key, || {
+                    let rgb = rgb_of(px);
+                    schist_neural::depth_map(&model, &rgb, width, height)
+                        .map_err(|e| log::warn!("smart portrait light: {e:#}"))
+                        .ok()
+                })
+            });
+            if let Some(depth) = depth {
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = y * width + x;
+                        let mut inside = 0.0f32;
+                        for p in parts.iter() {
+                            inside = inside.max(FaceParts::falloff(
+                                x as f32,
+                                y as f32,
+                                (p.centre.0, p.centre.1, p.span * 1.1),
+                            ));
+                        }
+                        if inside <= 0.0 {
+                            continue;
+                        }
+                        // The face as a surface: the depth map's slope
+                        // is its normal, and a light rakes across that.
+                        let at = |xx: usize, yy: usize| depth[yy * width + xx];
+                        let gx = at((x + 1).min(width - 1), y) - at(x.saturating_sub(1), y);
+                        let gy = at(x, (y + 1).min(height - 1)) - at(x, y.saturating_sub(1));
+                        // A silhouette is a cliff in the depth map, not a
+                        // surface: shading across one puts a bright rim
+                        // round the head, which is exactly what it looked
+                        // like before this test was here.
+                        let steep = (gx.hypot(gy) * 25.0).min(1.0);
+                        let n = [-gx * 14.0, -gy * 14.0, 1.0];
+                        let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+                        // The slider swings the light from one side to
+                        // the other, a little above.
+                        let l = [light.signum(), -0.35, 0.9];
+                        let ll = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
+                        let lambert =
+                            ((n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / (nl * ll)).clamp(0.0, 1.0);
+                        // Around the average, so lighting one side darkens
+                        // the other rather than brightening everything.
+                        let shade =
+                            1.0 + (lambert - 0.6) * light.abs() * 1.2 * inside * (1.0 - steep);
+                        for c in 0..3 {
+                            px[i * 4 + c] = (px[i * 4 + c] * shade.clamp(0.4, 1.8)).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Makeup Transfer: take the colour off one face and put it on another.
+///
+/// The reference is the layer underneath, as it is for Harmonization --
+/// paste the face whose makeup you want below the one you are editing.
+///
+/// Adobe's network segments both faces and matches them feature to
+/// feature. This assumes where the features are, and then refines the one
+/// that matters: lips are the reddest thing in the bottom half of a face,
+/// so the mouth's mask is weighted by how red each pixel actually is
+/// rather than trusting the geometry alone. Eyes and skin are geometry.
+///
+/// It moves colour, not texture: it will give you someone else's lipstick
+/// and eyeshadow, and it will not give you their eyeliner.
+pub struct MakeupTransfer {
+    faces: Memo<Vec<Face>>,
+    reference: Memo<Vec<Face>>,
+}
+
+impl MakeupTransfer {
+    pub const fn new() -> MakeupTransfer {
+        MakeupTransfer {
+            faces: Memo::new(),
+            reference: Memo::new(),
+        }
+    }
+}
+
+impl Default for MakeupTransfer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// How much a colour looks like a lip: red, but not skin.
+fn lipness(p: &[f32]) -> f32 {
+    let l = luma(p);
+    if l < 0.06 {
+        return 0.0;
+    }
+    // Lips are further towards red than the cheek beside them, and
+    // darker.
+    let redness = (p[0] - (p[1] + p[2]) / 2.0) / l.max(1e-3);
+    ((redness - 0.12) * 4.0).clamp(0.0, 1.0)
+}
+
+impl FilterPlugin for MakeupTransfer {
+    fn id(&self) -> &'static str {
+        "filter.neural.makeup_transfer"
+    }
+    fn name(&self) -> &'static str {
+        "Makeup Transfer"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("lips", "Lips", 0.0, 100.0, 80.0, ""),
+            param("eyes", "Eyes", 0.0, 100.0, 60.0, ""),
+            param("skin", "Skin Tone", 0.0, 100.0, 30.0, ""),
+        ]
+    }
+
+    fn wants_backdrop(&self) -> bool {
+        true
+    }
+
+    fn info(&self) -> Option<String> {
+        match schist_neural::installed("face") {
+            true => Some(
+                "Takes the makeup from a face on the layer underneath. \
+                 Colour, not texture."
+                    .to_string(),
+            ),
+            false => model_note("face", "so this does nothing."),
+        }
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        self.apply_with(px, width, height, values, &FilterContext::default());
+    }
+
+    fn apply_with(
+        &self,
+        px: &mut [f32],
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+        context: &FilterContext,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let lips = values.get("lips") / 100.0;
+        let eyes = values.get("eyes") / 100.0;
+        let skin = values.get("skin") / 100.0;
+        let Some(backdrop) = context.backdrop else {
+            return;
+        };
+        let Some(model) = schist_neural::get("face") else {
+            return;
+        };
+        let find = |memo: &Memo<Vec<Face>>, buf: &[f32]| -> Option<Arc<Vec<Face>>> {
+            let key = fingerprint(buf, width, height);
+            memo.get(key, || {
+                let rgb = rgb_of(buf);
+                schist_neural::faces(&model, &rgb, width, height)
+                    .map_err(|e| log::warn!("makeup transfer: {e:#}"))
+                    .ok()
+            })
+        };
+        let (Some(mine), Some(theirs)) = (find(&self.faces, px), find(&self.reference, backdrop))
+        else {
+            return;
+        };
+        let (Some(mine), Some(theirs)) = (mine.first(), theirs.first()) else {
+            return;
+        };
+        let (here, there) = (FaceParts::of(mine), FaceParts::of(theirs));
+
+        // Each region is a mask over both faces; the colour of one moves
+        // onto the other.
+        let regions: [(Region, f32); 3] = [
+            (region_lips, lips),
+            (region_eyes, eyes),
+            (region_skin, skin),
+        ];
+        for (mask, amount) in regions {
+            if amount <= 0.0 {
+                continue;
+            }
+            // Both masks up front: the one over this layer is needed
+            // while the layer is being written to, and a closure that
+            // reads the pixels cannot outlive that.
+            let mask_of = |buf: &[f32], parts: &FaceParts| -> Vec<f32> {
+                (0..width * height)
+                    .map(|i| {
+                        let (x, y) = ((i % width) as f32, (i / width) as f32);
+                        mask(parts, x, y, &buf[i * 4..i * 4 + 4])
+                    })
+                    .collect::<Vec<f32>>()
+            };
+            let mine_mask = mask_of(px, &here);
+            let their_mask = mask_of(backdrop, &there);
+            let (Some(from), Some(to)) = (
+                stats_of(px, |i| mine_mask[i] > 0.35),
+                stats_of(backdrop, |i| their_mask[i] > 0.35),
+            ) else {
+                continue;
+            };
+            for i in 0..width * height {
+                let m = mine_mask[i];
+                if m <= 0.0 {
+                    continue;
+                }
+                restat(&mut px[i * 4..i * 4 + 4], from, to, amount * m);
+            }
+        }
+    }
+}
+
+fn region_lips(p: &FaceParts, x: f32, y: f32, px: &[f32]) -> f32 {
+    // Geometry says roughly where the mouth is; redness says which of
+    // those pixels is actually lip rather than chin.
+    FaceParts::falloff(x, y, p.mouth) * lipness(px)
+}
+
+fn region_eyes(p: &FaceParts, x: f32, y: f32, _px: &[f32]) -> f32 {
+    // The lid, which is the part makeup is on: the eye's own circle,
+    // pushed up a little.
+    p.eyes
+        .iter()
+        .map(|e| FaceParts::falloff(x, y + e.2 * 0.35, (e.0, e.1, e.2 * 1.25)))
+        .fold(0.0, f32::max)
+}
+
+fn region_skin(p: &FaceParts, x: f32, y: f32, px: &[f32]) -> f32 {
+    let inside = FaceParts::falloff(x, y, (p.centre.0, p.centre.1, p.span * 0.9));
+    // Everything in the oval that is skin-coloured and is not a feature.
+    let feature = p
+        .eyes
+        .iter()
+        .map(|e| FaceParts::falloff(x, y, *e))
+        .fold(FaceParts::falloff(x, y, p.mouth), f32::max);
+    inside * skinness(px) * (1.0 - feature)
+}
+
+/// Sketch to Portrait: put a photograph back into a drawing.
+///
+/// Adobe's invents one, from a generative model that has been shown an
+/// enormous number of faces. This is the small honest version of the same
+/// idea: a network trained to *invert this build's own Photo to Sketch*,
+/// which is a much easier question than inventing a face and fits in 450k
+/// parameters. Give it a sketch this application made and it puts the
+/// tone and the colour back; give it a pencil drawing and it does
+/// something in the same spirit and rather worse.
+///
+/// It runs on the face rather than on the picture, because that is what
+/// it was trained on: the detector finds one, the crop goes through the
+/// network at the size it learned, and the result is blended back inside
+/// a soft oval. With no face -- or no detector -- the whole selection
+/// goes through instead, which is the right thing for a portrait that
+/// fills the frame and the wrong thing for a landscape.
+pub struct SketchToPortrait {
+    faces: Memo<Vec<Face>>,
+}
+
+impl SketchToPortrait {
+    pub const fn new() -> SketchToPortrait {
+        SketchToPortrait { faces: Memo::new() }
+    }
+}
+
+impl Default for SketchToPortrait {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FilterPlugin for SketchToPortrait {
+    fn id(&self) -> &'static str {
+        "filter.neural.sketch_to_portrait"
+    }
+    fn name(&self) -> &'static str {
+        "Sketch to Portrait"
+    }
+    fn category(&self) -> &'static str {
+        "Neural Filters"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("strength", "Strength", 0.0, 100.0, 100.0, ""),
+            param("detail", "Keep Lines", 0.0, 100.0, 25.0, ""),
+            param("colour", "Colour", 0.0, 300.0, 150.0, "%"),
+        ]
+    }
+
+    fn info(&self) -> Option<String> {
+        Some(match schist_neural::installed("face") {
+            true => "Trained to fill in this application's own Photo to \
+                     Sketch. Works on the face it finds."
+                .to_string(),
+            false => "Trained to fill in this application's own Photo to \
+                      Sketch. Install Faces (Skin Smoothing) and it will \
+                      work on the face rather than the whole selection."
+                .to_string(),
+        })
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let strength = (values.get("strength") / 100.0).clamp(0.0, 1.0);
+        let keep = (values.get("detail") / 100.0).clamp(0.0, 1.0);
+        let colour = values.get("colour") / 100.0;
+        if strength <= 0.0 {
+            return;
+        }
+        let Some(model) = schist_neural::get("portrait") else {
+            return;
+        };
+
+        // The face, if a detector found one. Grown the way the training
+        // crops were grown, or the network sees a tighter frame than it
+        // was taught on and paints the jaw where the cheek should be.
+        let face = schist_neural::get("face")
+            .and_then(|detector| {
+                let key = fingerprint(px, width, height);
+                self.faces.get(key, || {
+                    let rgb = rgb_of(px);
+                    schist_neural::faces(&detector, &rgb, width, height)
+                        .map_err(|e| log::warn!("sketch to portrait: {e:#}"))
+                        .ok()
+                })
+            })
+            .and_then(|faces| faces.first().copied());
+
+        let (x0, y0, side) = match face {
+            Some(f) => {
+                let side = f.width.max(f.height) * PORTRAIT_GROW;
+                (
+                    f.x + f.width / 2.0 - side / 2.0,
+                    f.y + f.height / 2.0 - side * 0.56,
+                    side,
+                )
+            }
+            None => (0.0, 0.0, width.max(height) as f32),
+        };
+
+        // Cut the crop out, letting it hang off the edges: a face at the
+        // margin still gets a square, mirrored where it runs out.
+        let side_px = side.round().max(8.0) as usize;
+        let mut crop = vec![0.0f32; side_px * side_px * 3];
+        for y in 0..side_px {
+            for x in 0..side_px {
+                let sx = mirror(x0 as i32 + x as i32, width);
+                let sy = mirror(y0 as i32 + y as i32, height);
+                let from = (sy * width + sx) * 4;
+                let to = (y * side_px + x) * 3;
+                crop[to..to + 3].copy_from_slice(&px[from..from + 3]);
+            }
+        }
+
+        let Ok(mut filled) = schist_neural::run_framed(&model, &crop, side_px, side_px)
+            .map_err(|e| log::warn!("sketch to portrait: {e:#}"))
+        else {
+            return;
+        };
+
+        // The network hedges on colour, because a network fitted to
+        // absolute error always does: a sketch genuinely does not say
+        // what colour anything was, and the safest guess is a pale one.
+        // Colour scales what it decided on around its own luminance,
+        // which is the difference between a plausible face and a
+        // washed-out one.
+        if (colour - 1.0).abs() > 1e-3 {
+            for p in filled.as_chunks_mut::<3>().0.iter_mut() {
+                let y = luma(&[p[0], p[1], p[2], 1.0]);
+                for c in p.iter_mut() {
+                    *c = (y + (*c - y) * colour).clamp(0.0, 1.0);
+                }
+            }
+        }
+
+        // Blend back inside a soft oval, so a face does not arrive in a
+        // rectangle. With no face the whole crop is the picture and the
+        // oval would cut its corners off, so it is skipped.
+        let oval = face.is_some();
+        for y in 0..side_px {
+            for x in 0..side_px {
+                let (ix, iy) = (x0 as i32 + x as i32, y0 as i32 + y as i32);
+                if ix < 0 || iy < 0 || ix >= width as i32 || iy >= height as i32 {
+                    continue;
+                }
+                let mut cover = strength;
+                if oval {
+                    let (u, v) = (
+                        (x as f32 / side_px as f32 - 0.5) * 2.0,
+                        (y as f32 / side_px as f32 - 0.5) * 2.0,
+                    );
+                    let d = u.hypot(v * 0.85);
+                    cover *= ((1.0 - d) / 0.25).clamp(0.0, 1.0);
+                }
+                if cover <= 0.0 {
+                    continue;
+                }
+                let to = (iy as usize * width + ix as usize) * 4;
+                let from = (y * side_px + x) * 3;
+                for c in 0..3 {
+                    // Keep Lines multiplies the drawing back over the
+                    // painting, which puts the pencil back on top of the
+                    // colour rather than under it.
+                    let painted =
+                        filled[from + c] * (1.0 - keep) + filled[from + c] * px[to + c] * keep;
+                    px[to + c] += (painted - px[to + c]) * cover;
+                }
+            }
+        }
+    }
+}
+
+/// How much bigger than the detector's box a portrait crop is, matching
+/// `tools/train/faces.py` -- a box stops at the jaw and the hairline, and
+/// the network was taught on crops that do not.
+const PORTRAIT_GROW: f32 = 1.9;
+
+/// Fold a coordinate back inside the image, so a crop that hangs off the
+/// edge is mirrored rather than black.
+fn mirror(v: i32, n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let n = n as i32;
+    let period = 2 * (n - 1);
+    let mut m = v.rem_euclid(period);
+    if m >= n {
+        m = period - m;
+    }
+    m as usize
+}
+
 pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(SkinSmoothing::new()));
     registry.register_filter(Box::new(JpegArtifactRemoval));
@@ -1515,4 +2174,7 @@ pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(PhotoRestoration));
     registry.register_filter(Box::new(PhotoToSketch));
     registry.register_filter(Box::new(FaceToCaricature::new()));
+    registry.register_filter(Box::new(SmartPortrait::new()));
+    registry.register_filter(Box::new(MakeupTransfer::new()));
+    registry.register_filter(Box::new(SketchToPortrait::new()));
 }

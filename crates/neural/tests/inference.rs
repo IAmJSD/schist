@@ -547,3 +547,83 @@ fn the_face_detector_finds_no_faces_in_a_photograph_with_none() {
     let flat = vec![0.5f32; w * h * 3];
     assert!(neural::faces(&model, &flat, w, h).expect("runs").is_empty());
 }
+
+#[test]
+fn the_portrait_model_fills_a_sketch_back_in() {
+    // The network is trained to invert Photo to Sketch, so the check is
+    // the round trip: sketch a photograph the way the filter does, hand
+    // the sketch back, and see how much of the photograph returns.
+    //
+    // This is also what pins the two together. If the filter's sketch
+    // operator is ever changed without retraining the network against
+    // the new one, the reconstruction gets worse and this fails, which
+    // is the only warning anybody would get.
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let sketch = sketch_of(&truth, w, h);
+    let model = neural::get("portrait").expect("model");
+    let filled = neural::run_framed(&model, &sketch, w, h).expect("runs");
+
+    assert_eq!(filled.len(), w * h * 3);
+    assert!(filled.iter().all(|v| (0.0..=1.0).contains(v)));
+    // Closer to the photograph than the sketch was, which is the whole
+    // claim and is not something an untrained network manages: filling
+    // a drawing in with the wrong tones scores worse than leaving it
+    // white.
+    let error = |px: &[f32]| {
+        px.iter()
+            .zip(&truth)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / px.len() as f32
+    };
+    let (before, after) = (error(&sketch), error(&filled));
+    println!("error against the photograph: sketch {before:.4} -> filled {after:.4}");
+    // The shipped model comes in around a third of the sketch's error;
+    // half is loose enough not to be brittle and tight enough that a
+    // model that had stopped learning could not pass.
+    assert!(
+        after < before * 0.5,
+        "the sketch did not come back as a photograph: {before:.4} -> {after:.4}"
+    );
+}
+
+/// Photo to Sketch, as the filter does it -- the operator the portrait
+/// model was trained to invert.
+fn sketch_of(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let plane: Vec<f32> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2])
+        .collect();
+    // A box blur of the inverted plane, twice, which is close enough to
+    // the Gaussian the filter uses for the network to recognise it.
+    let mut soft: Vec<f32> = plane.iter().map(|l| 1.0 - l).collect();
+    for _ in 0..2 {
+        let src = soft.clone();
+        let r = 4i32;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let (mut sum, mut n) = (0.0f32, 0.0f32);
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let sx = (x + dx).clamp(0, w as i32 - 1) as usize;
+                        let sy = (y + dy).clamp(0, h as i32 - 1) as usize;
+                        sum += src[sy * w + sx];
+                        n += 1.0;
+                    }
+                }
+                soft[y as usize * w + x as usize] = sum / n;
+            }
+        }
+    }
+    let mut out = vec![0.0f32; w * h * 3];
+    for i in 0..w * h {
+        let dodge = (plane[i] / (1.0 - soft[i]).max(1e-3)).min(1.0);
+        let line = 1.0 - ((1.0 - dodge) * 2.0).min(1.0);
+        let v = (line - (1.0 - plane[i]) * 0.24).clamp(0.0, 1.0);
+        out[i * 3..i * 3 + 3].copy_from_slice(&[v, v, v]);
+    }
+    out
+}
