@@ -2395,7 +2395,7 @@ fn preferences(
         .child(ui::field_row(
             "Rendering",
             ui::checkbox(
-                "GPU compositing (falls back to CPU without an adapter)",
+                "GPU compositing",
                 view.gpu_compositing,
                 |ws, cx| {
                     ws.view.gpu_compositing = !ws.view.gpu_compositing;
