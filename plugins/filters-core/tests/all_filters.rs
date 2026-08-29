@@ -172,7 +172,17 @@ fn blurs_and_noise_reduction_lower_local_contrast() {
         let f = reg.filters().find(|f| f.id() == id).expect(id);
         let before = image(w, h);
         let mut px = before.clone();
-        f.apply(&mut px, w, h, &FilterValues::defaults(&f.params()));
+        let mut values = FilterValues::defaults(&f.params());
+        // Reduce Noise has two stages after the smoothing that are not
+        // smoothing: it sharpens details back up (Photoshop's own default
+        // is 25%) and it rebuilds each channel from the pixel's own
+        // luminance plus smoothed chroma, which can raise the contrast of
+        // any single channel while lowering the picture's. What is being
+        // checked here is the smoothing, so those two are turned off
+        // rather than the defaults being changed to suit the test.
+        values.set("sharpen", 0.0);
+        values.set("colour", 0.0);
+        f.apply(&mut px, w, h, &values);
         assert!(
             contrast(&px) < contrast(&before),
             "{id} did not reduce local contrast"

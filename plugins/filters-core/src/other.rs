@@ -1,7 +1,9 @@
 //! Filter ▸ Other, plus the extra Blur, Sharpen and Noise entries that did
 //! not exist yet.
 
-use crate::util::{at, convolve3, gaussian_rgba, premultiply, put, unpremultiply, value_noise};
+use crate::util::{
+    at, convolve3, gaussian_rgba, luma, premultiply, put, sample, unpremultiply, value_noise,
+};
 use crate::{choice, param, simple_filter};
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
@@ -29,6 +31,9 @@ simple_filter!(
     }
 );
 
+/// What Offset leaves where the picture used to be.
+const OFFSET_UNDEFINED: &[&str] = &["Set to Transparent", "Repeat Edge Pixels", "Wrap Around"];
+
 simple_filter!(
     Offset,
     "filter.offset",
@@ -37,22 +42,34 @@ simple_filter!(
     [
         param("x", "Horizontal", -2000.0, 2000.0, 0.0, " px"),
         param("y", "Vertical", -2000.0, 2000.0, 0.0, " px"),
-        param("wrap", "Wrap Around", 0.0, 1.0, 1.0, "")
+        choice("undefined", "Undefined Areas", OFFSET_UNDEFINED, 2)
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let dx = v.get("x").round() as i32;
         let dy = v.get("y").round() as i32;
-        let wrap = v.get("wrap") >= 0.5;
+        let undefined = (v.get("undefined").round().max(0.0) as usize).min(2);
         let src = px.to_vec();
         for y in 0..h as i32 {
             for x in 0..w as i32 {
                 let (mut sx, mut sy) = (x - dx, y - dy);
-                if wrap {
-                    sx = sx.rem_euclid(w as i32);
-                    sy = sy.rem_euclid(h as i32);
-                } else if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
-                    put(px, w, x as usize, y as usize, [0.0; 4]);
-                    continue;
+                let outside = sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32;
+                match undefined {
+                    // Transparent: the vacated strip is a hole.
+                    0 if outside => {
+                        put(px, w, x as usize, y as usize, [0.0; 4]);
+                        continue;
+                    }
+                    // Repeat Edge Pixels: `at` clamps, so smearing the
+                    // edge is what happens if nothing else is done.
+                    1 => {}
+                    // Wrap Around: the other side comes into view, which
+                    // is what makes Offset the tool for checking whether
+                    // a texture tiles.
+                    2 => {
+                        sx = sx.rem_euclid(w as i32);
+                        sy = sy.rem_euclid(h as i32);
+                    }
+                    _ => {}
                 }
                 put(px, w, x as usize, y as usize, at(&src, w, h, sx, sy));
             }
@@ -62,14 +79,20 @@ simple_filter!(
 
 /// Grey-level morphology: dilate (`max`) grows light areas, erode grows
 /// dark ones. Photoshop calls them Maximum and Minimum.
-fn morph(px: &mut [f32], w: usize, h: usize, radius: i32, take_max: bool) {
+///
+/// `round` picks the shape of the structuring element, which is
+/// Photoshop's Preserve option: a disc keeps curves curved, and a square
+/// keeps corners square -- which matters, because these two filters are
+/// mostly used to grow and shrink masks, and a mask of a building should
+/// not come back with rounded corners.
+fn morph(px: &mut [f32], w: usize, h: usize, radius: i32, take_max: bool, round: bool) {
     let src = px.to_vec();
     for y in 0..h as i32 {
         for x in 0..w as i32 {
             let mut acc = if take_max { [0.0f32; 4] } else { [1.0f32; 4] };
             for dy in -radius..=radius {
                 for dx in -radius..=radius {
-                    if dx * dx + dy * dy > radius * radius {
+                    if round && dx * dx + dy * dy > radius * radius {
                         continue;
                     }
                     let p = at(&src, w, h, x + dx, y + dy);
@@ -92,9 +115,19 @@ simple_filter!(
     "filter.maximum",
     "Maximum",
     "Other",
-    [param("radius", "Radius", 1.0, 40.0, 2.0, " px")],
+    [
+        param("radius", "Radius", 1.0, 40.0, 2.0, " px"),
+        choice("preserve", "Preserve", &["Squareness", "Roundness"], 1)
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        morph(px, w, h, v.get("radius").round().max(1.0) as i32, true);
+        morph(
+            px,
+            w,
+            h,
+            v.get("radius").round().max(1.0) as i32,
+            true,
+            v.get("preserve") >= 0.5,
+        );
     }
 );
 
@@ -103,9 +136,19 @@ simple_filter!(
     "filter.minimum",
     "Minimum",
     "Other",
-    [param("radius", "Radius", 1.0, 40.0, 2.0, " px")],
+    [
+        param("radius", "Radius", 1.0, 40.0, 2.0, " px"),
+        choice("preserve", "Preserve", &["Squareness", "Roundness"], 1)
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        morph(px, w, h, v.get("radius").round().max(1.0) as i32, false);
+        morph(
+            px,
+            w,
+            h,
+            v.get("radius").round().max(1.0) as i32,
+            false,
+            v.get("preserve") >= 0.5,
+        );
     }
 );
 
@@ -116,24 +159,34 @@ simple_filter!(
     "Blur",
     [
         param("amount", "Amount", 1.0, 100.0, 10.0, ""),
-        param("spin", "Spin (0 = Zoom)", 0.0, 1.0, 1.0, "")
+        choice("method", "Blur Method", &["Spin", "Zoom"], 0),
+        choice("quality", "Quality", &["Draft", "Good", "Best"], 1),
+        param("x", "Centre X", 0.0, 100.0, 50.0, "%"),
+        param("y", "Centre Y", 0.0, 100.0, 50.0, "%")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Average along an arc (spin) or a ray (zoom) through the centre.
+        // Quality is how many samples that average takes: Photoshop's
+        // Draft is visibly banded and exists because this filter used to
+        // take a minute.
         let amount = v.get("amount") / 100.0;
-        let spin = v.get("spin") >= 0.5;
-        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let spin = v.get("method") < 0.5;
+        let steps = match (v.get("quality").round().max(0.0) as usize).min(2) {
+            0 => 6,
+            1 => 16,
+            _ => 48,
+        };
+        let (cx, cy) = (v.get("x") / 100.0 * w as f32, v.get("y") / 100.0 * h as f32);
         premultiply(px);
         let src = px.to_vec();
-        const STEPS: usize = 16;
         for y in 0..h {
             for x in 0..w {
                 let (fx, fy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
                 let r = fx.hypot(fy);
                 let theta = fy.atan2(fx);
                 let mut acc = [0.0f32; 4];
-                for s in 0..STEPS {
-                    let t = s as f32 / (STEPS - 1) as f32 - 0.5;
+                for s in 0..steps {
+                    let t = s as f32 / (steps - 1) as f32 - 0.5;
                     let (sx, sy) = if spin {
                         let a = theta + t * amount;
                         (cx + r * a.cos(), cy + r * a.sin())
@@ -143,7 +196,7 @@ simple_filter!(
                     };
                     let p = crate::util::sample(&src, w, h, sx - 0.5, sy - 0.5);
                     for c in 0..4 {
-                        acc[c] += p[c] / STEPS as f32;
+                        acc[c] += p[c] / steps as f32;
                     }
                 }
                 put(px, w, x, y, acc);
@@ -236,6 +289,20 @@ simple_filter!(
     }
 );
 
+/// The apertures Lens Blur can be given, as the number of blades.
+///
+/// A lens's iris is a ring of straight blades, and an out-of-focus
+/// highlight comes out the shape of the hole they leave -- which is why
+/// bokeh is hexagonal on one lens and round on another.
+const IRIS_SHAPES: &[&str] = &[
+    "Circle", "Triangle", "Square", "Pentagon", "Hexagon", "Heptagon", "Octagon",
+];
+
+/// The specular threshold `schist_fx`'s disc blur bakes into its own
+/// highlight weighting, and therefore the default here: move the slider
+/// off it and the filter takes its own path.
+const FX_THRESHOLD: f32 = 0.75;
+
 simple_filter!(
     LensBlur,
     "filter.lens_blur",
@@ -243,22 +310,102 @@ simple_filter!(
     "Blur",
     [
         param("radius", "Radius", 1.0, 60.0, 8.0, " px"),
-        param("brightness", "Specular Brightness", 0.0, 100.0, 0.0, "")
+        choice("shape", "Iris Shape", IRIS_SHAPES, 0),
+        param("curvature", "Blade Curvature", 0.0, 100.0, 0.0, ""),
+        param("rotation", "Rotation", 0.0, 360.0, 0.0, "\u{b0}"),
+        param("brightness", "Specular Brightness", 0.0, 100.0, 0.0, ""),
+        param("threshold", "Specular Threshold", 0.0, 100.0, 75.0, ""),
+        param("noise", "Noise", 0.0, 100.0, 0.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // A disc-shaped kernel rather than a Gaussian, which is what makes
-        // out-of-focus highlights come out as bokeh circles — and, at
-        // radius 60, eleven thousand taps a pixel, so this is the filter
-        // with most to gain from the GPU seam.
-        schist_fx::lens_blur_rgba(
-            px,
-            w,
-            h,
-            v.get("radius").round().max(1.0) as i32,
-            v.get("brightness") / 100.0,
-        );
+        // A flat kernel rather than a Gaussian, which is what makes
+        // out-of-focus highlights come out as discs instead of smears --
+        // and, at radius 60, eleven thousand taps a pixel.
+        let radius = v.get("radius").round().max(1.0) as i32;
+        let blades = (v.get("shape").round().max(0.0) as usize).min(IRIS_SHAPES.len() - 1);
+        let curvature = v.get("curvature") / 100.0;
+        let rotation = v.get("rotation").to_radians();
+        let boost = v.get("brightness") / 100.0;
+        let threshold = v.get("threshold") / 100.0;
+        let noise = v.get("noise") / 100.0;
+
+        // The plain round iris at the standard threshold is the one the
+        // shared blur implements -- and the one the GPU knows -- so the
+        // default settings stay on the fast path. Anything else is a
+        // different kernel and runs here.
+        if blades == 0 && curvature <= 0.0 && (threshold - FX_THRESHOLD).abs() < 0.01 {
+            schist_fx::lens_blur_rgba(px, w, h, radius, boost);
+        } else {
+            let sides = blades + 2;
+            premultiply(px);
+            let src = px.to_vec();
+            // The polygon, as the radius it allows at each angle: a
+            // straight blade is a cosine of the angle to the nearest
+            // corner, and curvature bows it back out towards a circle.
+            let reach = |dx: f32, dy: f32| -> f32 {
+                if blades == 0 {
+                    return radius as f32;
+                }
+                let a = dy.atan2(dx) - rotation;
+                let step = std::f32::consts::TAU / sides as f32;
+                let inner = (a.rem_euclid(step) - step / 2.0).cos() / (step / 2.0).cos();
+                let flat = radius as f32 / inner.max(1e-3);
+                flat + (radius as f32 - flat) * curvature
+            };
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let mut acc = [0.0f32; 4];
+                    let mut n = 0.0f32;
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let d = (dx as f32).hypot(dy as f32);
+                            if d > reach(dx as f32, dy as f32) {
+                                continue;
+                            }
+                            let p = at(&src, w, h, x + dx, y + dy);
+                            // Only what is brighter than the threshold
+                            // blooms, which is what keeps the whole
+                            // picture from lifting.
+                            let l = luma(&p);
+                            let k = if l > threshold {
+                                1.0 + (l - threshold).powi(2) * boost * 60.0
+                            } else {
+                                1.0
+                            };
+                            for c in 0..4 {
+                                acc[c] += p[c] * k;
+                            }
+                            n += k;
+                        }
+                    }
+                    if n > 0.0 {
+                        for a in acc.iter_mut() {
+                            *a /= n;
+                        }
+                        put(px, w, x as usize, y as usize, acc);
+                    }
+                }
+            }
+            unpremultiply(px);
+        }
+
+        // Grain, added last: a lens blur is the one place a picture ends
+        // up *too* clean, and Photoshop offers this for the same reason.
+        if noise > 0.0 {
+            for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let n = (value_noise(x, y, 9173) - 0.5) * noise * 0.35;
+                for c in p.iter_mut().take(3) {
+                    *c = (*c + n).clamp(0.0, 1.0);
+                }
+            }
+        }
     }
 );
+
+/// What Smart Sharpen is trying to undo, which decides what it
+/// subtracts.
+const SHARPEN_REMOVE: &[&str] = &["Gaussian Blur", "Lens Blur", "Motion Blur"];
 
 simple_filter!(
     SmartSharpen,
@@ -268,15 +415,58 @@ simple_filter!(
     [
         param("amount", "Amount", 1.0, 500.0, 100.0, "%"),
         param("radius", "Radius", 0.1, 64.0, 1.5, " px"),
-        param("noise", "Reduce Noise", 0.0, 100.0, 10.0, "%")
+        param("noise", "Reduce Noise", 0.0, 100.0, 10.0, "%"),
+        choice("remove", "Remove", SHARPEN_REMOVE, 1),
+        param("angle", "Angle", 0.0, 360.0, 0.0, "\u{b0}")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Unsharp mask that leaves low-contrast detail alone, which is
-        // what stops it amplifying grain.
+        // what stops it amplifying grain -- and which subtracts the blur
+        // it is actually trying to undo. Sharpening against a Gaussian
+        // when the softness came from motion puts halos across the
+        // direction of travel; sharpening against the *motion* does not.
         let amount = v.get("amount") / 100.0;
         let floor = v.get("noise") / 100.0 * 0.25;
+        let remove = (v.get("remove").round().max(0.0) as usize).min(2);
+        let angle = v.get("angle").to_radians();
+        let radius = v.get("radius");
         let mut low = px.to_vec();
-        gaussian_rgba(&mut low, w, h, v.get("radius"));
+        match remove {
+            // Gaussian: an ordinary soft focus.
+            0 => gaussian_rgba(&mut low, w, h, radius),
+            // Lens Blur: a flat disc, which is what defocus really is,
+            // and the reason this is Photoshop's default.
+            1 => schist_fx::lens_blur_rgba(&mut low, w, h, radius.round().max(1.0) as i32, 0.0),
+            // Motion Blur: a line at the given angle.
+            _ => {
+                let steps = radius.round().max(1.0) as i32;
+                let src = low.clone();
+                let (dx, dy) = (angle.cos(), angle.sin());
+                for y in 0..h {
+                    for x in 0..w {
+                        let mut acc = [0.0f32; 4];
+                        let mut n = 0.0;
+                        for t in -steps..=steps {
+                            let p = sample(
+                                &src,
+                                w,
+                                h,
+                                x as f32 + dx * t as f32,
+                                y as f32 + dy * t as f32,
+                            );
+                            for c in 0..4 {
+                                acc[c] += p[c];
+                            }
+                            n += 1.0;
+                        }
+                        for a in acc.iter_mut() {
+                            *a /= n;
+                        }
+                        put(&mut low, w, x, y, acc);
+                    }
+                }
+            }
+        }
         for (p, l) in px
             .as_chunks_mut::<4>()
             .0
@@ -405,13 +595,19 @@ simple_filter!(
     "Noise",
     [
         param("strength", "Strength", 0.0, 10.0, 5.0, ""),
-        param("detail", "Preserve Details", 0.0, 100.0, 60.0, "%")
+        param("detail", "Preserve Details", 0.0, 100.0, 60.0, "%"),
+        param("colour", "Reduce Colour Noise", 0.0, 100.0, 50.0, "%"),
+        param("sharpen", "Sharpen Details", 0.0, 100.0, 25.0, "%"),
+        param("jpeg", "Remove JPEG Artifact", 0.0, 1.0, 0.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Bilateral again, but tuned the other way round: a small spatial
         // radius with a threshold set by how much detail to keep.
         let strength = v.get("strength");
         let detail = v.get("detail") / 100.0;
+        let colour = v.get("colour") / 100.0;
+        let sharpen = v.get("sharpen") / 100.0;
+        let jpeg = v.get("jpeg") >= 0.5;
         let r = (strength.max(0.5)).round() as i32;
         let t = (0.25 * (1.0 - detail)).max(1e-3);
         let src = px.to_vec();
@@ -442,7 +638,74 @@ simple_filter!(
                 }
             }
         }
-        let _ = value_noise;
+
+        // Colour noise is a different animal from luminance noise: the
+        // eye barely resolves chroma, so it can be blurred hard without
+        // the picture going soft. Doing it separately is why a photograph
+        // can lose its purple speckle and keep its detail.
+        if colour > 0.0 {
+            let luminance: Vec<f32> = px.as_chunks::<4>().0.iter().map(|p| luma(p)).collect();
+            let mut smooth = px.to_vec();
+            gaussian_rgba(&mut smooth, w, h, 1.0 + colour * 4.0);
+            for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let sl = luma(&smooth[i * 4..i * 4 + 4]);
+                for c in 0..3 {
+                    // Take the smoothed pixel's chroma against this
+                    // pixel's own luminance.
+                    let chroma = smooth[i * 4 + c] - sl;
+                    let target = luminance[i] + chroma;
+                    p[c] = (p[c] + (target - p[c]) * colour).clamp(0.0, 1.0);
+                }
+            }
+        }
+
+        // JPEG leaves its damage on the 8-pixel grid and nowhere else, so
+        // the check box smooths across that grid specifically. It is the
+        // same trick JPEG Artifact Removal falls back to without its
+        // model, at a fraction of the strength: this is a tick box on a
+        // noise filter, not the filter for the job.
+        if jpeg {
+            let src = px.to_vec();
+            for y in 0..h {
+                for x in 0..w {
+                    if !(x % 8 == 0 && x > 0 || y % 8 == 0 && y > 0) {
+                        continue;
+                    }
+                    let here = at(&src, w, h, x as i32, y as i32);
+                    let left = at(&src, w, h, x as i32 - 1, y as i32);
+                    let above = at(&src, w, h, x as i32, y as i32 - 1);
+                    let mut out = here;
+                    for c in 0..3 {
+                        let mean = (here[c] + left[c] + above[c]) / 3.0;
+                        if (here[c] - mean).abs() < 0.1 {
+                            out[c] = here[c] + (mean - here[c]) * 0.7;
+                        }
+                    }
+                    put(px, w, x, y, out);
+                }
+            }
+        }
+
+        // Sharpen Details puts back what the smoothing cost, and only
+        // where there was an edge to begin with -- otherwise it would
+        // sharpen the noise straight back in.
+        if sharpen > 0.0 {
+            let mut low = px.to_vec();
+            gaussian_rgba(&mut low, w, h, 1.0);
+            for (p, l) in px
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(low.as_chunks::<4>().0.iter())
+            {
+                for c in 0..3 {
+                    let d = p[c] - l[c];
+                    if d.abs() > 0.02 {
+                        p[c] = (p[c] + d * sharpen * 1.5).clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
     }
 );
 

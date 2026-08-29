@@ -2,6 +2,18 @@
 
 use schist_neural::{self as neural, Input};
 
+/// Serialises the test that repoints the model directory against the two
+/// that read it.
+///
+/// `SCHIST_MODEL_DIR` is process-wide and the test harness runs these on
+/// threads, so without this the install test can move the directory out
+/// from under a model that another test has already decided is
+/// installed -- which fails, rarely, and only under load.
+fn model_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The tile a tiled model works in, for a test that needs to line up with
 /// it.
 fn tiling(model: &neural::Model) -> (usize, usize) {
@@ -278,12 +290,16 @@ fn a_corrupt_model_is_rejected() {
 
 #[test]
 fn install_checks_the_hash() {
+    let _guard = model_dir_lock();
     let dir = std::env::temp_dir().join(format!("schist-model-test-{}", std::process::id()));
-    // SAFETY: single-threaded test setup, before any model is loaded.
+    // SAFETY: no other test reads the model directory while the lock is
+    // held, and it is put back before the lock is released.
     unsafe { std::env::set_var("SCHIST_MODEL_DIR", &dir) };
     let mut spec = neural::spec("style-mosaic").expect("catalogued").clone();
     spec.sha256 = Some("0000000000000000000000000000000000000000000000000000000000000000");
     let err = neural::install(&spec, b"whatever").unwrap_err().to_string();
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("SCHIST_MODEL_DIR") };
     assert!(err.contains("checksum"), "unexpected error: {err}");
     assert!(!dir.join(spec.file).exists(), "a bad download was kept");
     let _ = std::fs::remove_dir_all(&dir);
@@ -482,11 +498,11 @@ fn correlation(a: &[f32], b: &[f32]) -> f32 {
 fn depth_comes_back_as_a_map_of_the_image() {
     // Downloaded rather than built in, so this is a no-op on a machine
     // that has not fetched it -- including CI.
-    if !neural::installed("depth") {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("depth") else {
         eprintln!("skipping: the depth model is not installed");
         return;
-    }
-    let model = neural::get("depth").expect("model");
+    };
     let (w, h) = (128usize, 128usize);
     let photo: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
     let map = neural::depth_map(&model, &photo, w, h).expect("runs");
@@ -509,11 +525,11 @@ fn depth_comes_back_as_a_map_of_the_image() {
 
 #[test]
 fn the_face_detector_finds_no_faces_in_a_photograph_with_none() {
-    if !neural::installed("face") {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("face") else {
         eprintln!("skipping: the face model is not installed");
         return;
-    }
-    let model = neural::get("face").expect("model");
+    };
     let (w, h) = (128usize, 128usize);
     let photo: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
     // A false positive here is the failure that matters: Skin Smoothing

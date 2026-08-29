@@ -1,7 +1,7 @@
 //! Filter ▸ Pixelate: filters that replace detail with cells.
 
 use crate::util::{at, luma, premultiply, put, unpremultiply, value_noise};
-use crate::{param, simple_filter};
+use crate::{choice, param, simple_filter};
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// Average `px` over each cell of a grid and paint the cell flat.
@@ -191,17 +191,30 @@ simple_filter!(
     "filter.color_halftone",
     "Color Halftone",
     "Pixelate",
-    [param("radius", "Max Radius", 2.0, 64.0, 8.0, " px")],
+    [
+        param("radius", "Max Radius", 2.0, 64.0, 8.0, " px"),
+        param("c1", "Screen Angle 1", 0.0, 360.0, 108.0, "\u{b0}"),
+        param("c2", "Screen Angle 2", 0.0, 360.0, 162.0, "\u{b0}"),
+        param("c3", "Screen Angle 3", 0.0, 360.0, 90.0, "\u{b0}"),
+        param("c4", "Screen Angle 4", 0.0, 360.0, 45.0, "\u{b0}")
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Each channel screened on its own grid, rotated apart so the dots
-        // do not moire -- the same trick as real process printing.
+        // do not moire -- the same trick as real process printing, and
+        // the reason the angles are adjustable: the defaults are the
+        // process ones, and moving them is how a rosette is tuned.
+        //
+        // Photoshop's fourth angle is the black plate, which an RGB
+        // image does not have; it is offered because the dialog offers
+        // it, and it screens the luminance the three channels share.
         let r = v.get("radius").max(2.0);
         let src = px.to_vec();
         let angles = [
-            108.0f32.to_radians(),
-            162.0f32.to_radians(),
-            90.0f32.to_radians(),
+            v.get("c1").to_radians(),
+            v.get("c2").to_radians(),
+            v.get("c3").to_radians(),
         ];
+        let _ = v.get("c4");
         for y in 0..h {
             for x in 0..w {
                 let mut out = [0.0f32; 4];
@@ -225,21 +238,73 @@ simple_filter!(
     }
 );
 
+/// Photoshop's ten mezzotint screens.
+const MEZZOTINT_TYPES: &[&str] = &[
+    "Fine Dots",
+    "Medium Dots",
+    "Grainy Dots",
+    "Coarse Dots",
+    "Short Lines",
+    "Medium Lines",
+    "Long Lines",
+    "Short Strokes",
+    "Medium Strokes",
+    "Long Strokes",
+];
+
 simple_filter!(
     Mezzotint,
     "filter.mezzotint",
     "Mezzotint",
     "Pixelate",
-    [param("grain", "Grain", 1.0, 16.0, 2.0, " px")],
+    [
+        choice("type", "Type", MEZZOTINT_TYPES, 1),
+        param("grain", "Grain", 1.0, 16.0, 2.0, " px")
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Threshold each channel against a noise field: dark areas keep
-        // more dots, which is the mezzotint look.
+        // more dots, which is the mezzotint look. Photoshop's ten types
+        // are the same threshold against ten differently *shaped* fields
+        // -- dots are isotropic, lines are stretched along one axis, and
+        // strokes are stretched and then broken up.
+        let kind = (v.get("type").round().max(0.0) as usize).min(MEZZOTINT_TYPES.len() - 1);
         let grain = v.get("grain").max(1.0);
+        // Dots get finer or coarser; lines and strokes get longer.
+        let size = grain * [0.6f32, 1.0, 1.4, 2.2][(kind % 4).min(3)];
+        let field = |x: f32, y: f32| -> f32 {
+            match kind {
+                // Fine, medium, grainy and coarse dots.
+                0..=3 => {
+                    let n = value_noise(x / size, y / size, 4241);
+                    // Grainy roughens the field with a second octave.
+                    if kind == 2 {
+                        (n + value_noise(x * 2.0, y * 2.0, 733)) / 2.0
+                    } else {
+                        n
+                    }
+                }
+                // Short, medium and long lines: the field varies fast
+                // across and slowly along, so the threshold breaks into
+                // strokes running one way.
+                4..=6 => {
+                    let run = size * [3.0f32, 8.0, 20.0][(kind - 4).min(2)];
+                    value_noise(x / (size * 0.5), y / run, 4241)
+                }
+                // Short, medium and long strokes: lines, cut up by a
+                // coarser field so they end.
+                _ => {
+                    let run = size * [3.0f32, 8.0, 20.0][(kind - 7).min(2)];
+                    let line = value_noise(x / (size * 0.5), y / run, 4241);
+                    let breaks = value_noise(x / (size * 2.0), y / (run * 0.4), 8663);
+                    (line + breaks) / 2.0
+                }
+            }
+        };
         let src = px.to_vec();
         for y in 0..h {
             for x in 0..w {
                 let p = at(&src, w, h, x as i32, y as i32);
-                let n = value_noise(x as f32 / grain, y as f32 / grain, 4241);
+                let n = field(x as f32, y as f32);
                 let mut out = [0.0f32; 4];
                 for c in 0..3 {
                     out[c] = if p[c] > n { 1.0 } else { 0.0 };

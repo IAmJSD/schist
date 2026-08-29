@@ -1,7 +1,7 @@
 //! Filter ▸ Stylize: filters built on edges and local contrast.
 
 use crate::util::{at, convolve3, gaussian_rgba, luma, put, value_noise};
-use crate::{param, simple_filter};
+use crate::{choice, param, simple_filter};
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
 
 /// Sobel gradient magnitude of the luminance at every pixel, 0..~1.
@@ -50,12 +50,20 @@ simple_filter!(
     "Stylize",
     [
         param("width", "Edge Width", 1.0, 14.0, 2.0, ""),
-        param("brightness", "Edge Brightness", 0.0, 20.0, 6.0, "")
+        param("brightness", "Edge Brightness", 0.0, 20.0, 6.0, ""),
+        param("smoothness", "Smoothness", 1.0, 15.0, 5.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let width = v.get("width").max(1.0);
         let brightness = v.get("brightness");
-        let e = edges(px, w, h);
+        let smoothness = v.get("smoothness");
+        // Smoothness settles the picture before the edges are found, so
+        // the glow follows the subject's outline rather than every leaf.
+        let mut settled = px.to_vec();
+        if smoothness > 1.0 {
+            gaussian_rgba(&mut settled, w, h, (smoothness - 1.0) * 0.35);
+        }
+        let e = edges(&settled, w, h);
         let src = px.to_vec();
         for y in 0..h {
             for x in 0..w {
@@ -147,11 +155,19 @@ simple_filter!(
     "filter.trace_contour",
     "Trace Contour",
     "Stylize",
-    [param("level", "Level", 0.0, 1.0, 0.5, "")],
+    [
+        param("level", "Level", 0.0, 1.0, 0.5, ""),
+        choice("edge", "Edge", &["Lower", "Upper"], 0)
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Mark where each channel crosses the level, per channel, which is
         // what gives Trace Contour its coloured outlines.
         let level = v.get("level");
+        // Which side of the crossing gets the ink: Lower outlines the
+        // darker side of each contour, Upper the lighter one, so running
+        // both and combining gives a contour two pixels wide with the
+        // level exactly between them.
+        let upper = v.get("edge") >= 0.5;
         let src = px.to_vec();
         for y in 0..h as i32 {
             for x in 0..w as i32 {
@@ -160,9 +176,9 @@ simple_filter!(
                 let d = at(&src, w, h, x, y + 1);
                 let mut out = [1.0, 1.0, 1.0, p[3]];
                 for c in 0..3 {
-                    let crosses =
-                        (p[c] < level) != (r[c] < level) || (p[c] < level) != (d[c] < level);
-                    if crosses {
+                    let here = p[c] < level;
+                    let crosses = here != (r[c] < level) || here != (d[c] < level);
+                    if crosses && (here != upper) {
                         out[c] = 0.0;
                     }
                 }
@@ -179,12 +195,23 @@ simple_filter!(
     "Stylize",
     [
         param("strength", "Strength", 1.0, 100.0, 20.0, " px"),
-        param("from_right", "From the Right", 0.0, 1.0, 0.0, "")
+        choice("method", "Method", &["Wind", "Blast", "Stagger"], 0),
+        choice(
+            "direction",
+            "Direction",
+            &["From the Left", "From the Right"],
+            0
+        )
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Streak edge pixels sideways, with random-length tails.
-        let strength = v.get("strength").max(1.0);
-        let right = v.get("from_right") >= 0.5;
+        // Streak edge pixels sideways, with random-length tails. Blast is
+        // the same streaks pulled much further; Stagger breaks them into
+        // steps that jump line to line, which is what makes it look torn
+        // rather than blown.
+        let method = (v.get("method").round().max(0.0) as usize).min(2);
+        let strength = v.get("strength").max(1.0) * if method == 1 { 2.5 } else { 1.0 };
+        let right = v.get("direction") >= 0.5;
+        let stagger = method == 2;
         let e = edges(px, w, h);
         let src = px.to_vec();
         for y in 0..h {
@@ -204,7 +231,15 @@ simple_filter!(
                         continue;
                     }
                     // Longer streaks are rarer, so the tail thins out.
-                    let len = value_noise(sx as f32, y as f32, 613) * strength;
+                    // Stagger picks a new length every few rows rather
+                    // than every row, which is what breaks the streaks
+                    // into blocks.
+                    let seed_y = if stagger {
+                        (y / 3 * 3) as f32
+                    } else {
+                        y as f32
+                    };
+                    let len = value_noise(sx as f32, seed_y, 613) * strength;
                     if (back as f32) > len {
                         continue;
                     }
@@ -220,6 +255,15 @@ simple_filter!(
     }
 );
 
+/// What Photoshop leaves in the gaps between the tiles.
+const TILE_FILLS: &[&str] = &[
+    "Transparent",
+    "Black",
+    "White",
+    "Inverse Image",
+    "Unaltered Image",
+];
+
 simple_filter!(
     Tiles,
     "filter.tiles",
@@ -227,17 +271,31 @@ simple_filter!(
     "Stylize",
     [
         param("count", "Number of Tiles", 2.0, 64.0, 10.0, ""),
-        param("offset", "Maximum Offset", 1.0, 99.0, 10.0, "%")
+        param("offset", "Maximum Offset", 1.0, 99.0, 10.0, "%"),
+        choice("fill", "Fill Empty Area With", TILE_FILLS, 0)
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Break the image into tiles and shove each one off its place.
         let count = v.get("count").max(2.0) as usize;
         let offset = v.get("offset") / 100.0;
+        let fill = (v.get("fill").round().max(0.0) as usize).min(TILE_FILLS.len() - 1);
         let tw = w.div_ceil(count);
         let th = h.div_ceil(count);
         let src = px.to_vec();
-        for p in px.as_chunks_mut::<4>().0.iter_mut() {
-            p[3] = 0.0;
+        // What shows through the gaps the tiles leave. Photoshop offers
+        // the foreground and background colours, which a filter cannot
+        // see, so those are black and white here.
+        for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            match fill {
+                0 => *p = [0.0, 0.0, 0.0, 0.0],
+                1 => *p = [0.0, 0.0, 0.0, 1.0],
+                2 => *p = [1.0, 1.0, 1.0, 1.0],
+                3 => {
+                    let o = &src[i * 4..i * 4 + 4];
+                    *p = [1.0 - o[0], 1.0 - o[1], 1.0 - o[2], o[3]];
+                }
+                _ => {}
+            }
         }
         for ty in 0..h.div_ceil(th) {
             for tx in 0..w.div_ceil(tw) {
@@ -279,21 +337,62 @@ simple_filter!(
     }
 );
 
+/// Photoshop's four ways of frosting an image.
+const DIFFUSE_MODES: &[&str] = &["Normal", "Darken Only", "Lighten Only", "Anisotropic"];
+
 simple_filter!(
     Diffuse,
     "filter.diffuse",
     "Diffuse",
     "Stylize",
-    [param("amount", "Amount", 1.0, 32.0, 4.0, " px")],
+    [
+        param("amount", "Amount", 1.0, 32.0, 4.0, " px"),
+        choice("mode", "Mode", DIFFUSE_MODES, 0)
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Swap each pixel with a random neighbour, which frosts the image.
+        // Darken and Lighten Only take the swap conditionally, so the
+        // frost only ever moves one way; Anisotropic takes the neighbour
+        // that agrees with the pixel most, which smears *along* edges
+        // rather than across them and comes out looking brushed.
         let r = v.get("amount").max(1.0);
+        let mode = (v.get("mode").round().max(0.0) as usize).min(DIFFUSE_MODES.len() - 1);
         let src = px.to_vec();
         for y in 0..h {
             for x in 0..w {
-                let dx = ((value_noise(x as f32, y as f32, 5) - 0.5) * 2.0 * r) as i32;
-                let dy = ((value_noise(x as f32, y as f32, 9) - 0.5) * 2.0 * r) as i32;
-                put(px, w, x, y, at(&src, w, h, x as i32 + dx, y as i32 + dy));
+                let here = at(&src, w, h, x as i32, y as i32);
+                let pick = if mode == 3 {
+                    // Anisotropic: of eight neighbours at this distance,
+                    // the closest in colour.
+                    let mut best = here;
+                    let mut best_d = f32::INFINITY;
+                    for k in 0..8 {
+                        let a = k as f32 * std::f32::consts::TAU / 8.0;
+                        let p = at(
+                            &src,
+                            w,
+                            h,
+                            x as i32 + (a.cos() * r) as i32,
+                            y as i32 + (a.sin() * r) as i32,
+                        );
+                        let d = (0..3).map(|c| (p[c] - here[c]).abs()).fold(0.0, f32::max);
+                        if d < best_d {
+                            best_d = d;
+                            best = p;
+                        }
+                    }
+                    best
+                } else {
+                    let dx = ((value_noise(x as f32, y as f32, 5) - 0.5) * 2.0 * r) as i32;
+                    let dy = ((value_noise(x as f32, y as f32, 9) - 0.5) * 2.0 * r) as i32;
+                    at(&src, w, h, x as i32 + dx, y as i32 + dy)
+                };
+                let out = match mode {
+                    1 if luma(&pick) > luma(&here) => here,
+                    2 if luma(&pick) < luma(&here) => here,
+                    _ => pick,
+                };
+                put(px, w, x, y, out);
             }
         }
     }
@@ -306,13 +405,19 @@ simple_filter!(
     "Stylize",
     [
         param("radius", "Stylization", 1.0, 12.0, 4.0, " px"),
-        param("levels", "Cleanliness", 2.0, 64.0, 20.0, "")
+        param("levels", "Cleanliness", 2.0, 64.0, 20.0, ""),
+        param("bristle", "Bristle Detail", 0.0, 10.0, 4.0, ""),
+        param("shine", "Shine", 0.0, 10.0, 2.0, ""),
+        param("angle", "Lighting Angle", 0.0, 360.0, 45.0, "\u{b0}")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Kuwahara-ish: take the colour of the most common intensity bin
         // in the neighbourhood, which flattens into brush strokes.
         let r = v.get("radius").max(1.0) as i32;
         let levels = v.get("levels").max(2.0) as usize;
+        let bristle = v.get("bristle") / 10.0;
+        let shine = v.get("shine") / 10.0;
+        let light = v.get("angle").to_radians();
         let src = px.to_vec();
         for y in 0..h as i32 {
             for x in 0..w as i32 {
@@ -339,13 +444,24 @@ simple_filter!(
                     .unwrap_or(0);
                 let n = counts[best].max(1) as f32;
                 let a = at(&src, w, h, x, y)[3];
-                put(
-                    px,
-                    w,
-                    x as usize,
-                    y as usize,
-                    [sums[best][0] / n, sums[best][1] / n, sums[best][2] / n, a],
-                );
+                let mut out = [sums[best][0] / n, sums[best][1] / n, sums[best][2] / n, a];
+                if bristle > 0.0 {
+                    // Bristles: the brush has hairs, and they run across
+                    // the stroke. The stroke direction is the local
+                    // gradient, so the comb follows the painting.
+                    let gx = luma(&at(&src, w, h, x + 1, y)) - luma(&at(&src, w, h, x - 1, y));
+                    let gy = luma(&at(&src, w, h, x, y + 1)) - luma(&at(&src, w, h, x, y - 1));
+                    let across = x as f32 * -gy + y as f32 * gx;
+                    let comb = (across * 2.0).sin() * bristle * 0.05;
+                    // ...and paint stands proud, so the ridges catch the
+                    // light from wherever it is coming.
+                    let facing = gx * light.cos() + gy * light.sin();
+                    let lit = 1.0 + comb + facing * shine * 2.0;
+                    for c in out.iter_mut().take(3) {
+                        *c = (*c * lit).clamp(0.0, 1.0);
+                    }
+                }
+                put(px, w, x as usize, y as usize, out);
             }
         }
     }
@@ -357,13 +473,22 @@ simple_filter!(
     "Extrude",
     "Stylize",
     [
+        choice("type", "Type", &["Blocks", "Pyramids"], 0),
         param("size", "Size", 2.0, 64.0, 12.0, " px"),
-        param("depth", "Depth", 1.0, 200.0, 30.0, " px")
+        param("depth", "Depth", 1.0, 200.0, 30.0, " px"),
+        choice("basis", "Depth From", &["Level", "Random"], 0),
+        param("solid", "Solid Front Faces", 0.0, 1.0, 0.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Blocks pushed towards the viewer by their own brightness.
+        // Blocks pushed towards the viewer by their own brightness --
+        // or by nothing but chance, which is what Random does, and which
+        // Photoshop offers because a photograph's own brightness often
+        // makes a very orderly heap.
+        let pyramids = v.get("type") >= 0.5;
         let size = v.get("size").max(2.0) as usize;
         let depth = v.get("depth");
+        let random = v.get("basis") >= 0.5;
+        let solid = v.get("solid") >= 0.5;
         let src = px.to_vec();
         for p in px.as_chunks_mut::<4>().0.iter_mut() {
             p[0] = 0.0;
@@ -374,9 +499,14 @@ simple_filter!(
         for by in 0..h.div_ceil(size) {
             for bx in 0..w.div_ceil(size) {
                 let (x0, y0) = (bx * size, by * size);
-                let colour = at(&src, w, h, (x0 + size / 2) as i32, (y0 + size / 2) as i32);
+                let mut colour = at(&src, w, h, (x0 + size / 2) as i32, (y0 + size / 2) as i32);
                 // Brighter blocks come further forward, so they grow.
-                let push = luma(&colour) * depth / 100.0;
+                let level = if random {
+                    value_noise(bx as f32, by as f32, 4177)
+                } else {
+                    luma(&colour)
+                };
+                let push = level * depth / 100.0;
                 let scale = 1.0 + push;
                 for y in 0..size {
                     for x in 0..size {
@@ -386,7 +516,34 @@ simple_filter!(
                         if ox < 0.0 || oy < 0.0 || ox >= w as f32 || oy >= h as f32 {
                             continue;
                         }
-                        put(px, w, ox as usize, oy as usize, colour);
+                        if !solid {
+                            // The face carries the picture rather than
+                            // one flat colour, which is the check box
+                            // turned off.
+                            colour = at(&src, w, h, (x0 + x) as i32, (y0 + y) as i32);
+                        }
+                        let shade = if pyramids {
+                            // A pyramid is lit by its own slope: the
+                            // facets meet at the middle of the tile, so
+                            // each side catches the light differently.
+                            let (u, vv) =
+                                (x as f32 / size as f32 - 0.5, y as f32 / size as f32 - 0.5);
+                            1.0 - (u + vv).abs() * 0.9
+                        } else {
+                            1.0
+                        };
+                        put(
+                            px,
+                            w,
+                            ox as usize,
+                            oy as usize,
+                            [
+                                (colour[0] * shade).clamp(0.0, 1.0),
+                                (colour[1] * shade).clamp(0.0, 1.0),
+                                (colour[2] * shade).clamp(0.0, 1.0),
+                                colour[3],
+                            ],
+                        );
                     }
                 }
             }

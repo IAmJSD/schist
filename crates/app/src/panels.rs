@@ -369,6 +369,9 @@ fn destructive_adjustment_entries() -> Vec<MenuEntry> {
 
 /// Menu grouping for the built-in filters.
 const FILTER_GROUPS: &[(&str, &[&str])] = &[
+    // Photoshop's own order, which starts with 3D and puts Other last
+    // before the Neural Filters.
+    ("3D", &["filter.bump_map", "filter.normal_map"]),
     (
         "Artistic",
         &[
