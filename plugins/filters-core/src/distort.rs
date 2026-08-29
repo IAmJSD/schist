@@ -56,18 +56,61 @@ simple_filter!(
     "Wave",
     "Distort",
     [
+        param("generators", "Number of Generators", 1.0, 8.0, 1.0, ""),
         param("wavelength", "Wavelength", 1.0, 400.0, 60.0, " px"),
-        param("amplitude", "Amplitude", 0.0, 200.0, 15.0, " px")
+        param("amplitude", "Amplitude", 0.0, 200.0, 15.0, " px"),
+        param("horizontal", "Horizontal Scale", 0.0, 100.0, 100.0, "%"),
+        param("vertical", "Vertical Scale", 0.0, 100.0, 100.0, "%"),
+        choice("type", "Type", &["Sine", "Triangle", "Square"], 0),
+        param("seed", "Randomness", 0.0, 999.0, 1.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+        // Photoshop's Wave is several wave generators added together,
+        // each with its own wavelength and phase inside the ranges the
+        // dialog gives -- which is why one generator looks like a ripple
+        // and five look like water.
+        let generators = v.get("generators").round().max(1.0) as usize;
         let len = v.get("wavelength").max(1.0);
         let amp = v.get("amplitude");
-        let k = std::f32::consts::TAU / len;
-        warp(px, w, h, |x, y| {
-            (x + (y * k).sin() * amp, y + (x * k).sin() * amp)
+        let hscale = v.get("horizontal") / 100.0;
+        let vscale = v.get("vertical") / 100.0;
+        let kind = (v.get("type").round().max(0.0) as usize).min(2);
+        let seed = v.get("seed") as u32;
+        // Square waves displace by a constant either way, which is what
+        // gives Wave its torn-paper look; triangles ramp between.
+        let shape = move |phase: f32| -> f32 {
+            let t = phase.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+            match kind {
+                1 => 4.0 * (t - 0.5).abs() - 1.0,
+                2 => {
+                    if t < 0.5 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                }
+                _ => phase.sin(),
+            }
+        };
+        warp(px, w, h, move |x, y| {
+            let (mut ox, mut oy) = (0.0f32, 0.0f32);
+            for g in 0..generators {
+                // Each generator gets its own wavelength and phase, from
+                // the seed, so Randomness rearranges the water without
+                // changing how much of it there is.
+                let jitter = 0.5 + value_noise(g as f32 * 13.0, 0.0, seed);
+                let k = std::f32::consts::TAU / (len * jitter);
+                let phase = value_noise(0.0, g as f32 * 7.0, seed) * std::f32::consts::TAU;
+                ox += shape(y * k + phase) * amp / generators as f32;
+                oy += shape(x * k + phase) * amp / generators as f32;
+            }
+            (x + ox * hscale, y + oy * vscale)
         });
     }
 );
+
+/// Photoshop's three ZigZags, which are three directions to push in.
+const ZIGZAG_STYLES: &[&str] = &["Around Center", "Out From Center", "Pond Ripples"];
 
 simple_filter!(
     ZigZag,
@@ -76,11 +119,13 @@ simple_filter!(
     "Distort",
     [
         param("amount", "Amount", -100.0, 100.0, 30.0, ""),
-        param("ridges", "Ridges", 1.0, 20.0, 5.0, "")
+        param("ridges", "Ridges", 1.0, 20.0, 5.0, ""),
+        choice("style", "Style", ZIGZAG_STYLES, 2)
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let amount = v.get("amount") / 100.0;
         let ridges = v.get("ridges").max(1.0);
+        let style = (v.get("style").round().max(0.0) as usize).min(2);
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
         let radius = cx.hypot(cy).max(1.0);
         warp(px, w, h, |x, y| {
@@ -89,10 +134,28 @@ simple_filter!(
             if d < 1e-3 {
                 return (x, y);
             }
-            // Pond ripples: displacement along the radius, fading out.
             let phase = d / radius * ridges * std::f32::consts::TAU;
-            let push = phase.sin() * amount * radius * 0.1 * (1.0 - d / radius).max(0.0);
-            (x + dx / d * push, y + dy / d * push)
+            // The three styles differ in *which way* the ripple pushes.
+            match style {
+                // Around Center: tangentially, so the picture twists back
+                // and forth as the rings go out.
+                0 => {
+                    let twist = phase.sin() * amount * 0.6 * (1.0 - d / radius).max(0.0);
+                    let (s, c) = twist.sin_cos();
+                    (cx + dx * c - dy * s, cy + dx * s + dy * c)
+                }
+                // Out From Center: radially, and always outwards, which
+                // reads as a starburst rather than as water.
+                1 => {
+                    let push = phase.sin().abs() * amount * radius * 0.1;
+                    (x + dx / d * push, y + dy / d * push)
+                }
+                // Pond Ripples: radially, signed, and fading out.
+                _ => {
+                    let push = phase.sin() * amount * radius * 0.1 * (1.0 - d / radius).max(0.0);
+                    (x + dx / d * push, y + dy / d * push)
+                }
+            }
         });
     }
 );
@@ -102,13 +165,28 @@ simple_filter!(
     "filter.spherize",
     "Spherize",
     "Distort",
-    [param("amount", "Amount", -100.0, 100.0, 50.0, "%")],
+    [
+        param("amount", "Amount", -100.0, 100.0, 50.0, "%"),
+        choice(
+            "mode",
+            "Mode",
+            &["Normal", "Horizontal Only", "Vertical Only"],
+            0
+        )
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let amount = v.get("amount") / 100.0;
+        // The two axis modes bulge a cylinder rather than a sphere, which
+        // is what you want for wrapping a label round a bottle.
+        let mode = (v.get("mode").round().max(0.0) as usize).min(2);
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
         let radius = cx.min(cy).max(1.0);
         warp(px, w, h, |x, y| {
-            let (dx, dy) = (x - cx, y - cy);
+            let (dx, dy) = match mode {
+                1 => (x - cx, 0.0),
+                2 => (0.0, y - cy),
+                _ => (x - cx, y - cy),
+            };
             let d = dx.hypot(dy);
             if d >= radius || d < 1e-3 {
                 return (x, y);
@@ -127,13 +205,28 @@ simple_filter!(
     "filter.pinch",
     "Pinch",
     "Distort",
-    [param("amount", "Amount", -100.0, 100.0, 50.0, "%")],
+    [
+        param("amount", "Amount", -100.0, 100.0, 50.0, "%"),
+        choice(
+            "mode",
+            "Mode",
+            &["Normal", "Horizontal Only", "Vertical Only"],
+            0
+        )
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let amount = v.get("amount") / 100.0;
+        // The two axis modes bulge a cylinder rather than a sphere, which
+        // is what you want for wrapping a label round a bottle.
+        let mode = (v.get("mode").round().max(0.0) as usize).min(2);
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
         let radius = cx.min(cy).max(1.0);
         warp(px, w, h, |x, y| {
-            let (dx, dy) = (x - cx, y - cy);
+            let (dx, dy) = match mode {
+                1 => (x - cx, 0.0),
+                2 => (0.0, y - cy),
+                _ => (x - cx, y - cy),
+            };
             let d = dx.hypot(dy);
             if d >= radius || d < 1e-3 {
                 return (x, y);
@@ -150,7 +243,12 @@ simple_filter!(
     "filter.polar",
     "Polar Coordinates",
     "Distort",
-    [param("to_polar", "Rectangular to Polar", 0.0, 1.0, 1.0, "")],
+    [choice(
+        "to_polar",
+        "Convert",
+        &["Polar to Rectangular", "Rectangular to Polar"],
+        1
+    )],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let to_polar = v.get("to_polar") >= 0.5;
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
@@ -179,14 +277,35 @@ simple_filter!(
     "filter.shear",
     "Shear",
     "Distort",
-    [param("amount", "Amount", -200.0, 200.0, 40.0, " px")],
+    [
+        param("amount", "Amount", -200.0, 200.0, 40.0, " px"),
+        choice("curve", "Curve", &["Bow", "S-Curve", "Ramp"], 0),
+        choice(
+            "undefined",
+            "Undefined Areas",
+            &["Repeat Edge Pixels", "Wrap Around"],
+            0
+        )
+    ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+        // Photoshop draws the shear as a curve you drag; the three shapes
+        // here are the ones anybody actually drags it into.
         let amount = v.get("amount");
+        let curve = (v.get("curve").round().max(0.0) as usize).min(2);
+        let wrap = v.get("undefined") >= 0.5;
         let hh = h as f32;
-        warp(px, w, h, |x, y| {
-            // A single bow across the height, which is what Shear's
-            // default curve does.
-            (x + (y / hh * std::f32::consts::PI).sin() * amount, y)
+        let ww = w as f32;
+        warp(px, w, h, move |x, y| {
+            let t = y / hh;
+            let shift = match curve {
+                1 => (t * std::f32::consts::TAU).sin(),
+                2 => t * 2.0 - 1.0,
+                _ => (t * std::f32::consts::PI).sin(),
+            } * amount;
+            let sx = x + shift;
+            // What happens at the sides: repeat the edge, which `warp`
+            // does by clamping, or bring the other side round.
+            (if wrap { sx.rem_euclid(ww) } else { sx }, y)
         });
     }
 );
@@ -197,19 +316,37 @@ simple_filter!(
     "Displace",
     "Distort",
     [
-        param("scale", "Scale", 0.0, 200.0, 20.0, " px"),
-        param("detail", "Detail", 1.0, 64.0, 16.0, " px")
+        param("scale", "Horizontal Scale", 0.0, 200.0, 20.0, " px"),
+        param("vscale", "Vertical Scale", 0.0, 200.0, 20.0, " px"),
+        param("detail", "Detail", 1.0, 64.0, 16.0, " px"),
+        param("seed", "Randomness", 0.0, 999.0, 1.0, ""),
+        choice(
+            "undefined",
+            "Undefined Areas",
+            &["Repeat Edge Pixels", "Wrap Around"],
+            0
+        )
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Photoshop displaces through a separate map file; with nowhere to
-        // pick one, this uses its own noise field, which is what the
-        // filter is mostly used for anyway.
+        // Photoshop displaces through a separate map file, chosen from a
+        // file picker a filter does not have. This uses its own noise
+        // field instead, with the same two scales and the same choice
+        // about what happens at the edges.
         let scale = v.get("scale");
+        let vscale = v.get("vscale");
         let detail = v.get("detail").max(1.0);
-        warp(px, w, h, |x, y| {
-            let u = fbm(x / detail, y / detail, 11, 3) - 0.5;
-            let vv = fbm(x / detail + 37.0, y / detail - 19.0, 23, 3) - 0.5;
-            (x + u * scale * 2.0, y + vv * scale * 2.0)
+        let seed = v.get("seed") as u32;
+        let wrap = v.get("undefined") >= 0.5;
+        let (ww, hh) = (w as f32, h as f32);
+        warp(px, w, h, move |x, y| {
+            let u = fbm(x / detail, y / detail, 11 + seed, 3) - 0.5;
+            let vv = fbm(x / detail + 37.0, y / detail - 19.0, 23 + seed, 3) - 0.5;
+            let (sx, sy) = (x + u * scale * 2.0, y + vv * vscale * 2.0);
+            if wrap {
+                (sx.rem_euclid(ww), sy.rem_euclid(hh))
+            } else {
+                (sx, sy)
+            }
         });
     }
 );

@@ -14,6 +14,7 @@ use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues, PluginManifest,
 pub mod artistic;
 pub mod blurgallery;
 pub mod brush;
+pub mod bump;
 pub mod camera_raw;
 pub mod distort;
 pub mod lens;
@@ -384,6 +385,15 @@ impl FilterPlugin for AddNoise {
                 choices: &[],
             },
             FilterParam {
+                key: "distribution",
+                label: "Distribution",
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                suffix: "",
+                choices: &["Uniform", "Gaussian"],
+            },
+            FilterParam {
                 key: "monochrome",
                 label: "Monochrome",
                 min: 0.0,
@@ -400,9 +410,10 @@ impl FilterPlugin for AddNoise {
             return;
         }
         let mono = values.get("monochrome") >= 0.5;
+        let gaussian = values.get("distribution") >= 0.5;
         // Deterministic hash noise: same input, same output, so undo/redo
         // and re-runs are reproducible.
-        let hash = |x: u32, y: u32, c: u32| -> f32 {
+        let raw = |x: u32, y: u32, c: u32| -> f32 {
             let mut h = x.wrapping_mul(0x9E37_79B9)
                 ^ y.wrapping_mul(0x85EB_CA6B)
                 ^ c.wrapping_mul(0xC2B2_AE35);
@@ -412,6 +423,21 @@ impl FilterPlugin for AddNoise {
             h = h.wrapping_mul(0x297A_2D39);
             h ^= h >> 15;
             (h as f32 / u32::MAX as f32) * 2.0 - 1.0
+        };
+        // Uniform noise is flat across its range; Gaussian bunches around
+        // zero with a long tail, so most pixels move less and a few move
+        // much more. Photoshop offers both because they look different at
+        // the same Amount: uniform reads as static, Gaussian as grain.
+        // Three samples averaged is enough of a bell for the eye, and is
+        // what the central limit theorem promises.
+        let hash = |x: u32, y: u32, c: u32| -> f32 {
+            if !gaussian {
+                return raw(x, y, c);
+            }
+            let a = raw(x, y, c);
+            let b = raw(x ^ 0x5bd1_e995, y, c);
+            let d = raw(x, y ^ 0x1b87_3593, c);
+            (a + b + d) / 3.0 * 1.7
         };
         for y in 0..height {
             for x in 0..width {
@@ -498,6 +524,7 @@ impl PluginManifest for CoreFiltersPlugin {
         registry.register_filter(Box::new(Median));
         artistic::register(registry);
         blurgallery::register(registry);
+        bump::register(registry);
         brush::register(registry);
         camera_raw::register(registry);
         lens::register(registry);

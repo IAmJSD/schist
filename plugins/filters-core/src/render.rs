@@ -70,21 +70,28 @@ simple_filter!(
     "Render",
     [
         param("variance", "Variance", 1.0, 64.0, 16.0, ""),
-        param("strength", "Strength", 1.0, 64.0, 4.0, "")
+        param("strength", "Strength", 1.0, 64.0, 4.0, ""),
+        param("seed", "Randomize", 0.0, 999.0, 0.0, "")
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         // Vertical streaks: noise that varies fast across and slowly down.
+        // Photoshop's Randomize is a button that reseeds; a filter has to
+        // be a function of its settings, so it is a number here.
         let variance = v.get("variance").max(1.0);
         let strength = v.get("strength").max(1.0);
+        let seed = 977 + v.get("seed") as u32;
         for y in 0..h {
             for x in 0..w {
-                let n = fbm(x as f32 * variance / 16.0, y as f32 / strength, 977, 4);
+                let n = fbm(x as f32 * variance / 16.0, y as f32 / strength, seed, 4);
                 let a = at(px, w, h, x as i32, y as i32)[3];
                 put(px, w, x, y, [n, n, n, a.max(1.0)]);
             }
         }
     }
 );
+
+/// The lenses Photoshop offers, which differ in how their ghosts fall.
+const LENS_TYPES: &[&str] = &["50-300mm Zoom", "35mm Prime", "105mm Prime", "Movie Prime"];
 
 simple_filter!(
     LensFlare,
@@ -94,23 +101,44 @@ simple_filter!(
     [
         param("x", "Centre X", 0.0, 100.0, 50.0, "%"),
         param("y", "Centre Y", 0.0, 100.0, 50.0, "%"),
-        param("brightness", "Brightness", 10.0, 300.0, 100.0, "%")
+        param("brightness", "Brightness", 10.0, 300.0, 100.0, "%"),
+        choice("lens", "Lens Type", LENS_TYPES, 0)
     ],
     |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
         let cx = v.get("x") / 100.0 * w as f32;
         let cy = v.get("y") / 100.0 * h as f32;
         let strength = v.get("brightness") / 100.0;
+        let lens = (v.get("lens").round().max(0.0) as usize).min(LENS_TYPES.len() - 1);
         let span = (w.max(h) as f32).max(1.0);
         // The main glow, plus ghosts spaced along the line through the
         // frame's centre -- which is where real lens ghosts appear.
+        //
+        // The lens type is the ghost pattern: a zoom has many elements
+        // and throws a long chain of small ghosts, a prime has few and
+        // throws a handful of large ones, and the movie lens is the
+        // anamorphic one everybody knows from the blue streak.
         let (mx, my) = (w as f32 / 2.0, h as f32 / 2.0);
-        let ghosts: [(f32, f32, f32); 5] = [
-            (0.35, 0.10, 0.6),
-            (0.70, 0.06, 0.9),
-            (1.30, 0.05, 0.8),
-            (1.70, 0.08, 0.5),
-            (2.10, 0.04, 1.1),
-        ];
+        let ghosts: &[(f32, f32, f32)] = match lens {
+            // 50-300mm zoom.
+            0 => &[
+                (0.35, 0.10, 0.6),
+                (0.70, 0.06, 0.9),
+                (1.30, 0.05, 0.8),
+                (1.70, 0.08, 0.5),
+                (2.10, 0.04, 1.1),
+            ],
+            // 35mm prime: fewer, bigger, warmer.
+            1 => &[(0.55, 0.16, 0.8), (1.45, 0.20, 0.6)],
+            // 105mm prime: tight and clean.
+            2 => &[(0.80, 0.07, 1.0), (1.25, 0.05, 0.7)],
+            // Movie prime: one big flare and a long tail.
+            _ => &[
+                (0.45, 0.22, 0.5),
+                (0.95, 0.10, 0.9),
+                (1.55, 0.14, 0.4),
+                (2.30, 0.06, 0.7),
+            ],
+        };
         for y in 0..h {
             for x in 0..w {
                 let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
@@ -118,7 +146,7 @@ simple_filter!(
                 // Core glare falls off sharply, with a wide soft halo.
                 let mut add =
                     (0.35 / (1.0 + d * d * 900.0) + 0.12 / (1.0 + d * d * 40.0)) * strength;
-                for (t, size, tint) in ghosts {
+                for &(t, size, tint) in ghosts {
                     let gx = cx + (mx - cx) * 2.0 * t;
                     let gy = cy + (my - cy) * 2.0 * t;
                     let gd = (fx - gx).hypot(fy - gy) / span;

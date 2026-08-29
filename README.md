@@ -117,8 +117,8 @@ glow, satin, colour overlay, gradient overlay, outer glow and drop shadow,
 with Photoshop's Fill-vs-Opacity semantics so "Fill 0% plus a drop shadow"
 does what you expect.
 
-**Filters.** A hundred and twenty-nine, which is Photoshop's Filter menu
-with nothing left out: Artistic, Blur, Blur Gallery, Brush Strokes,
+**Filters.** A hundred and thirty-one, which is Photoshop's Filter menu
+with nothing left out: 3D, Artistic, Blur, Blur Gallery, Brush Strokes,
 Distort, Noise, Pixelate, Render, Sharpen, Sketch, Stylize, Texture,
 Video, Other, Camera Raw and Neural Filters, plus Lens Correction and
 Adaptive Wide Angle. All preview live on the canvas inside the selection,
@@ -128,11 +128,16 @@ Stained Glass, Craquelure and the rest — which are ordinary filters here
 too, so each can be run from the menu on its own or stacked in the
 **Filter Gallery**, which previews the result of the lot.
 
-The Blur Gallery's five and Photoshop's three scripted Render filters —
-Flame, Picture Frame and Tree — arrive without the canvas widgets they
-have there: a filter is handed pixels and numbers, so a blur pin is a
-pair of position sliders, and Flame rises from the bottom of the
-selection rather than following a path you drew.
+Their dialogs match as well, which is most of what makes a filter feel
+like the one you know: Mezzotint's ten screens, Lens Blur's iris shapes,
+Smart Sharpen's choice of which blur it is undoing, Wave's several
+generators, Diffuse's anisotropic mode, Extrude's pyramids, Wind's blast
+and stagger. Where a control cannot exist here it is because a filter is
+handed pixels and numbers and nothing else: no foreground and background
+colours, so the Sketch group draws black on white; no file picker, so
+Displace uses a noise field rather than a map file; no canvas widgets, so
+a blur pin is a pair of position sliders and Flame rises from the bottom
+of the selection rather than following a path.
 
 **Warping.** Liquify with all seven brushes, Puppet Warp (Moving Least
 Squares, so pins hold and nothing shears), Content-Aware Scale (seam
