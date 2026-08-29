@@ -12,9 +12,11 @@
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry};
 
 pub mod artistic;
+pub mod blurgallery;
 pub mod brush;
 pub mod camera_raw;
 pub mod distort;
+pub mod lens;
 pub mod neural;
 pub mod other;
 pub mod pixelate;
@@ -495,8 +497,10 @@ impl PluginManifest for CoreFiltersPlugin {
         registry.register_filter(Box::new(AddNoise));
         registry.register_filter(Box::new(Median));
         artistic::register(registry);
+        blurgallery::register(registry);
         brush::register(registry);
         camera_raw::register(registry);
+        lens::register(registry);
         neural::register(registry);
         distort::register(registry);
         pixelate::register(registry);

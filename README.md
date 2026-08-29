@@ -117,15 +117,22 @@ glow, satin, colour overlay, gradient overlay, outer glow and drop shadow,
 with Photoshop's Fill-vs-Opacity semantics so "Fill 0% plus a drop shadow"
 does what you expect.
 
-**Filters.** A hundred and fifteen across fourteen categories —
-Artistic, Blur, Brush Strokes, Distort, Noise, Pixelate, Render, Sharpen,
-Sketch, Stylize, Texture, Other, Camera Raw and Neural Filters — all
-previewing live on the canvas inside the selection, with Cancel restoring
-exactly. That includes the forty-six effects Photoshop keeps *inside* the
-Filter Gallery — Watercolor, Sumi-e, Chrome, Stained Glass and the rest —
-which are ordinary filters here as well, so they can be run from the menu
-or stacked in the **Filter Gallery**, which previews the result of the
-lot.
+**Filters.** A hundred and twenty-nine, which is Photoshop's Filter menu
+with nothing left out: Artistic, Blur, Blur Gallery, Brush Strokes,
+Distort, Noise, Pixelate, Render, Sharpen, Sketch, Stylize, Texture,
+Video, Other, Camera Raw and Neural Filters, plus Lens Correction and
+Adaptive Wide Angle. All preview live on the canvas inside the selection,
+with Cancel restoring exactly. The count includes the forty-six effects
+Photoshop keeps *inside* the Filter Gallery — Watercolor, Sumi-e, Chrome,
+Stained Glass, Craquelure and the rest — which are ordinary filters here
+too, so each can be run from the menu on its own or stacked in the
+**Filter Gallery**, which previews the result of the lot.
+
+The Blur Gallery's five and Photoshop's three scripted Render filters —
+Flame, Picture Frame and Tree — arrive without the canvas widgets they
+have there: a filter is handed pixels and numbers, so a blur pin is a
+pair of position sliders, and Flame rises from the bottom of the
+selection rather than following a path you drew.
 
 **Warping.** Liquify with all seven brushes, Puppet Warp (Moving Least
 Squares, so pins hold and nothing shears), Content-Aware Scale (seam
