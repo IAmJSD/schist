@@ -489,6 +489,12 @@ pub struct ViewOptions {
     /// nothing is ever transmitted.
     #[serde(default)]
     pub crash_reports: bool,
+    /// Also upload that crash to the project's Sentry. Opt-in separately
+    /// from the local report — writing a file here and sending one to us
+    /// are not the same decision — and inert in any build that was not
+    /// given a DSN, which is every build but the official releases.
+    #[serde(default)]
+    pub crash_upload: bool,
     /// Composite and resample on the GPU when an adapter exists. On by
     /// default; the CPU reference takes over per-frame for anything the
     /// GPU path can't express, and entirely when this is off.
@@ -517,6 +523,7 @@ impl Default for ViewOptions {
             theme: Theme::Dark,
             zoom_with_scroll: false,
             crash_reports: false,
+            crash_upload: false,
             gpu_compositing: true,
             check_updates: true,
         }

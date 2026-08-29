@@ -22,6 +22,20 @@ jobs:
           - os: windows-latest
             artifact: schist-windows-x86_64
     runs-on: ${{ matrix.os }}
+    env:
+      # Compiled into the app by crates/app/src/crash.rs. In a fork, or any
+      # repository without the secret, this arrives as an empty string --
+      # which that code reads as "no DSN", so the build still succeeds and
+      # simply has nothing to upload to and no preference to offer.
+      SCHIST_SENTRY_DSN: ${{ secrets.SCHIST_SENTRY_DSN }}
+      # Where the debug info goes. `vars`, not `secrets`: an org and project
+      # slug are not secret, and putting them in `secrets` would only get
+      # them masked out of the logs that diagnose a failed upload.
+      SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+      SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+      # The one switch for all of it: with no token every Sentry step below
+      # is skipped and the release comes out as it did before any of this.
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -87,6 +101,26 @@ jobs:
         # The MCP server ships next to the app, so it is built in the same
         # invocation -- the two share nearly every dependency.
         run: cargo build --release -p schist-app -p schist-mcp
+
+      # Installed from npm rather than the shell installer: it is the one
+      # source with a binary for all four runners, arm64 Linux included.
+      - name: Install sentry-cli
+        if: env.SENTRY_AUTH_TOKEN != ''
+        run: npm install -g @sentry/cli@2
+
+      - name: Upload debug info to Sentry (Linux)
+        if: runner.os == 'Linux' && env.SENTRY_AUTH_TOKEN != ''
+        run: |
+          # Before the Package step strips them. ELF carries DWARF inside
+          # the executable, so this is the last moment it exists at all --
+          # what ships keeps only its build id, and that id is what a crash
+          # report is matched against these uploads on.
+          #
+          # schist-mcp is here even though only the app links the SDK: the
+          # strip is destructive, so this is the one chance to keep anything
+          # that could make sense of a fault in the server later.
+          sentry-cli debug-files upload --include-sources \
+            target/release/schist target/release/schist-mcp
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -187,6 +221,21 @@ jobs:
           # bundle's permissions or symlinks, which would void the signature.
           rm -rf dist/Schist.app
 
+      - name: Upload debug info to Sentry (macOS)
+        if: runner.os == 'macOS' && env.SENTRY_AUTH_TOKEN != ''
+        run: |
+          # After packaging, not before: bundle.sh runs cargo again, and a
+          # relink there would give the shipped binary a UUID no dSYM made
+          # earlier would match. Signing is safe to have happened already --
+          # codesign appends a signature and leaves LC_UUID alone.
+          #
+          # Nothing is stripped on macOS; the debug info simply lives in the
+          # object files rather than the executable, and dsymutil is what
+          # gathers it into a form that can be uploaded.
+          dsymutil target/release/schist target/release/schist-mcp
+          sentry-cli debug-files upload --include-sources \
+            target/release/schist.dSYM target/release/schist-mcp.dSYM
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -216,10 +265,59 @@ jobs:
           if (-not (Test-Path $out)) { throw "installer not produced: $out" }
           if ((Get-Item $out).Length -eq 0) { throw "installer is empty: $out" }
 
+      - name: Upload debug info to Sentry (Windows)
+        if: runner.os == 'Windows' && env.SENTRY_AUTH_TOKEN != ''
+        shell: pwsh
+        run: |
+          # MSVC keeps debug info in a .pdb beside the executable, so unlike
+          # Linux nothing had to be stripped and the shipped .exe is exactly
+          # what these describe. Matched rather than named: rustc derives the
+          # .pdb name from the binary's, and the only .pdb files that land
+          # directly in target/release are the two binaries' -- dependencies
+          # and build scripts write theirs into deps/ and build/.
+          $pdbs = Get-ChildItem target/release/*.pdb
+          if (-not $pdbs) { throw 'no .pdb beside the release binaries' }
+          sentry-cli debug-files upload --include-sources @($pdbs.FullName)
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
+
+  # Registers the version the app reports under, so an uploaded crash lands
+  # on a release with a commit range attached rather than on a bare string.
+  # Separate from `build` because it happens once, not once per platform.
+  sentry-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+      SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # set-commits works out what changed by reading the log; the
+          # default shallow clone has none to read.
+          fetch-depth: 0
+      - name: Register the release with Sentry
+        if: env.SENTRY_AUTH_TOKEN != ''
+        run: |
+          set -eo pipefail
+          npm install -g @sentry/cli@2
+          # The same name crash.rs sends events under, or they land nowhere
+          # -- and it builds that from CARGO_PKG_VERSION, so this reads the
+          # manifest rather than the tag. The two agree on a correctly cut
+          # release; if they ever do not, the manifest is what shipped.
+          release="schist@$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          sentry-cli releases new "$release"
+          # Needs a repository integration configured on the Sentry side.
+          # Without one this is the only part that fails, and it costs only
+          # the commit list, so it must not take the release down with it.
+          sentry-cli releases set-commits "$release" --auto --ignore-missing \
+            || echo "no repository integration; release created without commits"
+          sentry-cli releases finalize "$release"
 
   publish:
     needs: build

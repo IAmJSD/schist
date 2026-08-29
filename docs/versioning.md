@@ -85,7 +85,10 @@ changing it there ends self-updating silently, so keep the two together.
    `schist-mcp-linux-aarch64`), a loose binary on Windows, and on macOS
    `schist-mcp-macos.zip`, signed and notarized on its own. See
    [mcp.md](mcp.md).
-5. Update the AUR package from `packaging/linux/aur/PKGBUILD`: bump
+5. When the Sentry settings below are present, the same workflow uploads
+   each platform's debug info and registers the release. Nothing about the
+   published artifacts changes either way.
+6. Update the AUR package from `packaging/linux/aur/PKGBUILD`: bump
    `pkgver` to the new version, reset `pkgrel=1`, then in an Arch
    environment run `updpkgsums` (re-pins the tag tarball's sha256), test
    with `makepkg -s` + `namcap`, and regenerate `.SRCINFO` with
@@ -132,3 +135,60 @@ without that entitlement a notarized build dies as soon as it loads one.
 
 Windows builds are not signed — there is no certificate for them yet, so
 the installer triggers SmartScreen on first download.
+
+## Crash reporting and symbols
+
+Schist can upload a crash to Sentry. It is off twice over: the user has to
+tick **Preferences ▸ Diagnostics ▸ Also send it to the developers**, *and*
+the build has to have been given a DSN. Only the release workflow supplies
+one, so a build from source — or from a distribution's packaging — has no
+DSN, never starts the SDK, and does not even show the checkbox. See
+`crates/app/src/crash.rs`.
+
+Events are scrubbed before they leave: no PII, no breadcrumbs, no session
+tracking, `server_name` set to `redacted` rather than the machine's
+hostname, and the user's home directory rewritten to `~` in the panic
+message — an image editor panic tends to quote the path it choked on, and
+that path is somebody's document.
+
+### Settings
+
+| Name | Kind | What it is |
+| --- | --- | --- |
+| `SENTRY_AUTH_TOKEN` | secret | A token with `project:releases`. It is the switch for all of this: without it every Sentry step is skipped and the release is built exactly as it was before. |
+| `SCHIST_SENTRY_DSN` | secret | The DSN compiled into the app. Not really secret — it ships inside the binary — but it lives here so forks get an empty one and produce a build that cannot report. |
+| `SENTRY_ORG` | variable | The organisation slug. |
+| `SENTRY_PROJECT` | variable | The project slug. |
+
+The two slugs are repository *variables*, not secrets: they are not
+sensitive, and as secrets they would be masked out of exactly the log lines
+that explain a failed upload.
+
+### Debug info
+
+The release profile builds with `debug = 1`, and each platform hands that
+to Sentry in the form its object format keeps it in:
+
+* **Linux** — DWARF lives inside the executable, and the workflow strips it
+  before packaging so the AppImage does not carry it. The upload therefore
+  happens *before* the strip, on the unstripped binary. What ships keeps its
+  build id, and that is what Sentry matches the upload against; both Linux
+  targets pin `--build-id=sha1` in `.cargo/config.toml`, since mold writes
+  one by default and Ubuntu's GNU ld does not.
+* **macOS** — the debug info stays in the object files, so `dsymutil`
+  gathers it into a `.dSYM` and that is uploaded. It runs after packaging,
+  because `bundle.sh` invokes cargo again and a relink there would change
+  the binary's `LC_UUID`. Code signing is harmless: it appends a signature
+  and leaves `LC_UUID` alone.
+* **Windows** — MSVC writes a `.pdb` beside the executable. Nothing is
+  stripped and the `.pdb` is uploaded as it is.
+
+All three upload with `--include-sources`, which bundles the source the
+debug info points at so stack frames come back with code beside them. The
+sources are this repository and public crates, so there is nothing in that
+bundle that is not already published.
+
+A tagged build also registers `schist@X.Y.Z` as a Sentry release, which is
+the name `crash.rs` reports under. Attaching the commit range to it needs a
+repository integration configured on the Sentry side; without one that step
+alone is skipped and the release is still created.
