@@ -17,8 +17,8 @@ use crate::util::{
     at, blur_plane, edges, flatten_colour, from_luma, gaussian_rgba, luma, luma_map, put, sample,
     streak, surface, value_noise,
 };
-use crate::{choice, param, simple_filter};
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use crate::{choice, context_filter, param, simple_filter};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
 /// Flatten an image into regions a brush could have painted.
 ///
@@ -69,7 +69,7 @@ fn flatten(px: &mut [f32], w: usize, h: usize, radius: f32, tolerance: f32) {
     }
 }
 
-simple_filter!(
+context_filter!(
     ColoredPencil,
     "filter.colored_pencil",
     "Colored Pencil",
@@ -79,10 +79,12 @@ simple_filter!(
         param("pressure", "Stroke Pressure", 0.0, 15.0, 8.0, ""),
         param("paper", "Paper Brightness", 0.0, 50.0, 25.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Crosshatched pencil: the edges become strokes, the paper shows
         // through everywhere else, and the hatching runs at a fixed
-        // diagonal the way a right-handed hand draws it.
+        // diagonal the way a right-handed hand draws it. The paper is
+        // the background colour, which is what Photoshop's Paper
+        // Brightness is brightening.
         let width = v.get("width").max(1.0);
         let pressure = v.get("pressure") / 15.0;
         let paper = v.get("paper") / 50.0;
@@ -103,8 +105,17 @@ simple_filter!(
                 out[i] = (drawn * (0.75 + paper * 0.25)).clamp(0.0, 1.0);
             }
         }
-        // A pencil keeps a little of the subject's colour, not all of it.
+        // A pencil keeps a little of the subject's colour, not all of
+        // it -- and lays it on paper of the background colour.
         from_luma(px, &out, 0.35);
+        let paper = ctx.bg();
+        for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            // Where the pencil did not press, the sheet shows through.
+            let bare = out[i].clamp(0.0, 1.0);
+            for c in 0..3 {
+                p[c] = (p[c] * (1.0 - bare) + paper[c] * bare).clamp(0.0, 1.0);
+            }
+        }
     }
 );
 
@@ -231,29 +242,22 @@ simple_filter!(
     }
 );
 
-simple_filter!(
+context_filter!(
     NeonGlow,
     "filter.neon_glow",
     "Neon Glow",
     "Artistic",
     [
         param("size", "Glow Size", 1.0, 24.0, 5.0, ""),
-        param("brightness", "Glow Brightness", 0.0, 50.0, 15.0, ""),
-        param("hue", "Glow Colour", 0.0, 360.0, 200.0, "\u{b0}")
+        param("brightness", "Glow Brightness", 0.0, 50.0, 15.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // The image collapses to a dark ghost of itself and its edges
-        // light up in one colour. Photoshop takes the colour from the
-        // colour picker; there is no picker in a filter dialog, so it is
-        // a hue here.
+        // light up in one colour -- the foreground, which is where
+        // Photoshop's Glow Color well takes it from.
         let size = v.get("size");
         let brightness = v.get("brightness") / 50.0;
-        let hue = v.get("hue").to_radians();
-        let glow_rgb = [
-            (hue.cos() * 0.5 + 0.5).clamp(0.0, 1.0),
-            ((hue - 2.094).cos() * 0.5 + 0.5).clamp(0.0, 1.0),
-            ((hue + 2.094).cos() * 0.5 + 0.5).clamp(0.0, 1.0),
-        ];
+        let glow_rgb = ctx.fg();
         let plane = luma_map(px, w, h);
         let mut glow = edges(&plane, w, h);
         blur_plane(&mut glow, w, h, size);

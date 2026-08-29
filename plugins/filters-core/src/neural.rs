@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use crate::util::{at, gaussian_rgba, luma, put, sample, warp};
 use crate::{choice, param, simple_filter};
 use schist_neural::Face;
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
 /// Copy the RGB of a filter buffer out, run `f` on it, and blend the
 /// result back. Models work on RGB; the filter buffer is RGBA.
@@ -718,17 +718,18 @@ impl FilterPlugin for ColorTransfer {
     }
 
     fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
-        self.apply_over(px, None, width, height, values);
+        self.apply_with(px, width, height, values, &FilterContext::default());
     }
 
-    fn apply_over(
+    fn apply_with(
         &self,
         px: &mut [f32],
-        backdrop: Option<&[f32]>,
         width: usize,
         height: usize,
         values: &FilterValues,
+        context: &FilterContext,
     ) {
+        let backdrop = context.backdrop;
         if width == 0 || height == 0 {
             return;
         }
@@ -1013,17 +1014,18 @@ impl FilterPlugin for Harmonization {
     }
 
     fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
-        self.apply_over(px, None, width, height, values);
+        self.apply_with(px, width, height, values, &FilterContext::default());
     }
 
-    fn apply_over(
+    fn apply_with(
         &self,
         px: &mut [f32],
-        backdrop: Option<&[f32]>,
         width: usize,
         height: usize,
         values: &FilterValues,
+        context: &FilterContext,
     ) {
+        let backdrop = context.backdrop;
         if width == 0 || height == 0 {
             return;
         }
@@ -1119,17 +1121,18 @@ impl FilterPlugin for LandscapeMixer {
     }
 
     fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
-        self.apply_over(px, None, width, height, values);
+        self.apply_with(px, width, height, values, &FilterContext::default());
     }
 
-    fn apply_over(
+    fn apply_with(
         &self,
         px: &mut [f32],
-        backdrop: Option<&[f32]>,
         width: usize,
         height: usize,
         values: &FilterValues,
+        context: &FilterContext,
     ) {
+        let backdrop = context.backdrop;
         if width == 0 || height == 0 {
             return;
         }

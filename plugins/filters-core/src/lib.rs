@@ -105,6 +105,66 @@ macro_rules! simple_filter {
     };
 }
 
+/// The same, for a filter that reads its
+/// [`FilterContext`](schist_plugin_api::FilterContext) -- the toolbox
+/// colours, a chosen image, the active path.
+///
+/// The body takes one more argument than [`simple_filter`]'s does. Run
+/// with no host to gather a context -- from a test, or a plug-in host
+/// that predates the idea -- it gets the default one, which is black on
+/// white and nothing else, and that is what these filters were pictured
+/// with anyway.
+#[macro_export]
+macro_rules! context_filter {
+    ($ty:ident, $id:expr, $name:expr, $category:expr, [$($param:expr),* $(,)?], $body:expr) => {
+        pub struct $ty;
+
+        impl FilterPlugin for $ty {
+            fn id(&self) -> &'static str {
+                $id
+            }
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn category(&self) -> &'static str {
+                $category
+            }
+            fn params(&self) -> Vec<FilterParam> {
+                vec![$($param),*]
+            }
+            fn apply(
+                &self,
+                pixels: &mut [f32],
+                width: usize,
+                height: usize,
+                values: &FilterValues,
+            ) {
+                self.apply_with(
+                    pixels,
+                    width,
+                    height,
+                    values,
+                    &schist_plugin_api::FilterContext::default(),
+                )
+            }
+            fn apply_with(
+                &self,
+                pixels: &mut [f32],
+                width: usize,
+                height: usize,
+                values: &FilterValues,
+                context: &schist_plugin_api::FilterContext,
+            ) {
+                if width == 0 || height == 0 {
+                    return;
+                }
+                #[allow(clippy::redundant_closure_call)]
+                ($body)(pixels, width, height, values, context)
+            }
+        }
+    };
+}
+
 use schist_fx::{gaussian_rgba as gaussian_blur, premultiply, unpremultiply};
 
 pub struct GaussianBlur;

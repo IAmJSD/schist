@@ -2,8 +2,8 @@
 //! [`warp`], so they differ only in the mapping.
 
 use crate::util::{blur_plane, fbm, luma, surface, value_noise, warp};
-use crate::{choice, param, simple_filter};
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use crate::{choice, context_filter, param, simple_filter};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
     Twirl,
@@ -310,38 +310,94 @@ simple_filter!(
     }
 );
 
-simple_filter!(
-    Displace,
-    "filter.displace",
-    "Displace",
-    "Distort",
-    [
-        param("scale", "Horizontal Scale", 0.0, 200.0, 20.0, " px"),
-        param("vscale", "Vertical Scale", 0.0, 200.0, 20.0, " px"),
-        param("detail", "Detail", 1.0, 64.0, 16.0, " px"),
-        param("seed", "Randomness", 0.0, 999.0, 1.0, ""),
-        choice(
-            "undefined",
-            "Undefined Areas",
-            &["Repeat Edge Pixels", "Wrap Around"],
-            0
+/// How a map that is not the layer's size gets used.
+const MAP_FIT: &[&str] = &["Stretch To Fit", "Tile"];
+
+/// What happens where the displacement sends a pixel off the edge.
+const MAP_UNDEFINED: &[&str] = &["Repeat Edge Pixels", "Wrap Around"];
+
+/// Filter ▸ Distort ▸ Displace.
+///
+/// Photoshop reads the displacement out of a file you pick: the red
+/// channel moves each pixel horizontally, the green channel vertically,
+/// with mid grey meaning "stay". That is exactly what this does when it
+/// is given a map -- the dialog has a Choose button for it -- and when
+/// it is not, it falls back to a noise field of its own, which is what
+/// the filter is most often used for anyway.
+pub struct Displace;
+
+impl FilterPlugin for Displace {
+    fn id(&self) -> &'static str {
+        "filter.displace"
+    }
+    fn name(&self) -> &'static str {
+        "Displace"
+    }
+    fn category(&self) -> &'static str {
+        "Distort"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("scale", "Horizontal Scale", 0.0, 200.0, 20.0, " px"),
+            param("vscale", "Vertical Scale", 0.0, 200.0, 20.0, " px"),
+            param("detail", "Detail", 1.0, 64.0, 16.0, " px"),
+            param("seed", "Randomness", 0.0, 999.0, 1.0, ""),
+            choice("fit", "Map Fit", MAP_FIT, 0),
+            choice("undefined", "Undefined Areas", MAP_UNDEFINED, 0),
+        ]
+    }
+
+    fn wants_map(&self) -> Option<&'static str> {
+        Some("Displacement Map")
+    }
+
+    fn info(&self) -> Option<String> {
+        Some(
+            "With no map chosen this displaces through a noise field of \
+             its own; Detail and Randomness shape it."
+                .to_string(),
         )
-    ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Photoshop displaces through a separate map file, chosen from a
-        // file picker a filter does not have. This uses its own noise
-        // field instead, with the same two scales and the same choice
-        // about what happens at the edges.
-        let scale = v.get("scale");
-        let vscale = v.get("vscale");
-        let detail = v.get("detail").max(1.0);
-        let seed = v.get("seed") as u32;
-        let wrap = v.get("undefined") >= 0.5;
-        let (ww, hh) = (w as f32, h as f32);
-        warp(px, w, h, move |x, y| {
-            let u = fbm(x / detail, y / detail, 11 + seed, 3) - 0.5;
-            let vv = fbm(x / detail + 37.0, y / detail - 19.0, 23 + seed, 3) - 0.5;
-            let (sx, sy) = (x + u * scale * 2.0, y + vv * vscale * 2.0);
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        self.apply_with(px, width, height, values, &FilterContext::default());
+    }
+
+    fn apply_with(
+        &self,
+        px: &mut [f32],
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+        context: &FilterContext,
+    ) {
+        let scale = values.get("scale");
+        let vscale = values.get("vscale");
+        let detail = values.get("detail").max(1.0);
+        let seed = values.get("seed") as u32;
+        let tile = values.get("fit") >= 0.5;
+        let wrap = values.get("undefined") >= 0.5;
+        let (ww, hh) = (width as f32, height as f32);
+        let map = context.map;
+        warp(px, width, height, move |x, y| {
+            let (u, v) = match map {
+                // Photoshop's convention, and every displacement map
+                // ever drawn for it: red is horizontal, green is
+                // vertical, and mid grey is no movement at all.
+                Some(map) => {
+                    let p = if tile {
+                        map.tiled(x, y)
+                    } else {
+                        map.stretched(x / ww, y / hh)
+                    };
+                    (p[0] - 0.5, p[1] - 0.5)
+                }
+                None => (
+                    fbm(x / detail, y / detail, 11 + seed, 3) - 0.5,
+                    fbm(x / detail + 37.0, y / detail - 19.0, 23 + seed, 3) - 0.5,
+                ),
+            };
+            let (sx, sy) = (x + u * scale * 2.0, y + v * vscale * 2.0);
             if wrap {
                 (sx.rem_euclid(ww), sy.rem_euclid(hh))
             } else {
@@ -349,15 +405,9 @@ simple_filter!(
             }
         });
     }
-);
+}
 
-// The three Distort effects that live in the Filter Gallery rather than
-// in the Filter menu. They are distortions in the same sense as the rest
-// of this module -- Glass and Ocean Ripple are coordinate remaps -- with
-// the exception of Diffuse Glow, which Adobe filed here because it is
-// what happens when you distort *light* instead of position.
-
-simple_filter!(
+context_filter!(
     DiffuseGlow,
     "filter.diffuse_glow",
     "Diffuse Glow",
@@ -367,11 +417,13 @@ simple_filter!(
         param("glow", "Glow Amount", 0.0, 20.0, 10.0, ""),
         param("clear", "Clear Amount", 0.0, 20.0, 15.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Light bleeding out of the highlights through a grainy diffusion
         // filter, which is what a stocking over the lens does. Clear
         // Amount is the threshold: below it nothing glows, which is what
-        // keeps the shadows from fogging.
+        // keeps the shadows from fogging. The glow is the background
+        // colour, as Photoshop's is -- white by default, which is why
+        // nobody notices until they change it.
         let graininess = v.get("graininess") / 10.0;
         let glow = v.get("glow") / 20.0;
         let clear = v.get("clear") / 20.0;
@@ -385,11 +437,13 @@ simple_filter!(
         for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let (x, y) = ((i % w) as f32, (i / w) as f32);
             let grain = (value_noise(x, y, 5237) - 0.5) * graininess * 0.35;
-            let lift = (bright[i] * (0.6 + glow * 2.0) + grain).max(0.0);
-            for v in p.iter_mut().take(3) {
-                // Screened towards white rather than added, so the glow
-                // saturates the way light does instead of clipping.
-                *v = (1.0 - (1.0 - *v) * (1.0 - lift.min(1.0))).clamp(0.0, 1.0);
+            let lift = (bright[i] * (0.6 + glow * 2.0) + grain).clamp(0.0, 1.0);
+            let colour = ctx.bg();
+            for (c, v) in p.iter_mut().take(3).enumerate() {
+                // Screened towards the glow colour rather than added, so
+                // the light saturates the way light does instead of
+                // clipping.
+                *v = (colour[c] - (colour[c] - *v) * (1.0 - lift)).clamp(0.0, 1.0);
             }
         }
     }

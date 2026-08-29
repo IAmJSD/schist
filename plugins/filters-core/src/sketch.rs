@@ -13,10 +13,10 @@
 //! which is why they look raised rather than drawn.
 
 use crate::util::{
-    blur_plane, edges, fbm, from_luma, gradient, luma_map, streak, surface, value_noise,
+    blur_plane, edges, fbm, from_luma_between, gradient, luma_map, streak, surface, value_noise,
 };
-use crate::{choice, param, simple_filter};
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use crate::{choice, context_filter, param};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
 /// Photoshop's eight light positions, as a direction to light from.
 pub const LIGHTS: &[&str] = &[
@@ -47,7 +47,7 @@ fn relief(plane: &[f32], w: usize, h: usize, light: (f32, f32), strength: f32) -
         .collect()
 }
 
-simple_filter!(
+context_filter!(
     BasRelief,
     "filter.bas_relief",
     "Bas Relief",
@@ -57,7 +57,7 @@ simple_filter!(
         param("smoothness", "Smoothness", 1.0, 15.0, 3.0, ""),
         choice("light", "Light", LIGHTS, 3)
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Carved shallowly into stone: the picture as a height field, lit
         // from one side, with everything flat going mid grey.
         let detail = v.get("detail");
@@ -66,11 +66,11 @@ simple_filter!(
         let mut plane = luma_map(px, w, h);
         blur_plane(&mut plane, w, h, smoothness * 0.25);
         let out = relief(&plane, w, h, light, detail * 0.9);
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     ChalkAndCharcoal,
     "filter.chalk_charcoal",
     "Chalk & Charcoal",
@@ -80,7 +80,7 @@ simple_filter!(
         param("chalk", "Chalk Area", 0.0, 20.0, 6.0, ""),
         param("pressure", "Stroke Pressure", 0.0, 5.0, 1.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Charcoal in the shadows, chalk in the highlights, mid grey
         // paper in between -- and the two drawn at opposite diagonals,
         // which is what stops the result reading as a posterisation.
@@ -105,11 +105,11 @@ simple_filter!(
             }
             out[i] = out[i].clamp(0.0, 1.0);
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     Charcoal,
     "filter.charcoal",
     "Charcoal",
@@ -119,7 +119,7 @@ simple_filter!(
         param("detail", "Detail", 0.0, 5.0, 5.0, ""),
         param("balance", "Light/Dark Balance", 0.0, 100.0, 50.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Smudged charcoal on paper: the edges are where the stick
         // presses hardest, the tone is dragged along the stroke, and the
         // balance slides the whole thing between a sketch and a
@@ -138,11 +138,11 @@ simple_filter!(
                 + (1.0 - smudged[i]) * balance;
             out[i] = (1.0 - ink).clamp(0.0, 1.0);
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     Chrome,
     "filter.chrome",
     "Chrome",
@@ -151,7 +151,7 @@ simple_filter!(
         param("detail", "Detail", 0.0, 10.0, 4.0, ""),
         param("smoothness", "Smoothness", 0.0, 10.0, 7.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Polished metal: the picture as a surface, lit, and then its
         // tones folded back on themselves so that every slope crosses
         // black and white several times. The folding is the whole trick
@@ -167,11 +167,11 @@ simple_filter!(
             out[i] = (0.5 + folded * 0.5).clamp(0.0, 1.0);
         }
         blur_plane(&mut out, w, h, 0.4);
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     ConteCrayon,
     "filter.conte_crayon",
     "Cont\u{e9} Crayon",
@@ -183,7 +183,7 @@ simple_filter!(
         param("scaling", "Scaling", 50.0, 200.0, 100.0, "%"),
         param("relief", "Relief", 0.0, 50.0, 20.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // A dense, soft crayon that only touches the high points of the
         // paper. Foreground Level is how far up the tones the dark
         // crayon reaches; Background Level is how far down the light one
@@ -212,11 +212,11 @@ simple_filter!(
                 .clamp(0.0, 1.0);
             }
         }
-        from_luma(px, &out, 0.15);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     GraphicPen,
     "filter.graphic_pen",
     "Graphic Pen",
@@ -226,7 +226,7 @@ simple_filter!(
         param("balance", "Light/Dark Balance", 0.0, 100.0, 50.0, ""),
         choice("direction", "Stroke Direction", crate::brush::DIRECTIONS, 0)
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // One pen, one direction, no grey: the tone is carried entirely
         // by how much of the paper the hatching covers. Every stroke is
         // the same weight, which is what makes it a pen drawing rather
@@ -248,14 +248,14 @@ simple_filter!(
                 out[i] = if comb < ink { 0.0 } else { 1.0 };
             }
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
 /// The three patterns Photoshop's halftone offers.
 const HALFTONE_PATTERNS: &[&str] = &["Circle", "Dot", "Line"];
 
-simple_filter!(
+context_filter!(
     HalftonePattern,
     "filter.halftone_pattern",
     "Halftone Pattern",
@@ -265,7 +265,7 @@ simple_filter!(
         param("contrast", "Contrast", 0.0, 50.0, 5.0, ""),
         choice("pattern", "Pattern Type", HALFTONE_PATTERNS, 1)
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // A screen, as a newspaper would print it -- but drawn *over* the
         // tone rather than replacing it, which is the difference between
         // this and Pixelate ▸ Color Halftone. Circles ripple out from the
@@ -297,11 +297,11 @@ simple_filter!(
                 out[i] = if screen < tone { 1.0 } else { 0.0 };
             }
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     NotePaper,
     "filter.note_paper",
     "Note Paper",
@@ -311,7 +311,7 @@ simple_filter!(
         param("graininess", "Graininess", 0.0, 20.0, 10.0, ""),
         param("relief", "Relief", 0.0, 25.0, 11.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Handmade paper with the image pressed into it: the picture is
         // reduced to two levels, and the boundary between them is
         // embossed as though the light paper had been pushed through the
@@ -331,11 +331,11 @@ simple_filter!(
                 out[i] = (sheet + (embossed[i] - 0.5) * 0.9 + g).clamp(0.0, 1.0);
             }
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     Photocopy,
     "filter.photocopy",
     "Photocopy",
@@ -344,7 +344,7 @@ simple_filter!(
         param("detail", "Detail", 1.0, 24.0, 7.0, ""),
         param("darkness", "Darkness", 1.0, 50.0, 8.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // A bad photocopy: the machine holds the edges and the deepest
         // shadows and gives up on everything in between, which is why a
         // photocopied photograph comes back as an outline.
@@ -361,11 +361,11 @@ simple_filter!(
             let flooded = ((0.25 - plane[i]) * 6.0 * darkness).max(0.0);
             out[i] = (1.0 - below.max(0.0) - flooded).clamp(0.0, 1.0);
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     Plaster,
     "filter.plaster",
     "Plaster",
@@ -375,7 +375,7 @@ simple_filter!(
         param("smoothness", "Smoothness", 1.0, 15.0, 2.0, ""),
         choice("light", "Light", LIGHTS, 5)
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Poured and set: the dark half of the picture rises out of the
         // light half as a smooth blob, lit from one side. Everything
         // inside a region is flat, so it reads as moulded rather than
@@ -398,11 +398,11 @@ simple_filter!(
             .zip(&height)
             .map(|(l, hgt)| (l * 0.65 + hgt * 0.35).clamp(0.0, 1.0))
             .collect();
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     Reticulation,
     "filter.reticulation",
     "Reticulation",
@@ -412,7 +412,7 @@ simple_filter!(
         param("black", "Black Level", 0.0, 50.0, 40.0, ""),
         param("white", "White Level", 0.0, 50.0, 5.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Film emulsion that has cracked and clumped -- what happens when
         // a negative is developed at the wrong temperature. The clumps
         // gather in the shadows and the highlights break into speckle.
@@ -432,11 +432,11 @@ simple_filter!(
                 out[i] = (l + grain).clamp(0.0, 1.0);
             }
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     Stamp,
     "filter.stamp",
     "Stamp",
@@ -445,7 +445,7 @@ simple_filter!(
         param("balance", "Light/Dark Balance", 0.0, 50.0, 25.0, ""),
         param("smoothness", "Smoothness", 1.0, 50.0, 5.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // A rubber stamp: one threshold, and enough smoothing first that
         // the boundary could have been cut out of rubber.
         let balance = v.get("balance") / 50.0;
@@ -456,11 +456,11 @@ simple_filter!(
             .iter()
             .map(|l| if *l > 1.0 - balance { 1.0 } else { 0.0 })
             .collect();
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     TornEdges,
     "filter.torn_edges",
     "Torn Edges",
@@ -470,7 +470,7 @@ simple_filter!(
         param("smoothness", "Smoothness", 1.0, 15.0, 9.0, ""),
         param("contrast", "Contrast", 1.0, 25.0, 12.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Stamp, but the threshold wanders: the boundary is pushed about
         // by a noise field, so the shapes come out ragged the way torn
         // paper is ragged rather than cut.
@@ -494,11 +494,11 @@ simple_filter!(
                 out[i] = t;
             }
         }
-        from_luma(px, &out, 0.0);
+        from_luma_between(px, &out, ctx.fg(), ctx.bg());
     }
 );
 
-simple_filter!(
+context_filter!(
     WaterPaper,
     "filter.water_paper",
     "Water Paper",
@@ -508,7 +508,7 @@ simple_filter!(
         param("brightness", "Brightness", 0.0, 100.0, 60.0, ""),
         param("contrast", "Contrast", 0.0, 100.0, 80.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, _ctx: &FilterContext| {
         // Painted onto fibrous, wet paper: the colour runs along the
         // fibres, which lie in whatever direction the paper was made in.
         // The one effect in this group that keeps its colour, because

@@ -336,3 +336,20 @@ pub fn flatten_colour(p: &mut [f32], levels: f32, chroma_step: f32) {
     p[1] = g.clamp(0.0, 1.0);
     p[2] = bl.clamp(0.0, 1.0);
 }
+
+/// Write a tone map back as a duotone between two colours.
+///
+/// Photoshop's Sketch filters draw in the foreground and background
+/// colours rather than in black and white: the ink is the foreground,
+/// the paper is the background, and everything between is a mix. With
+/// the swatches at their defaults that *is* black on white, which is why
+/// the difference is invisible until somebody changes them -- and then
+/// it is the difference between a photocopy and a sepia print.
+pub fn from_luma_between(px: &mut [f32], plane: &[f32], ink: [f32; 3], paper: [f32; 3]) {
+    for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let t = plane[i].clamp(0.0, 1.0);
+        for c in 0..3 {
+            p[c] = ink[c] + (paper[c] - ink[c]) * t;
+        }
+    }
+}

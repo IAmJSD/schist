@@ -132,12 +132,24 @@ Their dialogs match as well, which is most of what makes a filter feel
 like the one you know: Mezzotint's ten screens, Lens Blur's iris shapes,
 Smart Sharpen's choice of which blur it is undoing, Wave's several
 generators, Diffuse's anisotropic mode, Extrude's pyramids, Wind's blast
-and stagger. Where a control cannot exist here it is because a filter is
-handed pixels and numbers and nothing else: no foreground and background
-colours, so the Sketch group draws black on white; no file picker, so
-Displace uses a noise field rather than a map file; no canvas widgets, so
-a blur pin is a pair of position sliders and Flame rises from the bottom
-of the selection rather than following a path.
+and stagger.
+
+And they read the same things Photoshop's read. The Sketch group draws in
+the **foreground and background colours**, as do Clouds, Fibers, Tiles,
+Neon Glow, Colored Pencil's paper and Diffuse Glow's glow — set the
+swatches to sepia and Stamp comes out as a sepia print. **Displace**
+warps through a map you pick from a file, red for horizontal and green
+for vertical, stretched or tiled. **Flame** burns along the active path
+when the document has one. **Lens Blur** can take its depth from the
+layer's transparency or from what is underneath it, so part of the
+picture stays sharp. Harmonization, Colour Transfer and Landscape Mixer
+match against the layer below. Everything a filter needs beyond its own
+pixels is gathered by the host and handed over, which is what
+`FilterPlugin::wants_map`, `wants_path` and `wants_backdrop` are for.
+
+What is left is ergonomic rather than functional: Photoshop puts blur
+pins, light gizmos and flame paths on the canvas, and here they are
+position sliders and the path you already drew.
 
 **Warping.** Liquify with all seven brushes, Puppet Warp (Moving Least
 Squares, so pins hold and nothing shears), Content-Aware Scale (seam

@@ -1,10 +1,10 @@
 //! Filter ▸ Render: filters that generate rather than transform.
 
 use crate::util::{at, blur_plane, fbm, luma_map, put, value_noise};
-use crate::{choice, param, simple_filter};
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use crate::{choice, context_filter, param, simple_filter};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
-simple_filter!(
+context_filter!(
     Clouds,
     "filter.clouds",
     "Clouds",
@@ -14,24 +14,35 @@ simple_filter!(
         param("detail", "Detail", 1.0, 8.0, 5.0, ""),
         param("seed", "Seed", 0.0, 999.0, 1.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Photoshop draws clouds in the foreground and background colours;
-        // filters do not see those, so this renders greyscale, which is
-        // what Clouds is used as a source for anyway.
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
+        // Rendered between the foreground and background colours, which
+        // is what makes Clouds a sky rather than a grey field.
         let scale = v.get("scale").max(4.0);
         let octaves = v.get("detail").max(1.0) as u32;
         let seed = v.get("seed") as u32;
+        let (fg, bg) = (ctx.fg(), ctx.bg());
         for y in 0..h {
             for x in 0..w {
                 let n = fbm(x as f32 / scale, y as f32 / scale, seed, octaves);
                 let a = at(px, w, h, x as i32, y as i32)[3];
-                put(px, w, x, y, [n, n, n, a.max(1.0)]);
+                put(
+                    px,
+                    w,
+                    x,
+                    y,
+                    [
+                        fg[0] + (bg[0] - fg[0]) * n,
+                        fg[1] + (bg[1] - fg[1]) * n,
+                        fg[2] + (bg[2] - fg[2]) * n,
+                        a.max(1.0),
+                    ],
+                );
             }
         }
     }
 );
 
-simple_filter!(
+context_filter!(
     DifferenceClouds,
     "filter.difference_clouds",
     "Difference Clouds",
@@ -41,15 +52,22 @@ simple_filter!(
         param("detail", "Detail", 1.0, 8.0, 5.0, ""),
         param("seed", "Seed", 0.0, 999.0, 1.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // Same field, differenced against what is already there, which is
         // what gives the veined look when applied repeatedly.
         let scale = v.get("scale").max(4.0);
         let octaves = v.get("detail").max(1.0) as u32;
         let seed = v.get("seed") as u32;
+        let (fg, bg) = (ctx.fg(), ctx.bg());
         for y in 0..h {
             for x in 0..w {
-                let n = fbm(x as f32 / scale, y as f32 / scale, seed, octaves);
+                let t = fbm(x as f32 / scale, y as f32 / scale, seed, octaves);
+                let n = crate::util::luma(&[
+                    fg[0] + (bg[0] - fg[0]) * t,
+                    fg[1] + (bg[1] - fg[1]) * t,
+                    fg[2] + (bg[2] - fg[2]) * t,
+                    1.0,
+                ]);
                 let p = at(px, w, h, x as i32, y as i32);
                 put(
                     px,
@@ -63,7 +81,7 @@ simple_filter!(
     }
 );
 
-simple_filter!(
+context_filter!(
     Fibers,
     "filter.fibers",
     "Fibers",
@@ -73,18 +91,31 @@ simple_filter!(
         param("strength", "Strength", 1.0, 64.0, 4.0, ""),
         param("seed", "Randomize", 0.0, 999.0, 0.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
-        // Vertical streaks: noise that varies fast across and slowly down.
-        // Photoshop's Randomize is a button that reseeds; a filter has to
-        // be a function of its settings, so it is a number here.
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
+        // Vertical streaks between the two colours: noise that varies
+        // fast across and slowly down. Photoshop's Randomize is a button
+        // that reseeds; a filter has to be a function of its settings, so
+        // it is a number here.
         let variance = v.get("variance").max(1.0);
         let strength = v.get("strength").max(1.0);
         let seed = 977 + v.get("seed") as u32;
+        let (fg, bg) = (ctx.fg(), ctx.bg());
         for y in 0..h {
             for x in 0..w {
                 let n = fbm(x as f32 * variance / 16.0, y as f32 / strength, seed, 4);
                 let a = at(px, w, h, x as i32, y as i32)[3];
-                put(px, w, x, y, [n, n, n, a.max(1.0)]);
+                put(
+                    px,
+                    w,
+                    x,
+                    y,
+                    [
+                        fg[0] + (bg[0] - fg[0]) * n,
+                        fg[1] + (bg[1] - fg[1]) * n,
+                        fg[2] + (bg[2] - fg[2]) * n,
+                        a.max(1.0),
+                    ],
+                );
             }
         }
     }
@@ -588,46 +619,149 @@ simple_filter!(
 // narrows, wanders, and cools from white through yellow to red as it
 // goes. Sampling that as a field and colouring by temperature gets much
 // closer than drawing tongues would.
-simple_filter!(
-    Flame,
-    "filter.flame",
-    "Flame",
-    "Render",
-    [
-        param("count", "Flames", 1.0, 24.0, 5.0, ""),
-        param("height", "Length", 10.0, 100.0, 55.0, "%"),
-        param("width", "Width", 5.0, 100.0, 30.0, ""),
-        param("angle", "Angle", -60.0, 60.0, 0.0, "\u{b0}"),
-        param("turbulence", "Turbulent", 0.0, 100.0, 45.0, ""),
-        param("opacity", "Opacity", 0.0, 100.0, 100.0, ""),
-        param("seed", "Randomness", 0.0, 999.0, 3.0, "")
-    ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+/// Filter ▸ Render ▸ Flame.
+///
+/// Photoshop's runs along a path you drew, and so does this one when the
+/// document has an active path: the host flattens it and hands over the
+/// points. With no path the flames rise from the bottom of the
+/// selection, which is where a fire is.
+///
+/// A flame is drawn the way one behaves: a column of hot gas that rises,
+/// narrows, wanders, and cools from white through yellow to red as it
+/// goes. Sampling that as a field and colouring by temperature gets much
+/// closer than drawing tongues would.
+pub struct Flame;
+
+impl FilterPlugin for Flame {
+    fn id(&self) -> &'static str {
+        "filter.flame"
+    }
+    fn name(&self) -> &'static str {
+        "Flame"
+    }
+    fn category(&self) -> &'static str {
+        "Render"
+    }
+    fn params(&self) -> Vec<FilterParam> {
+        vec![
+            param("count", "Flames", 1.0, 24.0, 5.0, ""),
+            param("height", "Length", 10.0, 100.0, 55.0, "%"),
+            param("width", "Width", 5.0, 100.0, 30.0, ""),
+            param("angle", "Angle", -60.0, 60.0, 0.0, "\u{b0}"),
+            param("turbulence", "Turbulent", 0.0, 100.0, 45.0, ""),
+            param("opacity", "Opacity", 0.0, 100.0, 100.0, ""),
+            param("seed", "Randomness", 0.0, 999.0, 3.0, ""),
+        ]
+    }
+
+    fn wants_path(&self) -> bool {
+        true
+    }
+
+    fn info(&self) -> Option<String> {
+        Some(
+            "Burns along the active path when there is one, and up from \
+             the bottom of the selection when there is not."
+                .to_string(),
+        )
+    }
+
+    fn apply(&self, px: &mut [f32], width: usize, height: usize, values: &FilterValues) {
+        self.apply_with(px, width, height, values, &FilterContext::default());
+    }
+
+    fn apply_with(
+        &self,
+        px: &mut [f32],
+        w: usize,
+        h: usize,
+        v: &FilterValues,
+        context: &FilterContext,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
         let count = v.get("count").round().max(1.0) as usize;
-        let height = v.get("height") / 100.0 * h as f32;
+        let length = v.get("height") / 100.0 * h as f32;
         let width = v.get("width") / 100.0 * (w as f32 / count as f32) * 0.9;
         let lean = v.get("angle").to_radians().tan();
         let turbulence = v.get("turbulence") / 100.0;
         let opacity = v.get("opacity") / 100.0;
         let seed = v.get("seed") as u32;
-        if height <= 0.0 || width <= 0.0 || opacity <= 0.0 {
+        if length <= 0.0 || width <= 0.0 || opacity <= 0.0 {
             return;
         }
+
+        // Where each flame starts and which way is up for it. Along a
+        // path that is a point on the curve and the curve's own normal,
+        // so a flame on a diagonal leans off the diagonal rather than off
+        // the frame.
+        let roots: Vec<(f32, f32, f32, f32)> = match context.path {
+            Some(points) if points.len() >= 2 => (0..count)
+                .map(|i| {
+                    let t = if count == 1 {
+                        0.5
+                    } else {
+                        i as f32 / (count - 1) as f32
+                    };
+                    let last = points.len() - 1;
+                    let at = t * last as f32;
+                    // The segment this root sits on. The final root lands
+                    // exactly on the last point, where there is no
+                    // segment ahead of it, so it takes the one behind --
+                    // without which its direction is (0, 0), its normal
+                    // is nothing, and it sets the whole frame alight.
+                    let i0 = (at.floor() as usize).min(last.saturating_sub(1));
+                    let frac = at - i0 as f32;
+                    let (p0, p1) = (points[i0], points[i0 + 1]);
+                    let (x, y) = (p0.0 + (p1.0 - p0.0) * frac, p0.1 + (p1.1 - p0.1) * frac);
+                    // The normal, pointing up-ish: fire leaves a surface
+                    // at right angles to it.
+                    let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+                    let n = dx.hypot(dy);
+                    let (mut nx, mut ny) = if n < 1e-3 {
+                        // A segment with no length says nothing about
+                        // which way is up; straight up it is.
+                        (0.0, -1.0)
+                    } else {
+                        (dy / n, -dx / n)
+                    };
+                    if ny > 0.0 {
+                        nx = -nx;
+                        ny = -ny;
+                    }
+                    (x, y, nx, ny)
+                })
+                .collect(),
+            // No path: evenly along the bottom edge, burning straight up.
+            _ => (0..count)
+                .map(|i| {
+                    (
+                        (i as f32 + 0.5) * w as f32 / count as f32,
+                        h as f32,
+                        0.0,
+                        -1.0,
+                    )
+                })
+                .collect(),
+        };
+
         for y in 0..h {
             for x in 0..w {
                 let (fx, fy) = (x as f32, y as f32);
-                // How far up this pixel is inside the flame's own space.
-                let rise = (h as f32 - fy) / height;
-                if !(0.0..=1.0).contains(&rise) {
-                    continue;
-                }
                 let mut heat = 0.0f32;
-                for f in 0..count {
-                    // Where this flame's column is at this height: it
-                    // leans, and it wanders more the higher it goes.
-                    let base = (f as f32 + 0.5) * w as f32 / count as f32;
+                for (f, &(rx, ry, nx, ny)) in roots.iter().enumerate() {
+                    // How far up this flame's own axis the pixel is, and
+                    // how far off it.
+                    let (dx, dy) = (fx - rx, fy - ry);
+                    let up = dx * nx + dy * ny;
+                    let rise = up / length;
+                    if !(0.0..=1.0).contains(&rise) {
+                        continue;
+                    }
+                    let across = dx * -ny + dy * nx + lean * up;
                     let wander = (fbm(
-                        fy / (18.0 + 30.0 * (1.0 - turbulence)),
+                        up / (18.0 + 30.0 * (1.0 - turbulence)),
                         f as f32 * 9.0,
                         seed,
                         3,
@@ -636,16 +770,23 @@ simple_filter!(
                         * width
                         * 3.0
                         * rise;
-                    let cx = base + lean * (h as f32 - fy) + wander;
                     // The column narrows as it rises and dies out at the
                     // top, which is what gives a flame its shape.
                     let taper = (1.0 - rise).powf(0.65) * (1.0 - (rise - 0.05).max(0.0) * 0.35);
                     let reach = (width * taper).max(0.5);
-                    let d = ((fx - cx) / reach).abs();
+                    let d = ((across - wander) / reach).abs();
                     if d < 1.0 {
                         // Licks: the flame is not solid, it is torn into
-                        // tongues by the same noise field.
-                        let tongue = fbm(fx / 9.0, (fy - rise * 60.0) / 7.0, seed ^ 0x51ed, 3);
+                        // tongues by the same noise field -- sampled in
+                        // the flame's own frame rather than the
+                        // picture's, so the tongues run *up* it whichever
+                        // way it is pointing.
+                        let tongue = fbm(
+                            (across - wander) / 9.0,
+                            (up - rise * 60.0) / 7.0,
+                            seed ^ 0x51ed,
+                            3,
+                        );
                         let body = (1.0 - d * d) * (1.0 - rise * 0.85);
                         heat = heat.max((body * (0.55 + tongue * 0.9)).max(0.0));
                     }
@@ -679,7 +820,7 @@ simple_filter!(
             }
         }
     }
-);
+}
 
 pub fn register(registry: &mut schist_plugin_api::PluginRegistry) {
     registry.register_filter(Box::new(Clouds));

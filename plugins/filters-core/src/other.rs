@@ -4,8 +4,8 @@
 use crate::util::{
     at, convolve3, gaussian_rgba, luma, premultiply, put, sample, unpremultiply, value_noise,
 };
-use crate::{choice, param, simple_filter};
-use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues};
+use crate::{choice, context_filter, param, simple_filter};
+use schist_plugin_api::{FilterContext, FilterParam, FilterPlugin, FilterValues};
 
 simple_filter!(
     HighPass,
@@ -303,7 +303,10 @@ const IRIS_SHAPES: &[&str] = &[
 /// off it and the filter takes its own path.
 const FX_THRESHOLD: f32 = 0.75;
 
-simple_filter!(
+/// Where Lens Blur reads its depth from, which decides what stays sharp.
+const DEPTH_SOURCES: &[&str] = &["None", "Transparency", "Layer Below"];
+
+context_filter!(
     LensBlur,
     "filter.lens_blur",
     "Lens Blur",
@@ -315,9 +318,12 @@ simple_filter!(
         param("rotation", "Rotation", 0.0, 360.0, 0.0, "\u{b0}"),
         param("brightness", "Specular Brightness", 0.0, 100.0, 0.0, ""),
         param("threshold", "Specular Threshold", 0.0, 100.0, 75.0, ""),
-        param("noise", "Noise", 0.0, 100.0, 0.0, "")
+        param("noise", "Noise", 0.0, 100.0, 0.0, ""),
+        choice("depth", "Depth Map", DEPTH_SOURCES, 0),
+        param("focal", "Blur Focal Distance", 0.0, 100.0, 0.0, ""),
+        param("invert_depth", "Invert Depth Map", 0.0, 1.0, 0.0, "")
     ],
-    |px: &mut [f32], w: usize, h: usize, v: &FilterValues| {
+    |px: &mut [f32], w: usize, h: usize, v: &FilterValues, ctx: &FilterContext| {
         // A flat kernel rather than a Gaussian, which is what makes
         // out-of-focus highlights come out as discs instead of smears --
         // and, at radius 60, eleven thousand taps a pixel.
@@ -333,6 +339,9 @@ simple_filter!(
         // shared blur implements -- and the one the GPU knows -- so the
         // default settings stay on the fast path. Anything else is a
         // different kernel and runs here.
+        // Kept for the depth map below, which needs the picture as it
+        // was to hold anything back at.
+        let sharp = px.to_vec();
         if blades == 0 && curvature <= 0.0 && (threshold - FX_THRESHOLD).abs() < 0.01 {
             schist_fx::lens_blur_rgba(px, w, h, radius, boost);
         } else {
@@ -387,6 +396,35 @@ simple_filter!(
                 }
             }
             unpremultiply(px);
+        }
+
+        // A depth map holds part of the picture back at its original
+        // sharpness: everything at the focal distance stays, everything
+        // away from it takes the blur. Photoshop reads the map from a
+        // channel or a layer mask; the two sources a filter can reach
+        // are the layer's own transparency and whatever is underneath
+        // it.
+        let source = (v.get("depth").round().max(0.0) as usize).min(2);
+        if source > 0 {
+            let focal = v.get("focal") / 100.0;
+            let invert = v.get("invert_depth") >= 0.5;
+            let depth: Option<Vec<f32>> = match source {
+                1 => Some(sharp.as_chunks::<4>().0.iter().map(|p| p[3]).collect()),
+                _ => ctx
+                    .backdrop
+                    .map(|b| b.as_chunks::<4>().0.iter().map(|p| luma(p)).collect()),
+            };
+            if let Some(depth) = depth {
+                for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let d = if invert { 1.0 - depth[i] } else { depth[i] };
+                    // In focus at the focal distance, blurred away from
+                    // it -- the same reading Depth Blur gives its map.
+                    let keep = 1.0 - (d - focal).abs().min(1.0);
+                    for c in 0..4 {
+                        p[c] += (sharp[i * 4 + c] - p[c]) * keep;
+                    }
+                }
+            }
         }
 
         // Grain, added last: a lens blur is the one place a picture ends

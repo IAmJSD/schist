@@ -355,7 +355,11 @@ fn the_filters_that_ask_for_a_backdrop_use_it() {
         let before = image(w, h);
         let mut px = before.clone();
         let values = FilterValues::defaults(&f.params());
-        f.apply_over(&mut px, Some(&warm), w, h, &values);
+        let context = schist_plugin_api::FilterContext {
+            backdrop: Some(&warm),
+            ..Default::default()
+        };
+        f.apply_with(&mut px, w, h, &values, &context);
         let (was, now, want) = (mean(&before), mean(&px), mean(&warm));
         for c in 0..3 {
             let closer = (now[c] - want[c]).abs() < (was[c] - want[c]).abs();
@@ -373,4 +377,106 @@ fn the_filters_that_ask_for_a_backdrop_use_it() {
         asked >= 3,
         "expected the three matching filters, found {asked}"
     );
+}
+
+#[test]
+fn the_two_tone_filters_draw_in_the_colours_they_are_given() {
+    // Photoshop's Sketch group renders in the foreground and background
+    // colours, and Clouds and Fibers render *between* them. With the
+    // swatches at their defaults that is black on white, which is why
+    // the difference is invisible until somebody changes them -- so the
+    // check is that a filter handed two unmistakable colours produces
+    // neither black nor white.
+    let (w, h) = (32usize, 32usize);
+    let context = schist_plugin_api::FilterContext {
+        foreground: schist_color::Rgba {
+            r: 0.8,
+            g: 0.1,
+            b: 0.1,
+            a: 1.0,
+        },
+        background: schist_color::Rgba {
+            r: 0.1,
+            g: 0.2,
+            b: 0.7,
+            a: 1.0,
+        },
+        ..Default::default()
+    };
+    let reg = registry();
+    let mut checked = 0;
+    for f in reg
+        .filters()
+        .filter(|f| f.category() == "Sketch" || matches!(f.id(), "filter.clouds" | "filter.fibers"))
+    {
+        // Water Paper keeps the photograph's own colour, as Photoshop's
+        // does; it is in the Sketch menu but is not a two-tone filter.
+        if f.id() == "filter.water_paper" {
+            continue;
+        }
+        checked += 1;
+        let mut px = image(w, h);
+        let values = FilterValues::defaults(&f.params());
+        f.apply_with(&mut px, w, h, &values, &context);
+        // Every pixel should sit between the two colours, so nothing
+        // should be more green than either of them is.
+        let greenest = px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[1])
+            .fold(0.0f32, f32::max);
+        assert!(
+            greenest <= 0.45,
+            "{} ignored the colours it was given: greenest channel {greenest:.2}",
+            f.id()
+        );
+    }
+    assert!(checked >= 14, "expected the two-tone set, found {checked}");
+}
+
+#[test]
+fn displace_uses_the_map_it_is_given() {
+    // A map that is mid grey on the left and hard right on the red
+    // channel should leave the left alone and shove the right sideways.
+    let (w, h) = (64usize, 32usize);
+    let map = schist_plugin_api::FilterImage {
+        width: w,
+        height: h,
+        pixels: (0..w * h)
+            .flat_map(|i| {
+                let right = (i % w) > w / 2;
+                [if right { 1.0f32 } else { 0.5 }, 0.5, 0.5, 1.0]
+            })
+            .collect(),
+    };
+    let reg = registry();
+    let f = reg
+        .filters()
+        .find(|f| f.id() == "filter.displace")
+        .expect("displace");
+    let before = image(w, h);
+    let mut px = before.clone();
+    let mut values = FilterValues::defaults(&f.params());
+    values.set("scale", 20.0);
+    values.set("vscale", 0.0);
+    let context = schist_plugin_api::FilterContext {
+        map: Some(&map),
+        ..Default::default()
+    };
+    f.apply_with(&mut px, w, h, &values, &context);
+
+    let moved = |x: usize| {
+        (0..h)
+            .map(|y| {
+                let i = (y * w + x) * 4;
+                (px[i] - before[i]).abs()
+            })
+            .sum::<f32>()
+    };
+    assert!(
+        moved(w / 4) < 1e-3,
+        "mid grey in the map should mean no movement"
+    );
+    assert!(moved(w * 3 / 4) > 0.1, "the map's push was ignored");
 }
