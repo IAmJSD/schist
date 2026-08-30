@@ -1031,6 +1031,7 @@ impl Workspace {
         if ws.view.ai_panel {
             ws.ensure_ai_models(cx);
         }
+        ws.watch_agent_path(cx);
         ws.rebuild_tool_groups();
         ws.sync_note_defaults();
         // A launch-time update check, when the preference allows one and

@@ -58,6 +58,40 @@ impl Workspace {
         }
     }
 
+    /// Pick up the login-shell PATH once its probe answers.
+    ///
+    /// Asking the shell costs a shell startup, so it runs on a thread
+    /// while the window opens (see [`crate::ai::path`]) — which means the
+    /// availability this workspace was built with can say the CLIs are
+    /// missing when they are merely off launchd's PATH. Poll for the
+    /// answer and redo it. The probe gives up on its own, so the loop
+    /// always ends.
+    pub fn watch_agent_path(&mut self, cx: &mut Context<Self>) {
+        if ai::path::ready() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            while !ai::path::ready() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            this.update(cx, |ws, cx| {
+                let found = (Backend::Claude.available(), Backend::Codex.available());
+                if found == ws.ai.available {
+                    return;
+                }
+                ws.ai.available = found;
+                if ws.view.ai_panel {
+                    ws.ensure_ai_models(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The fetched (or fallback) catalog for a harness.
     pub fn ai_models_for(&self, backend: Backend) -> Vec<ModelEntry> {
         let cached = match backend {

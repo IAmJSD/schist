@@ -6,7 +6,7 @@
 //! requests to [`PanelServer`], which queues them for the UI thread and
 //! awaits the reply — no socket, no bridge, no second process.
 
-use super::{AgentEvent, AiShared, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
+use super::{path, AgentEvent, AiShared, Backend, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
 use claude_agent_sdk_rs::types::mcp::McpSdkServerConfig;
 use claude_agent_sdk_rs::{
     ClaudeAgentOptions, ClaudeClient, ClaudeError, McpServerConfig, McpServers, Message,
@@ -96,6 +96,12 @@ fn options(shared: &AiShared, resume: Option<String>) -> ClaudeAgentOptions {
         cwd: std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(std::path::PathBuf::from),
+        // Found on the login shell's PATH rather than launchd's, which is
+        // all a Finder launch inherits; `env` hands that same PATH to
+        // whatever the CLI spawns in turn. `None` lets the SDK run its
+        // own search and say its own thing when it comes up empty.
+        cli_path: Backend::Claude.locate(),
+        env: path::child_env(),
         ..Default::default()
     }
 }

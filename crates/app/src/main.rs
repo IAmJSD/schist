@@ -210,11 +210,11 @@ fn main() {
         }
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    // A Finder/desktop launch gets launchd's bare PATH; take the login
-    // shell's instead so the AI panel finds the same CLIs the terminal
-    // does. Before anything spawns threads — this edits the environment.
-    #[cfg(unix)]
-    ai::adopt_login_shell_path();
+    // A Finder/desktop launch gets launchd's bare PATH, not the one the
+    // AI panel's CLIs live on. Start asking the login shell for its PATH
+    // now and collect the answer later: it is a shell startup, and the
+    // window must not wait on it.
+    ai::path::start();
     // Before anything else: a system with no Vulkan driver cannot open a
     // window, and saying so plainly beats the panic that follows from
     // deep inside GPUI's renderer.
