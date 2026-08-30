@@ -7,9 +7,12 @@ arch=(x86_64 aarch64)
 url="https://github.com/Infrawrench/schist"
 license=(MIT)
 # fontconfig/wayland/vulkan-icd-loader are dlopen'd, so namcap flags them
-# "may not be needed" — they are.
+# "may not be needed" — they are. vulkan-driver is the virtual package
+# every ICD provides: the loader on its own renders nothing, and an install
+# with no GPU driver (a VM, most often) would otherwise get as far as the
+# window and no further. vulkan-swrast satisfies it in software.
 depends=(fontconfig freetype2 hicolor-icon-theme libxcb libxkbcommon
-         libxkbcommon-x11 vulkan-icd-loader wayland)
+         libxkbcommon-x11 vulkan-driver vulkan-icd-loader wayland)
 # clang + mold: the repo's .cargo/config.toml selects them as the linker.
 makedepends=(cargo clang mold)
 # !lto: makepkg's -flto=auto produces GCC-bitcode objects in ring's C archive

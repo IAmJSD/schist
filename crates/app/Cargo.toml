@@ -54,3 +54,9 @@ schist-plugin-host-wasm.workspace = true
 # other than this one and are unpacked on first use. See the Makefile.
 schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
 schist-colormgmt.workspace = true
+
+# The pre-flight Vulkan probe in `src/vulkan.rs`. Blade already links this
+# exact version to do the real thing, so it is not another crate in the
+# tree -- only another user of one.
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = "0.38"

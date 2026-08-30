@@ -14,6 +14,10 @@ mod panels;
 mod style_dialog;
 mod ui;
 mod update;
+// Linux renders through Vulkan and panics inside GPUI when there is no
+// driver to render with. Nothing to check on macOS (Metal) or Windows.
+#[cfg(target_os = "linux")]
+mod vulkan;
 mod workspace;
 
 use actions::{HideApp, HideOthers, Quit, ShowAll};
@@ -191,6 +195,11 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Before anything else: a system with no Vulkan driver cannot open a
+    // window, and saying so plainly beats the panic that follows from
+    // deep inside GPUI's renderer.
+    #[cfg(target_os = "linux")]
+    vulkan::check();
     let options = workspace::load_view_options();
     // Both diagnostics are opt-in, and separately so: writing a report to
     // this machine and sending one to ours are not the same decision.

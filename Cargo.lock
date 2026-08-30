@@ -5927,6 +5927,7 @@ name = "schist-app"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "ash",
  "env_logger",
  "gpui",
  "image",
