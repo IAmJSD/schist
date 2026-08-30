@@ -9,7 +9,7 @@
 //! process (the pid is shared with [`Conversation`]); the thread id
 //! survives and the next conversation resumes it.
 
-use super::{AgentEvent, AiShared, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
+use super::{path, AgentEvent, AiShared, Backend, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
 use anyhow::{Context as _, Result};
 use codex_codes::cli::AppServerBuilder;
 use codex_codes::client_sync::SyncClient;
@@ -67,9 +67,16 @@ fn run(
     resume: Option<String>,
 ) -> Result<()> {
     let exe = std::env::current_exe().context("locating the schist binary")?;
+    // The CLI is located on the login shell's PATH, not launchd's — the
+    // builder's own `which` would only see what a Finder launch inherits
+    // — and that PATH is passed on to the app-server's own children.
+    let mut builder = AppServerBuilder::new().env("PATH", path::resolved());
+    if let Some(codex) = Backend::Codex.locate() {
+        builder = builder.command(codex);
+    }
     // The bridge command and its token, as codex config: the value side of
     // each `-c` is TOML.
-    let mut builder = AppServerBuilder::new()
+    builder = builder
         .config_override(
             "mcp_servers.schist.command",
             toml_string(&exe.display().to_string()),

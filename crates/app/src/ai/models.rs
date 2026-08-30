@@ -9,7 +9,7 @@
 //! failure the static fallback catalog is reported instead, so the
 //! picker is never empty.
 
-use super::{AgentEvent, AiShared, Backend, ModelEntry};
+use super::{path, AgentEvent, AiShared, Backend, ModelEntry};
 use anyhow::{anyhow, Context as _, Result};
 
 pub fn fetch(backend: Backend, shared: AiShared) {
@@ -42,6 +42,10 @@ fn probe(backend: Backend) -> Result<Vec<ModelEntry>> {
 /// Connect the Agent SDK client just long enough to read the server info
 /// its initialize handshake carries, then hang up.
 fn claude_models() -> Result<Vec<ModelEntry>> {
+    // Before the runtime: resolving the CLI waits on the login-shell PATH
+    // probe, and that wait does not belong inside an async block.
+    let cli_path = Backend::Claude.locate();
+    let env = path::child_env();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -51,6 +55,10 @@ fn claude_models() -> Result<Vec<ModelEntry>> {
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(std::path::PathBuf::from),
             skip_version_check: true,
+            // Same spawn settings the conversation uses: see
+            // `claude::options`.
+            cli_path,
+            env,
             ..Default::default()
         };
         let mut client = claude_agent_sdk_rs::ClaudeClient::new(options);
@@ -108,7 +116,10 @@ fn claude_models() -> Result<Vec<ModelEntry>> {
 
 /// One `model/list` round trip on a throwaway app-server.
 fn codex_models() -> Result<Vec<ModelEntry>> {
-    let mut builder = codex_codes::AppServerBuilder::new();
+    let mut builder = codex_codes::AppServerBuilder::new().env("PATH", path::resolved());
+    if let Some(codex) = Backend::Codex.locate() {
+        builder = builder.command(codex);
+    }
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         builder = builder.working_directory(std::path::PathBuf::from(home));
     }
