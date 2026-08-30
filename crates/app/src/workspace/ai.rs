@@ -20,11 +20,21 @@ const AI_TICK_MS: u64 = 33;
 impl Workspace {
     pub fn toggle_ai_panel(&mut self, cx: &mut Context<Self>) {
         self.view.ai_panel = !self.view.ai_panel;
-        self.status = format!(
-            "AI panel {}",
-            if self.view.ai_panel { "shown" } else { "hidden" }
-        )
-        .into();
+        self.status = if self.view.ai_panel {
+            "AI panel shown".into()
+        } else {
+            // The panel's own close button lands here too; say how to
+            // get it back.
+            format!(
+                "AI panel hidden — View ▸ AI Panel ({}) brings it back",
+                if cfg!(target_os = "macos") {
+                    "Cmd+Shift+A"
+                } else {
+                    "Ctrl+Shift+A"
+                }
+            )
+            .into()
+        };
         if self.view.ai_panel {
             self.ensure_ai_models(cx);
         }

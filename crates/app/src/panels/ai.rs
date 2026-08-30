@@ -76,6 +76,24 @@ fn header(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                             cx.listener(|ws, _e, _w, cx| ws.ai_new_conversation(cx)),
                         )
                         .child(icon("trash", 13.0, palette().text_dim)),
+                )
+                // Closes the sidebar; whether it was open is a saved
+                // preference, so it comes back on the next launch.
+                .child(
+                    div()
+                        .id("ai-close")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(20.0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgb(palette().hover)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _e, _w, cx| ws.toggle_ai_panel(cx)),
+                        )
+                        .child(icon("close", 13.0, palette().text_dim)),
                 ),
         )
 }
