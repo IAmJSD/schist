@@ -103,11 +103,9 @@ impl Catalog {
         let mut catalog = Catalog::assemble(registry);
         if scope == Scope::Active {
             let managers = ["create_session", "list_sessions", "close_session"];
-            catalog.defs.retain(|def| {
-                !managers
-                    .iter()
-                    .any(|m| def["name"].as_str() == Some(m))
-            });
+            catalog
+                .defs
+                .retain(|def| !managers.iter().any(|m| def["name"].as_str() == Some(m)));
             for name in managers {
                 catalog.actions.remove(name);
             }

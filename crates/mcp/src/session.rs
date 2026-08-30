@@ -223,7 +223,12 @@ impl Session {
         out
     }
 
-    pub fn stroke(&mut self, points: &[(f32, f32)], pressure: f32, modifiers: Modifiers) -> Result<()> {
+    pub fn stroke(
+        &mut self,
+        points: &[(f32, f32)],
+        pressure: f32,
+        modifiers: Modifiers,
+    ) -> Result<()> {
         let out = self.ctx().stroke(points, pressure, modifiers);
         self.doc.take_damage();
         out

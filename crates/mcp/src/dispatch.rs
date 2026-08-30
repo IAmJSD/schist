@@ -234,21 +234,21 @@ fn apply_adjustment(sess: &mut SessionCtx, kind: AdjustmentKind, args: &Value) -
 }
 
 fn tool_stroke(sess: &mut SessionCtx, args: &Value) -> Result<Value> {
-    let points: Vec<(f32, f32)> = args
-        .get("points")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow!("missing points array"))?
-        .iter()
-        .map(|p| {
-            let pair = p.as_array().filter(|a| a.len() == 2).ok_or_else(|| {
-                anyhow!("each point must be an [x, y] pair in document pixels")
-            })?;
-            Ok((
-                pair[0].as_f64().unwrap_or(0.0) as f32,
-                pair[1].as_f64().unwrap_or(0.0) as f32,
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let points: Vec<(f32, f32)> =
+        args.get("points")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("missing points array"))?
+            .iter()
+            .map(|p| {
+                let pair = p.as_array().filter(|a| a.len() == 2).ok_or_else(|| {
+                    anyhow!("each point must be an [x, y] pair in document pixels")
+                })?;
+                Ok((
+                    pair[0].as_f64().unwrap_or(0.0) as f32,
+                    pair[1].as_f64().unwrap_or(0.0) as f32,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
     let pressure = args
         .get("pressure")
         .and_then(|v| v.as_f64())

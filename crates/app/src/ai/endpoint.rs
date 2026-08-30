@@ -86,9 +86,15 @@ fn serve(stream: TcpStream, shared: &AiShared, expected: &str) {
         }
         log::debug!(
             "mcp bridge request: {}",
-            message.get("method").and_then(|m| m.as_str()).unwrap_or("?")
+            message
+                .get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or("?")
         );
-        let id = message.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let id = message
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let (tx, rx) = std::sync::mpsc::channel();
         shared.ask(
             message,
@@ -212,7 +218,8 @@ mod tests {
 
         // A wrong token gets silence and a closed connection.
         let mut bad = TcpStream::connect(&endpoint.addr).unwrap();
-        bad.write_all(b"nope\n{\"id\":1,\"method\":\"ping\"}\n").unwrap();
+        bad.write_all(b"nope\n{\"id\":1,\"method\":\"ping\"}\n")
+            .unwrap();
 
         let mut conn = TcpStream::connect(&endpoint.addr).unwrap();
         conn.write_all(format!("{}\n", endpoint.token).as_bytes())

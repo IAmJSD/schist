@@ -24,7 +24,12 @@ use std::sync::{Arc, Mutex};
 
 /// Start a Codex conversation worker. `resume` continues an earlier
 /// thread by id.
-pub fn start(shared: AiShared, addr: String, token: String, resume: Option<String>) -> Conversation {
+pub fn start(
+    shared: AiShared,
+    addr: String,
+    token: String,
+    resume: Option<String>,
+) -> Conversation {
     let (tx, rx) = std::sync::mpsc::channel();
     let pid: Arc<Mutex<Option<u32>>> = Default::default();
     let worker_pid = pid.clone();
@@ -215,11 +220,7 @@ fn forward(shared: &AiShared, notification: Notification) -> bool {
 /// server in this profile is the app's own, which is what the panel is
 /// *for*. Commands and file changes are declined, and anything else gets
 /// an error so the server is never left waiting.
-fn respond_declining(
-    client: &mut SyncClient,
-    id: codex_codes::RequestId,
-    request: ServerRequest,
-) {
+fn respond_declining(client: &mut SyncClient, id: codex_codes::RequestId, request: ServerRequest) {
     let result = match request {
         ServerRequest::McpServerElicitationRequest(_) => client.respond(
             id,

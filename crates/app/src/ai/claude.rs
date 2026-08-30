@@ -9,8 +9,8 @@
 use super::{AgentEvent, AiShared, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
 use claude_agent_sdk_rs::types::mcp::McpSdkServerConfig;
 use claude_agent_sdk_rs::{
-    ClaudeAgentOptions, ClaudeClient, ClaudeError, McpServerConfig, McpServers,
-    Message, PermissionMode, SdkMcpServer, SystemPrompt,
+    ClaudeAgentOptions, ClaudeClient, ClaudeError, McpServerConfig, McpServers, Message,
+    PermissionMode, SdkMcpServer, SystemPrompt,
 };
 use futures::StreamExt as _;
 use std::collections::HashMap;
@@ -82,20 +82,22 @@ fn options(shared: &AiShared, resume: Option<String>) -> ClaudeAgentOptions {
             }),
         }),
     );
-    let mut options = ClaudeAgentOptions::default();
-    options.mcp_servers = McpServers::Dict(servers);
-    options.allowed_tools = vec!["mcp__schist".to_string()];
-    options.system_prompt = Some(SystemPrompt::Text(SYSTEM_PROMPT.to_string()));
-    options.permission_mode = Some(PermissionMode::Default);
-    options.include_partial_messages = true;
-    options.resume = resume;
-    // The conversation is about the canvas, not about whatever directory
-    // the app was launched from — and with no setting_sources, no
-    // CLAUDE.md or filesystem settings leak in either.
-    options.cwd = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from);
-    options
+    ClaudeAgentOptions {
+        mcp_servers: McpServers::Dict(servers),
+        allowed_tools: vec!["mcp__schist".to_string()],
+        system_prompt: Some(SystemPrompt::Text(SYSTEM_PROMPT.to_string())),
+        permission_mode: Some(PermissionMode::Default),
+        include_partial_messages: true,
+        resume,
+        // The conversation is about the canvas, not about whatever
+        // directory the app was launched from — and with no
+        // setting_sources, no CLAUDE.md or filesystem settings leak in
+        // either.
+        cwd: std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from),
+        ..Default::default()
+    }
 }
 
 async fn run(
@@ -188,11 +190,9 @@ fn forward(shared: &AiShared, message: Message) -> bool {
                         }
                     }
                 }
-                Some("content_block_delta") => {
-                    if event["delta"]["type"] == "text_delta" {
-                        if let Some(text) = event["delta"]["text"].as_str() {
-                            shared.push(AgentEvent::Text(text.to_string()));
-                        }
+                Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
+                    if let Some(text) = event["delta"]["text"].as_str() {
+                        shared.push(AgentEvent::Text(text.to_string()));
                     }
                 }
                 _ => {}

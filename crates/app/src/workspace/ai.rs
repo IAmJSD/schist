@@ -64,9 +64,7 @@ impl Workspace {
             Backend::Claude => &self.ai.models_claude,
             Backend::Codex => &self.ai.models_codex,
         };
-        cached
-            .clone()
-            .unwrap_or_else(|| backend.fallback_models())
+        cached.clone().unwrap_or_else(|| backend.fallback_models())
     }
 
     /// What the model chip says: the display name of the current pick.
@@ -289,7 +287,12 @@ impl Workspace {
                         }
                     }
                     let endpoint = self.ai.endpoint.as_ref().unwrap();
-                    ai::codex::start(shared, endpoint.addr.clone(), endpoint.token.clone(), resume)
+                    ai::codex::start(
+                        shared,
+                        endpoint.addr.clone(),
+                        endpoint.token.clone(),
+                        resume,
+                    )
                 }
             };
             self.ai.conversation = Some(conversation);
@@ -366,7 +369,11 @@ impl Workspace {
         for request in requests {
             log::debug!(
                 "mcp answering: {}",
-                request.message.get("method").and_then(|m| m.as_str()).unwrap_or("?")
+                request
+                    .message
+                    .get("method")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("?")
             );
             let reply = self.ai_mcp_reply(&request.message, cx);
             (request.reply)(reply);
@@ -464,10 +471,9 @@ impl Workspace {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
-        let envelope = |id: Value, result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
-        let rpc_error = |id: Value, code: i64, message: String| {
-            json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-        };
+        let envelope =
+            |id: Value, result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
+        let rpc_error = |id: Value, code: i64, message: String| json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
         match method {
             "initialize" => {
                 let requested = params
@@ -496,7 +502,10 @@ impl Workspace {
                         schist_mcp::Scope::Active,
                     ));
                 }
-                envelope(id, json!({"tools": self.ai.catalog.as_ref().unwrap().defs()}))
+                envelope(
+                    id,
+                    json!({"tools": self.ai.catalog.as_ref().unwrap().defs()}),
+                )
             }
             "tools/call" => {
                 let Some(name) = params.get("name").and_then(|v| v.as_str()) else {

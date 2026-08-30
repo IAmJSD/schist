@@ -122,12 +122,15 @@ fn transcript(ws: &mut Workspace) -> impl IntoElement {
                      as the menus, one undo step each.",
                 )
         }))
-        .children((running && ws.ai.transcript.last().map(|e| e.kind) != Some(AiEntryKind::Assistant)).then(|| {
-            div()
-                .text_size(px(11.0))
-                .text_color(gpui::rgb(palette().text_faint))
-                .child("thinking…")
-        }))
+        .children(
+            (running && ws.ai.transcript.last().map(|e| e.kind) != Some(AiEntryKind::Assistant))
+                .then(|| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(palette().text_faint))
+                        .child("thinking…")
+                }),
+        )
 }
 
 fn entry(kind: AiEntryKind, text: &str, streaming: bool) -> AnyElement {
@@ -233,11 +236,7 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         cx.notify();
                     }),
                 )
-                .children(
-                    shown
-                        .split('\n')
-                        .map(|l| SharedString::from(l.to_string())),
-                ),
+                .children(shown.split('\n').map(|l| SharedString::from(l.to_string()))),
         )
         .child(
             div()
@@ -247,11 +246,9 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .justify_between()
                 .child(model_chip(ws, cx))
                 .child(if running {
-                    ui::button("Stop", false, |ws, _w, cx| ws.ai_stop(cx), cx)
-                        .into_any_element()
+                    ui::button("Stop", false, |ws, _w, cx| ws.ai_stop(cx), cx).into_any_element()
                 } else {
-                    ui::button("Send", true, |ws, _w, cx| ws.ai_send(cx), cx)
-                        .into_any_element()
+                    ui::button("Send", true, |ws, _w, cx| ws.ai_send(cx), cx).into_any_element()
                 }),
         )
 }
@@ -457,7 +454,11 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                     .px_2()
                     .border_b_1()
                     .border_color(gpui::rgb(palette().accent))
-                    .child(div().flex_none().child(icon("search", 12.0, palette().text_faint)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(icon("search", 12.0, palette().text_faint)),
+                    )
                     .child(
                         div()
                             .flex_grow()
@@ -477,22 +478,17 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .min_h(px(60.0))
-                    .child(rail)
-                    .child(
-                        div()
-                            .id("ai-models")
-                            .flex()
-                            .flex_col()
-                            .flex_grow()
-                            .max_h(px(280.0))
-                            .py_1()
-                            .overflow_y_scroll()
-                            .children(rows),
-                    ),
+                div().flex().flex_row().min_h(px(60.0)).child(rail).child(
+                    div()
+                        .id("ai-models")
+                        .flex()
+                        .flex_col()
+                        .flex_grow()
+                        .max_h(px(280.0))
+                        .py_1()
+                        .overflow_y_scroll()
+                        .children(rows),
+                ),
             ),
     )
     .into_any_element()

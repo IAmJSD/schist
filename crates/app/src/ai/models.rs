@@ -46,11 +46,13 @@ fn claude_models() -> Result<Vec<ModelEntry>> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut options = claude_agent_sdk_rs::ClaudeAgentOptions::default();
-        options.cwd = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from);
-        options.skip_version_check = true;
+        let options = claude_agent_sdk_rs::ClaudeAgentOptions {
+            cwd: std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from),
+            skip_version_check: true,
+            ..Default::default()
+        };
         let mut client = claude_agent_sdk_rs::ClaudeClient::new(options);
         client.connect().await.context("starting Claude Code")?;
         let info = client.get_server_info();

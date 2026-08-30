@@ -87,7 +87,12 @@ impl Backend {
         match self {
             Backend::Claude => vec![
                 entry("Claude Opus", "opus", "Most capable tier", true),
-                entry("Claude Sonnet", "sonnet", "Efficient for routine tasks", false),
+                entry(
+                    "Claude Sonnet",
+                    "sonnet",
+                    "Efficient for routine tasks",
+                    false,
+                ),
                 entry("Claude Haiku", "haiku", "Fastest for quick answers", false),
             ],
             Backend::Codex => codex_codes::CodexModel::known()
@@ -171,7 +176,11 @@ impl AiShared {
     }
 
     /// Queue an MCP request for the UI thread; the reply lands in `reply`.
-    pub fn ask(&self, message: serde_json::Value, reply: Box<dyn FnOnce(serde_json::Value) + Send>) {
+    pub fn ask(
+        &self,
+        message: serde_json::Value,
+        reply: Box<dyn FnOnce(serde_json::Value) + Send>,
+    ) {
         if let Ok(mut q) = self.mcp.lock() {
             q.push_back(McpRequest { message, reply });
         }
