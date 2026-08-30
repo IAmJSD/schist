@@ -65,7 +65,7 @@ type Hosts = (
     schist_plugin_host_8bf::manager::PluginManager,
 );
 
-fn build_registry() -> Hosts {
+pub fn build_registry() -> Hosts {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
         Box::new(schist_tools_basic::BasicToolsPlugin),

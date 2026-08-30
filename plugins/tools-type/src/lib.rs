@@ -300,6 +300,11 @@ impl ToolPlugin for TypeTool {
     fn name(&self) -> &'static str {
         "Type"
     }
+    fn description(&self) -> &'static str {
+        "Click to start a text layer there, or click an existing one to edit it. While it \
+         is open the tool takes raw keys (send characters as key input), and committing \
+         renders the layer and closes the edit."
+    }
     fn icon(&self) -> &'static str {
         "type"
     }

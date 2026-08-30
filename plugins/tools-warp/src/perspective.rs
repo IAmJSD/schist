@@ -250,6 +250,10 @@ impl ToolPlugin for VanishingPointTool {
     fn name(&self) -> &'static str {
         "Vanishing Point"
     }
+    fn description(&self) -> &'static str {
+        "Drag out a plane over something with perspective in it, then switch the mode to \
+         Clone and paint: the copied pixels follow the plane, shrinking with distance."
+    }
     fn icon(&self) -> &'static str {
         "vanishing-point"
     }

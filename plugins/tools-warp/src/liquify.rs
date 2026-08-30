@@ -260,6 +260,10 @@ impl ToolPlugin for LiquifyTool {
     fn name(&self) -> &'static str {
         "Liquify"
     }
+    fn description(&self) -> &'static str {
+        "Push, twirl, pucker or bloat pixels under a large brush -- the mode option picks \
+         which. The warp accumulates in a mesh and is applied to the layer on commit."
+    }
     fn icon(&self) -> &'static str {
         "liquify"
     }

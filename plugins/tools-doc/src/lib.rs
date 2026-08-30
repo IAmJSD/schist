@@ -152,6 +152,22 @@ impl ToolPlugin for RectTool {
             RectKind::Frame => "Frame",
         }
     }
+    fn description(&self) -> &'static str {
+        match self.kind {
+            RectKind::Artboard => {
+                "Drag out an artboard: a named region of the canvas that exports on its own. \
+                 Dragging inside an existing one moves it."
+            }
+            RectKind::Slice => {
+                "Drag out an export slice, a named rectangle of the canvas exported as its \
+                 own image. Dragging inside an existing one moves it."
+            }
+            RectKind::Frame => {
+                "Drag out a frame: a rectangular (or elliptical) layer that masks whatever \
+                 is placed into it."
+            }
+        }
+    }
     fn icon(&self) -> &'static str {
         match self.kind {
             RectKind::Artboard => "artboard",
@@ -371,6 +387,18 @@ impl ToolPlugin for PointTool {
         match self.kind {
             PointKind::Note => "Note",
             PointKind::Count => "Count",
+        }
+    }
+    fn description(&self) -> &'static str {
+        match self.kind {
+            PointKind::Note => {
+                "Click empty canvas to pin a note there, stamped with the author and colour \
+                 in the editor state; click an existing pin to select it for the Notes panel."
+            }
+            PointKind::Count => {
+                "Click to drop numbered count markers on the canvas, and click an existing \
+                 one to remove it."
+            }
         }
     }
     fn icon(&self) -> &'static str {

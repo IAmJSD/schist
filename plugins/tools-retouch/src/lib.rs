@@ -125,6 +125,11 @@ impl ToolPlugin for PatchTool {
     fn name(&self) -> &'static str {
         "Patch"
     }
+    fn description(&self) -> &'static str {
+        "Drag an outline around a flaw, then drag that selection onto clean pixels: the \
+         texture there is fitted into the flaw. Patch mode chooses which end of the pair \
+         you drag."
+    }
     fn icon(&self) -> &'static str {
         "patch"
     }
@@ -302,6 +307,10 @@ impl ToolPlugin for ContentAwareMoveTool {
     fn name(&self) -> &'static str {
         "Content-Aware Move"
     }
+    fn description(&self) -> &'static str {
+        "Drag a selected object elsewhere and the hole it leaves is filled in from its \
+         surroundings. In Extend mode the object is stretched instead of moved."
+    }
     fn icon(&self) -> &'static str {
         "content-move"
     }
@@ -454,6 +463,9 @@ impl ToolPlugin for RedEyeTool {
     fn name(&self) -> &'static str {
         "Red Eye"
     }
+    fn description(&self) -> &'static str {
+        "Click a pupil to drain the flash red out of it."
+    }
     fn icon(&self) -> &'static str {
         "red-eye"
     }
@@ -599,6 +611,10 @@ impl ToolPlugin for MagicEraserTool {
     }
     fn name(&self) -> &'static str {
         "Magic Eraser"
+    }
+    fn description(&self) -> &'static str {
+        "Click to erase the area of similar colour under the pointer, within the tool's \
+         tolerance -- contiguous with the click, or everywhere in the layer."
     }
     fn icon(&self) -> &'static str {
         "eraser-magic"

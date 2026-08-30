@@ -441,6 +441,21 @@ impl ToolPlugin for ShapeTool {
         }
     }
 
+    fn description(&self) -> &'static str {
+        match self.kind {
+            ShapeKind::Rectangle => {
+                "Drag out a rectangle shape layer in the foreground colour; it stays vector \
+                 and re-rasterizes when resized."
+            }
+            ShapeKind::Ellipse => "Drag out an ellipse shape layer in the foreground colour.",
+            ShapeKind::Line => "Drag out a straight line shape layer in the foreground colour.",
+            ShapeKind::Polygon => {
+                "Drag out a regular polygon shape layer in the foreground colour, with the \
+                 number of sides from the options."
+            }
+        }
+    }
+
     fn icon(&self) -> &'static str {
         match self.kind {
             ShapeKind::Rectangle => "shape-rect",
@@ -636,6 +651,10 @@ impl ToolPlugin for PenTool {
     }
     fn name(&self) -> &'static str {
         "Pen"
+    }
+    fn description(&self) -> &'static str {
+        "Build a path: click for a corner point, drag to pull curve handles out of it, and \
+         click the first point to close. Commit turns the path into a shape layer."
     }
     fn icon(&self) -> &'static str {
         "pen"

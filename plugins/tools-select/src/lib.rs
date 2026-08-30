@@ -212,6 +212,20 @@ impl ToolPlugin for MarqueeTool {
         }
     }
 
+    fn description(&self) -> &'static str {
+        match self.shape {
+            MarqueeShape::Rect => {
+                "Drag out a rectangular selection. Shift at the start of the drag adds to \
+                 the selection, alt subtracts, both intersect; shift during the drag squares \
+                 it off. A click with no drag deselects."
+            }
+            MarqueeShape::Ellipse => {
+                "Drag out an elliptical selection, with the same shift/alt combining as the \
+                 rectangular marquee."
+            }
+        }
+    }
+
     fn icon(&self) -> &'static str {
         match self.shape {
             MarqueeShape::Rect => "marquee-rect",
@@ -451,6 +465,22 @@ impl ToolPlugin for LassoTool {
             LassoKind::Magnetic => "Magnetic Lasso",
         }
     }
+    fn description(&self) -> &'static str {
+        match self.kind {
+            LassoKind::Free => {
+                "Drag a freehand outline; the selection closes across the ends when the drag \
+                 finishes. Shift adds, alt subtracts."
+            }
+            LassoKind::Polygonal => {
+                "Click corner after corner to build a straight-edged selection, and click \
+                 near the first point to close it."
+            }
+            LassoKind::Magnetic => {
+                "Trace roughly along an edge and the outline snaps to the strongest contrast \
+                 near the path."
+            }
+        }
+    }
     fn icon(&self) -> &'static str {
         match self.kind {
             LassoKind::Free => "lasso",
@@ -672,6 +702,10 @@ impl ToolPlugin for WandTool {
     fn name(&self) -> &'static str {
         "Magic Wand"
     }
+    fn description(&self) -> &'static str {
+        "Click to select the connected area of similar colour under the pointer, within \
+         the tolerance option -- the same tolerance Grow, Similar and Color Range read."
+    }
     fn icon(&self) -> &'static str {
         "wand"
     }
@@ -820,6 +854,10 @@ impl ToolPlugin for QuickSelectTool {
     }
     fn name(&self) -> &'static str {
         "Quick Selection"
+    }
+    fn description(&self) -> &'static str {
+        "Paint over a region and the selection grows through the similar pixels the brush \
+         passes over."
     }
     fn icon(&self) -> &'static str {
         "quick-select"
@@ -1134,6 +1172,9 @@ impl ToolPlugin for ObjectSelectTool {
     }
     fn name(&self) -> &'static str {
         "Object Selection"
+    }
+    fn description(&self) -> &'static str {
+        "Drag a box around an object and the selection snaps to the object found inside it."
     }
     fn icon(&self) -> &'static str {
         "object-select"
