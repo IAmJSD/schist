@@ -19,6 +19,14 @@ panel drives the CLI you already have installed and logged in.
 If neither CLI is on `PATH` the panel says so instead of sending
 anything.
 
+A model picker sits under the header. "Default" is whatever the CLI's
+own configuration chooses; the other entries are per-harness — the
+Claude aliases (Opus, Sonnet, Haiku) resolve to the newest model of each
+tier, and the Codex list is its SDK's bundled catalog. The choice is
+remembered per harness and applies from the next message without
+restarting the conversation: Claude Code switches its live session,
+Codex takes it as a per-turn override.
+
 ## What the agent sees
 
 The agent's hands are the same ~250 MCP tools `schist-mcp` publishes

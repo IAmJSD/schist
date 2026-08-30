@@ -109,12 +109,21 @@ async fn run(
         return;
     }
     shared.push(AgentEvent::Info("Claude Code connected".into()));
+    // The model applied to the live session; the CLI keeps it until told
+    // otherwise, so it only needs saying when the selection changes.
+    let mut applied_model: Option<String> = None;
     while let Some(cmd) = rx.recv().await {
-        let prompt = match cmd {
-            ConvCmd::Say(prompt) => prompt,
+        let (prompt, model) = match cmd {
+            ConvCmd::Say { prompt, model } => (prompt, model),
             ConvCmd::Interrupt => continue,
             ConvCmd::Shutdown => break,
         };
+        if model != applied_model {
+            match client.set_model(model.as_deref()).await {
+                Ok(()) => applied_model = model,
+                Err(e) => shared.error(format!("switching model failed: {e}")),
+            }
+        }
         if let Err(e) = client.query(prompt).await {
             shared.error(format!("sending the prompt failed: {e}"));
             shared.push(AgentEvent::TurnDone);
@@ -147,7 +156,7 @@ async fn run(
                             shared.error(format!("interrupt failed: {e}"));
                         }
                     }
-                    Some(ConvCmd::Say(_)) => {
+                    Some(ConvCmd::Say { .. }) => {
                         // One turn at a time; the UI disables Send while
                         // running, so this is belt-and-braces.
                     }

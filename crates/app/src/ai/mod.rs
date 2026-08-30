@@ -64,6 +64,32 @@ impl Backend {
             _ => Backend::Claude,
         }
     }
+
+    /// The models the sidebar offers, as (display name, slug). An empty
+    /// slug means the CLI's own default. Claude Code resolves the aliases
+    /// to the latest model of each tier itself; the Codex list is the
+    /// SDK's bundled catalog, so it tracks the crate rather than us.
+    pub fn models(self) -> Vec<(&'static str, String)> {
+        match self {
+            Backend::Claude => vec![
+                ("Default", String::new()),
+                ("Opus", "opus".to_string()),
+                ("Sonnet", "sonnet".to_string()),
+                ("Haiku", "haiku".to_string()),
+            ],
+            Backend::Codex => {
+                let mut out = vec![("Default", String::new())];
+                out.extend(
+                    codex_codes::CodexModel::known()
+                        .iter()
+                        // Hidden from Codex's own picker; same here.
+                        .filter(|m| !matches!(m, codex_codes::CodexModel::CodexAutoReview))
+                        .map(|m| (m.display_name(), m.cli_arg().to_string())),
+                );
+                out
+            }
+        }
+    }
 }
 
 /// What a conversation worker reports back, drained by the UI ticker.
@@ -85,7 +111,11 @@ pub enum AgentEvent {
 
 /// What the UI sends a conversation worker.
 pub enum ConvCmd {
-    Say(String),
+    Say {
+        prompt: String,
+        /// Model slug for this turn; `None` is the CLI's own default.
+        model: Option<String>,
+    },
     Interrupt,
     Shutdown,
 }

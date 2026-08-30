@@ -129,8 +129,8 @@ fn run(
     shared.push(AgentEvent::Info("Codex connected".into()));
 
     while let Ok(cmd) = rx.recv() {
-        let prompt = match cmd {
-            ConvCmd::Say(prompt) => prompt,
+        let (prompt, model) = match cmd {
+            ConvCmd::Say { prompt, model } => (prompt, model),
             ConvCmd::Interrupt => continue,
             ConvCmd::Shutdown => break,
         };
@@ -140,6 +140,8 @@ fn run(
                 text: prompt,
                 text_elements: None,
             }],
+            // Per-turn override; None inherits the thread's model.
+            model,
             ..Default::default()
         }) {
             shared.error(format!("sending the prompt failed: {e}"));

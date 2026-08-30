@@ -43,6 +43,28 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The current backend's model override; empty preference means the
+    /// CLI's own default.
+    pub fn ai_model(&self) -> Option<String> {
+        let slug = match self.ai.backend {
+            Backend::Claude => &self.view.ai_model_claude,
+            Backend::Codex => &self.view.ai_model_codex,
+        };
+        (!slug.is_empty()).then(|| slug.clone())
+    }
+
+    /// Pick a model for the current backend. Takes effect from the next
+    /// turn — Claude switches its live session, Codex overrides per turn
+    /// — so the conversation keeps going either way.
+    pub fn set_ai_model(&mut self, slug: String, cx: &mut Context<Self>) {
+        match self.ai.backend {
+            Backend::Claude => self.view.ai_model_claude = slug,
+            Backend::Codex => self.view.ai_model_codex = slug,
+        }
+        self.save_view_options();
+        cx.notify();
+    }
+
     /// Clear the transcript and forget the session; the next prompt
     /// starts fresh.
     pub fn ai_new_conversation(&mut self, cx: &mut Context<Self>) {
@@ -130,8 +152,9 @@ impl Workspace {
             text: prompt.clone(),
         });
         self.ai.running = true;
+        let model = self.ai_model();
         if let Some(conversation) = &self.ai.conversation {
-            conversation.cmds.send(ConvCmd::Say(prompt));
+            conversation.cmds.send(ConvCmd::Say { prompt, model });
         }
         self.ensure_ai_ticker(cx);
         self.ai.scroll.scroll_to_bottom();

@@ -28,6 +28,7 @@ pub fn ai_sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Any
         .border_l_1()
         .border_color(gpui::rgb(palette().panel_edge))
         .child(header(ws, cx))
+        .child(model_row(ws, cx))
         .child(transcript(ws))
         .child(prompt_box(ws, cx));
     Some(panel.into_any_element())
@@ -102,6 +103,50 @@ fn backend_button(ws: &Workspace, backend: Backend, cx: &mut Context<Workspace>)
             cx.listener(move |ws, _e, _w, cx| ws.set_ai_backend(backend, cx)),
         )
         .child(label)
+}
+
+/// The model picker: the backend's catalog plus its CLI default.
+fn model_row(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let backend = ws.ai.backend;
+    let current = match backend {
+        Backend::Claude => ws.view.ai_model_claude.clone(),
+        Backend::Codex => ws.view.ai_model_codex.clone(),
+    };
+    let options: Vec<(SharedString, String)> = backend
+        .models()
+        .into_iter()
+        .map(|(name, slug)| (SharedString::from(name), slug))
+        .collect();
+    let label: SharedString = options
+        .iter()
+        .find(|(_, slug)| *slug == current)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| "Default".into());
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px_2()
+        .pb_1()
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(palette().text_dim))
+                .child("Model"),
+        )
+        .child(ui::dropdown(
+            ui::Dropdown {
+                popup: Popup::Field("ai-model"),
+                is_open: ws.open_popup == Some(Popup::Field("ai-model")),
+                current,
+                label,
+                width: 170.0,
+                options,
+            },
+            |ws, slug, cx| ws.set_ai_model(slug, cx),
+            cx,
+        ))
 }
 
 fn transcript(ws: &mut Workspace) -> impl IntoElement {

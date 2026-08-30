@@ -563,6 +563,13 @@ pub struct ViewOptions {
     /// Which agent harness the sidebar drives ("claude" or "codex").
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
+    /// Model override per harness; empty means whatever the CLI's own
+    /// configuration picks. Two fields because the slugs don't travel:
+    /// "opus" means nothing to Codex, "gpt-5.5" nothing to Claude.
+    #[serde(default)]
+    pub ai_model_claude: String,
+    #[serde(default)]
+    pub ai_model_codex: String,
 }
 
 /// Whoever is logged in, which is Photoshop's default author too. Empty
@@ -606,6 +613,8 @@ impl Default for ViewOptions {
             note_color: default_note_color(),
             ai_panel: false,
             ai_backend: default_ai_backend(),
+            ai_model_claude: String::new(),
+            ai_model_codex: String::new(),
         }
     }
 }
