@@ -128,10 +128,14 @@ configured, so renewing the certificate means replacing two secrets and
 nothing else.
 
 Signing runs under the hardened runtime, which notarization requires. That
-in turn requires the JIT entitlement in
-[`packaging/macos/entitlements.plist`](../packaging/macos/entitlements.plist):
-the plugin host compiles every plugin with Cranelift at load time, and
-without that entitlement a notarized build dies as soon as it loads one.
+in turn requires both entitlements in
+[`packaging/macos/entitlements.plist`](../packaging/macos/entitlements.plist).
+The JIT one: the plugin host compiles every plugin with Cranelift at load
+time, and without it a notarized build dies as soon as it loads one. And
+library validation off: HEIC import dlopen's libheif — Homebrew's, or the
+decode-only build the app offers to download — and the hardened runtime
+otherwise refuses to load any library not signed by this Team ID, which no
+copy of libheif is.
 
 Windows builds are not signed — there is no certificate for them yet, so
 the installer triggers SmartScreen on first download.

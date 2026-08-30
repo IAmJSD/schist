@@ -598,7 +598,7 @@ mod tests {
         };
         assert!(HeifCodec.probe(&bytes), "{name} should probe as HEIF");
         match HeifCodec.import(&bytes) {
-            Err(err) if heif::download_would_help(&err) => {
+            Err(err) if heif::no_decoder_available(&err) => {
                 eprintln!("skipping: {err:#}");
                 None
             }
@@ -623,12 +623,25 @@ mod tests {
             "nothing written on mismatch"
         );
 
+        assert!(
+            !heif::installed_matches(&file),
+            "nothing installed before the good write"
+        );
+
         let path = heif::install(&file, b"payload").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
         assert!(
             !path.with_extension("part").exists(),
             "temp file renamed away"
         );
+        // What stops the download dialog looping: with the pinned bytes
+        // on disk, a second download has nothing to add. Bytes that are
+        // merely *present* do not count -- an older pinned version is
+        // exactly what a download replaces.
+        assert!(heif::installed_matches(&file), "pinned bytes recognised");
+        std::fs::write(&path, b"an older pinned build").unwrap();
+        assert!(!heif::installed_matches(&file), "stale build is not it");
+
         std::env::remove_var("SCHIST_LIBHEIF_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }
