@@ -737,6 +737,45 @@ impl ToolPlugin for PaintTool {
         }
     }
 
+    fn description(&self) -> &'static str {
+        match self.mode {
+            PaintMode::Brush => {
+                "Paint a soft-edged stroke in the foreground colour, sized by the editor's \
+                 brush size, hardness and opacity."
+            }
+            PaintMode::Pencil => {
+                "Paint a hard-edged, unantialiased stroke in the foreground colour."
+            }
+            PaintMode::Eraser => "Erase along the stroke, taking the layer back to transparency.",
+            PaintMode::Clone => {
+                "Clone Stamp: alt-click to set the source point, then paint pixels copied \
+                 from it at that offset."
+            }
+            PaintMode::Dodge => "Lighten the pixels the stroke passes over.",
+            PaintMode::Burn => "Darken the pixels the stroke passes over.",
+            PaintMode::Sponge => "Saturate, or desaturate, the pixels the stroke passes over.",
+            PaintMode::Blur => "Blur the pixels the stroke passes over.",
+            PaintMode::Sharpen => "Sharpen the pixels the stroke passes over.",
+            PaintMode::Smudge => "Drag colour along the stroke, as if pushing wet paint.",
+            PaintMode::Heal => {
+                "Healing Brush: alt-click to set the source, then paint; the source's texture \
+                 is blended into the destination's own colour and lighting."
+            }
+            PaintMode::SpotHeal => {
+                "Spot Healing Brush: paint over a blemish and it is replaced with texture \
+                 taken from around it -- no source point to set."
+            }
+            PaintMode::HistoryBrush => {
+                "Paint pixels back out of the document's history snapshot, undoing later \
+                 work stroke by stroke."
+            }
+            PaintMode::BackgroundEraser => {
+                "Erase the colour sampled under the brush's centre and leave unlike pixels \
+                 alone, for lifting a subject off its background."
+            }
+        }
+    }
+
     fn icon(&self) -> &'static str {
         match self.mode {
             PaintMode::Brush => "brush",
@@ -943,6 +982,19 @@ impl ToolPlugin for GradientTool {
         match self.kind {
             GradientKind::Linear => "Gradient",
             GradientKind::Radial => "Radial Gradient",
+        }
+    }
+    fn description(&self) -> &'static str {
+        match self.kind {
+            GradientKind::Linear => {
+                "Drag to fill the layer -- through the selection when there is one -- with a \
+                 linear gradient running from the foreground colour to the background colour \
+                 along the drag."
+            }
+            GradientKind::Radial => {
+                "Drag from the centre outwards to fill with a radial gradient between the \
+                 foreground and background colours."
+            }
         }
     }
     fn icon(&self) -> &'static str {
@@ -1166,6 +1218,10 @@ impl ToolPlugin for BucketTool {
     }
     fn name(&self) -> &'static str {
         "Paint Bucket"
+    }
+    fn description(&self) -> &'static str {
+        "Click to flood the connected area of similar colour under the pointer with the \
+         foreground colour, within the tool's tolerance."
     }
     fn icon(&self) -> &'static str {
         "bucket"

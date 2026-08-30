@@ -272,9 +272,10 @@ Two hosts, one difference. A `.8bf` publishes no parameter list — its own
 dialog is its entire UI — so the app runs it with `show_dialog` on and
 the MCP server runs it off, where nobody could dismiss one. That is what
 `manager::Interactive` selects, and it is the only thing the two callers
-disagree about. Over MCP the plug-ins appear in `describe filters` like
-any other, and `describe photoshop_plugins` reports the folders scanned,
-each plug-in's architecture, and why anything unavailable is unavailable.
+disagree about. Over MCP a loaded plug-in is published as its own
+`filter_*` tool like any other filter, and the `photoshop_plugins` tool
+reports the folders scanned, each plug-in's architecture, and why
+anything unavailable is unavailable.
 
 **Settings survive between runs.** The descriptor suites are null, so
 nothing records through them — but plug-ins fall back to the `parameters`

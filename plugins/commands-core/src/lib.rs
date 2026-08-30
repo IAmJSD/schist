@@ -13,12 +13,14 @@ use std::sync::Arc;
 fn cmd(
     id: &'static str,
     title: &'static str,
+    description: &'static str,
     keybind: Option<&'static str>,
     run: impl Fn(&mut CommandCtx) + Send + 'static,
 ) -> Command {
     Command {
         id,
         title,
+        description,
         keybind,
         run: Box::new(run),
     }
@@ -456,13 +458,16 @@ impl CommandPlugin for CoreCommandsPlugin {
     fn commands(&self) -> Vec<Command> {
         vec![
             // --- Edit ---
-            cmd("edit.undo", "Undo", Some("cmd-z"), |ctx| {
+            cmd("edit.undo", "Undo",
+                "Step back one entry in the document's undo history.", Some("cmd-z"), |ctx| {
                 ctx.doc.undo();
             }),
-            cmd("edit.redo", "Redo", Some("cmd-shift-z"), |ctx| {
+            cmd("edit.redo", "Redo",
+                "Redo the edit that was last undone.", Some("cmd-shift-z"), |ctx| {
                 ctx.doc.redo();
             }),
-            cmd("edit.copy", "Copy", Some("cmd-c"), |ctx| {
+            cmd("edit.copy", "Copy",
+                "Copy the active layer's selected pixels to the internal clipboard (the whole layer when nothing is selected).", Some("cmd-c"), |ctx| {
                 match copy_pixels(ctx.doc, false) {
                     Some(clip) => ctx.state.clipboard = Some(Arc::new(clip)),
                     // Saying nothing while the clipboard kept its previous
@@ -474,13 +479,15 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "edit.copy_merged",
                 "Copy Merged",
+                "Copy the selection as every visible layer composites it, rather than from the active layer alone.",
                 Some("cmd-shift-c"),
                 |ctx| match copy_pixels(ctx.doc, true) {
                     Some(clip) => ctx.state.clipboard = Some(Arc::new(clip)),
                     None => ctx.refuse(NOTHING_TO_COPY),
                 },
             ),
-            cmd("edit.cut", "Cut", Some("cmd-x"), |ctx| {
+            cmd("edit.cut", "Cut",
+                "Copy the selected pixels to the clipboard and erase them from the active layer.", Some("cmd-x"), |ctx| {
                 match copy_pixels(ctx.doc, false) {
                     Some(clip) => {
                         ctx.state.clipboard = Some(Arc::new(clip));
@@ -489,34 +496,40 @@ impl CommandPlugin for CoreCommandsPlugin {
                     None => ctx.refuse(NOTHING_TO_COPY),
                 }
             }),
-            cmd("edit.paste", "Paste", Some("cmd-v"), |ctx| {
+            cmd("edit.paste", "Paste",
+                "Paste the clipboard into a new layer above the active one, centred on the canvas.", Some("cmd-v"), |ctx| {
                 paste(ctx, false)
             }),
             cmd(
                 "edit.paste_in_place",
                 "Paste in Place",
+                "Paste the clipboard into a new layer at the coordinates it was copied from.",
                 Some("cmd-shift-v"),
                 |ctx| paste(ctx, true),
             ),
             cmd(
                 "edit.fill_foreground",
                 "Fill with Foreground",
+                "Fill the selection (or the whole canvas when nothing is selected) with the foreground colour.",
                 Some("alt-backspace"),
                 |ctx| fill_selection(ctx, false),
             ),
             cmd(
                 "edit.fill_background",
                 "Fill with Background",
+                "Fill the selection (or the whole canvas when nothing is selected) with the background colour.",
                 Some("cmd-backspace"),
                 |ctx| fill_selection(ctx, true),
             ),
             // --- Select ---
-            cmd("select.all", "Select All", Some("cmd-a"), |ctx| {
+            cmd("select.all", "Select All",
+                "Select the entire canvas.", Some("cmd-a"), |ctx| {
                 let mut edit = ctx.doc.begin_edit("Select All");
                 edit.change_selection(|sel, canvas| sel.select_all(canvas));
                 edit.commit();
             }),
-            cmd("select.deselect", "Deselect", Some("cmd-d"), |ctx| {
+            cmd("select.deselect", "Deselect",
+                "Drop the selection, so edits apply to the whole layer again.", Some("cmd-d"), |ctx| {
                 let mut edit = ctx.doc.begin_edit("Deselect");
                 edit.change_selection(|sel, _| sel.deselect());
                 edit.commit();
@@ -524,6 +537,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "select.inverse",
                 "Select Inverse",
+                "Swap selected and unselected areas.",
                 Some("cmd-shift-i"),
                 |ctx| {
                     // Nothing selected means nothing to invert; without
@@ -538,7 +552,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 },
             ),
             // --- Layer ---
-            cmd("layer.new", "New Layer", Some("cmd-shift-n"), |ctx| {
+            cmd("layer.new", "New Layer",
+                "Add an empty raster layer above the active one and make it active.", Some("cmd-shift-n"), |ctx| {
                 let path = insert_path_above_active(ctx.doc);
                 let n = ctx.doc.tree.len() + 1;
                 let mut layer = Layer::new_raster(format!("Layer {n}"));
@@ -549,7 +564,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
                 ctx.doc.active_layer = Some(id);
             }),
-            cmd("layer.duplicate", "Duplicate Layer", Some("cmd-j"), |ctx| {
+            cmd("layer.duplicate", "Duplicate Layer",
+                "Copy the active layer, contents and all, onto a new layer above it.", Some("cmd-j"), |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;
                 };
@@ -569,6 +585,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.smart_object",
                 "Convert to Smart Object",
+                "Wrap the active raster layer's pixels in a smart object, so later transforms and filters resample the untouched source.",
                 None,
                 |ctx| {
                     let Some(id) = ctx.doc.active_layer else {
@@ -592,7 +609,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                     edit.commit();
                 },
             ),
-            cmd("layer.rasterize", "Rasterize Layer", None, |ctx| {
+            cmd("layer.rasterize", "Rasterize Layer",
+                "Bake a shape, text or smart-object layer down to plain pixels.", None, |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;
                 };
@@ -611,7 +629,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.set_smart_object(id, None);
                 edit.commit();
             }),
-            cmd("layer.delete", "Delete Layer", None, |ctx| {
+            cmd("layer.delete", "Delete Layer",
+                "Delete the selected layers.", None, |ctx| {
                 // Deletes the panel's whole multi-selection as one edit.
                 let ids = selection_roots(ctx.doc);
                 if ids.is_empty() {
@@ -627,7 +646,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 }
                 edit.commit();
             }),
-            cmd("layer.group", "Group Layers", Some("cmd-g"), |ctx| {
+            cmd("layer.group", "Group Layers",
+                "Wrap the selected layers in a new group, in place.", Some("cmd-g"), |ctx| {
                 // Wraps the selected layers in a group, which lands where
                 // the topmost of them was.
                 let ids = selection_roots(ctx.doc);
@@ -671,7 +691,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.active_layer = Some(group_id);
                 ctx.doc.selected = vec![group_id];
             }),
-            cmd("select.reselect", "Reselect", Some("cmd-shift-d"), |ctx| {
+            cmd("select.reselect", "Reselect",
+                "Bring back the selection that was last dropped.", Some("cmd-shift-d"), |ctx| {
                 let Some(previous) = ctx.doc.last_selection.clone() else {
                     ctx.refuse("Nothing to reselect");
                     return;
@@ -680,18 +701,22 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.change_selection(|sel, _| *sel = previous);
                 edit.commit();
             }),
-            cmd("select.feather", "Feather Selection", None, |ctx| {
+            cmd("select.feather", "Feather Selection",
+                "Soften the selection's edge by a two-pixel blur, so the next edit fades out across it.", None, |ctx| {
                 let mut edit = ctx.doc.begin_edit("Feather");
                 edit.change_selection(|sel, _| sel.feather(2.0));
                 edit.commit();
             }),
-            cmd("select.grow", "Grow", None, |ctx| {
+            cmd("select.grow", "Grow",
+                "Extend the selection into touching pixels that resemble what is already selected, within the magic wand's tolerance.", None, |ctx| {
                 grow_selection(ctx, true);
             }),
-            cmd("select.similar", "Similar", None, |ctx| {
+            cmd("select.similar", "Similar",
+                "Select every pixel in the layer resembling the selection, touching it or not, within the magic wand's tolerance.", None, |ctx| {
                 grow_selection(ctx, false);
             }),
-            cmd("select.save", "Save Selection", None, |ctx| {
+            cmd("select.save", "Save Selection",
+                "Stash the current selection in the document as a named alpha channel.", None, |ctx| {
                 if ctx.doc.selection.is_empty() {
                     ctx.refuse("Select something first");
                     return;
@@ -701,7 +726,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.saved_selections.push((format!("Alpha {n}"), sel));
                 ctx.doc.mark_dirty();
             }),
-            cmd("select.load", "Load Selection", None, |ctx| {
+            cmd("select.load", "Load Selection",
+                "Restore the most recently saved selection.", None, |ctx| {
                 // Loads the most recently saved one; the dialog picks by
                 // name once there is a channels panel to name them in.
                 let Some((_, sel)) = ctx.doc.saved_selections.last().cloned() else {
@@ -712,15 +738,18 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
             }),
             // --- Layer ordering ---
-            cmd("layer.raise", "Bring Forward", Some("cmd-]"), |ctx| {
+            cmd("layer.raise", "Bring Forward",
+                "Move the active layer one place up its group's stack.", Some("cmd-]"), |ctx| {
                 move_layer_by(ctx, 1);
             }),
-            cmd("layer.lower", "Send Backward", Some("cmd-["), |ctx| {
+            cmd("layer.lower", "Send Backward",
+                "Move the active layer one place down its group's stack.", Some("cmd-["), |ctx| {
                 move_layer_by(ctx, -1);
             }),
             cmd(
                 "layer.to_front",
                 "Bring to Front",
+                "Move the active layer to the top of its group.",
                 Some("cmd-shift-]"),
                 |ctx| {
                     move_layer_to_end(ctx, true);
@@ -729,6 +758,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.to_back",
                 "Send to Back",
+                "Move the active layer to the bottom of its group.",
                 Some("cmd-shift-["),
                 |ctx| {
                     move_layer_to_end(ctx, false);
@@ -737,6 +767,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.clipping_mask",
                 "Create/Release Clipping Mask",
+                "Clip the active layer to the one below it, or release it if it already is; a clipped layer shows only where its base has pixels.",
                 Some("cmd-alt-g"),
                 |ctx| {
                     let Some(id) = ctx.doc.active_layer else {
@@ -757,6 +788,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.cut_to_new",
                 "Layer via Cut",
+                "Move the selected pixels out of the active layer and onto a new layer above it.",
                 Some("cmd-shift-j"),
                 |ctx| {
                     let Some(clip) = copy_pixels(ctx.doc, false) else {
@@ -778,7 +810,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                     ctx.doc.active_layer = Some(id);
                 },
             ),
-            cmd("layer.add_mask", "Add Layer Mask", None, |ctx| {
+            cmd("layer.add_mask", "Add Layer Mask",
+                "Add a layer mask to the active layer, revealing only the selection when there is one.", None, |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;
                 };
@@ -807,11 +840,14 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.set_mask(id, Some(mask));
                 edit.commit();
             }),
-            cmd("layer.flatten", "Flatten Image", None, flatten_image),
-            cmd("layer.merge_down", "Merge Down", Some("cmd-e"), merge_down),
+            cmd("layer.flatten", "Flatten Image",
+                "Composite everything visible into one opaque Background layer, discarding hidden layers.", None, flatten_image),
+            cmd("layer.merge_down", "Merge Down",
+                "Composite the active layer into the layer beneath it.", Some("cmd-e"), merge_down),
             cmd(
                 "layer.merge_visible",
                 "Merge Visible",
+                "Composite every visible layer into one, leaving hidden layers alone.",
                 Some("cmd-shift-e"),
                 merge_visible,
             ),

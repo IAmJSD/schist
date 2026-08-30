@@ -164,6 +164,14 @@ impl ToolPlugin for PathSelectTool {
             ArrowKind::Direct => "Direct Selection",
         }
     }
+    fn description(&self) -> &'static str {
+        match self.kind {
+            ArrowKind::Path => "Click a path to select it, and drag to move the whole path.",
+            ArrowKind::Direct => {
+                "Drag an individual anchor point or its handles to reshape the path around it."
+            }
+        }
+    }
     fn icon(&self) -> &'static str {
         match self.kind {
             ArrowKind::Path => "path-select",
@@ -366,6 +374,13 @@ impl ToolPlugin for FreeformPenTool {
             "Curvature Pen"
         } else {
             "Freeform Pen"
+        }
+    }
+    fn description(&self) -> &'static str {
+        if self.curvature {
+            "Click a series of points and the path is curved smoothly through them."
+        } else {
+            "Drag a freehand line and it is fitted to a path, as loosely as the Fit option says."
         }
     }
     fn icon(&self) -> &'static str {
@@ -587,6 +602,9 @@ impl ToolPlugin for CustomShapeTool {
     }
     fn name(&self) -> &'static str {
         "Custom Shape"
+    }
+    fn description(&self) -> &'static str {
+        "Drag out one of the built-in preset shapes, picked with the Shape option."
     }
     fn icon(&self) -> &'static str {
         "shape-custom"

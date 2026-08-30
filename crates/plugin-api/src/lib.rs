@@ -139,6 +139,14 @@ pub trait ToolPlugin: Send {
     /// Stable identifier, e.g. "brush".
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
+    /// A sentence saying what the tool does and how it is driven, for
+    /// hosts that have no toolbar to point at: the MCP server publishes
+    /// one tool per canvas tool and this is its description. Defaulted
+    /// so a third-party plugin still compiles; it then falls back to
+    /// the name.
+    fn description(&self) -> &'static str {
+        ""
+    }
     /// Icon asset name (the app shell renders `icons/<name>.svg`).
     fn icon(&self) -> &'static str;
     /// Default activation key, e.g. "b". Registered into the keymap.
@@ -391,6 +399,11 @@ impl CommandCtx<'_> {
 pub struct Command {
     pub id: &'static str,
     pub title: &'static str,
+    /// What the command does, in a sentence. The title is a menu label
+    /// ("Grow", "Similar") and says nothing on its own to a caller that
+    /// cannot see the menu it sits in -- the MCP server publishes every
+    /// command as its own tool and this is its description.
+    pub description: &'static str,
     /// Default keybinding in GPUI keystroke syntax, e.g. "cmd-shift-e"
     /// ("cmd" is mapped to ctrl on Linux/Windows by the app shell).
     pub keybind: Option<&'static str>,

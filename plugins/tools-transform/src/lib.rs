@@ -338,6 +338,22 @@ impl ToolPlugin for TransformTool {
             TransformMode::Selection => "Transform Selection",
         }
     }
+
+    fn description(&self) -> &'static str {
+        match self.mode {
+            TransformMode::Layer => {
+                "Free Transform. Activating it opens a transform box around the active \
+                 layer: drag a corner to scale, drag outside one to rotate, drag an edge to \
+                 skew. Nothing is written until it is committed (Enter), and cancelling \
+                 (Escape) puts the layer back."
+            }
+            TransformMode::Selection => {
+                "Transform Selection: the same box, moving the selection outline rather than \
+                 the pixels inside it. Commit or cancel to finish."
+            }
+        }
+    }
+
     fn icon(&self) -> &'static str {
         "transform"
     }
@@ -638,6 +654,10 @@ impl ToolPlugin for CropTool {
     }
     fn name(&self) -> &'static str {
         "Crop"
+    }
+    fn description(&self) -> &'static str {
+        "Drag out the area to keep and adjust its handles; committing (Enter) trims the \
+         document to it, cancelling (Escape) leaves it alone."
     }
     fn icon(&self) -> &'static str {
         "crop"

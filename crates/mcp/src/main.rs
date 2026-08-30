@@ -1,15 +1,19 @@
 //! `schist-mcp` — a Model Context Protocol server over stdio.
 //!
 //! Create a session (a blank document or an opened file), then drive it by
-//! session id: every registered tool, menu command, filter, adjustment and
-//! codec — the same plugin registry the GPUI app assembles — plus document
-//! introspection and PNG rendering. JSON-RPC 2.0, newline-delimited, on
-//! stdin/stdout; logs go to stderr so they never corrupt the stream.
+//! session id. Every registered canvas tool, menu command, filter and
+//! adjustment — the same plugin registry the GPUI app assembles — is
+//! published as its own MCP tool with its own documented parameters (see
+//! `catalog`), alongside document introspection and PNG rendering.
+//! JSON-RPC 2.0, newline-delimited, on stdin/stdout; logs go to stderr so
+//! they never corrupt the stream.
 
+mod catalog;
 mod session;
 
 use anyhow::{anyhow, bail, Result};
 use base64::Engine as _;
+use catalog::{Action, Catalog};
 use schist_core::color::{Depth, Rgba};
 use schist_core::{AdjustmentKind, BlendMode, IntRect, Layer, LayerId, LayerKind};
 use schist_plugin_api::{ExportOptions, Modifiers, OptionKind, OptionValue, ToolOption};
@@ -76,6 +80,10 @@ struct RpcError(i64, String);
 struct Server {
     sessions: HashMap<String, Session>,
     next_id: u64,
+    /// Built on the first `tools/list` or `tools/call` rather than at
+    /// startup: assembling it scans the plugin folders, and a client that
+    /// only pings should not pay for that.
+    catalog: Option<Catalog>,
 }
 
 impl Server {
@@ -95,15 +103,16 @@ impl Server {
                     },
                     "instructions": "Headless Schist image editor. Call create_session first \
                         (blank document or open a file) and pass the returned session id to every \
-                        other tool. Use describe to enumerate the session's canvas tools, menu \
-                        commands, filters, adjustments and codecs; get_state for the document and \
-                        layer tree; render to see the canvas as a PNG. Edits go through the same \
-                        plugin registry and undo history as the GUI (undo/redo are the edit.undo \
-                        and edit.redo commands).",
+                        other tool. Everything the editor can do is its own tool: cmd_* are the \
+                        menu commands (cmd_edit_undo, cmd_edit_redo…), tool_* select a canvas \
+                        tool and set its options before you drive it with tool_stroke and \
+                        tool_input, filter_* run filters, adjust_* apply adjustments. get_state \
+                        gives the document and layer tree; render returns the canvas as a PNG. \
+                        Edits go through the same plugin registry and undo history as the GUI.",
                 }))
             }
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tool_defs()})),
+            "tools/list" => Ok(json!({"tools": self.catalog().defs()})),
             "tools/call" => {
                 let name = params
                     .get("name")
@@ -122,7 +131,34 @@ impl Server {
         }
     }
 
+    /// Everything the server publishes is a name in the catalog, so this
+    /// is the only place a name turns back into work.
     fn call_tool(&mut self, name: &str, args: &Value) -> Result<Value> {
+        let action = self
+            .catalog()
+            .action(name)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown tool {name:?}"))?;
+        match action {
+            Action::Builtin(name) => self.call_builtin(&name, args),
+            Action::Tool(id) => self.select_tool(&id, args),
+            Action::Command(id) => {
+                let sess = self.session(args)?;
+                let title = sess.run_command(&id)?;
+                text(title)
+            }
+            Action::Filter(id) => self.apply_filter(&id, args),
+            Action::Adjustment(kind) => self.apply_adjustment(kind, args),
+        }
+    }
+
+    fn catalog(&mut self) -> &Catalog {
+        self.catalog.get_or_insert_with(Catalog::build)
+    }
+
+    /// The server's own tools: the ones that are about sessions, state and
+    /// files rather than about something in the registry.
+    fn call_builtin(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {
             "create_session" => self.create_session(args),
             "list_sessions" => self.list_sessions(),
@@ -133,27 +169,11 @@ impl Server {
                     .ok_or_else(|| anyhow!("no session {id:?}"))?;
                 text(format!("closed {id}"))
             }
-            "describe" => {
-                let sess = self.session(args)?;
-                let what = args.get("what").and_then(|v| v.as_str()).unwrap_or("all");
-                text_json(describe(sess, what)?)
-            }
             "get_state" => {
                 let id = arg_str(args, "session")?.to_string();
                 let sess = self.session(args)?;
                 text_json(state_json(&id, sess))
             }
-            "run_command" => {
-                let sess = self.session(args)?;
-                let title = sess.run_command(arg_str(args, "id")?)?;
-                text(title)
-            }
-            "select_tool" => {
-                let sess = self.session(args)?;
-                let id = sess.activate_tool(arg_str(args, "id")?)?;
-                text(format!("active tool: {id}"))
-            }
-            "set_tool_options" => self.set_tool_options(args),
             "tool_stroke" => self.tool_stroke(args),
             "tool_input" => {
                 let modifiers = parse_modifiers(args.get("modifiers"));
@@ -165,38 +185,6 @@ impl Server {
                     modifiers,
                 )?;
                 text(if consumed { "consumed" } else { "not consumed" }.to_string())
-            }
-            "apply_filter" => {
-                let values: Vec<(String, f64)> = args
-                    .get("params")
-                    .and_then(|v| v.as_object())
-                    .map(|m| {
-                        m.iter()
-                            .map(|(k, v)| {
-                                v.as_f64()
-                                    .map(|n| (k.clone(), n))
-                                    .ok_or_else(|| anyhow!("parameter {k:?} must be a number"))
-                            })
-                            .collect::<Result<Vec<_>>>()
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-                let sess = self.session(args)?;
-                let name = sess.apply_filter(arg_str(args, "id")?, &values)?;
-                text(format!("applied {name}"))
-            }
-            "apply_adjustment" => {
-                let kind = parse_adjustment_kind(arg_str(args, "kind")?)?;
-                let params = match args.get("params") {
-                    Some(v) if !v.is_null() => Some(
-                        serde_json::from_value::<schist_adjustments::Params>(v.clone())
-                            .map_err(|e| anyhow!("bad adjustment params: {e}"))?,
-                    ),
-                    _ => None,
-                };
-                let sess = self.session(args)?;
-                let name = sess.apply_adjustment(kind, params)?;
-                text(format!("applied {name}"))
             }
             "set_active_layer" => {
                 let id = args
@@ -250,8 +238,137 @@ impl Server {
                 sess.export(&path, &options)?;
                 text(format!("exported {}", path.display()))
             }
-            _ => bail!("unknown tool {name:?}"),
+            "photoshop_plugins" => {
+                let sess = self.session(args)?;
+                text_json(photoshop_json(sess))
+            }
+            other => bail!("unknown tool {other:?}"),
         }
+    }
+
+    /// Make a canvas tool active and apply the options passed with it.
+    ///
+    /// Options are read fresh between writes because a tool's options bar
+    /// can change shape as it is set: the move tool only offers its
+    /// auto-select target once auto-select is on.
+    fn select_tool(&mut self, id: &str, args: &Value) -> Result<Value> {
+        let sess = self.session(args)?;
+        let id = sess.activate_tool(id)?;
+        for (key, value) in catalog::parameters(args) {
+            let declared = sess
+                .registry
+                .tools()
+                .find(|t| t.id() == id)
+                .map(|t| t.options())
+                .unwrap_or_default();
+            let kind = declared
+                .iter()
+                .find(|o| o.key == key)
+                .map(|o| o.kind)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "tool {id:?} has no option {key:?} (has: {:?})",
+                        declared.iter().map(|o| o.key).collect::<Vec<_>>()
+                    )
+                })?;
+            sess.set_tool_option(&key, coerce_option(&value, kind)?)?;
+        }
+        let options: Vec<Value> = sess
+            .registry
+            .tools()
+            .find(|t| t.id() == id)
+            .map(|t| t.options().iter().map(option_json).collect())
+            .unwrap_or_default();
+        text_json(json!({"active_tool": id, "options": options}))
+    }
+
+    fn apply_filter(&mut self, id: &str, args: &Value) -> Result<Value> {
+        let sess = self.session(args)?;
+        let params = sess
+            .registry
+            .filters()
+            .find(|f| f.id() == id)
+            .map(|f| f.params())
+            .ok_or_else(|| anyhow!("unknown filter {id:?}"))?;
+        let mut values: Vec<(String, f64)> = Vec::new();
+        for (key, value) in catalog::parameters(args) {
+            let param = params.iter().find(|p| p.key == key).ok_or_else(|| {
+                anyhow!(
+                    "filter {id:?} has no parameter {key:?} (has: {:?})",
+                    params.iter().map(|p| p.key).collect::<Vec<_>>()
+                )
+            })?;
+            // A choice reads as its name here, the way the dialog shows
+            // it, but the filter only ever sees the index.
+            let number = match &value {
+                Value::String(name) if !param.choices.is_empty() => param
+                    .choices
+                    .iter()
+                    .position(|c| c.eq_ignore_ascii_case(name))
+                    .map(|i| i as f64)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "no choice {name:?} for {key:?} (choices: {:?})",
+                            param.choices
+                        )
+                    })?,
+                other => other
+                    .as_f64()
+                    .ok_or_else(|| anyhow!("parameter {key:?} must be a number"))?,
+            };
+            values.push((key, number));
+        }
+        let name = sess.apply_filter(id, &values)?;
+        text(format!("applied {name}"))
+    }
+
+    fn apply_adjustment(&mut self, kind: AdjustmentKind, args: &Value) -> Result<Value> {
+        let mut params = match args.get("params") {
+            Some(v) if !v.is_null() => {
+                serde_json::from_value::<schist_adjustments::Params>(v.clone())
+                    .map_err(|e| anyhow!("bad adjustment params: {e}"))?
+            }
+            _ => schist_adjustments::Params::default_for(kind),
+        };
+        let mut arguments = catalog::parameters(args);
+        arguments.remove("params");
+        // Flags first: setting one round-trips through serde, which would
+        // undo slider values written before it.
+        for (key, value) in &arguments {
+            let Some(flag) = value.as_bool() else {
+                continue;
+            };
+            params = catalog::set_flag(&params, key, flag).ok_or_else(|| {
+                anyhow!(
+                    "{} has no flag {key:?} (has: {:?})",
+                    kind.display_name(),
+                    catalog::flags(&params)
+                        .iter()
+                        .map(|(k, _)| k.clone())
+                        .collect::<Vec<_>>()
+                )
+            })?;
+        }
+        let specs = params.param_specs();
+        for (key, value) in &arguments {
+            if value.is_boolean() {
+                continue;
+            }
+            let number = value
+                .as_f64()
+                .ok_or_else(|| anyhow!("parameter {key:?} must be a number"))?;
+            if !specs.iter().any(|s| s.key == key) {
+                bail!(
+                    "{} has no parameter {key:?} (has: {:?})",
+                    kind.display_name(),
+                    specs.iter().map(|s| s.key).collect::<Vec<_>>()
+                );
+            }
+            params.set_param(key, number as f32);
+        }
+        let sess = self.session(args)?;
+        let name = sess.apply_adjustment(kind, Some(params))?;
+        text(format!("applied {name}"))
     }
 
     fn session(&mut self, args: &Value) -> Result<&mut Session> {
@@ -303,37 +420,6 @@ impl Server {
             .collect();
         sessions.sort_by(|a, b| a["session"].as_str().cmp(&b["session"].as_str()));
         text_json(json!({"sessions": sessions}))
-    }
-
-    fn set_tool_options(&mut self, args: &Value) -> Result<Value> {
-        let options = args
-            .get("options")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow!("missing options object"))?
-            .clone();
-        let sess = self.session(args)?;
-        let active = sess.state.active_tool;
-        let declared: Vec<ToolOption> = sess
-            .registry
-            .tools()
-            .find(|t| t.id() == active)
-            .map(|t| t.options())
-            .unwrap_or_default();
-        for (key, value) in &options {
-            let kind = declared
-                .iter()
-                .find(|o| o.key == key.as_str())
-                .map(|o| o.kind)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "tool {active:?} has no option {key:?} (has: {:?})",
-                        declared.iter().map(|o| o.key).collect::<Vec<_>>()
-                    )
-                })?;
-            let value = coerce_option(value, kind)?;
-            sess.set_tool_option(key, value)?;
-        }
-        text(format!("set {} option(s) on {active}", options.len()))
     }
 
     fn tool_stroke(&mut self, args: &Value) -> Result<Value> {
@@ -635,41 +721,6 @@ fn normalize(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-const ADJUSTMENT_KINDS: [AdjustmentKind; 18] = [
-    AdjustmentKind::Levels,
-    AdjustmentKind::Curves,
-    AdjustmentKind::HueSaturation,
-    AdjustmentKind::BrightnessContrast,
-    AdjustmentKind::BlackWhite,
-    AdjustmentKind::SolidColor,
-    AdjustmentKind::GradientFill,
-    AdjustmentKind::PatternFill,
-    AdjustmentKind::Invert,
-    AdjustmentKind::Posterize,
-    AdjustmentKind::Threshold,
-    AdjustmentKind::ColorBalance,
-    AdjustmentKind::Vibrance,
-    AdjustmentKind::Exposure,
-    AdjustmentKind::PhotoFilter,
-    AdjustmentKind::GradientMap,
-    AdjustmentKind::SelectiveColor,
-    AdjustmentKind::ChannelMixer,
-];
-
-fn parse_adjustment_kind(name: &str) -> Result<AdjustmentKind> {
-    let wanted = normalize(name);
-    ADJUSTMENT_KINDS
-        .iter()
-        .find(|k| normalize(k.display_name()) == wanted)
-        .copied()
-        .ok_or_else(|| {
-            anyhow!(
-                "unknown adjustment {name:?} (kinds: {})",
-                ADJUSTMENT_KINDS.map(|k| k.display_name()).join(", ")
-            )
-        })
-}
-
 const BLEND_MODES: [BlendMode; 28] = [
     BlendMode::PassThrough,
     BlendMode::Normal,
@@ -840,402 +891,133 @@ fn state_json(id: &str, sess: &Session) -> Value {
     })
 }
 
-fn describe(sess: &Session, what: &str) -> Result<Value> {
-    let tools = || -> Value {
-        sess.registry
-            .tools()
-            .map(|t| {
-                json!({
-                    "id": t.id(),
-                    "name": t.name(),
-                    "group": t.group(),
-                    "shortcut": t.shortcut(),
-                    "in_toolbar": t.in_toolbar(),
-                    "options": t.options().iter().map(option_json).collect::<Vec<_>>(),
-                })
-            })
-            .collect()
-    };
-    let commands = || -> Value {
-        sess.registry
-            .commands()
+/// What the Photoshop plug-in scan found.
+///
+/// The plug-ins that loaded are published as filter tools like any
+/// other, so this is really about the ones that did not: which folders
+/// were searched, and what stopped each entry.
+fn photoshop_json(sess: &Session) -> Value {
+    json!({
+        "folders": sess
+            .photoshop
+            .dirs
             .iter()
-            .map(|c| json!({"id": c.id, "title": c.title, "keybind": c.keybind}))
-            .collect()
-    };
-    let filters = || -> Value {
-        sess.registry
-            .filters()
-            .map(|f| {
-                json!({
-                    "id": f.id(),
-                    "name": f.name(),
-                    "category": f.category(),
-                    "info": f.info(),
-                    "params": f
-                        .params()
-                        .iter()
-                        .map(|p| {
-                            json!({
-                                "key": p.key,
-                                "label": p.label,
-                                "min": p.min,
-                                "max": p.max,
-                                "default": p.default,
-                                "suffix": p.suffix,
-                                "choices": p.choices,
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect()
-    };
-    let codecs = || -> Value {
-        sess.registry
-            .codecs()
-            .map(|c| {
-                json!({
-                    "id": c.id(),
-                    "name": c.name(),
-                    "extensions": c.extensions(),
-                    "can_export": c.can_export(),
-                    "supports_quality": c.supports_quality(),
-                })
-            })
-            .collect()
-    };
-    let adjustments = || -> Value {
-        ADJUSTMENT_KINDS
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>(),
+        "plugins": sess
+            .photoshop
+            .entries
             .iter()
-            .map(|k| {
+            .map(|e| {
                 json!({
-                    "kind": k.display_name(),
-                    "default_params": serde_json::to_value(
-                        schist_adjustments::Params::default_for(*k)
-                    )
-                    .unwrap_or(Value::Null),
+                    "id": e.id,
+                    "name": e.name,
+                    "file": e.container.display().to_string(),
+                    "architecture": e.architecture,
+                    "enabled": e.enabled,
+                    "available": e.blocker.is_none() && e.enabled,
+                    "unavailable_because": e.blocker,
                 })
             })
-            .collect()
-    };
-    // Photoshop plug-ins are ordinary filters once loaded, so they are
-    // already in `filters`. This section is the other half: what was
-    // found, and why anything missing from that list is missing.
-    let photoshop_plugins = || -> Value {
-        json!({
-            "folders": sess
-                .photoshop
-                .dirs
-                .iter()
-                .map(|d| d.display().to_string())
-                .collect::<Vec<_>>(),
-            "plugins": sess
-                .photoshop
-                .entries
-                .iter()
-                .map(|e| {
-                    json!({
-                        "id": e.id,
-                        "name": e.name,
-                        "file": e.container.display().to_string(),
-                        "architecture": e.architecture,
-                        "enabled": e.enabled,
-                        "available": e.blocker.is_none() && e.enabled,
-                        "unavailable_because": e.blocker,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        })
-    };
-    let blend_modes = || -> Value {
-        BLEND_MODES
-            .iter()
-            .map(|m| json!(format!("{m:?}")))
-            .collect()
-    };
-    Ok(match what {
-        "tools" => json!({"tools": tools()}),
-        "commands" => json!({"commands": commands()}),
-        "filters" => json!({"filters": filters()}),
-        "codecs" => json!({"codecs": codecs()}),
-        "adjustments" => json!({"adjustments": adjustments()}),
-        "blend_modes" => json!({"blend_modes": blend_modes()}),
-        "photoshop_plugins" => json!({"photoshop_plugins": photoshop_plugins()}),
-        "all" => json!({
-            "tools": tools(),
-            "commands": commands(),
-            "filters": filters(),
-            "codecs": codecs(),
-            "adjustments": adjustments(),
-            "blend_modes": blend_modes(),
-            "photoshop_plugins": photoshop_plugins(),
-        }),
-        other => bail!(
-            "unknown section {other:?} (tools, commands, filters, codecs, adjustments, \
-             blend_modes, photoshop_plugins or all)"
-        ),
+            .collect::<Vec<_>>(),
     })
-}
-
-// ----- tool definitions -----
-
-fn tool_defs() -> Value {
-    let session_prop = json!({"type": "string", "description": "Session id from create_session"});
-    let modifiers_prop = json!({
-        "type": "object",
-        "description": "Held modifier keys",
-        "properties": {
-            "shift": {"type": "boolean"},
-            "alt": {"type": "boolean"},
-            "ctrl": {"type": "boolean", "description": "Ctrl/Cmd"},
-        },
-    });
-    let def = |name: &str, description: &str, props: Value, required: &[&str]| {
-        json!({
-            "name": name,
-            "description": description,
-            "inputSchema": {
-                "type": "object",
-                "properties": props,
-                "required": required,
-            },
-        })
-    };
-    json!([
-        def(
-            "create_session",
-            "Create an editing session: open an image file (PSD/PSB, PNG, JPEG, WebP, TIFF, \
-             Affinity .af/.afphoto/.afdesign/.afpub) or start a blank document with a white \
-             Background layer. Returns the session id and initial state.",
-            json!({
-                "path": {"type": "string", "description": "File to open; omit for a blank document"},
-                "width": {"type": "integer", "description": "Blank document width (default 1280)"},
-                "height": {"type": "integer", "description": "Blank document height (default 800)"},
-                "depth": {"type": "integer", "enum": [8, 16, 32], "description": "Bits per channel (default 8)"},
-                "title": {"type": "string"},
-            }),
-            &[],
-        ),
-        def("list_sessions", "List open sessions.", json!({}), &[]),
-        def(
-            "close_session",
-            "Close a session, discarding unsaved changes.",
-            json!({"session": session_prop}),
-            &["session"],
-        ),
-        def(
-            "describe",
-            "Enumerate what the session can do: canvas tools (with their options), menu \
-             commands (run with run_command), filters, destructive adjustments (with default \
-             parameter shapes), codecs and blend modes.",
-            json!({
-                "session": session_prop,
-                "what": {
-                    "type": "string",
-                    "enum": [
-                        "tools",
-                        "commands",
-                        "filters",
-                        "codecs",
-                        "adjustments",
-                        "blend_modes",
-                        "photoshop_plugins",
-                        "all"
-                    ],
-                    "description": "Section to list (default all)",
-                },
-            }),
-            &["session"],
-        ),
-        def(
-            "get_state",
-            "Document info, full layer tree (with layer ids), selection, undo/redo state, and \
-             editor state including the active tool's options.",
-            json!({"session": session_prop}),
-            &["session"],
-        ),
-        def(
-            "run_command",
-            "Run a menu command by id (see describe): edit.undo, edit.redo, select.all, \
-             layer.new, layer.duplicate, image.crop and everything else in the menus.",
-            json!({
-                "session": session_prop,
-                "id": {"type": "string", "description": "Command id, e.g. \"layer.duplicate\""},
-            }),
-            &["session", "id"],
-        ),
-        def(
-            "select_tool",
-            "Activate a canvas tool by id (see describe): brush, eraser, marquee, lasso, wand, \
-             gradient, move, crop, transform, text, shapes, pen…",
-            json!({
-                "session": session_prop,
-                "id": {"type": "string", "description": "Tool id, e.g. \"brush\""},
-            }),
-            &["session", "id"],
-        ),
-        def(
-            "set_tool_options",
-            "Set options-bar values on the active tool. Numbers for sliders, booleans for \
-             toggles, and either an index or the choice's name for dropdowns.",
-            json!({
-                "session": session_prop,
-                "options": {
-                    "type": "object",
-                    "description": "Option key to value, e.g. {\"wand-tolerance\": 40}",
-                    "additionalProperties": true,
-                },
-            }),
-            &["session", "options"],
-        ),
-        def(
-            "tool_stroke",
-            "Drive the active tool through one pointer gesture in document pixels: down on the \
-             first point, drag through the rest, up on the last. One point clicks. A brush \
-             stroke, a marquee drag, a transform-handle drag and a text-layer click are all one \
-             call. Modal tools (crop, transform, text) keep a pending state afterwards — finish \
-             with tool_input.",
-            json!({
-                "session": session_prop,
-                "points": {
-                    "type": "array",
-                    "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
-                    "description": "[[x, y], …] in document pixels",
-                },
-                "pressure": {"type": "number", "description": "Stylus pressure 0..1 (default 1)"},
-                "modifiers": modifiers_prop,
-            }),
-            &["session", "points"],
-        ),
-        def(
-            "tool_input",
-            "Non-pointer input for the active tool: commit (Enter) or cancel (Escape) a pending \
-             crop/transform/text gesture, or send a raw key — the type tool takes text through \
-             action \"key\" with the character in \"text\".",
-            json!({
-                "session": session_prop,
-                "action": {"type": "string", "enum": ["key", "commit", "cancel"]},
-                "key": {"type": "string", "description": "Physical key name for action \"key\", e.g. \"a\", \"enter\", \"backspace\""},
-                "text": {"type": "string", "description": "Character the key types, when it types one"},
-                "modifiers": modifiers_prop,
-            }),
-            &["session", "action"],
-        ),
-        def(
-            "apply_filter",
-            "Run a destructive filter on the active pixel layer (through the selection when one \
-             exists), as one undoable edit. Omitted parameters use their defaults (see describe).",
-            json!({
-                "session": session_prop,
-                "id": {"type": "string", "description": "Filter id, e.g. \"filter.gaussian-blur\""},
-                "params": {
-                    "type": "object",
-                    "description": "Parameter key to number",
-                    "additionalProperties": {"type": "number"},
-                },
-            }),
-            &["session", "id"],
-        ),
-        def(
-            "apply_adjustment",
-            "Image ▸ Adjustments: apply an adjustment destructively to the active layer's \
-             pixels. For a non-destructive adjustment layer use the layer.adjustment.* commands \
-             instead. params follows the shape shown by describe(adjustments); omit for defaults.",
-            json!({
-                "session": session_prop,
-                "kind": {"type": "string", "description": "e.g. \"Levels\", \"Hue/Saturation\", \"Brightness/Contrast\""},
-                "params": {"type": "object", "description": "Serde form of the adjustment's parameters"},
-            }),
-            &["session", "kind"],
-        ),
-        def(
-            "set_active_layer",
-            "Make a layer the target of tools, filters and layer commands (layer ids come from \
-             get_state).",
-            json!({
-                "session": session_prop,
-                "id": {"type": "integer", "description": "Layer id"},
-            }),
-            &["session", "id"],
-        ),
-        def(
-            "set_layer_props",
-            "Change a layer's name, visibility, opacity, fill opacity, blend mode, lock or \
-             clipping flag, as one undoable edit.",
-            json!({
-                "session": session_prop,
-                "id": {"type": "integer"},
-                "name": {"type": "string"},
-                "visible": {"type": "boolean"},
-                "opacity": {"type": "number", "description": "0..1"},
-                "fill_opacity": {"type": "number", "description": "0..1"},
-                "blend": {"type": "string", "description": "Blend mode name, e.g. \"Multiply\""},
-                "locked": {"type": "boolean"},
-                "clipping": {"type": "boolean"},
-            }),
-            &["session", "id"],
-        ),
-        def(
-            "set_editor",
-            "Set shared editor state: foreground/background colours, brush size and hardness, \
-             tool opacity, magic-wand tolerance, transform resampling.",
-            json!({
-                "session": session_prop,
-                "foreground": {"type": "string", "description": "#rrggbb or #rrggbbaa"},
-                "background": {"type": "string"},
-                "brush_size": {"type": "number", "description": "Pixels"},
-                "brush_hardness": {"type": "number", "description": "0 soft .. 1 hard"},
-                "tool_opacity": {"type": "number", "description": "0..1"},
-                "tolerance": {"type": "integer", "description": "0..255"},
-                "resample": {"type": "string", "enum": ["nearest", "bilinear", "bicubic"]},
-            }),
-            &["session"],
-        ),
-        def(
-            "render",
-            "Composite the document (or a region) and return it as a PNG image, downscaled to \
-             max_dim for viewing. Pass path to also write the full-resolution PNG to disk.",
-            json!({
-                "session": session_prop,
-                "x": {"type": "integer"},
-                "y": {"type": "integer"},
-                "width": {"type": "integer"},
-                "height": {"type": "integer"},
-                "max_dim": {"type": "integer", "description": "Longest edge of the returned preview (default 1024)"},
-                "path": {"type": "string", "description": "Also write full-resolution PNG here"},
-            }),
-            &["session"],
-        ),
-        def(
-            "save",
-            "Save the document, codec chosen by extension (.psd/.psb keeps layers; raster \
-             formats flatten). Defaults to the path it was opened from.",
-            json!({
-                "session": session_prop,
-                "path": {"type": "string", "description": "Target path; optional when the document already has one"},
-            }),
-            &["session"],
-        ),
-        def(
-            "export",
-            "Export a flattened copy with encoder settings, leaving the document's own path \
-             untouched.",
-            json!({
-                "session": session_prop,
-                "path": {"type": "string"},
-                "quality": {"type": "integer", "description": "1..100 for lossy formats (default 90)"},
-                "bit_depth": {"type": "integer", "description": "Bits per channel where the format supports a choice (default 8)"},
-                "dither": {"type": "boolean", "description": "Dither when reducing depth (default true)"},
-            }),
-            &["session", "path"],
-        ),
-    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every name in the tool list has to lead somewhere. A builtin that
+    /// is published but not implemented reports "unknown tool" to the
+    /// caller and nothing at all to us.
+    #[test]
+    fn every_published_name_dispatches() {
+        let mut server = Server::default();
+        let names: Vec<String> = server
+            .catalog()
+            .defs()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.len() > 100, "only {} tools published", names.len());
+        for name in names {
+            if let Err(e) = server.call_tool(&name, &json!({})) {
+                let e = format!("{e:#}");
+                assert!(!e.contains("unknown tool"), "{name}: {e}");
+            }
+        }
+    }
+
+    /// A filter's choice parameter reads as the name the dialog shows.
+    #[test]
+    fn a_choice_reaches_the_filter_as_its_index() {
+        let mut server = Server::default();
+        server
+            .call_tool("create_session", &json!({"width": 32, "height": 32}))
+            .expect("session");
+        let args = json!({"session": "s1", "amount": 10, "distribution": "Gaussian"});
+        server.call_tool("filter_add_noise", &args).expect("filter");
+        let bad = json!({"session": "s1", "distribution": "Poisson"});
+        let e = format!(
+            "{:#}",
+            server.call_tool("filter_add_noise", &bad).unwrap_err()
+        );
+        assert!(e.contains("no choice"), "{e}");
+    }
+
+    /// Selecting a tool and setting its options is one call, and the
+    /// options that arrive with it are checked against that tool.
+    #[test]
+    fn a_tool_is_selected_and_configured_together() {
+        let mut server = Server::default();
+        server
+            .call_tool("create_session", &json!({"width": 32, "height": 32}))
+            .expect("session");
+        let args = json!({"session": "s1", "marquee-feather": 3.0});
+        server
+            .call_tool("tool_marquee_rect", &args)
+            .expect("select");
+        let sess = server.sessions.get("s1").unwrap();
+        assert_eq!(sess.state.active_tool, "marquee.rect");
+        let feather = sess
+            .registry
+            .tools()
+            .find(|t| t.id() == "marquee.rect")
+            .unwrap()
+            .options()
+            .iter()
+            .find(|o| o.key == "marquee-feather")
+            .map(|o| o.value.num());
+        assert_eq!(feather, Some(3.0));
+        let e = format!(
+            "{:#}",
+            server
+                .call_tool("tool_marquee_rect", &json!({"session": "s1", "nope": 1}))
+                .unwrap_err()
+        );
+        assert!(e.contains("no option"), "{e}");
+    }
+
+    /// An adjustment takes its checkbox as a boolean and its sliders as
+    /// numbers, and the two do not undo each other.
+    #[test]
+    fn an_adjustment_takes_flags_and_sliders_at_once() {
+        let mut server = Server::default();
+        server
+            .call_tool("create_session", &json!({"width": 32, "height": 32}))
+            .expect("session");
+        let args = json!({"session": "s1", "monochrome": true, "r_r": 50.0});
+        server
+            .call_tool("adjust_channel_mixer", &args)
+            .expect("adjustment");
+        let e = format!(
+            "{:#}",
+            server
+                .call_tool("adjust_levels", &json!({"session": "s1", "bogus": 1.0}))
+                .unwrap_err()
+        );
+        assert!(e.contains("no parameter"), "{e}");
+    }
 
     #[test]
     fn colours_parse_in_every_hex_form() {
@@ -1266,16 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn names_normalize_to_kinds_and_modes() {
-        assert_eq!(
-            parse_adjustment_kind("Hue/Saturation").unwrap(),
-            AdjustmentKind::HueSaturation
-        );
-        assert_eq!(
-            parse_adjustment_kind("brightness-contrast").unwrap(),
-            AdjustmentKind::BrightnessContrast
-        );
-        assert!(parse_adjustment_kind("sepia").is_err());
+    fn names_normalize_to_modes() {
         assert_eq!(
             parse_blend_mode("soft light").unwrap(),
             BlendMode::SoftLight

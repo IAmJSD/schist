@@ -108,6 +108,10 @@ impl ToolPlugin for MoveTool {
     fn name(&self) -> &'static str {
         "Move"
     }
+    fn description(&self) -> &'static str {
+        "Drag the active layer's contents to a new position. With Auto-Select on, \
+         the press picks whichever layer -- or whole group -- is under the pointer first."
+    }
     fn icon(&self) -> &'static str {
         "move"
     }
@@ -304,6 +308,10 @@ impl ToolPlugin for EyedropperTool {
     fn name(&self) -> &'static str {
         "Eyedropper"
     }
+    fn description(&self) -> &'static str {
+        "Sample the colour under the pointer into the foreground swatch, or into the \
+         background swatch when alt is held. Dragging keeps sampling."
+    }
     fn icon(&self) -> &'static str {
         "eyedropper"
     }
@@ -357,7 +365,7 @@ impl ToolPlugin for EyedropperTool {
 
 /// Viewport tools — no-ops at the document level (see module docs).
 macro_rules! viewport_tool {
-    ($ty:ident, $id:literal, $name:literal, $icon:literal, $key:literal) => {
+    ($ty:ident, $id:literal, $name:literal, $desc:literal, $icon:literal, $key:literal) => {
         pub struct $ty;
 
         impl ToolPlugin for $ty {
@@ -366,6 +374,9 @@ macro_rules! viewport_tool {
             }
             fn name(&self) -> &'static str {
                 $name
+            }
+            fn description(&self) -> &'static str {
+                $desc
             }
             fn icon(&self) -> &'static str {
                 $icon
@@ -380,8 +391,24 @@ macro_rules! viewport_tool {
     };
 }
 
-viewport_tool!(HandTool, "hand", "Hand", "hand", "h");
-viewport_tool!(ZoomTool, "zoom", "Zoom", "zoom", "z");
+viewport_tool!(
+    HandTool,
+    "hand",
+    "Hand",
+    "Pans the view. The viewport belongs to the window, so headless this tool does nothing \
+     to the document.",
+    "hand",
+    "h"
+);
+viewport_tool!(
+    ZoomTool,
+    "zoom",
+    "Zoom",
+    "Zooms the view. The viewport belongs to the window, so headless this tool does nothing \
+     to the document.",
+    "zoom",
+    "z"
+);
 
 pub struct BasicToolsPlugin;
 
