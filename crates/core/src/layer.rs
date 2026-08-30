@@ -469,6 +469,26 @@ impl LayerTree {
         }
     }
 
+    /// Which layer to select once whatever sat at `path` is gone.
+    ///
+    /// Call it *after* the removal: the sibling below the hole, or the
+    /// layer that fell into it when the hole was at the bottom, or the
+    /// group that held it once it holds nothing else.
+    pub fn neighbour_of(&self, path: &LayerPath) -> Option<LayerId> {
+        let (&ix, parents) = path.0.split_last()?;
+        let mut layers: &[Layer] = &self.layers;
+        let mut parent: Option<&Layer> = None;
+        for &p in parents {
+            let layer = layers.get(p)?;
+            layers = layer.children()?;
+            parent = Some(layer);
+        }
+        match layers.is_empty() {
+            true => parent.map(|l| l.id),
+            false => Some(layers[ix.saturating_sub(1).min(layers.len() - 1)].id),
+        }
+    }
+
     pub fn remove(&mut self, id: LayerId) -> Option<(LayerPath, Layer)> {
         let path = self.path_of(id)?;
         let layer = self.remove_at(&path)?;

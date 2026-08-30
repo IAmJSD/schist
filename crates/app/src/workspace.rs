@@ -87,6 +87,11 @@ pub(crate) fn load_view_options() -> ViewOptions {
 /// How often a dirty document is snapshotted for crash recovery.
 const AUTOSAVE_SECS: u64 = 30;
 
+/// The registry id of the PNG codec. Codecs are registered as
+/// `codec.<format>`; looking one up by the bare format name silently finds
+/// nothing.
+const PNG_CODEC_ID: &str = "codec.png";
+
 /// A document open in another tab, parked with its view transform so
 /// switching back lands on the same spot at the same zoom.
 struct DocTab {
@@ -2959,7 +2964,7 @@ impl Workspace {
                 .map(|c| if c.is_alphanumeric() { c } else { '-' })
                 .collect();
             let out = dir.join(format!("{stem}-{safe}.png"));
-            let Some(codec) = self.registry.codecs().find(|c| c.id() == "png") else {
+            let Some(codec) = self.png_codec() else {
                 continue;
             };
             match codec.export(&region_doc) {
@@ -2975,6 +2980,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The PNG codec, which is how anything leaves the app as a flat image.
+    ///
+    /// Both callers used to look for the id `"png"`; every codec is
+    /// registered as `codec.<format>`, so the lookup never matched and
+    /// exporting slices and copying to the system clipboard both returned
+    /// early without a word.
+    fn png_codec(&self) -> Option<&dyn schist_plugin_api::CodecPlugin> {
+        self.registry.codecs().find(|c| c.id() == PNG_CODEC_ID)
+    }
+
     /// Push the internal clipboard out to the system clipboard as a PNG.
     ///
     /// Schist's own copy/paste has always worked between its documents;
@@ -2987,7 +3002,7 @@ impl Workspace {
         if w == 0 || h == 0 {
             return;
         }
-        let Some(codec) = self.registry.codecs().find(|c| c.id() == "png") else {
+        let Some(codec) = self.png_codec() else {
             return;
         };
         // Codecs export documents, so the clipboard becomes a one-layer one.
@@ -8035,8 +8050,23 @@ fn builtin_index(name: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_index, hex_field_after, numeric_accepts};
+    use super::{builtin_index, hex_field_after, numeric_accepts, PNG_CODEC_ID};
+    use schist_plugin_api::{PluginManifest, PluginRegistry};
     use std::time::{Duration, SystemTime};
+
+    /// Copying to the system clipboard and exporting slices both look the
+    /// PNG codec up by id, and both looked for `"png"` -- which nothing is
+    /// registered as, so each returned early and did nothing at all.
+    #[test]
+    fn the_png_codec_answers_to_the_id_it_is_looked_up_by() {
+        let mut registry = PluginRegistry::new();
+        schist_codecs_common::CommonCodecsPlugin.register(&mut registry);
+        let codec = registry
+            .codecs()
+            .find(|c| c.id() == PNG_CODEC_ID)
+            .expect("nothing is registered under the id the PNG lookups use");
+        assert!(codec.can_export(), "the PNG codec has to be able to export");
+    }
 
     #[test]
     fn numeric_fields_take_fractions_and_negatives() {

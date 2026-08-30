@@ -155,6 +155,10 @@ fn reid(layer: &mut Layer) {
     }
 }
 
+/// Why copy and cut decline: no active layer, or one made of something
+/// other than pixels.
+const NOTHING_TO_COPY: &str = "Select a pixel layer to copy from";
+
 /// Copy the active layer's pixels within the selection to a ClipboardImage.
 fn copy_pixels(doc: &Document, merged: bool) -> Option<ClipboardImage> {
     let canvas = doc.canvas_rect();
@@ -459,24 +463,30 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.redo();
             }),
             cmd("edit.copy", "Copy", Some("cmd-c"), |ctx| {
-                if let Some(clip) = copy_pixels(ctx.doc, false) {
-                    ctx.state.clipboard = Some(Arc::new(clip));
+                match copy_pixels(ctx.doc, false) {
+                    Some(clip) => ctx.state.clipboard = Some(Arc::new(clip)),
+                    // Saying nothing while the clipboard kept its previous
+                    // contents read as "copied", and the next paste looked
+                    // like it had pasted the wrong thing.
+                    None => ctx.refuse(NOTHING_TO_COPY),
                 }
             }),
             cmd(
                 "edit.copy_merged",
                 "Copy Merged",
                 Some("cmd-shift-c"),
-                |ctx| {
-                    if let Some(clip) = copy_pixels(ctx.doc, true) {
-                        ctx.state.clipboard = Some(Arc::new(clip));
-                    }
+                |ctx| match copy_pixels(ctx.doc, true) {
+                    Some(clip) => ctx.state.clipboard = Some(Arc::new(clip)),
+                    None => ctx.refuse(NOTHING_TO_COPY),
                 },
             ),
             cmd("edit.cut", "Cut", Some("cmd-x"), |ctx| {
-                if let Some(clip) = copy_pixels(ctx.doc, false) {
-                    ctx.state.clipboard = Some(Arc::new(clip));
-                    clear_selection(ctx);
+                match copy_pixels(ctx.doc, false) {
+                    Some(clip) => {
+                        ctx.state.clipboard = Some(Arc::new(clip));
+                        clear_selection(ctx);
+                    }
+                    None => ctx.refuse(NOTHING_TO_COPY),
                 }
             }),
             cmd("edit.paste", "Paste", Some("cmd-v"), |ctx| {
@@ -1015,6 +1025,42 @@ mod tests {
         );
     }
 
+    /// Undoing a paste used to null `active_layer`, and copy, cut and
+    /// every other pixel command then did nothing at all -- while the
+    /// status line still reported them as having run.
+    #[test]
+    fn undoing_a_paste_leaves_a_layer_active() {
+        let reg = registry();
+        let mut doc = doc_with_pixels();
+        let mut state = EditorState::default();
+        let background = doc.tree.layers[0].id;
+        doc.selection
+            .select_rect(IntRect::from_xywh(10, 10, 20, 20), SelectOp::Replace);
+        run(&reg, "edit.copy", &mut doc, &mut state);
+        run(&reg, "edit.paste_in_place", &mut doc, &mut state);
+        run(&reg, "edit.undo", &mut doc, &mut state);
+        assert_eq!(doc.tree.layers.len(), 1);
+        assert_eq!(
+            doc.active_layer,
+            Some(background),
+            "undo left nothing active"
+        );
+
+        state.clipboard = None;
+        run(&reg, "edit.cut", &mut doc, &mut state);
+        assert!(state.clipboard.is_some(), "cut after undo copied nothing");
+        assert_eq!(
+            doc.tree.layers[0]
+                .as_raster()
+                .unwrap()
+                .tiles
+                .pixel(15, 15)
+                .to_u8()[3],
+            0,
+            "cut after undo cleared nothing"
+        );
+    }
+
     #[test]
     fn cut_clears_selection_region() {
         let reg = registry();
@@ -1166,6 +1212,22 @@ mod tests {
             run_for_refusal(&reg, "edit.paste", &mut doc, &mut state).as_deref(),
             Some("Nothing on the clipboard"),
             "Paste with an empty clipboard"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.copy", &mut doc, &mut state).as_deref(),
+            Some(NOTHING_TO_COPY),
+            "Copy with no active layer"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.cut", &mut doc, &mut state).as_deref(),
+            Some(NOTHING_TO_COPY),
+            "Cut with no active layer"
         );
 
         let mut doc = doc_with_pixels();
