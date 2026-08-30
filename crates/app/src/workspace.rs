@@ -7704,7 +7704,7 @@ fn builtin_index(name: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{PNG_CODEC_ID, builtin_index, hex_field_after, numeric_accepts};
+    use super::{builtin_index, hex_field_after, numeric_accepts, PNG_CODEC_ID};
     use schist_plugin_api::{PluginManifest, PluginRegistry};
     use std::time::{Duration, SystemTime};
 
