@@ -29,14 +29,13 @@ pub fn ai_sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Any
         .bg(gpui::rgb(palette().panel_bg))
         .border_l_1()
         .border_color(gpui::rgb(palette().panel_edge))
-        .child(header(ws, cx))
+        .child(header(cx))
         .child(transcript(ws))
         .child(prompt_box(ws, cx));
     Some(panel.into_any_element())
 }
 
-fn header(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let backend = ws.ai.backend;
+fn header(cx: &mut Context<Workspace>) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -50,17 +49,6 @@ fn header(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .text_size(px(11.0))
-                        .text_color(gpui::rgb(palette().text_dim))
-                        .child(icon(backend.icon(), 12.0, palette().text_dim))
-                        .child(backend.label()),
-                )
                 .child(
                     div()
                         .id("ai-clear")
