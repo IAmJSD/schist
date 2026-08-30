@@ -17,6 +17,72 @@ pub mod codex;
 pub mod endpoint;
 pub mod models;
 
+/// Adopt the login shell's PATH when launched from Finder or a desktop
+/// environment.
+///
+/// A GUI launch inherits launchd's (or the desktop session's) minimal
+/// PATH, never the user's shell configuration, so a `claude` or `codex`
+/// living in ~/.local/bin, /opt/homebrew/bin or an npm prefix looks
+/// missing to [`Backend::available`] — and to the SDKs' own spawns —
+/// while working fine from a terminal. Asking the user's shell for its
+/// PATH once at startup makes the panel see the same commands the
+/// terminal does.
+///
+/// Must run early in `main`, before other threads could be reading the
+/// environment: it calls `std::env::set_var`.
+#[cfg(unix)]
+pub fn adopt_login_shell_path() {
+    // A terminal launch already carries the user's PATH; don't spend a
+    // shell startup on it.
+    if std::env::var_os("TERM").is_some() {
+        return;
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    // Interactive + login so both the profile and the rc file
+    // contribute — installers append PATH edits to either. Those files
+    // may print banners, so the value is fenced with markers; and the
+    // inner printf runs under `sh` because fish would expand its own
+    // "$PATH" as a space-joined list, while the exported environment is
+    // colon-joined for every shell.
+    const MARK: &str = "__SCHIST_PATH__";
+    const PRINTER: &str = "sh -c 'printf \"__SCHIST_PATH__%s__SCHIST_PATH__\" \"$PATH\"'";
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("shell-path".into())
+        .spawn({
+            let shell = shell.clone();
+            move || {
+                let out = std::process::Command::new(shell)
+                    .args(["-l", "-i", "-c", PRINTER])
+                    .stdin(std::process::Stdio::null())
+                    .output();
+                let _ = tx.send(out);
+            }
+        });
+    if spawned.is_err() {
+        return;
+    }
+    // A shell rc that hangs must not hang the app: give it a few seconds
+    // and launch with the plain PATH otherwise. (On timeout the probe
+    // thread is abandoned; it exits whenever the shell does.)
+    let out = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            log::warn!("asking {shell} for PATH failed: {e}");
+            return;
+        }
+        Err(_) => {
+            log::warn!("asking {shell} for PATH timed out; installed CLIs may look missing");
+            return;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match stdout.split(MARK).nth(1) {
+        Some(path) if !path.is_empty() => std::env::set_var("PATH", path),
+        _ => log::warn!("{shell} printed no PATH; installed CLIs may look missing"),
+    }
+}
+
 /// Which agent harness a conversation runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
