@@ -25,6 +25,14 @@ sudo apt-get install build-essential pkg-config libfontconfig-dev \
 cargo run --release -p schist-app -- [file.psd|file.png|…]
 ```
 
+Those are the packages to *build* against. Running also needs a Vulkan
+**driver** installed — GPUI renders through it, and the loader above is
+only the part that finds one. On Debian and Fedora that is
+`mesa-vulkan-drivers`; on Arch it is `vulkan-driver` (any of
+`vulkan-radeon`, `vulkan-intel`, `nvidia-utils`, …), or `vulkan-swrast`
+on a virtual machine with no GPU driver of its own. With no driver
+installed Schist stops at startup and says which package is missing.
+
 `cargo test --workspace` runs everything. `make helpers` cross-compiles
 the Photoshop plug-in helpers, which are separate binaries for the
 architectures a `.8bf` plug-in might be built for — see
