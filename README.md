@@ -333,10 +333,17 @@ own MCP tool, with its own parameters described, plus inline PNG
 rendering. It ships with every release; `cargo build --release -p
 schist-mcp` builds it from source. See [docs/mcp.md](docs/mcp.md).
 
+The same tool surface also powers the in-app **AI panel** (View ▸ AI
+Panel): a sidebar that drives your installed `claude` or `codex` CLI
+against the document you have open, edits streaming onto the canvas as
+undoable history entries. No API keys — it uses the agent CLI you are
+already logged into. See [docs/ai-panel.md](docs/ai-panel.md).
+
 ## Documentation
 
 * [docs/architecture.md](docs/architecture.md) — how the pieces fit
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
 * [docs/mcp.md](docs/mcp.md) — the MCP server
+* [docs/ai-panel.md](docs/ai-panel.md) — the in-app AI sidebar
 * [docs/quicklook.md](docs/quicklook.md) — the macOS Quick Look extensions
 * [docs/versioning.md](docs/versioning.md) — compatibility and releases

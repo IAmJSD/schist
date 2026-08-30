@@ -220,6 +220,7 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Grid", ToggleGrid, Some("cmd-'")),
                 App("Guides", ToggleGuides, Some("cmd-;")),
                 App("Notes", ToggleNotes, None),
+                App("AI Panel", ToggleAi, Some("cmd-shift-a")),
                 App("Extras", ToggleExtras, Some("cmd-h")),
                 App("Snap", ToggleSnap, Some("cmd-shift-;")),
                 App("Clear Guides", ClearGuides, Some("cmd-alt-;")),

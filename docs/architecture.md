@@ -23,7 +23,7 @@ crates/app              GPUI shell: window, canvas, panels, dialogs, keymap
 
 crates/quicklook        macOS Quick Look thumbnail and preview extensions
 └── crates/preview      one windowless image of a file, as fast as the file allows
-crates/mcp              headless editing sessions over the Model Context Protocol
+crates/mcp              MCP catalog + dispatch: headless sessions (schist-mcp) and the app's AI panel
 
 plugins/                first-party features, each optional at compile time
 ├── tools-basic         move, eyedropper, hand, zoom

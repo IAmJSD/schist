@@ -351,7 +351,11 @@ impl Workspace {
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
-                if ws.layer_rename_key(ev, cx) || ws.note_edit_key(ev, cx) {
+                if ws.layer_rename_key(ev, cx)
+                    || ws.note_edit_key(ev, cx)
+                    || ws.ai_model_menu_key(ev, cx)
+                    || ws.ai_input_key(ev, cx)
+                {
                     cx.stop_propagation();
                     return;
                 }
@@ -537,6 +541,8 @@ impl Render for Workspace {
         } else if self.tool_captures_keys()
             || self.layer_rename.is_some()
             || self.note_edit.is_some()
+            || self.ai.input_active
+            || self.ai.model_menu
         {
             "Workspace text_entry"
         } else {
@@ -681,6 +687,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ClearGuides, _w, cx| ws.clear_guides(cx)))
             .on_action(cx.listener(|ws, _: &CycleScreenMode, _w, cx| ws.cycle_screen_mode(cx)))
             .on_action(cx.listener(|ws, _: &TogglePanels, _w, cx| ws.cycle_screen_mode(cx)))
+            .on_action(cx.listener(|ws, _: &ToggleAiPanel, _w, cx| ws.toggle_ai_panel(cx)))
             .on_action(cx.listener(|ws, _: &ShowLayerStyle, _w, cx| {
                 if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
                     ws.show_layer_style(id, cx);
@@ -726,7 +733,12 @@ impl Render for Workspace {
                                 (chrome && self.view.rulers).then(|| panels::rulers(self, cx)),
                             ),
                     )
-                    .children(chrome.then(|| panels::side_panels(self, cx))),
+                    .children(chrome.then(|| panels::side_panels(self, cx)))
+                    .children(if chrome {
+                        panels::ai_sidebar(self, cx)
+                    } else {
+                        None
+                    }),
             )
             .children(chrome.then(|| panels::status_bar(self)))
             .children(tool_flyout)

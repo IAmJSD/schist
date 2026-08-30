@@ -469,6 +469,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "async-task"
 version = "4.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,6 +1041,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-agent-sdk-rs"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b07aee643e9d8f0837ffdb0141e7a902fbc1ea1b40f6ce68bf530f4135b4fc81"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "dashmap",
+ "flume 0.12.0",
+ "futures",
+ "paste",
+ "path-absolutize",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "typed-builder",
+ "uuid",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,6 +1151,19 @@ dependencies = [
  "serde",
  "termcolor",
  "unicode-width",
+]
+
+[[package]]
+name = "codex-codes"
+version = "0.150.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "766bb584b37591c58a19332932f99ac2526680dc62dad40899b272fa26d9cb24"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "which 8.0.6",
 ]
 
 [[package]]
@@ -1644,6 +1703,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
 
 [[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2111,6 +2184,9 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+dependencies = [
+ "getrandom 0.4.3",
+]
 
 [[package]]
 name = "fax"
@@ -2203,6 +2279,18 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "nanorand",
+ "spin",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "fastrand 2.5.0",
+ "futures-core",
+ "futures-sink",
  "spin",
 ]
 
@@ -2715,7 +2803,7 @@ dependencies = [
  "embed-resource",
  "etagere",
  "filedescriptor",
- "flume",
+ "flume 0.11.1",
  "foreign-types",
  "futures",
  "gpui-macros",
@@ -2928,7 +3016,7 @@ dependencies = [
  "tendril",
  "unicase",
  "walkdir",
- "which",
+ "which 6.0.3",
 ]
 
 [[package]]
@@ -4711,6 +4799,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
+name = "path-absolutize"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4af381fe79fa195b4909485d99f73a80792331df0625188e707854f0b3383f5"
+dependencies = [
+ "path-dedot",
+]
+
+[[package]]
+name = "path-dedot"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07ba0ad7e047712414213ff67533e6dd477af0a4e1d14fb52343e53d30ea9397"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
 name = "pathfinder_geometry"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5928,7 +6034,11 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "ash",
+ "async-trait",
+ "claude-agent-sdk-rs",
+ "codex-codes",
  "env_logger",
+ "futures",
  "gpui",
  "image",
  "log",
@@ -5945,6 +6055,7 @@ dependencies = [
  "schist-filters-core",
  "schist-fx",
  "schist-layer-fx",
+ "schist-mcp",
  "schist-neural",
  "schist-plugin-api",
  "schist-plugin-host-8bf",
@@ -5965,6 +6076,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallvec",
+ "tokio",
  "ureq",
 ]
 
@@ -7434,8 +7546,21 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -7895,6 +8020,26 @@ name = "twox-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
+
+[[package]]
+name = "typed-builder"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31aa81521b70f94402501d848ccc0ecaa8f93c8eb6999eb9747e72287757ffda"
+dependencies = [
+ "typed-builder-macro",
+]
+
+[[package]]
+name = "typed-builder-macro"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "076a02dc54dd46795c2e9c8282ed40bcfb1e22747e955de9389a1de28190fb26"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "typeid"
@@ -8818,6 +8963,15 @@ dependencies = [
  "home",
  "rustix 0.38.44",
  "winsafe",
+]
+
+[[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

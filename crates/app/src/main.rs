@@ -1,6 +1,7 @@
 //! Schist — a plugin-first image editor on GPUI.
 
 mod actions;
+mod ai;
 mod assets;
 mod color_picker;
 mod crash;
@@ -194,6 +195,20 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 }
 
 fn main() {
+    // `schist --mcp-bridge <addr>` is not a GUI launch at all: it is the
+    // stdio pump an agent harness spawns as its "MCP server", forwarding
+    // into the running app's loopback endpoint. Handled before anything
+    // else so no window, logger or driver probe gets in the way.
+    {
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some("--mcp-bridge") {
+            let Some(addr) = args.next() else {
+                eprintln!("usage: schist --mcp-bridge <addr>");
+                std::process::exit(2);
+            };
+            ai::endpoint::run_bridge(&addr);
+        }
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // Before anything else: a system with no Vulkan driver cannot open a
     // window, and saying so plainly beats the panic that follows from

@@ -87,6 +87,7 @@ schist-tools-vector = { path = "plugins/tools-vector" }
 schist-tools-type = { path = "plugins/tools-type" }
 schist-filters-core = { path = "plugins/filters-core" }
 schist-commands-core = { path = "plugins/commands-core" }
+schist-mcp = { path = "crates/mcp" }
 
 # external
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch and stylus pressure on the
@@ -112,6 +113,18 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 libloading = "0.8"
 byteorder = "1.5"
 log = "0.4"
+# The AI sidebar drives coding-agent harnesses through their SDKs: the
+# community Rust port of the Claude Agent SDK (Claude Code), and the typed
+# app-server protocol client for OpenAI's Codex. Both wrap the CLIs the
+# user already has installed and logged in; neither talks to a model API
+# directly, so no keys are handled here.
+claude-agent-sdk-rs = "0.6"
+codex-codes = { version = "0.150", default-features = false, features = ["sync-client"] }
+# claude-agent-sdk-rs is tokio-based; the app runs one small runtime on
+# the AI worker thread rather than adopting tokio app-wide.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+futures = "0.3"
+async-trait = "0.1"
 # GPU compositing backend; wgpu is its own instance (GPUI's renderer does
 # not expose a device to share).
 wgpu = "27"

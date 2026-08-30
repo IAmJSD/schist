@@ -20,6 +20,7 @@ use schist_color::Rgba;
 use schist_core::{BlendMode, Layer, LayerId, LayerKind};
 use std::sync::Arc;
 
+mod ai;
 mod color;
 mod context;
 mod history;
@@ -34,6 +35,7 @@ mod status;
 mod tabs;
 mod toolbar;
 
+pub use ai::*;
 use color::*;
 pub use context::*;
 use history::*;

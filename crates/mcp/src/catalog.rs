@@ -47,6 +47,18 @@ pub const ADJUSTMENT_KINDS: [AdjustmentKind; 18] = [
     AdjustmentKind::ChannelMixer,
 ];
 
+/// How the host addresses documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The stdio server: many sessions, every tool takes a session id and
+    /// `create_session`/`list_sessions`/`close_session` manage them.
+    Sessions,
+    /// The app's in-process host: exactly one document — whichever is
+    /// open in the window — so there is no session id to pass and no
+    /// session management to publish.
+    Active,
+}
+
 /// What calling one published tool actually does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -79,6 +91,38 @@ impl Catalog {
     }
 
     pub fn from_registry(registry: &PluginRegistry) -> Catalog {
+        Catalog::from_registry_scoped(registry, Scope::Sessions)
+    }
+
+    /// Assemble the list for a host that addresses documents its own way.
+    ///
+    /// The definitions are built with their session id in place and
+    /// stripped afterwards for [`Scope::Active`]: one construction path,
+    /// so the two scopes cannot drift apart in what they publish.
+    pub fn from_registry_scoped(registry: &PluginRegistry, scope: Scope) -> Catalog {
+        let mut catalog = Catalog::assemble(registry);
+        if scope == Scope::Active {
+            let managers = ["create_session", "list_sessions", "close_session"];
+            catalog
+                .defs
+                .retain(|def| !managers.iter().any(|m| def["name"].as_str() == Some(m)));
+            for name in managers {
+                catalog.actions.remove(name);
+            }
+            for def in &mut catalog.defs {
+                let schema = &mut def["inputSchema"];
+                if let Some(props) = schema["properties"].as_object_mut() {
+                    props.remove("session");
+                }
+                if let Some(required) = schema["required"].as_array_mut() {
+                    required.retain(|r| r.as_str() != Some("session"));
+                }
+            }
+        }
+        catalog
+    }
+
+    fn assemble(registry: &PluginRegistry) -> Catalog {
         let mut b = Builder::default();
         for (name, def, action) in builtins(registry) {
             b.push(name, def, action);
@@ -448,7 +492,7 @@ fn builtins(registry: &PluginRegistry) -> Vec<(String, Value, Action)> {
         .filter(|c| c.can_export())
         .flat_map(|c| c.extensions().iter().copied())
         .collect();
-    let blend_modes: Vec<String> = crate::BLEND_MODES
+    let blend_modes: Vec<String> = crate::dispatch::BLEND_MODES
         .iter()
         .map(|m| format!("{m:?}"))
         .collect();
@@ -775,6 +819,35 @@ mod tests {
         assert_eq!(slug("Hue/Saturation"), "hue_saturation");
         assert_eq!(slug("Brightness/Contrast"), "brightness_contrast");
         assert_eq!(slug("  odd  id  "), "odd_id");
+    }
+
+    /// The app-hosted catalog is about one document: nothing takes a
+    /// session id and nothing manages sessions.
+    #[test]
+    fn the_active_scope_has_no_sessions_anywhere() {
+        let (registry, _wasm, _photoshop) = session::build_registry();
+        let catalog = Catalog::from_registry_scoped(&registry, Scope::Active);
+        assert!(catalog.defs().len() > 100);
+        for name in ["create_session", "list_sessions", "close_session"] {
+            assert!(catalog.action(name).is_none(), "{name} was published");
+        }
+        for def in catalog.defs() {
+            let name = def["name"].as_str().unwrap();
+            assert!(
+                def["inputSchema"]["properties"]["session"].is_null(),
+                "{name} still takes a session id"
+            );
+            let required = def["inputSchema"]["required"].as_array().unwrap();
+            assert!(
+                !required.iter().any(|r| r == "session"),
+                "{name} still requires a session id"
+            );
+        }
+        // The sibling scope built from the same registry still has them.
+        let sessions = Catalog::from_registry_scoped(&registry, Scope::Sessions);
+        assert!(sessions.action("create_session").is_some());
+        let state = find(&sessions, "get_state");
+        assert!(state["inputSchema"]["properties"]["session"].is_object());
     }
 
     /// Two ids that sanitize alike must both stay reachable.
