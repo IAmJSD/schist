@@ -64,6 +64,20 @@ pub struct EditorState {
     /// Colour tolerance, 0..=255. Mirrored from the magic wand, which is
     /// where Photoshop's Grow, Similar and Color Range take theirs from.
     pub tolerance: u8,
+    /// Author stamped on notes as they are placed. Mirrored from the Note
+    /// tool's options bar, and persisted across sessions by the shell --
+    /// a reviewer types their name once, not once per note.
+    pub note_author: String,
+    /// Colour new notes are given, likewise from the options bar.
+    pub note_color: Rgba,
+    /// Index into `Document::notes` of the note the Notes panel is
+    /// showing. Set by the Note tool when a marker is clicked, and by the
+    /// panel's own navigation.
+    ///
+    /// An index rather than an id because notes carry none; anything that
+    /// shortens the list has to clamp or clear this, which is why every
+    /// read goes through `Document::notes.get()`.
+    pub active_note: Option<usize>,
 }
 
 impl Default for EditorState {
@@ -79,6 +93,9 @@ impl Default for EditorState {
             zoom: 1.0,
             resample: schist_core::Filter::Bicubic,
             tolerance: 32,
+            note_author: String::new(),
+            note_color: schist_core::DEFAULT_NOTE_COLOR,
+            active_note: None,
         }
     }
 }
@@ -103,6 +120,17 @@ pub enum Overlay {
     Circle { cx: f32, cy: f32, r: f32 },
     /// Straight line segment.
     Line { x1: f32, y1: f32, x2: f32, y2: f32 },
+    /// A note's pin, filled in the note's own colour. Drawn at a fixed
+    /// *screen* size like Photoshop's, so a note stays findable and
+    /// clickable whether the document is at 5% or 1600%.
+    NoteMarker {
+        x: f32,
+        y: f32,
+        color: Rgba,
+        /// The note showing in the Notes panel, outlined so the panel and
+        /// the canvas agree on which one is being read.
+        selected: bool,
+    },
 }
 
 /// A canvas tool. One tool is active at a time; the canvas routes pointer

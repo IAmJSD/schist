@@ -117,6 +117,17 @@ pub enum EditOp {
         before: Box<Selection>,
         after: Box<Selection>,
     },
+    /// The document's notes changed -- placed, moved, retyped, deleted or
+    /// cleared.
+    ///
+    /// The whole list rather than a per-note delta: notes are a handful of
+    /// short strings, so a snapshot costs less than the machinery to
+    /// describe which one moved, and it makes Clear Notes one op like
+    /// every other.
+    NotesSet {
+        before: Vec<crate::annotate::Note>,
+        after: Vec<crate::annotate::Note>,
+    },
     /// The document's colour mode changed (Image > Mode).
     ///
     /// Set outside the edit, so undo restored the pixels and left the new

@@ -309,6 +309,10 @@ pub enum PointKind {
 pub struct PointTool {
     kind: PointKind,
     grabbed: Option<usize>,
+    /// The notes as they stood when the drag began. A move is one history
+    /// entry for the whole gesture, not one per pointer-move, so the
+    /// `before` has to outlive the mutations made for live feedback.
+    drag_before: Option<Vec<Note>>,
 }
 
 impl PointTool {
@@ -316,8 +320,44 @@ impl PointTool {
         PointTool {
             kind,
             grabbed: None,
+            drag_before: None,
         }
     }
+}
+
+/// Screen-space radius of a note's marker. Fixed rather than scaled, so
+/// notes stay findable when the document is zoomed out.
+pub const NOTE_MARKER_R: f32 = 7.0;
+
+/// The markers for every note in `doc`, with `active` outlined.
+///
+/// Free rather than a method on the tool, and called by the shell rather
+/// than returned from `overlays()`, because notes belong to the document
+/// and not to whoever is holding the Note tool. Drawing them from the
+/// tool made a note left for a colleague vanish the moment anyone picked
+/// up a brush, which is indistinguishable from it having been deleted.
+pub fn note_overlays(doc: &Document, active: Option<usize>) -> Vec<Overlay> {
+    doc.notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| Overlay::NoteMarker {
+            x: n.at.0,
+            y: n.at.1,
+            color: n.color,
+            selected: active == Some(i),
+        })
+        .collect()
+}
+
+/// The note whose marker covers `(x, y)`, topmost first: later notes are
+/// drawn over earlier ones, so they have to be hit in the same order.
+fn note_at(doc: &Document, x: f32, y: f32, radius: f32) -> Option<usize> {
+    doc.notes
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, n)| (n.at.0 - x).hypot(n.at.1 - y) <= radius)
+        .map(|(i, _)| i)
 }
 
 impl ToolPlugin for PointTool {
@@ -347,27 +387,40 @@ impl ToolPlugin for PointTool {
         let r = 10.0 / ctx.state.zoom.max(0.01);
         match self.kind {
             PointKind::Note => {
-                // Alt-click removes; clicking an existing note grabs it.
-                if let Some(i) = ctx
-                    .doc
-                    .notes
-                    .iter()
-                    .position(|n| (n.at.0 - input.x).hypot(n.at.1 - input.y) <= r)
-                {
+                // Alt-click removes; clicking an existing note selects it
+                // and grabs it for a drag.
+                if let Some(i) = note_at(ctx.doc, input.x, input.y, r) {
                     if input.modifiers.alt {
-                        ctx.doc.notes.remove(i);
-                        ctx.doc.mark_dirty();
+                        let mut edit = ctx.doc.begin_edit("Delete Note");
+                        edit.change_notes(|notes| {
+                            notes.remove(i);
+                        });
+                        edit.commit();
+                        // Every note after the removed one shifted down.
+                        ctx.state.active_note = match ctx.state.active_note {
+                            Some(a) if a == i => None,
+                            Some(a) if a > i => Some(a - 1),
+                            other => other,
+                        };
                     } else {
                         self.grabbed = Some(i);
+                        self.drag_before = Some(ctx.doc.notes.clone());
+                        ctx.state.active_note = Some(i);
                     }
                 } else {
-                    let n = ctx.doc.notes.len() + 1;
-                    ctx.doc.notes.push(Note {
-                        at: (input.x, input.y),
-                        author: String::new(),
-                        text: format!("Note {n}"),
+                    // A new note is born empty and selected: the Notes
+                    // panel is where its text gets typed, and placing one
+                    // is the request to type into it. It used to arrive
+                    // holding the placeholder "Note 3", which no panel
+                    // ever showed and no user could change.
+                    let author = ctx.state.note_author.clone();
+                    let color = ctx.state.note_color;
+                    let mut edit = ctx.doc.begin_edit("Place Note");
+                    edit.change_notes(|notes| {
+                        notes.push(Note::new((input.x, input.y), author, color));
                     });
-                    ctx.doc.mark_dirty();
+                    edit.commit();
+                    ctx.state.active_note = Some(ctx.doc.notes.len() - 1);
                 }
             }
             PointKind::Count => {
@@ -395,35 +448,45 @@ impl ToolPlugin for PointTool {
                 }
             }
         }
-        ctx.doc.add_damage(ctx.doc.canvas_rect());
-    }
-
-    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
-        if let Some(i) = self.grabbed {
-            if let Some(note) = ctx.doc.notes.get_mut(i) {
-                note.at = (input.x, input.y);
-                ctx.doc.mark_dirty();
-            }
+        // Counts are drawn straight from the document rather than through
+        // an edit, so they still have to ask for the repaint themselves.
+        // Notes go through the history now, which does it for them.
+        if self.kind == PointKind::Count {
             ctx.doc.add_damage(ctx.doc.canvas_rect());
         }
     }
 
-    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {
+    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        if let Some(i) = self.grabbed {
+            // Moved live for feedback; the history entry is assembled once
+            // the drag ends, from the snapshot taken when it started.
+            if let Some(note) = ctx.doc.notes.get_mut(i) {
+                note.at = (input.x, input.y);
+            }
+        }
+    }
+
+    fn on_pointer_up(&mut self, ctx: &mut ToolCtx, _input: PointerInput) {
         self.grabbed = None;
+        let Some(before) = self.drag_before.take() else {
+            return;
+        };
+        // Rewind to the pre-drag state so the builder captures the whole
+        // gesture as one op, then re-apply what the drag arrived at.
+        // `change_notes` is a no-op when the two match, so a click that
+        // only selected a note leaves no history entry.
+        let after = std::mem::replace(&mut ctx.doc.notes, before);
+        let mut edit = ctx.doc.begin_edit("Move Note");
+        edit.change_notes(|notes| *notes = after);
+        edit.commit();
     }
 
     fn overlays(&self, doc: &Document, _state: &EditorState) -> Vec<Overlay> {
         let mut out = Vec::new();
         match self.kind {
-            PointKind::Note => {
-                for n in &doc.notes {
-                    out.push(Overlay::Circle {
-                        cx: n.at.0,
-                        cy: n.at.1,
-                        r: 7.0,
-                    });
-                }
-            }
+            // Nothing: the shell draws note markers itself, from
+            // `note_overlays`, so that they are there under every tool.
+            PointKind::Note => {}
             PointKind::Count => {
                 for group in &doc.counts {
                     for p in &group.points {

@@ -2306,7 +2306,7 @@ fn preferences(
     state: &DialogState,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let view = ws.view;
+    let view = ws.view.clone();
     let intent = ws.color.intent;
     let keymap_path = crate::keymap::user_keymap_path()
         .map(|p| p.display().to_string())
