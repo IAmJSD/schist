@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use schist_color::Rgba;
+
 use crate::blend::BlendMode;
 use crate::geom::IntRect;
 use crate::layer::LayerId;
@@ -34,11 +36,44 @@ pub struct Slice {
 }
 
 /// A pinned annotation.
+///
+/// The marker on the canvas is all a note shows until it is selected;
+/// `text` is read and written in the Notes panel, which is why an empty
+/// one is legitimate rather than a placeholder to fill in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Note {
     pub at: (f32, f32),
     pub author: String,
     pub text: String,
+    /// Marker colour, so several reviewers' notes stay apart on one
+    /// document. Photoshop puts this in the Note tool's options bar and
+    /// keeps it per-note, not per-document.
+    #[serde(default = "default_note_color")]
+    pub color: Rgba,
+}
+
+/// Photoshop's default note colour: a pale yellow that stays legible on
+/// both light and dark artwork.
+pub const DEFAULT_NOTE_COLOR: Rgba = Rgba {
+    r: 1.0,
+    g: 0.85,
+    b: 0.28,
+    a: 1.0,
+};
+
+fn default_note_color() -> Rgba {
+    DEFAULT_NOTE_COLOR
+}
+
+impl Note {
+    pub fn new(at: (f32, f32), author: impl Into<String>, color: Rgba) -> Note {
+        Note {
+            at,
+            author: author.into(),
+            text: String::new(),
+            color,
+        }
+    }
 }
 
 /// A set of tally marks, as the Count tool leaves behind.

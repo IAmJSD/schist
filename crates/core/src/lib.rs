@@ -17,7 +17,9 @@ pub mod smart;
 pub mod style;
 pub mod tile;
 
-pub use annotate::{Artboard, CountGroup, LayerComp, LayerCompState, Note, Slice};
+pub use annotate::{
+    Artboard, CountGroup, LayerComp, LayerCompState, Note, Slice, DEFAULT_NOTE_COLOR,
+};
 pub use blend::BlendMode;
 pub use document::{
     blit_rgba8, blit_rgba_f32, Document, DocumentId, EditBuilder, Guide, PreservedResource,

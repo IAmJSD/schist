@@ -283,6 +283,7 @@ pub fn render(
                 crate::style_dialog::effect_label(effect)
             )),
             ColorTarget::ColorRange => SharedString::from("Color Picker (Color Range)"),
+            ColorTarget::Note => SharedString::from("Color Picker (Note Color)"),
         },
         620.0,
         body,

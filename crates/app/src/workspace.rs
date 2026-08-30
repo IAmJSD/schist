@@ -274,6 +274,10 @@ pub struct Workspace {
     /// An inline rename in progress in the layers panel: the layer and
     /// the text typed so far.
     pub layer_rename: Option<(schist_core::LayerId, String)>,
+    /// A note field being typed into: which one, and the text so far.
+    /// Held here rather than written straight through so the whole typing
+    /// session is one history entry rather than one per keystroke.
+    pub note_edit: Option<(NoteField, String)>,
     /// The selection outline, tagged with the selection generation it was
     /// traced from.
     selection_outline: Option<(u64, SelectionOutline)>,
@@ -470,7 +474,9 @@ impl Theme {
 }
 
 /// View toggles that don't belong to the document.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+// Not `Copy`: the note author is a String, and the handful of places
+// that snapshot the options clone explicitly.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ViewOptions {
     pub rulers: bool,
     pub grid: bool,
@@ -505,6 +511,30 @@ pub struct ViewOptions {
     /// it is a preference; it sends nothing but the request itself.
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// Draw note markers (View ▸ Notes, Photoshop's Show ▸ Notes).
+    #[serde(default = "default_true")]
+    pub notes: bool,
+    /// Name stamped on notes as they are placed. A preference rather than
+    /// document state: it is who is reviewing, not what is being
+    /// reviewed, and typing it once per session would be once too many.
+    #[serde(default = "default_note_author")]
+    pub note_author: String,
+    /// Colour new notes are given, 0xRRGGBB.
+    #[serde(default = "default_note_color")]
+    pub note_color: u32,
+}
+
+/// Whoever is logged in, which is Photoshop's default author too. Empty
+/// when the environment does not say, rather than a guess like "user".
+fn default_note_author() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
+}
+
+fn default_note_color() -> u32 {
+    let [r, g, b, _] = schist_core::DEFAULT_NOTE_COLOR.to_u8();
+    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
 fn default_true() -> bool {
@@ -526,6 +556,9 @@ impl Default for ViewOptions {
             crash_upload: false,
             gpu_compositing: true,
             check_updates: true,
+            notes: true,
+            note_author: default_note_author(),
+            note_color: default_note_color(),
         }
     }
 }
@@ -786,6 +819,19 @@ pub enum ColorTarget {
     /// The colour Select ▸ Color Range matches against, with that
     /// dialog left open underneath the picker.
     ColorRange,
+    /// The Note tool's colour, given to notes as they are placed. Does
+    /// not recolour notes already on the canvas, matching Photoshop.
+    Note,
+}
+
+/// Which note field an inline edit is typing into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteField {
+    /// The body of the note at this index, in the Notes panel.
+    Text(usize),
+    /// The author on the Note tool's options bar, stamped on notes placed
+    /// from then on.
+    Author,
 }
 
 /// A press on a layer row that may become a drag-reorder.
@@ -912,6 +958,7 @@ impl Workspace {
             layer_row_bounds: FxHashMap::default(),
             layer_anchor: None,
             layer_rename: None,
+            note_edit: None,
             selection_outline: None,
             nav_thumb: None,
             focused_once: false,
@@ -921,6 +968,7 @@ impl Workspace {
             proof_transform: None,
         };
         ws.rebuild_tool_groups();
+        ws.sync_note_defaults();
         // A launch-time update check, when the preference allows one and
         // the last one was long enough ago. Delayed: the first seconds
         // after launch belong to opening whatever the user
@@ -3232,9 +3280,10 @@ impl Workspace {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
-        // Clicking the canvas ends an inline layer rename, keeping what
-        // was typed.
+        // Clicking the canvas ends an inline layer rename or an open
+        // note, keeping what was typed.
         self.commit_layer_rename(cx);
+        self.commit_note_edit(cx);
         let local = self.to_local(ev.position);
         if ev.button == MouseButton::Middle || self.panning_tool() {
             self.pan_last = Some(ev.position);
@@ -3899,6 +3948,220 @@ impl Workspace {
         true
     }
 
+    // ----- notes -----
+
+    /// Mirror the persisted note defaults into the shared editor state,
+    /// which is where the Note tool reads them from.
+    fn sync_note_defaults(&mut self) {
+        self.editor.note_author = self.view.note_author.clone();
+        let c = self.view.note_color;
+        self.editor.note_color = Rgba::new(
+            ((c >> 16) & 0xFF) as f32 / 255.0,
+            ((c >> 8) & 0xFF) as f32 / 255.0,
+            (c & 0xFF) as f32 / 255.0,
+            1.0,
+        );
+    }
+
+    /// The note the Notes panel is showing and the canvas is outlining.
+    ///
+    /// Notes are addressed by index, and undo, delete, Clear Notes and
+    /// switching to a document with fewer of them all leave a stale one
+    /// behind -- so this resolves rather than trusting what was stored,
+    /// and it is the only thing that does. Falls back to the first note
+    /// because the panel always shows one, and the marker it outlines has
+    /// to be the same one.
+    pub fn active_note(&self) -> Option<usize> {
+        let n = self.doc.as_ref()?.notes.len();
+        (n > 0).then(|| self.editor.active_note.filter(|&i| i < n).unwrap_or(0))
+    }
+
+    pub fn toggle_notes(&mut self, cx: &mut Context<Self>) {
+        self.view.notes = !self.view.notes;
+        self.status = format!("Notes {}", if self.view.notes { "on" } else { "off" }).into();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    /// Show a note in the Notes panel. Ends any edit in progress first, so
+    /// switching notes mid-typing keeps what was typed into the old one.
+    pub fn select_note(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.commit_note_edit(cx);
+        self.editor.active_note = Some(index);
+        cx.notify();
+    }
+
+    /// Step to the next (`+1`) or previous (`-1`) note, wrapping.
+    pub fn step_note(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.doc.as_ref().map_or(0, |d| d.notes.len());
+        if count == 0 {
+            return;
+        }
+        let current = self.active_note().unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(count as isize) as usize;
+        self.select_note(next, cx);
+    }
+
+    pub fn delete_note(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.cancel_note_edit(cx);
+        if let Some(doc) = self.doc.as_mut() {
+            if index >= doc.notes.len() {
+                return;
+            }
+            let mut edit = doc.begin_edit("Delete Note");
+            edit.change_notes(|notes| {
+                notes.remove(index);
+            });
+            edit.commit();
+        }
+        // Keep reading down the list, as Photoshop's Notes panel does,
+        // rather than dropping the selection on every delete.
+        let remaining = self.doc.as_ref().map_or(0, |d| d.notes.len());
+        self.editor.active_note = (remaining > 0).then(|| index.min(remaining - 1));
+        self.after_change(cx);
+    }
+
+    pub fn clear_notes(&mut self, cx: &mut Context<Self>) {
+        self.cancel_note_edit(cx);
+        if let Some(doc) = self.doc.as_mut() {
+            if doc.notes.is_empty() {
+                return;
+            }
+            let mut edit = doc.begin_edit("Clear Notes");
+            edit.change_notes(|notes| notes.clear());
+            edit.commit();
+        }
+        self.editor.active_note = None;
+        self.after_change(cx);
+    }
+
+    /// Set the author stamped on notes placed from now on. Existing notes
+    /// keep the name they were written under.
+    pub fn set_note_author(&mut self, author: String, cx: &mut Context<Self>) {
+        self.view.note_author = author;
+        self.sync_note_defaults();
+        self.save_view_options();
+        cx.notify();
+    }
+
+    /// Start typing into a note's body in the Notes panel.
+    pub fn begin_note_edit(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.commit_note_edit(cx);
+        let Some(text) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.notes.get(index))
+            .map(|n| n.text.clone())
+        else {
+            return;
+        };
+        self.editor.active_note = Some(index);
+        self.note_edit = Some((NoteField::Text(index), text));
+        cx.notify();
+    }
+
+    /// Start typing into the Author field on the options bar.
+    pub fn begin_note_author_edit(&mut self, cx: &mut Context<Self>) {
+        self.commit_note_edit(cx);
+        self.note_edit = Some((NoteField::Author, self.view.note_author.clone()));
+        cx.notify();
+    }
+
+    /// What an open field is showing, for the renderer to draw a caret
+    /// after. `None` when that field is not the one being typed into.
+    pub fn note_edit_buffer(&self, field: NoteField) -> Option<&str> {
+        match &self.note_edit {
+            Some((f, text)) if *f == field => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Write the typed text back as one history entry for the session.
+    ///
+    /// Unlike a layer rename an empty note is kept: a note with no text is
+    /// a legitimate pin, and clearing one should not silently restore what
+    /// it used to say.
+    pub fn commit_note_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((field, text)) = self.note_edit.take() else {
+            return;
+        };
+        match field {
+            NoteField::Text(index) => {
+                if let Some(doc) = self.doc.as_mut() {
+                    if doc.notes.get(index).is_some_and(|n| n.text != text) {
+                        let mut edit = doc.begin_edit("Edit Note");
+                        edit.change_notes(|notes| notes[index].text = text);
+                        edit.commit();
+                    }
+                }
+            }
+            // Not a document edit, so it is not in the history: the author
+            // is a preference, and undoing a brush stroke should not
+            // rename the person who made it.
+            NoteField::Author => self.set_note_author(text, cx),
+        }
+        self.after_change(cx);
+    }
+
+    /// Abandon the typing session, leaving the note as it was.
+    pub fn cancel_note_edit(&mut self, cx: &mut Context<Self>) {
+        if self.note_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Feed a keystroke to an open note. Consumes every key while one is
+    /// open, so single-letter tool shortcuts can't fire mid-sentence.
+    ///
+    /// Enter inserts a newline rather than committing: a note is a
+    /// paragraph, not a field, and Photoshop's is multi-line too. Escape
+    /// and clicking away are what end the session.
+    pub fn note_edit_key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.note_edit.is_none() {
+            return false;
+        }
+        match ev.keystroke.key.as_str() {
+            "escape" | "tab" => self.commit_note_edit(cx),
+            // A note's body is a paragraph, so Enter breaks the line, as
+            // it does in Photoshop's Notes panel. The one-line Author
+            // field has nothing to break, so there Enter means done.
+            "enter"
+                if self
+                    .note_edit
+                    .as_ref()
+                    .is_some_and(|(f, _)| *f == NoteField::Author) =>
+            {
+                self.commit_note_edit(cx)
+            }
+            "enter" => {
+                if let Some((_, text)) = self.note_edit.as_mut() {
+                    text.push('\n');
+                }
+            }
+            "backspace" => {
+                if let Some((_, text)) = self.note_edit.as_mut() {
+                    text.pop();
+                }
+            }
+            "space" => {
+                if let Some((_, text)) = self.note_edit.as_mut() {
+                    text.push(' ');
+                }
+            }
+            _ => {
+                if let (Some((_, text)), Some(t)) =
+                    (self.note_edit.as_mut(), ev.keystroke.key_char.as_deref())
+                {
+                    if !t.is_empty() && !t.chars().any(char::is_control) {
+                        text.push_str(t);
+                    }
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
     // ----- context menus -----
 
     /// Open a right-click menu at `position`.
@@ -3980,6 +4243,7 @@ impl Workspace {
             // Not reachable from the editor colour wells: these belong to
             // a dialog, which opens the picker through
             // `open_color_picker_on` and supplies the colour itself.
+            ColorTarget::Note => self.editor.note_color,
             ColorTarget::StyleEffect(_) | ColorTarget::ColorRange => return,
         };
         self.open_color_picker_on(target, original, cx);
@@ -4022,6 +4286,12 @@ impl Workspace {
         match target {
             ColorTarget::Foreground => self.editor.foreground = colour,
             ColorTarget::Background => self.editor.background = colour,
+            ColorTarget::Note => {
+                self.editor.note_color = colour;
+                let [r, g, b, _] = colour.to_u8();
+                self.view.note_color = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+                self.save_view_options();
+            }
             // Written below, once `close_modal` has put the dialog the
             // picker was opened from back in `self.modal`.
             ColorTarget::StyleEffect(_) | ColorTarget::ColorRange => {}
@@ -4048,7 +4318,7 @@ impl Workspace {
                 });
                 cx.notify();
             }
-            ColorTarget::Foreground | ColorTarget::Background => {}
+            ColorTarget::Foreground | ColorTarget::Background | ColorTarget::Note => {}
         }
     }
 
@@ -4363,6 +4633,14 @@ impl Workspace {
         // canvas key listener the rename normally types through.
         if self.layer_rename.is_some() {
             self.cancel_layer_rename(cx);
+            return;
+        }
+        // Escape ends an open note but keeps what was typed. Unlike a
+        // rename there is no draft to throw away: Photoshop's notes save
+        // as you write them, so the only question escape answers is
+        // whether the keyboard still belongs to the note.
+        if self.note_edit.is_some() {
+            self.commit_note_edit(cx);
             return;
         }
         if self.tool_flyout.is_some() {
@@ -4714,7 +4992,7 @@ impl Workspace {
 
     /// Remember the current preferences so Cancel can restore them.
     pub fn snapshot_preferences(&mut self) {
-        self.preferences_snapshot = Some(Box::new((self.view, self.color.intent)));
+        self.preferences_snapshot = Some(Box::new((self.view.clone(), self.color.intent)));
     }
 
     /// Accept whatever Preferences changed.
@@ -6734,6 +7012,7 @@ impl Workspace {
         let selection_generation = doc.selection.generation();
         let ant_phase = self.ant_phase;
         let has_selection = !doc.selection.is_empty() && !doc.selection.bounds().is_empty();
+        let active_note = self.active_note();
         let mut guides = doc.guides.clone();
         if let Some(dragging) = self.dragging_guide {
             guides.push(dragging);
@@ -6756,6 +7035,17 @@ impl Workspace {
                     }
                 }
             }
+        }
+        // Notes, under every tool. They are the document's, not the Note
+        // tool's, and drawing them from the tool put them on screen only
+        // while it happened to be held. View ▸ Notes hides them
+        // deliberately, and ⌘H with the rest of the extras.
+        //
+        // Appended after `tool_has_overlay` is set on purpose: that flag
+        // runs the marching-ants ticker, and a static marker has nothing
+        // to march.
+        if self.view.notes && self.view.extras {
+            overlays.extend(schist_tools_doc::note_overlays(doc, active_note));
         }
         let origin = (
             f32::from(bounds.origin.x) + f32::from(self.offset.x),
@@ -6856,7 +7146,7 @@ impl Workspace {
         // drawn as thin axis-aligned quads, so a rotated view hides them
         // rather than showing them pointing the wrong way.
         if self.view.extras && self.rotation == 0.0 {
-            let view = self.view;
+            let view = self.view.clone();
             let canvas_w = canvas_rect.width() as f32;
             let canvas_h = canvas_rect.height() as f32;
             let hair = (1.0 / scale_factor.max(0.01)).max(0.5);
@@ -6964,6 +7254,27 @@ impl Workspace {
                         size: size(px(d), px(d)),
                     });
                 }
+                Overlay::NoteMarker {
+                    x,
+                    y,
+                    color,
+                    selected,
+                } => {
+                    // Sized in screen pixels rather than document ones, so
+                    // a note stays the same readable dot at 5% and 1600%.
+                    let r = schist_tools_doc::NOTE_MARKER_R;
+                    let centre = to_screen(x, y);
+                    let [cr, cg, cb, _] = color.to_u8();
+                    job.markers.push(Marker {
+                        bounds: Bounds {
+                            origin: point(centre.x - px(r), centre.y - px(r)),
+                            size: size(px(r * 2.0), px(r * 2.0)),
+                        },
+                        fill: gpui::rgb(((cr as u32) << 16) | ((cg as u32) << 8) | cb as u32)
+                            .into(),
+                        selected,
+                    });
+                }
             }
         }
         job
@@ -7035,7 +7346,7 @@ impl Workspace {
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
-                if ws.layer_rename_key(ev, cx) {
+                if ws.layer_rename_key(ev, cx) || ws.note_edit_key(ev, cx) {
                     cx.stop_propagation();
                     return;
                 }
@@ -7163,6 +7474,28 @@ impl Workspace {
                                 gpui::BorderStyle::Solid,
                             ));
                         }
+                        // Notes last, so a pin is never buried under the
+                        // ants or a tool's handles.
+                        for marker in job.markers {
+                            let r = marker.bounds.size.width / 2.0;
+                            // Filled and outlined: the fill is the note's
+                            // colour, which the user chose and may well
+                            // have matched to the artwork, so a dark rim
+                            // is what keeps it visible against it. The
+                            // selected note wears a white one instead.
+                            window.paint_quad(gpui::quad(
+                                marker.bounds,
+                                r,
+                                marker.fill,
+                                px(if marker.selected { 2.0 } else { 1.0 }),
+                                if marker.selected {
+                                    gpui::rgb(0xFFFFFF)
+                                } else {
+                                    gpui::rgb(0x202020)
+                                },
+                                gpui::BorderStyle::Solid,
+                            ));
+                        }
                     },
                 )
                 .size_full(),
@@ -7214,6 +7547,13 @@ fn push_ants(ants: &mut Ants, pts: &[Point<Pixels>], phase: u32) {
     }
 }
 
+/// A note's pin, already in screen space.
+struct Marker {
+    bounds: Bounds<Pixels>,
+    fill: gpui::Hsla,
+    selected: bool,
+}
+
 /// Dash segments batched by colour, so an outline of any complexity costs
 /// two paths rather than one per dash.
 #[derive(Default)]
@@ -7233,6 +7573,8 @@ pub struct PaintJob {
     /// Marching-ants dashes.
     ants: Ants,
     circles: Vec<Bounds<Pixels>>,
+    /// Note pins.
+    markers: Vec<Marker>,
     /// Thin filled rectangles: grid lines, guides and ruler ticks.
     lines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
     /// Images superseded this frame, freed after painting.
@@ -7265,7 +7607,10 @@ impl Render for Workspace {
         // only the unmodified single-letter bindings were ever suppressed.
         let key_context = if self.modal.is_some() {
             "Workspace modal"
-        } else if self.tool_captures_keys() || self.layer_rename.is_some() {
+        } else if self.tool_captures_keys()
+            || self.layer_rename.is_some()
+            || self.note_edit.is_some()
+        {
             "Workspace text_entry"
         } else {
             "Workspace editable"
@@ -7403,6 +7748,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ToggleRulers, _w, cx| ws.toggle_rulers(cx)))
             .on_action(cx.listener(|ws, _: &ToggleGrid, _w, cx| ws.toggle_grid(cx)))
             .on_action(cx.listener(|ws, _: &ToggleGuides, _w, cx| ws.toggle_guides(cx)))
+            .on_action(cx.listener(|ws, _: &ToggleNotes, _w, cx| ws.toggle_notes(cx)))
             .on_action(cx.listener(|ws, _: &ToggleExtras, _w, cx| ws.toggle_extras(cx)))
             .on_action(cx.listener(|ws, _: &ToggleSnap, _w, cx| ws.toggle_snap(cx)))
             .on_action(cx.listener(|ws, _: &ClearGuides, _w, cx| ws.clear_guides(cx)))

@@ -200,13 +200,14 @@ impl Document {
     ///
     /// `dirty` is otherwise set only by the edit machinery, so document
     /// state that is mutated directly (guides, layer comps, saved
-    /// selections, notes, counts) never reached it: the tab closed with no
+    /// selections, counts) never reached it: the tab closed with no
     /// prompt and `autosave`, which filters on `dirty`, skipped the
     /// document entirely.
     ///
     /// This is the minimum for not losing the work. Those lists still
     /// belong in history; when they get their own `EditOp` the call here
-    /// becomes redundant rather than wrong.
+    /// becomes redundant rather than wrong -- as it now is for notes,
+    /// which go through [`EditBuilder::change_notes`].
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -470,6 +471,17 @@ impl Document {
                     *after
                 };
                 self.damage_all();
+            }
+            EditOp::NotesSet { before, after } => {
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                // No revision bump and no damage: notes are overlay
+                // furniture, so nothing composited depends on them and
+                // invalidating caches here would be pure waste.
+                self.notes = target.clone();
             }
         }
     }
@@ -854,6 +866,22 @@ impl<'a> EditBuilder<'a> {
         let after = Box::new(self.doc.selection.clone());
         self.ops.push(EditOp::SelectionSet { before, after });
         self.damage = self.damage.union(&canvas);
+    }
+
+    /// Replace the document's notes, capturing before/after.
+    pub fn change_notes(&mut self, f: impl FnOnce(&mut Vec<crate::annotate::Note>)) {
+        let before = self.doc.notes.clone();
+        f(&mut self.doc.notes);
+        if before == self.doc.notes {
+            return;
+        }
+        let after = self.doc.notes.clone();
+        self.ops.push(EditOp::NotesSet { before, after });
+        // Deliberately no damage: a note is an overlay, not pixels.
+        // Damage invalidates cached composited tiles, so reporting the
+        // canvas here would recomposite the whole document every time a
+        // marker was nudged. The shell repaints after every edit anyway,
+        // and the overlays are rebuilt from scratch each frame.
     }
 
     /// Finish: snapshot `after` states for tile writes and push to history.
