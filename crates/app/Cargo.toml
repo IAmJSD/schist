@@ -54,6 +54,14 @@ schist-plugin-host-wasm.workspace = true
 # other than this one and are unpacked on first use. See the Makefile.
 schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
 schist-colormgmt.workspace = true
+# The AI sidebar: shared MCP catalog/dispatch, and the agent SDKs that
+# drive the user's installed `claude` / `codex` CLIs against it.
+schist-mcp.workspace = true
+claude-agent-sdk-rs.workspace = true
+codex-codes.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
 
 # The pre-flight Vulkan probe in `src/vulkan.rs`. Blade already links this
 # exact version to do the real thing, so it is not another crate in the

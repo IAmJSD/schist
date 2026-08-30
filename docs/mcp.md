@@ -7,6 +7,10 @@ links the kernel and the same first-party plugin set the app assembles
 and no display: everything runs headless through the same registry,
 undo history and compositor the GUI uses.
 
+The same catalog and dispatch also run *inside* the app, behind the AI
+panel (View ▸ AI Panel) — there they operate on the document open in the
+window instead of headless sessions. See [ai-panel.md](ai-panel.md).
+
 [Model Context Protocol]: https://modelcontextprotocol.io
 
 ## Getting the binary

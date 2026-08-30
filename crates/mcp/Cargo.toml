@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Model Context Protocol server exposing Schist editing sessions over stdio"
 
+[lib]
+name = "schist_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "schist-mcp"
 path = "src/main.rs"

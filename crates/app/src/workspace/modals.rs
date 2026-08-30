@@ -425,6 +425,13 @@ impl Workspace {
             self.commit_note_edit(cx);
             return;
         }
+        // Same shape for the AI prompt box: escape hands the keyboard
+        // back and the draft stays put.
+        if self.ai.input_active {
+            self.ai.input_active = false;
+            cx.notify();
+            return;
+        }
         if self.tool_flyout.is_some() {
             self.close_tool_flyout(cx);
             return;

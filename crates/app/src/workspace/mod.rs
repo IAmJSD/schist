@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 mod adjustments;
+mod ai;
 mod chrome;
 mod clipboard;
 mod colormgmt;
@@ -324,6 +325,8 @@ pub struct Workspace {
     pub color: schist_colormgmt::ColorSettings,
     display_transform: Option<Arc<schist_colormgmt::ColorTransform>>,
     proof_transform: Option<Arc<schist_colormgmt::ColorTransform>>,
+    /// The AI sidebar: transcript, conversation worker, MCP queues.
+    pub ai: crate::ai::AiState,
 }
 
 /// One filter in the Filter Gallery's stack.
@@ -553,6 +556,13 @@ pub struct ViewOptions {
     /// Colour new notes are given, 0xRRGGBB.
     #[serde(default = "default_note_color")]
     pub note_color: u32,
+    /// Show the AI sidebar. Off by default: it spawns an agent CLI the
+    /// user may not have, and a chat column is not everyone's furniture.
+    #[serde(default)]
+    pub ai_panel: bool,
+    /// Which agent harness the sidebar drives ("claude" or "codex").
+    #[serde(default = "default_ai_backend")]
+    pub ai_backend: String,
 }
 
 /// Whoever is logged in, which is Photoshop's default author too. Empty
@@ -570,6 +580,10 @@ fn default_note_color() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_ai_backend() -> String {
+    "claude".to_string()
 }
 
 impl Default for ViewOptions {
@@ -590,6 +604,8 @@ impl Default for ViewOptions {
             notes: true,
             note_author: default_note_author(),
             note_color: default_note_color(),
+            ai_panel: false,
+            ai_backend: default_ai_backend(),
         }
     }
 }
@@ -997,7 +1013,9 @@ impl Workspace {
             color: schist_colormgmt::ColorSettings::default(),
             display_transform: None,
             proof_transform: None,
+            ai: crate::ai::AiState::new(crate::ai::Backend::Claude),
         };
+        ws.ai.backend = crate::ai::Backend::from_pref(&ws.view.ai_backend);
         ws.rebuild_tool_groups();
         ws.sync_note_defaults();
         // A launch-time update check, when the preference allows one and
