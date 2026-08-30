@@ -91,9 +91,11 @@ schist-commands-core = { path = "plugins/commands-core" }
 # external
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch and stylus pressure on the
 # mouse events, which upstream has no equivalent of; needed for trackpad
-# pinch-to-zoom and pressure-sensitive painting on the canvas.
+# pinch-to-zoom and pressure-sensitive painting on the canvas. It also
+# carries images to the Linux clipboards, which upstream writes as an
+# empty string.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "84bdb01b29887ca09b6c437dad9a0ae838fe48e8" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "4ab83c7d970241f8b3027dc4ce614f3062f99843" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

@@ -311,9 +311,7 @@ impl Document {
                     }
                     Direction::Undo => {
                         self.tree.remove_at(path);
-                        if self.active_layer == Some(layer.id) {
-                            self.active_layer = None;
-                        }
+                        self.reselect_after_removal(layer.id, path);
                     }
                 }
                 self.add_damage(layer.content_bounds());
@@ -323,9 +321,7 @@ impl Document {
                 match dir {
                     Direction::Redo => {
                         self.tree.remove_at(path);
-                        if self.active_layer == Some(layer.id) {
-                            self.active_layer = None;
-                        }
+                        self.reselect_after_removal(layer.id, path);
                     }
                     Direction::Undo => {
                         self.tree.insert_at(path, (**layer).clone());
@@ -474,6 +470,20 @@ impl Document {
         }
     }
 
+    /// Keep the panel pointed at something after `removed` (which sat at
+    /// `path`) leaves the tree.
+    ///
+    /// Nulling `active_layer` left the document with no active layer at
+    /// all, and every command that edits pixels -- copy, cut, fill, the
+    /// brush -- became a silent no-op until you clicked a row. Undoing a
+    /// paste was enough to get there.
+    fn reselect_after_removal(&mut self, removed: LayerId, path: &LayerPath) {
+        self.selected.retain(|&id| id != removed);
+        if self.active_layer == Some(removed) {
+            self.active_layer = self.tree.neighbour_of(path);
+        }
+    }
+
     fn structure_changed(&mut self) {
         self.revision += 1;
     }
@@ -605,9 +615,7 @@ impl<'a> EditBuilder<'a> {
             return false;
         };
         self.damage = self.damage.union(&layer.content_bounds());
-        if self.doc.active_layer == Some(id) {
-            self.doc.active_layer = None;
-        }
+        self.doc.reselect_after_removal(id, &path);
         self.ops.push(EditOp::LayerRemove {
             path,
             layer: Box::new(layer),
@@ -1323,6 +1331,64 @@ mod tests {
         doc.redo();
         assert_eq!(doc.mode, schist_color::ColorMode::Grayscale);
     }
+    /// Removing the active layer -- by deleting it, or by undoing the
+    /// insert that created it -- used to leave `active_layer` at None,
+    /// and every pixel command silently did nothing until a row was
+    /// clicked. Photoshop moves the selection to the layer below.
+    #[test]
+    fn removing_the_active_layer_selects_a_neighbour() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let bottom = doc.push_layer(Layer::new_raster("bottom"));
+        let top = doc.push_layer(Layer::new_raster("top"));
+        assert_eq!(doc.active_layer, Some(top));
+
+        let mut edit = doc.begin_edit("Delete Layer");
+        edit.remove_layer(top);
+        edit.commit();
+        assert_eq!(doc.active_layer, Some(bottom), "delete left nothing active");
+
+        doc.undo().unwrap();
+        doc.active_layer = Some(top);
+        doc.redo().unwrap();
+        assert_eq!(doc.active_layer, Some(bottom), "redo left nothing active");
+
+        // Undoing an insert is the paste case: the layer that was there
+        // before the new one comes back as the active one.
+        let mut edit = doc.begin_edit("Paste");
+        let pasted = edit.insert_layer(LayerPath(vec![1]), Layer::new_raster("pasted"));
+        edit.commit();
+        doc.active_layer = Some(pasted);
+        doc.undo().unwrap();
+        assert_eq!(doc.active_layer, Some(bottom), "undo left nothing active");
+    }
+
+    /// The last layer in a group leaves the group itself selected, and the
+    /// last layer in the document leaves nothing -- there is nothing else.
+    #[test]
+    fn removing_the_only_layer_falls_back_to_its_group() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let mut group = Layer::new_group("group");
+        let child = Layer::new_raster("child");
+        let child_id = child.id;
+        let group_id = group.id;
+        match &mut group.kind {
+            crate::layer::LayerKind::Group(g) => g.children.push(child),
+            _ => unreachable!(),
+        }
+        doc.push_layer(group);
+        doc.active_layer = Some(child_id);
+
+        let mut edit = doc.begin_edit("Delete Layer");
+        edit.remove_layer(child_id);
+        edit.commit();
+        assert_eq!(doc.active_layer, Some(group_id));
+
+        let mut edit = doc.begin_edit("Delete Layer");
+        edit.remove_layer(group_id);
+        edit.commit();
+        assert_eq!(doc.active_layer, None, "an empty document has no layer");
+    }
+
     #[test]
     fn undoing_back_to_the_save_point_is_no_longer_dirty() {
         // Undo used to set `dirty = true` unconditionally, so a document
