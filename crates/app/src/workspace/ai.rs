@@ -9,7 +9,7 @@
 //! history and repaints through the ordinary `after_change` path.
 
 use super::*;
-use crate::ai::{self, AgentEvent, AiEntry, AiEntryKind, Backend, ConvCmd};
+use crate::ai::{self, AgentEvent, AiEntry, AiEntryKind, Backend, ConvCmd, ModelEntry};
 use serde_json::{json, Value};
 
 /// How often the queues are drained while a conversation is talking.
@@ -25,8 +25,146 @@ impl Workspace {
             if self.view.ai_panel { "shown" } else { "hidden" }
         )
         .into();
+        if self.view.ai_panel {
+            self.ensure_ai_models(cx);
+        }
         self.save_view_options();
         cx.notify();
+    }
+
+    /// Kick off the model-catalog probes for whichever CLIs are
+    /// installed, once per run. The lists arrive through the event queue.
+    pub fn ensure_ai_models(&mut self, cx: &mut Context<Self>) {
+        if self.ai.available.0 && self.ai.models_claude.is_none() && !self.ai.fetching_claude {
+            self.ai.fetching_claude = true;
+            ai::models::fetch(Backend::Claude, self.ai.shared.clone());
+        }
+        if self.ai.available.1 && self.ai.models_codex.is_none() && !self.ai.fetching_codex {
+            self.ai.fetching_codex = true;
+            ai::models::fetch(Backend::Codex, self.ai.shared.clone());
+        }
+        if self.ai.fetching_claude || self.ai.fetching_codex {
+            self.ensure_ai_ticker(cx);
+        }
+    }
+
+    /// The fetched (or fallback) catalog for a harness.
+    pub fn ai_models_for(&self, backend: Backend) -> Vec<ModelEntry> {
+        let cached = match backend {
+            Backend::Claude => &self.ai.models_claude,
+            Backend::Codex => &self.ai.models_codex,
+        };
+        cached
+            .clone()
+            .unwrap_or_else(|| backend.fallback_models())
+    }
+
+    /// What the model chip says: the display name of the current pick.
+    pub fn ai_model_name(&self) -> String {
+        let slug = match self.ai.backend {
+            Backend::Claude => &self.view.ai_model_claude,
+            Backend::Codex => &self.view.ai_model_codex,
+        };
+        self.ai_models_for(self.ai.backend)
+            .into_iter()
+            .find(|m| m.slug == *slug)
+            .map(|m| m.name)
+            .unwrap_or_else(|| {
+                // Nothing used here yet and the catalog hasn't arrived to
+                // seed a pick.
+                if slug.is_empty() {
+                    "…".to_string()
+                } else {
+                    slug.clone()
+                }
+            })
+    }
+
+    pub fn open_ai_model_menu(&mut self, cx: &mut Context<Self>) {
+        if self.ai.model_menu {
+            self.close_ai_model_menu(cx);
+            return;
+        }
+        self.ai.model_menu = true;
+        self.ai.menu_backend = self.ai.backend;
+        self.ai.model_search.clear();
+        self.ai.input_active = false;
+        self.ensure_ai_models(cx);
+        cx.notify();
+    }
+
+    pub fn close_ai_model_menu(&mut self, cx: &mut Context<Self>) {
+        self.ai.model_menu = false;
+        cx.notify();
+    }
+
+    /// The rows the picker is showing: the rail's harness normally, every
+    /// installed harness once a search narrows things down.
+    pub fn ai_menu_entries(&self) -> Vec<(Backend, ModelEntry)> {
+        let wanted = self.ai.model_search.to_lowercase();
+        let backends: Vec<Backend> = if wanted.is_empty() {
+            vec![self.ai.menu_backend]
+        } else {
+            let mut all = Vec::new();
+            if self.ai.available.0 {
+                all.push(Backend::Claude);
+            }
+            if self.ai.available.1 {
+                all.push(Backend::Codex);
+            }
+            all
+        };
+        let mut out = Vec::new();
+        for backend in backends {
+            for entry in self.ai_models_for(backend) {
+                let matches = wanted.is_empty()
+                    || entry.name.to_lowercase().contains(&wanted)
+                    || entry.slug.to_lowercase().contains(&wanted)
+                    || backend.label().to_lowercase().contains(&wanted);
+                if matches {
+                    out.push((backend, entry));
+                }
+            }
+        }
+        out
+    }
+
+    /// Commit a pick: harness and model together, as one gesture.
+    pub fn ai_pick_model(&mut self, backend: Backend, slug: String, cx: &mut Context<Self>) {
+        if backend != self.ai.backend {
+            self.set_ai_backend(backend, cx);
+        }
+        self.set_ai_model(slug, cx);
+        self.close_ai_model_menu(cx);
+    }
+
+    /// Keystrokes while the picker is open: type to search, Enter takes
+    /// the top match, Escape closes.
+    pub fn ai_model_menu_key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.ai.model_menu {
+            return false;
+        }
+        match ev.keystroke.key.as_str() {
+            "escape" => self.close_ai_model_menu(cx),
+            "enter" => {
+                if let Some((backend, entry)) = self.ai_menu_entries().into_iter().next() {
+                    self.ai_pick_model(backend, entry.slug, cx);
+                }
+            }
+            "backspace" => {
+                self.ai.model_search.pop();
+            }
+            "space" => self.ai.model_search.push(' '),
+            _ => {
+                if let Some(t) = ev.keystroke.key_char.as_deref() {
+                    if !t.is_empty() && !t.chars().any(char::is_control) {
+                        self.ai.model_search.push_str(t);
+                    }
+                }
+            }
+        }
+        cx.notify();
+        true
     }
 
     /// Switch harness. Ends the current conversation — its session id
@@ -237,7 +375,11 @@ impl Workspace {
         if had_events || had_requests {
             cx.notify();
         }
-        let keep = self.ai.running || had_events || had_requests;
+        let keep = self.ai.running
+            || self.ai.fetching_claude
+            || self.ai.fetching_codex
+            || had_events
+            || had_requests;
         if !keep {
             self.ai.ticker = false;
         }
@@ -258,6 +400,36 @@ impl Workspace {
                 text: name,
             }),
             AgentEvent::Session(id) => self.ai.session = Some(id),
+            AgentEvent::Models(backend, models) => {
+                // The picker holds concrete models only; if nothing has
+                // been used in this app yet (or the remembered slug is no
+                // longer offered), seed from the harness's recommendation
+                // — from then on it's simply what was last used here.
+                let slot = match backend {
+                    Backend::Claude => &mut self.view.ai_model_claude,
+                    Backend::Codex => &mut self.view.ai_model_codex,
+                };
+                if !models.iter().any(|m| m.slug == *slot) {
+                    let seed = models
+                        .iter()
+                        .find(|m| m.recommended)
+                        .or_else(|| models.first());
+                    if let Some(seed) = seed {
+                        *slot = seed.slug.clone();
+                        self.save_view_options();
+                    }
+                }
+                match backend {
+                    Backend::Claude => {
+                        self.ai.models_claude = Some(models);
+                        self.ai.fetching_claude = false;
+                    }
+                    Backend::Codex => {
+                        self.ai.models_codex = Some(models);
+                        self.ai.fetching_codex = false;
+                    }
+                }
+            }
             AgentEvent::Info(text) => self.ai.transcript.push(AiEntry {
                 kind: AiEntryKind::Info,
                 text,

@@ -4,7 +4,9 @@
 //! Rendering only — the conversation lives in `crate::ai` workers and the
 //! workspace's `ai_*` methods. The prompt box follows the notes panel's
 //! text-entry pattern: a plain buffer, a drawn `|` caret, one child div
-//! per line.
+//! per line. Harness and model are picked together in one popup — a
+//! search box over the live catalogs each installed CLI reported, with a
+//! rail to flip between harnesses — opened from the chip beside Send.
 
 use super::*;
 use crate::ai::{AiEntryKind, Backend};
@@ -28,13 +30,13 @@ pub fn ai_sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Any
         .border_l_1()
         .border_color(gpui::rgb(palette().panel_edge))
         .child(header(ws, cx))
-        .child(model_row(ws, cx))
         .child(transcript(ws))
         .child(prompt_box(ws, cx));
     Some(panel.into_any_element())
 }
 
 fn header(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let backend = ws.ai.backend;
     div()
         .flex()
         .flex_row()
@@ -48,8 +50,17 @@ fn header(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(backend_button(ws, Backend::Claude, cx))
-                .child(backend_button(ws, Backend::Codex, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(palette().text_dim))
+                        .child(icon(backend.icon(), 12.0, palette().text_dim))
+                        .child(backend.label()),
+                )
                 .child(
                     div()
                         .id("ai-clear")
@@ -67,86 +78,6 @@ fn header(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .child(icon("trash", 13.0, palette().text_dim)),
                 ),
         )
-}
-
-fn backend_button(ws: &Workspace, backend: Backend, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let selected = ws.ai.backend == backend;
-    let installed = match backend {
-        Backend::Claude => ws.ai.available.0,
-        Backend::Codex => ws.ai.available.1,
-    };
-    let label = match backend {
-        Backend::Claude => "Claude",
-        Backend::Codex => "Codex",
-    };
-    div()
-        .id(match backend {
-            Backend::Claude => "ai-backend-claude",
-            Backend::Codex => "ai-backend-codex",
-        })
-        .px_1p5()
-        .h(px(20.0))
-        .flex()
-        .items_center()
-        .rounded_sm()
-        .text_size(px(11.0))
-        .text_color(gpui::rgb(if installed {
-            palette().text
-        } else {
-            palette().text_faint
-        }))
-        .when_active(selected)
-        .cursor_pointer()
-        .hover(|s| s.bg(gpui::rgb(palette().hover)))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |ws, _e, _w, cx| ws.set_ai_backend(backend, cx)),
-        )
-        .child(label)
-}
-
-/// The model picker: the backend's catalog plus its CLI default.
-fn model_row(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let backend = ws.ai.backend;
-    let current = match backend {
-        Backend::Claude => ws.view.ai_model_claude.clone(),
-        Backend::Codex => ws.view.ai_model_codex.clone(),
-    };
-    let options: Vec<(SharedString, String)> = backend
-        .models()
-        .into_iter()
-        .map(|(name, slug)| (SharedString::from(name), slug))
-        .collect();
-    let label: SharedString = options
-        .iter()
-        .find(|(_, slug)| *slug == current)
-        .map(|(name, _)| name.clone())
-        .unwrap_or_else(|| "Default".into());
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .px_2()
-        .pb_1()
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(gpui::rgb(palette().text_dim))
-                .child("Model"),
-        )
-        .child(ui::dropdown(
-            ui::Dropdown {
-                popup: Popup::Field("ai-model"),
-                is_open: ws.open_popup == Some(Popup::Field("ai-model")),
-                current,
-                label,
-                width: 170.0,
-                options,
-            },
-            |ws, slug, cx| ws.set_ai_model(slug, cx),
-            cx,
-        ))
 }
 
 fn transcript(ws: &mut Workspace) -> impl IntoElement {
@@ -258,6 +189,7 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     };
     let running = ws.ai.running;
     div()
+        .relative()
         .flex()
         .flex_col()
         .flex_none()
@@ -265,6 +197,7 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .gap_1()
         .border_t_1()
         .border_color(gpui::rgb(palette().panel_edge))
+        .children(ws.ai.model_menu.then(|| model_menu(ws, cx)))
         .child(
             div()
                 .id("ai-input")
@@ -306,12 +239,7 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(gpui::rgb(palette().text_faint))
-                        .child(if editing { "Enter sends · Shift+Enter breaks" } else { "" }),
-                )
+                .child(model_chip(ws, cx))
                 .child(if running {
                     ui::button("Stop", false, |ws, _w, cx| ws.ai_stop(cx), cx)
                         .into_any_element()
@@ -320,4 +248,226 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .into_any_element()
                 }),
         )
+}
+
+/// The chip that opens the picker, in the corner where its choice acts.
+fn model_chip(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id("ai-model-chip")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .h(px(22.0))
+        .px_1p5()
+        .rounded_sm()
+        .cursor_pointer()
+        .bg(gpui::rgb(palette().control_bg))
+        .hover(|s| s.bg(gpui::rgb(palette().button_hover)))
+        .text_size(px(11.0))
+        .text_color(gpui::rgb(palette().text))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|ws, _e, _w, cx| ws.open_ai_model_menu(cx)),
+        )
+        .child(icon(ws.ai.backend.icon(), 11.0, palette().text_dim))
+        .child(SharedString::from(ws.ai_model_name()))
+        .child(icon("chevron-down", 10.0, palette().text_dim))
+}
+
+/// The picker: search over the live catalogs, a rail per installed
+/// harness, and rows named the way the harness names them.
+fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let search = &ws.ai.model_search;
+    let searching = !search.is_empty();
+    let fetching = match ws.ai.menu_backend {
+        Backend::Claude => ws.ai.fetching_claude && ws.ai.models_claude.is_none(),
+        Backend::Codex => ws.ai.fetching_codex && ws.ai.models_codex.is_none(),
+    };
+    let current_backend = ws.ai.backend;
+    let current_slug = match current_backend {
+        Backend::Claude => ws.view.ai_model_claude.clone(),
+        Backend::Codex => ws.view.ai_model_codex.clone(),
+    };
+
+    let entries = ws.ai_menu_entries();
+    let rows: Vec<AnyElement> = if fetching && entries.is_empty() {
+        vec![menu_note("Asking the CLI for its models…")]
+    } else if entries.is_empty() {
+        vec![menu_note("No models match")]
+    } else {
+        entries
+            .into_iter()
+            .map(|(backend, entry)| {
+                let picked = backend == current_backend && entry.slug == current_slug;
+                let slug = entry.slug.clone();
+                let sub = if entry.detail.is_empty() {
+                    backend.label().to_string()
+                } else {
+                    format!("{} · {}", backend.label(), entry.detail)
+                };
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(gpui::rgb(palette().hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, _e, _w, cx| {
+                            ws.ai_pick_model(backend, slug.clone(), cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(12.0))
+                            .text_color(gpui::rgb(palette().text))
+                            .child(SharedString::from(entry.name))
+                            .children(picked.then(|| icon("check", 12.0, palette().accent_hover))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(10.0))
+                            .text_color(gpui::rgb(palette().text_faint))
+                            .child(icon(backend.icon(), 9.0, palette().text_faint))
+                            .child(div().truncate().child(SharedString::from(sub))),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    };
+
+    let mut rail = div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(px(34.0))
+        .items_center()
+        .pt_1()
+        .gap_1()
+        .border_r_1()
+        .border_color(gpui::rgb(palette().divider));
+    for backend in [Backend::Claude, Backend::Codex] {
+        let installed = match backend {
+            Backend::Claude => ws.ai.available.0,
+            Backend::Codex => ws.ai.available.1,
+        };
+        if !installed {
+            continue;
+        }
+        // A search spans every harness, so the rail stands down.
+        let selected = !searching && ws.ai.menu_backend == backend;
+        rail = rail.child(
+            div()
+                .id(backend.icon())
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(24.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .when(selected, |d| d.bg(gpui::rgb(palette().selection_bg)))
+                .hover(|s| s.bg(gpui::rgb(palette().hover)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, _e, _w, cx| {
+                        ws.ai.menu_backend = backend;
+                        ws.ai.model_search.clear();
+                        ws.ensure_ai_models(cx);
+                        cx.notify();
+                    }),
+                )
+                .child(icon(
+                    backend.icon(),
+                    13.0,
+                    if selected {
+                        palette().text
+                    } else {
+                        palette().text_dim
+                    },
+                )),
+        );
+    }
+
+    gpui::deferred(
+        div()
+            .absolute()
+            .bottom(px(34.0))
+            .left(px(8.0))
+            .w(px(276.0))
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .bg(gpui::rgb(palette().popup_bg))
+            .border_1()
+            .border_color(gpui::rgb(palette().edge))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|ws, _e, _w, cx| ws.close_ai_model_menu(cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .h(px(30.0))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(gpui::rgb(palette().accent))
+                    .child(icon("search", 12.0, palette().text_faint))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(gpui::rgb(if searching {
+                                palette().text
+                            } else {
+                                palette().text_faint
+                            }))
+                            .child(SharedString::from(if searching {
+                                format!("{search}|")
+                            } else {
+                                "Search models…|".to_string()
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .min_h(px(60.0))
+                    .child(rail)
+                    .child(
+                        div()
+                            .id("ai-models")
+                            .flex()
+                            .flex_col()
+                            .flex_grow()
+                            .max_h(px(280.0))
+                            .py_1()
+                            .overflow_y_scroll()
+                            .children(rows),
+                    ),
+            ),
+    )
+    .into_any_element()
+}
+
+fn menu_note(text: &'static str) -> AnyElement {
+    div()
+        .px_2()
+        .py_2()
+        .text_size(px(11.0))
+        .text_color(gpui::rgb(palette().text_faint))
+        .child(text)
+        .into_any_element()
 }

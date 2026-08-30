@@ -563,9 +563,11 @@ pub struct ViewOptions {
     /// Which agent harness the sidebar drives ("claude" or "codex").
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
-    /// Model override per harness; empty means whatever the CLI's own
-    /// configuration picks. Two fields because the slugs don't travel:
-    /// "opus" means nothing to Codex, "gpt-5.5" nothing to Claude.
+    /// The model last used in this app, per harness — deliberately not
+    /// the CLI's own default, which is tuned for coding. Empty until the
+    /// first catalog fetch seeds it. Two fields because the slugs don't
+    /// travel: "opus" means nothing to Codex, "gpt-5.5" nothing to
+    /// Claude.
     #[serde(default)]
     pub ai_model_claude: String,
     #[serde(default)]
@@ -1025,6 +1027,10 @@ impl Workspace {
             ai: crate::ai::AiState::new(crate::ai::Backend::Claude),
         };
         ws.ai.backend = crate::ai::Backend::from_pref(&ws.view.ai_backend);
+        ws.ai.menu_backend = ws.ai.backend;
+        if ws.view.ai_panel {
+            ws.ensure_ai_models(cx);
+        }
         ws.rebuild_tool_groups();
         ws.sync_note_defaults();
         // A launch-time update check, when the preference allows one and

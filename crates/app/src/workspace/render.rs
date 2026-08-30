@@ -351,7 +351,10 @@ impl Workspace {
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
-                if ws.layer_rename_key(ev, cx) || ws.note_edit_key(ev, cx) || ws.ai_input_key(ev, cx)
+                if ws.layer_rename_key(ev, cx)
+                    || ws.note_edit_key(ev, cx)
+                    || ws.ai_model_menu_key(ev, cx)
+                    || ws.ai_input_key(ev, cx)
                 {
                     cx.stop_propagation();
                     return;
@@ -539,6 +542,7 @@ impl Render for Workspace {
             || self.layer_rename.is_some()
             || self.note_edit.is_some()
             || self.ai.input_active
+            || self.ai.model_menu
         {
             "Workspace text_entry"
         } else {

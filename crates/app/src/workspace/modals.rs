@@ -425,6 +425,11 @@ impl Workspace {
             self.commit_note_edit(cx);
             return;
         }
+        // The model picker closes like any popup.
+        if self.ai.model_menu {
+            self.close_ai_model_menu(cx);
+            return;
+        }
         // Same shape for the AI prompt box: escape hands the keyboard
         // back and the draft stays put.
         if self.ai.input_active {

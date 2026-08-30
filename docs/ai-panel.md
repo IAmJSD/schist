@@ -19,11 +19,14 @@ panel drives the CLI you already have installed and logged in.
 If neither CLI is on `PATH` the panel says so instead of sending
 anything.
 
-A model picker sits under the header. "Default" is whatever the CLI's
-own configuration chooses; the other entries are per-harness — the
-Claude aliases (Opus, Sonnet, Haiku) resolve to the newest model of each
-tier, and the Codex list is its SDK's bundled catalog. The choice is
-remembered per harness and applies from the next message without
+The chip beside Send opens the model picker: a search box over the
+catalogs each installed CLI reports for this account (the same lists
+their own pickers show, with versioned names — "Claude Fable 5",
+"GPT-5.6-Terra"), and a rail to flip between harnesses. Picking a row
+picks harness and model together. There is no "default" row: the CLI's
+own default is tuned for coding and is only used once, to seed the first
+selection — after that the panel simply remembers what was last used
+here, per harness. The choice applies from the next message without
 restarting the conversation: Claude Code switches its live session,
 Codex takes it as a per-turn override.
 

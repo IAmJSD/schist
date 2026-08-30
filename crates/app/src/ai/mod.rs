@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 pub mod claude;
 pub mod codex;
 pub mod endpoint;
+pub mod models;
 
 /// Which agent harness a conversation runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,31 +66,53 @@ impl Backend {
         }
     }
 
-    /// The models the sidebar offers, as (display name, slug). An empty
-    /// slug means the CLI's own default. Claude Code resolves the aliases
-    /// to the latest model of each tier itself; the Codex list is the
-    /// SDK's bundled catalog, so it tracks the crate rather than us.
-    pub fn models(self) -> Vec<(&'static str, String)> {
+    /// The icon asset for the harness's mark in the model picker.
+    pub fn icon(self) -> &'static str {
         match self {
-            Backend::Claude => vec![
-                ("Default", String::new()),
-                ("Opus", "opus".to_string()),
-                ("Sonnet", "sonnet".to_string()),
-                ("Haiku", "haiku".to_string()),
-            ],
-            Backend::Codex => {
-                let mut out = vec![("Default", String::new())];
-                out.extend(
-                    codex_codes::CodexModel::known()
-                        .iter()
-                        // Hidden from Codex's own picker; same here.
-                        .filter(|m| !matches!(m, codex_codes::CodexModel::CodexAutoReview))
-                        .map(|m| (m.display_name(), m.cli_arg().to_string())),
-                );
-                out
-            }
+            Backend::Claude => "ai-claude",
+            Backend::Codex => "ai-codex",
         }
     }
+
+    /// A static stand-in used until (or in case) the live catalog from
+    /// the CLI arrives — see [`models::fetch`], which asks each harness
+    /// what this account actually has.
+    pub fn fallback_models(self) -> Vec<ModelEntry> {
+        let entry = |name: &str, slug: &str, detail: &str, recommended: bool| ModelEntry {
+            slug: slug.to_string(),
+            name: name.to_string(),
+            detail: detail.to_string(),
+            recommended,
+        };
+        match self {
+            Backend::Claude => vec![
+                entry("Claude Opus", "opus", "Most capable tier", true),
+                entry("Claude Sonnet", "sonnet", "Efficient for routine tasks", false),
+                entry("Claude Haiku", "haiku", "Fastest for quick answers", false),
+            ],
+            Backend::Codex => codex_codes::CodexModel::known()
+                .iter()
+                // Hidden from Codex's own picker; same here.
+                .filter(|m| !matches!(m, codex_codes::CodexModel::CodexAutoReview))
+                .enumerate()
+                .map(|(i, m)| entry(m.display_name(), m.cli_arg(), "Codex catalog", i == 0))
+                .collect(),
+        }
+    }
+}
+
+/// One model a harness offers.
+#[derive(Clone)]
+pub struct ModelEntry {
+    /// What the harness is told.
+    pub slug: String,
+    pub name: String,
+    /// The harness's own description line, shown under the name.
+    pub detail: String,
+    /// The harness's own pick, used only to seed the first selection —
+    /// after that the app remembers what was last used *here*, which is
+    /// deliberately not the user's coding default.
+    pub recommended: bool,
 }
 
 /// What a conversation worker reports back, drained by the UI ticker.
@@ -100,6 +123,8 @@ pub enum AgentEvent {
     ToolCall(String),
     /// The backend's session/thread id, for resuming.
     Session(String),
+    /// The models the harness reported for this account.
+    Models(Backend, Vec<ModelEntry>),
     /// A status line worth a dim row in the transcript.
     Info(String),
     Error(String),
@@ -254,6 +279,18 @@ pub struct AiState {
     /// The published tool list, built from the app's registry on first
     /// use. Also serves `tools/list` for the workers.
     pub catalog: Option<schist_mcp::Catalog>,
+    /// The model picker popup.
+    pub model_menu: bool,
+    /// Which harness's list the picker's rail is showing.
+    pub menu_backend: Backend,
+    /// The picker's search buffer.
+    pub model_search: String,
+    /// Live model catalogs, fetched from each installed CLI once per run
+    /// ([`models::fetch`]); `None` until they arrive.
+    pub models_claude: Option<Vec<ModelEntry>>,
+    pub models_codex: Option<Vec<ModelEntry>>,
+    pub fetching_claude: bool,
+    pub fetching_codex: bool,
     /// Whether the drain ticker task is live (only ever one at a time).
     pub ticker: bool,
     /// Loopback endpoint for harnesses that spawn their MCP servers as
@@ -276,6 +313,13 @@ impl AiState {
             conversation: None,
             session: None,
             catalog: None,
+            model_menu: false,
+            menu_backend: backend,
+            model_search: String::new(),
+            models_claude: None,
+            models_codex: None,
+            fetching_claude: false,
+            fetching_codex: false,
             ticker: false,
             endpoint: None,
             scroll: gpui::ScrollHandle::new(),
