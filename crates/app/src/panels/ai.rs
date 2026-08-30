@@ -306,6 +306,11 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                 } else {
                     format!("{} · {}", backend.label(), entry.detail)
                 };
+                // gpui's ellipsis needs a real text engine pass this UI
+                // kit doesn't do; a character budget sized to the row is
+                // how the rest of the chrome truncates.
+                let name = ellipsize(&entry.name, if picked { 27 } else { 31 });
+                let sub = ellipsize(&sub, 41);
                 div()
                     .px_2()
                     .py_1()
@@ -325,11 +330,22 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .justify_between()
+                            .gap_1()
+                            .overflow_hidden()
                             .text_size(px(12.0))
                             .text_color(gpui::rgb(palette().text))
-                            .child(SharedString::from(entry.name))
-                            .children(picked.then(|| icon("check", 12.0, palette().accent_hover))),
+                            .child(
+                                div()
+                                    .flex_grow()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .child(SharedString::from(name)),
+                            )
+                            .children(picked.then(|| {
+                                div()
+                                    .flex_none()
+                                    .child(icon("check", 12.0, palette().accent_hover))
+                            })),
                     )
                     .child(
                         div()
@@ -337,10 +353,21 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                             .flex_row()
                             .items_center()
                             .gap_1()
+                            .overflow_hidden()
                             .text_size(px(10.0))
                             .text_color(gpui::rgb(palette().text_faint))
-                            .child(icon(backend.icon(), 9.0, palette().text_faint))
-                            .child(div().truncate().child(SharedString::from(sub))),
+                            .child(div().flex_none().child(icon(
+                                backend.icon(),
+                                9.0,
+                                palette().text_faint,
+                            )))
+                            .child(
+                                div()
+                                    .flex_grow()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .child(SharedString::from(sub)),
+                            ),
                     )
                     .into_any_element()
             })
@@ -424,9 +451,12 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                     .px_2()
                     .border_b_1()
                     .border_color(gpui::rgb(palette().accent))
-                    .child(icon("search", 12.0, palette().text_faint))
+                    .child(div().flex_none().child(icon("search", 12.0, palette().text_faint)))
                     .child(
                         div()
+                            .flex_grow()
+                            .min_w(px(0.0))
+                            .truncate()
                             .text_size(px(11.0))
                             .text_color(gpui::rgb(if searching {
                                 palette().text
@@ -460,6 +490,15 @@ fn model_menu(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             ),
     )
     .into_any_element()
+}
+
+/// Trim to a character budget with an ellipsis, on a char boundary.
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
 }
 
 fn menu_note(text: &'static str) -> AnyElement {
