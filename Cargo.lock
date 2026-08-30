@@ -5912,7 +5912,7 @@ dependencies = [
 
 [[package]]
 name = "schist-adjustments"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "schist-color",
@@ -5924,7 +5924,7 @@ dependencies = [
 
 [[package]]
 name = "schist-app"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "ash",
@@ -5970,7 +5970,7 @@ dependencies = [
 
 [[package]]
 name = "schist-codec-affinity"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "crc32fast",
  "image",
@@ -5993,7 +5993,7 @@ dependencies = [
 
 [[package]]
 name = "schist-codec-psd"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -6012,7 +6012,7 @@ dependencies = [
 
 [[package]]
 name = "schist-codecs-common"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -6031,14 +6031,14 @@ dependencies = [
 
 [[package]]
 name = "schist-color"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "schist-colormgmt"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "log",
@@ -6049,7 +6049,7 @@ dependencies = [
 
 [[package]]
 name = "schist-commands-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "schist-color",
@@ -6060,7 +6060,7 @@ dependencies = [
 
 [[package]]
 name = "schist-compositor"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "rayon",
@@ -6075,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "schist-compositor-gpu"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "naga 27.0.3",
@@ -6097,7 +6097,7 @@ dependencies = [
 
 [[package]]
 name = "schist-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "log",
@@ -6111,7 +6111,7 @@ dependencies = [
 
 [[package]]
 name = "schist-filters-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "schist-color",
@@ -6122,14 +6122,14 @@ dependencies = [
 
 [[package]]
 name = "schist-fx"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "schist-layer-fx"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "schist-color",
  "schist-core",
@@ -6138,7 +6138,7 @@ dependencies = [
 
 [[package]]
 name = "schist-mcp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "schist-neural"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "log",
@@ -6182,7 +6182,7 @@ dependencies = [
 
 [[package]]
 name = "schist-pixel-ops"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "schist-color",
  "schist-core",
@@ -6190,7 +6190,7 @@ dependencies = [
 
 [[package]]
 name = "schist-plugin-api"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "parking_lot",
@@ -6205,7 +6205,7 @@ dependencies = [
 
 [[package]]
 name = "schist-plugin-host-8bf"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "libloading",
  "log",
@@ -6217,7 +6217,7 @@ dependencies = [
 
 [[package]]
 name = "schist-plugin-host-wasm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "log",
@@ -6231,7 +6231,7 @@ dependencies = [
 
 [[package]]
 name = "schist-plugin-sdk"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6239,7 +6239,7 @@ dependencies = [
 
 [[package]]
 name = "schist-preview"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "image",
@@ -6254,11 +6254,11 @@ dependencies = [
 
 [[package]]
 name = "schist-psd-descriptor"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "schist-quicklook"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "block2",
@@ -6272,7 +6272,7 @@ dependencies = [
 
 [[package]]
 name = "schist-text-engine"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fontdb 0.24.0",
  "fontdue",
@@ -6285,7 +6285,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-basic"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "schist-color",
  "schist-compositor",
@@ -6295,7 +6295,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-doc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "schist-color",
  "schist-core",
@@ -6305,7 +6305,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-paint"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rustc-hash 2.1.3",
  "schist-color",
@@ -6317,7 +6317,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-retouch"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "rayon",
@@ -6329,7 +6329,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-select"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "schist-color",
@@ -6341,7 +6341,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-transform"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "schist-color",
@@ -6352,7 +6352,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-type"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "log",
  "schist-color",
@@ -6365,7 +6365,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-vector"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "schist-color",
  "schist-core",
@@ -6375,7 +6375,7 @@ dependencies = [
 
 [[package]]
 name = "schist-tools-warp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rayon",
  "schist-color",
@@ -6386,7 +6386,7 @@ dependencies = [
 
 [[package]]
 name = "schist-vector"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "schist-core",
 ]
