@@ -8,5 +8,15 @@
          notarized Schist launches and then dies the moment it loads a
          plugin, which is to say immediately. -->
     <key>com.apple.security.cs.allow-jit</key><true/>
+
+    <!-- HEIC import dlopen's libheif: either Homebrew's or the
+         decode-only build the app offers to download. Neither is signed
+         by this Team ID, and the hardened runtime's library validation
+         rejects any library that is not, so without this a signed build
+         cannot load either one -- HEIC fails, the download dialog
+         offers the fix, and the fix cannot load either. Only affects
+         libraries this process dlopen's by name; .8bf plug-ins are
+         hosted in a separate helper process. -->
+    <key>com.apple.security.cs.disable-library-validation</key><true/>
 </dict>
 </plist>

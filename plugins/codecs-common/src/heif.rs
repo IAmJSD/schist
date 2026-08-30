@@ -148,17 +148,48 @@ pub fn is_missing_library_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains(NOT_AVAILABLE)
 }
 
+/// True when the failure is "this machine cannot decode HEIC" — no
+/// libheif at all, or one with no HEVC decoder — rather than a broken
+/// file. Tests skip on this; the app asks the further question of
+/// whether a download would fix it.
+pub fn no_decoder_available(err: &anyhow::Error) -> bool {
+    is_missing_library_error(err) || format!("{err:#}").contains(NO_DECODER)
+}
+
 /// True when this machine cannot decode HEIC today but installing the
 /// managed library would fix it: either no libheif loaded at all, or
 /// the loaded (system) build has no HEVC decoder — stock Ubuntu ships
 /// libheif with only AV1 plugins — and the managed build, which always
-/// carries one, is not the library in use.
+/// carries one, is neither in use nor already installed.
 pub fn download_would_help(err: &anyhow::Error) -> bool {
-    if is_missing_library_error(err) {
-        return true;
+    if !no_decoder_available(err) {
+        return false;
     }
-    let from_managed = LOADED.lock().unwrap().is_some_and(|(_, managed)| managed);
-    !from_managed && format!("{err:#}").contains(NO_DECODER)
+    // The managed build is loaded and still could not do it: there is
+    // nothing left to fetch.
+    if LOADED.lock().unwrap().is_some_and(|(_, managed)| managed) {
+        return false;
+    }
+    // Nor is there when the pinned build is already on disk and simply
+    // did not load — dlopen refused it (a signature policy, a missing
+    // dependency, the wrong architecture), and downloading the same
+    // bytes over the top would only offer the dialog again, forever.
+    !managed_installed()
+}
+
+/// Whether the pinned managed library is already on disk, byte for
+/// byte. A mismatch counts as not installed: that is an older pinned
+/// version, which a download does replace.
+pub fn managed_installed() -> bool {
+    managed_library().is_some_and(|managed| installed_matches(&managed.library))
+}
+
+/// Whether `file` is already in the managed directory with exactly the
+/// pinned contents.
+pub(crate) fn installed_matches(file: &RemoteFile) -> bool {
+    use sha2::Digest as _;
+    std::fs::read(managed_dir().join(file.name))
+        .is_ok_and(|bytes| format!("{:x}", sha2::Sha256::digest(&bytes)) == file.sha256)
 }
 
 /// One file the app may download: URL pinned to a release tag, contents
@@ -326,12 +357,16 @@ fn libheif() -> anyhow::Result<&'static LibHeif> {
     }
     candidates.extend(LIBRARY_CANDIDATES.iter().map(|name| (name.into(), false)));
 
-    let mut last_err = String::new();
+    // Every candidate's failure, not just the last: the one that
+    // matters is usually the managed library's, and it is first in the
+    // list. Reporting only the last leaves a downloaded library that
+    // dlopen refused looking like it was never there.
+    let mut errors = Vec::new();
     for (name, from_managed) in &candidates {
         let lib = match unsafe { libloading::Library::new(name) } {
             Ok(lib) => lib,
             Err(err) => {
-                last_err = err.to_string();
+                errors.push(format!("{}: {err}", name.to_string_lossy()));
                 continue;
             }
         };
@@ -346,12 +381,13 @@ fn libheif() -> anyhow::Result<&'static LibHeif> {
                 *loaded = Some((lib, *from_managed));
                 return Ok(lib);
             }
-            Err(err) => last_err = err,
+            Err(err) => errors.push(format!("{}: {err}", name.to_string_lossy())),
         }
     }
     Err(anyhow::anyhow!(
-        "{NOT_AVAILABLE} ({last_err}). Opening HEIC needs the libheif library \
-         (Linux: install libheif1; macOS: brew install libheif)"
+        "{NOT_AVAILABLE} ({}). Opening HEIC needs the libheif library \
+         (Linux: install libheif1; macOS: brew install libheif)",
+        errors.join("; ")
     ))
 }
 
