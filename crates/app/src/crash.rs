@@ -33,6 +33,7 @@ pub fn state_dir() -> Option<PathBuf> {
 }
 
 /// Where crash reports are written.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn crash_dir() -> Option<PathBuf> {
     Some(state_dir()?.join("schist/crashes"))
 }
@@ -42,6 +43,7 @@ pub fn crash_dir() -> Option<PathBuf> {
 ///
 /// `enabled` comes from preferences; when false the default hook runs and
 /// nothing is written.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn install_handler(enabled: bool) {
     if !enabled {
         return;
@@ -53,6 +55,7 @@ pub fn install_handler(enabled: bool) {
     }));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_report(info: &std::panic::PanicHookInfo<'_>) {
     let Some(dir) = crash_dir() else { return };
     if std::fs::create_dir_all(&dir).is_err() {
@@ -89,6 +92,7 @@ fn write_report(info: &std::panic::PanicHookInfo<'_>) {
     eprintln!("schist: crash report written to {}", path.display());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// This build's home for uploaded crashes, or `None` if it has not got one.
 ///
 /// A runtime `SCHIST_SENTRY_DSN` beats the compiled-in value, which is how
@@ -107,12 +111,21 @@ fn dsn() -> Option<String> {
 ///
 /// The Preferences checkbox is hidden when this is false — offering to send
 /// reports from a build that has nowhere to send them would be a lie.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn reporting_available() -> bool {
     dsn().is_some()
 }
 
+/// The web build carries no Sentry client, so the Preferences checkbox
+/// for uploads never appears.
+#[cfg(target_arch = "wasm32")]
+pub fn reporting_available() -> bool {
+    false
+}
+
 /// A live Sentry client. Holding it is what keeps uploads working; dropping
 /// it flushes whatever is still queued, so `main` keeps it until it exits.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Reporter(#[allow(dead_code)] sentry::ClientInitGuard);
 
 /// Start uploading crashes, if the user asked for it and this build can.
@@ -125,6 +138,7 @@ pub struct Reporter(#[allow(dead_code)] sentry::ClientInitGuard);
 /// local report being written first and the upload attempted second — a
 /// network that is down or slow then cannot cost the user the report on
 /// disk.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_reporting(enabled: bool) -> Option<Reporter> {
     if !enabled {
         return None;
@@ -189,6 +203,7 @@ pub fn start_reporting(enabled: bool) -> Option<Reporter> {
 }
 
 /// This user's home directory, by the same variables [`state_dir`] uses.
+#[cfg(not(target_arch = "wasm32"))]
 fn home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var("USERPROFILE").ok().map(PathBuf::from)
@@ -204,6 +219,7 @@ fn home_dir() -> Option<PathBuf> {
 /// names both them and their work. The rest of the event is safe as it
 /// stands: frame filenames are the *build* machine's source paths, and the
 /// module list is addresses and debug ids.
+#[cfg(not(target_arch = "wasm32"))]
 fn redact_paths(event: &mut sentry::protocol::Event<'static>, home: &str) {
     // "/" and "" would rewrite every path in the event into nonsense.
     if home.len() < 2 {
@@ -220,6 +236,7 @@ fn redact_paths(event: &mut sentry::protocol::Event<'static>, home: &str) {
 }
 
 /// `redact_paths` for one string.
+#[cfg(not(target_arch = "wasm32"))]
 fn redact(text: &str, home: &str) -> String {
     // Backslashes as well as forward, because a Windows panic message may
     // quote either: `Path::display` gives `C:\Users\a`, but a path built

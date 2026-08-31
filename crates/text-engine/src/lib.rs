@@ -142,6 +142,24 @@ pub fn refresh() {
     }
 }
 
+/// Font files handed over at startup on the web, where there are no font
+/// directories to scan: the loading page fetches them and the app calls
+/// [`add_font_data`] before anything shapes text.
+#[cfg(target_arch = "wasm32")]
+fn web_faces() -> &'static std::sync::Mutex<Vec<Vec<u8>>> {
+    static FACES: OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+    FACES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Register a font from raw file bytes and make it usable at once.
+#[cfg(target_arch = "wasm32")]
+pub fn add_font_data(bytes: Vec<u8>) {
+    if let Ok(mut faces) = web_faces().lock() {
+        faces.push(bytes);
+    }
+    refresh();
+}
+
 /// Where fonts fetched by the app are installed, alongside whatever the
 /// platform already provides.
 pub fn font_dir() -> Option<PathBuf> {
@@ -220,6 +238,12 @@ fn scan_fonts() -> fontdb::Database {
     db.load_system_fonts();
     if let Some(dir) = font_dir() {
         db.load_fonts_dir(dir);
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Ok(faces) = web_faces().lock() {
+        for bytes in faces.iter() {
+            db.load_font_data(bytes.clone());
+        }
     }
     // Point the generic families at something that actually exists, so
     // an unknown family name resolves through `Family::SansSerif`

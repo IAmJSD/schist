@@ -42,12 +42,21 @@ impl Workspace {
 
     /// Persist view options so they survive a restart.
     pub fn save_view_options(&self) {
-        let Some(path) = prefs_path() else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Ok(json) = serde_json::to_string(&self.view) {
+                crate::web::local_set(crate::web::PREFS_KEY, &json);
+            }
         }
-        if let Ok(json) = serde_json::to_string_pretty(&self.view) {
-            let _ = std::fs::write(path, json);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(path) = prefs_path() else { return };
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&self.view) {
+                let _ = std::fs::write(path, json);
+            }
         }
     }
 

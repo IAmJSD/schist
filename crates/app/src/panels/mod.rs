@@ -20,6 +20,7 @@ use schist_color::Rgba;
 use schist_core::{BlendMode, Layer, LayerId, LayerKind};
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 mod ai;
 mod color;
 mod context;
@@ -35,8 +36,16 @@ mod status;
 mod tabs;
 mod toolbar;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use ai::*;
 use color::*;
+
+/// The sidebar renders nothing on the web, where the AI subsystem (which
+/// drives locally installed agent CLIs) is compiled out.
+#[cfg(target_arch = "wasm32")]
+pub fn ai_sidebar(_ws: &mut Workspace, _cx: &mut Context<Workspace>) -> Option<gpui::AnyElement> {
+    None
+}
 pub use context::*;
 use history::*;
 use layers::*;

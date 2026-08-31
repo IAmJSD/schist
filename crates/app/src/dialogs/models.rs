@@ -36,7 +36,13 @@ pub(super) fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl
             let size = schist_neural::installed_size(spec)
                 .map(|b| size_of(b as f64))
                 .unwrap_or_else(|| size_of(spec.bytes as f64));
-            let state = if spec.built_in() {
+            // A "built-in" only ships in the binary natively; the web
+            // build serves the same file beside the app and fetches it on
+            // demand, so there it gets the download/remove row like any
+            // other model.
+            let carried = spec.built_in() && cfg!(not(target_arch = "wasm32"));
+            let fetchable = schist_neural::download_url(spec).is_some();
+            let state = if carried {
                 format!("Built in \u{b7} {size}")
             } else if let Some(download) = busy {
                 // Against the size this build expects rather than the
@@ -50,10 +56,15 @@ pub(super) fn model_manager(ws: &Workspace, cx: &mut Context<Workspace>) -> impl
                 )
             } else if installed {
                 format!("Installed \u{b7} {size}")
-            } else {
+            } else if fetchable {
                 format!("Not installed \u{b7} {size}")
+            } else {
+                // The externally-hosted models: their GitHub URLs redirect
+                // through a host that sends no CORS headers, so a browser
+                // cannot fetch them at all.
+                format!("Not available in the browser \u{b7} {size}")
             };
-            let action: gpui::AnyElement = if spec.built_in() {
+            let action: gpui::AnyElement = if carried || (!installed && !fetchable) {
                 div().into_any_element()
             } else if busy.is_some() {
                 div()

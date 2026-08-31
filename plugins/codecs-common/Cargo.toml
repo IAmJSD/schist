@@ -11,11 +11,15 @@ schist-codec-affinity.workspace = true
 anyhow.workspace = true
 log.workspace = true
 image.workspace = true
-libloading.workspace = true
 sha2 = "0.10"
 schist-color.workspace = true
 schist-colormgmt.workspace = true
 schist-compositor.workspace = true
+
+# HEIC rides on a dlopen'd libheif; a browser has neither dlopen nor a
+# libheif to open, so the codec (and its loader) stay off the wasm build.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libloading.workspace = true
 
 [dev-dependencies]
 crc32fast.workspace = true

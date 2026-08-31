@@ -2,7 +2,9 @@
 //! adjustments, export options and preferences.
 
 use crate::ui;
-use crate::workspace::{ColorTarget, Modal, NewDocBackground, Popup, UpdateProgress, Workspace};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::workspace::UpdateProgress;
+use crate::workspace::{ColorTarget, Modal, NewDocBackground, Popup, Workspace};
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _,
@@ -21,10 +23,12 @@ mod layer_props;
 mod models;
 mod new_doc;
 mod open;
+#[cfg(not(target_arch = "wasm32"))]
 mod plugins;
 mod prefs;
 mod profile;
 mod size;
+#[cfg(not(target_arch = "wasm32"))]
 mod update;
 
 use adjust::*;
@@ -37,10 +41,12 @@ use layer_props::*;
 use models::*;
 use new_doc::*;
 use open::*;
+#[cfg(not(target_arch = "wasm32"))]
 use plugins::*;
 use prefs::*;
 use profile::*;
 use size::*;
+#[cfg(not(target_arch = "wasm32"))]
 use update::*;
 
 /// Apply a stepper delta to a pixel dimension.
@@ -137,9 +143,21 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         } => crate::color_picker::render(ws, target, hsv, original, cx).into_any_element(),
         Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
         Modal::DropImage { path } => drop_image(path, cx).into_any_element(),
+        // Three desktop-only dialogs. Their modals are never opened on
+        // the web (the flows that open them are compiled out), so these
+        // arms only satisfy the exhaustiveness check there.
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::HeifSupport { path } => heif_support(ws, path, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::HeifSupport { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::UpdateAvailable { update } => update_available(ws, update, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::UpdateAvailable { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::PluginManager => plugin_manager(ws, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::PluginManager => return None,
         Modal::ModelManager => model_manager(ws, cx).into_any_element(),
         Modal::MissingFonts { fonts } => missing_fonts(ws, &fonts, cx).into_any_element(),
         Modal::Preferences => preferences(ws, &state, cx).into_any_element(),

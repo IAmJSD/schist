@@ -5,3 +5,6 @@ target/
 
 # Python bytecode from tools/
 __pycache__/
+
+# The assembled web deployment (tools/web-build.sh)
+/dist/

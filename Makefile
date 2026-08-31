@@ -106,13 +106,14 @@ exe = $(if $(findstring windows,$(1)),.exe,)
 HELPERS := $(foreach t,$(HELPER_TARGETS),$(DESTDIR)/$(name-$(t)))
 
 .DEFAULT_GOAL := help
-.PHONY: help all app build helpers install-helpers preflight release check-bundle clean-helpers FORCE
+.PHONY: help all app build web helpers install-helpers preflight release check-bundle clean-helpers FORCE
 
 help:
 	@echo 'make build            the app, carrying the plug-in helpers ($(PROFILE))'
 	@echo 'make release          build and package into dist/'
 	@echo
 	@echo 'make app              just the Schist binary, no helpers'
+	@echo 'make web              the browser build, into dist/web/'
 	@echo 'make helpers          just the .8bf plug-in helpers, beside the binary'
 	@echo 'make install-helpers DESTDIR=DIR   put the helpers somewhere else'
 	@echo
@@ -138,6 +139,12 @@ stage-helpers:
 # unpack, and says so if asked to run a plug-in.
 app:
 	$(CARGO) build $(PROFILE_FLAG) -p schist-app
+
+# The browser deployment, assembled into dist/web/. A script rather than
+# rules here: it is one linear pipeline (bindgen, opt, chunk, manifest)
+# with nothing make's dependency graph would add. See docs/web.md.
+web:
+	./tools/web-build.sh
 
 helpers: preflight $(HELPERS)
 

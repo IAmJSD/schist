@@ -53,12 +53,26 @@ pub use segment::segment;
 pub use tile::{run_scaled, run_tiled};
 
 /// The models shipped inside the binary.
+///
+/// Not on the web: eleven megabytes of baseline download for filters that
+/// may never run is the wrong trade there, so the same files are served
+/// beside the app (`tools/web-build.sh` copies them) and fetched into the
+/// in-memory store on demand, like any other download. The catalogue's
+/// `bytes` fields are therefore literals rather than `.len()` of these;
+/// `built_in_sizes_match_the_catalogue` (below) keeps them honest.
+#[cfg(not(target_arch = "wasm32"))]
 const DETAIL_ONNX: &[u8] = include_bytes!("../models/detail.onnx");
+#[cfg(not(target_arch = "wasm32"))]
 const DEJPEG_ONNX: &[u8] = include_bytes!("../models/dejpeg.onnx");
+#[cfg(not(target_arch = "wasm32"))]
 const COLORIZE_ONNX: &[u8] = include_bytes!("../models/colorize.onnx");
+#[cfg(not(target_arch = "wasm32"))]
 const PORTRAIT_ONNX: &[u8] = include_bytes!("../models/portrait.onnx");
+#[cfg(not(target_arch = "wasm32"))]
 const INPAINT_ONNX: &[u8] = include_bytes!("../models/inpaint.onnx");
+#[cfg(not(target_arch = "wasm32"))]
 const WAIFU2X_ART_ONNX: &[u8] = include_bytes!("../models/waifu2x-art.onnx");
+#[cfg(not(target_arch = "wasm32"))]
 const WAIFU2X_PHOTO_ONNX: &[u8] = include_bytes!("../models/waifu2x-photo.onnx");
 
 /// How a model wants its pixels.
@@ -191,7 +205,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "detail.onnx",
         url: None,
         sha256: None,
-        bytes: DETAIL_ONNX.len(),
+        bytes: 156_906,
         input: Input::Tiles {
             size: 128,
             overlap: 8,
@@ -208,7 +222,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "dejpeg.onnx",
         url: None,
         sha256: None,
-        bytes: DEJPEG_ONNX.len(),
+        bytes: 261_562,
         input: Input::Tiles {
             size: 128,
             overlap: 8,
@@ -226,7 +240,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "colorize.onnx",
         url: None,
         sha256: None,
-        bytes: COLORIZE_ONNX.len(),
+        bytes: 1_864_870,
         // Chroma is low-frequency and colour has to agree across a whole
         // subject, so this one sees the picture whole and small rather
         // than sharp and in pieces.
@@ -247,7 +261,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "portrait.onnx",
         url: None,
         sha256: None,
-        bytes: PORTRAIT_ONNX.len(),
+        bytes: 1_795_756,
         // A face at a time, whole: filling in a drawing means knowing
         // what the drawing is of, and no tile of a face knows that.
         input: Input::Frame {
@@ -267,7 +281,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "inpaint.onnx",
         url: None,
         sha256: None,
-        bytes: INPAINT_ONNX.len(),
+        bytes: 2_894_365,
         // The region whole, because the answer for a pixel in the middle
         // of a hole is not anywhere near it -- there is nothing near it --
         // it is at the far side, and no tile of a hole can see that.
@@ -288,7 +302,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "waifu2x-art.onnx",
         url: None,
         sha256: None,
-        bytes: WAIFU2X_ART_ONNX.len(),
+        bytes: 2_213_982,
         input: Input::Tiles {
             size: 128,
             overlap: 8,
@@ -306,7 +320,7 @@ pub const CATALOG: &[ModelSpec] = &[
         file: "waifu2x-photo.onnx",
         url: None,
         sha256: None,
-        bytes: WAIFU2X_PHOTO_ONNX.len(),
+        bytes: 2_213_982,
         input: Input::Tiles {
             size: 128,
             overlap: 8,
@@ -400,6 +414,40 @@ pub fn spec(id: &str) -> Option<&'static ModelSpec> {
     CATALOG.iter().find(|m| m.id == id)
 }
 
+/// Where a build that lacks a model can fetch it, or `None` when it
+/// cannot.
+///
+/// Natively that is the catalogue URL (built-ins need no fetching). On the
+/// web it is the other way round: the formerly-embedded models are served
+/// beside the app and fetched same-origin, while the external ones are
+/// unreachable — their GitHub URLs redirect through a host that sends no
+/// CORS headers, so a browser fetch is refused before it starts.
+pub fn download_url(spec: &ModelSpec) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        spec.built_in()
+            .then(|| format!("assets/models/{}", spec.file))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if spec.built_in() {
+            return None;
+        }
+        spec.url.map(str::to_owned)
+    }
+}
+
+/// The web build's model store: fetched bytes, held in memory for the
+/// life of the tab. A browser offers no directory to write into, and the
+/// models are small enough (11 MB for all seven servable ones) that
+/// re-fetching per session — usually straight from the HTTP cache — is
+/// the simpler bargain.
+#[cfg(target_arch = "wasm32")]
+fn web_store() -> &'static RwLock<HashMap<&'static str, Vec<u8>>> {
+    static STORE: OnceLock<RwLock<HashMap<&'static str, Vec<u8>>>> = OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
 /// Where downloaded models live.
 pub fn model_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("SCHIST_MODEL_DIR") {
@@ -415,6 +463,11 @@ pub fn model_dir() -> PathBuf {
 
 /// Whether a model is ready to run.
 pub fn installed(id: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        spec(id).is_some_and(|s| web_store().read().is_ok_and(|m| m.contains_key(s.file)))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     match spec(id) {
         Some(s) if s.built_in() => true,
         Some(s) => model_dir().join(s.file).exists(),
@@ -673,6 +726,19 @@ pub fn get(id: &str) -> Option<Arc<Model>> {
     loaded
 }
 
+#[cfg(target_arch = "wasm32")]
+fn load(spec: &'static ModelSpec) -> Result<Model> {
+    let store = match web_store().read() {
+        Ok(store) => store,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let bytes = store
+        .get(spec.file)
+        .with_context(|| format!("{} is not fetched", spec.file))?;
+    Model::from_bytes(spec, bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn load(spec: &'static ModelSpec) -> Result<Model> {
     if spec.built_in() {
         let bytes = match spec.id {
@@ -701,29 +767,59 @@ pub fn install(spec: &ModelSpec, bytes: &[u8]) -> Result<PathBuf> {
             bail!("checksum mismatch: expected {want}, got {got}");
         }
     }
-    let dir = model_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(spec.file);
-    // Write beside the target and rename, so an interrupted install
-    // cannot leave a half-file that later loads as a corrupt model.
-    let tmp = path.with_extension("part");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, &path)?;
-    forget(spec.id);
-    Ok(path)
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut store = match web_store().write() {
+            Ok(store) => store,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        store.insert(spec.file, bytes.to_vec());
+        drop(store);
+        forget(spec.id);
+        Ok(PathBuf::from(spec.file))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let dir = model_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(spec.file);
+        // Write beside the target and rename, so an interrupted install
+        // cannot leave a half-file that later loads as a corrupt model.
+        let tmp = path.with_extension("part");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
+        forget(spec.id);
+        Ok(path)
+    }
 }
 
 /// Remove an installed model.
 pub fn uninstall(spec: &ModelSpec) -> Result<()> {
-    if spec.built_in() {
-        bail!("{} ships with the application", spec.name);
+    // On the web every model is a fetch, the built-ins included, so any
+    // of them can be let go of.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut store = match web_store().write() {
+            Ok(store) => store,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        store.remove(spec.file);
+        drop(store);
+        forget(spec.id);
+        Ok(())
     }
-    let path = model_dir().join(spec.file);
-    if path.exists() {
-        std::fs::remove_file(&path)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if spec.built_in() {
+            bail!("{} ships with the application", spec.name);
+        }
+        let path = model_dir().join(spec.file);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        forget(spec.id);
+        Ok(())
     }
-    forget(spec.id);
-    Ok(())
 }
 
 /// Drop a model from the cache so the next use reloads it.
@@ -741,12 +837,22 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// The size of an installed model on disk, for the manager dialog.
 pub fn installed_size(spec: &ModelSpec) -> Option<u64> {
-    if spec.built_in() {
-        return Some(spec.bytes as u64);
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_store()
+            .read()
+            .ok()
+            .and_then(|m| m.get(spec.file).map(|b| b.len() as u64))
     }
-    std::fs::metadata(model_dir().join(spec.file))
-        .ok()
-        .map(|m| m.len())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if spec.built_in() {
+            return Some(spec.bytes as u64);
+        }
+        std::fs::metadata(model_dir().join(spec.file))
+            .ok()
+            .map(|m| m.len())
+    }
 }
 
 /// Path a model would live at, for messages.
@@ -758,4 +864,27 @@ pub fn path_of(spec: &ModelSpec) -> PathBuf {
 /// to delete anything else.
 pub fn is_in_store(path: &Path) -> bool {
     path.starts_with(model_dir())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod catalogue_tests {
+    use super::*;
+
+    // The web build cannot take these sizes from the embedded bytes (it
+    // has none), so the catalogue carries literals; this is what keeps
+    // them the truth when a model is retrained.
+    #[test]
+    fn built_in_sizes_match_the_catalogue() {
+        for (id, bytes) in [
+            ("detail", DETAIL_ONNX),
+            ("dejpeg", DEJPEG_ONNX),
+            ("colorize", COLORIZE_ONNX),
+            ("portrait", PORTRAIT_ONNX),
+            ("inpaint", INPAINT_ONNX),
+            ("waifu2x-art", WAIFU2X_ART_ONNX),
+            ("waifu2x-photo", WAIFU2X_PHOTO_ONNX),
+        ] {
+            assert_eq!(spec(id).unwrap().bytes, bytes.len(), "{id}");
+        }
+    }
 }

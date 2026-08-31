@@ -12,16 +12,12 @@ path = "src/main.rs"
 gpui.workspace = true
 anyhow.workspace = true
 log.workspace = true
-env_logger.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Update checks, font downloads and update downloads.
-ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 # Verifies a downloaded update against the digest the release records.
 sha2 = "0.10"
-# Only used by the opt-in crash upload, and only in a build handed a DSN.
-sentry.workspace = true
 image.workspace = true
+futures.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
 
@@ -29,7 +25,6 @@ schist-core.workspace = true
 schist-color.workspace = true
 schist-plugin-api.workspace = true
 schist-compositor.workspace = true
-schist-compositor-gpu.workspace = true
 schist-fx.workspace = true
 schist-layer-fx.workspace = true
 schist-neural.workspace = true
@@ -49,19 +44,60 @@ schist-vector.workspace = true
 schist-commands-core.workspace = true
 schist-filters-core.workspace = true
 schist-adjustments.workspace = true
+schist-colormgmt.workspace = true
+
+# Everything a browser tab cannot host: subprocesses and dlopen (the two
+# plug-in hosts, the agent CLIs behind the AI sidebar), blocking sockets
+# (ureq, sentry), and the second wgpu device the GPU compositor opens with
+# a blocking pollster wait. The web build composites on the CPU reference
+# backend and drops those features; see src/web/mod.rs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger.workspace = true
+# Update checks, font downloads and update downloads.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+# Only used by the opt-in crash upload, and only in a build handed a DSN.
+sentry.workspace = true
+schist-compositor-gpu.workspace = true
 schist-plugin-host-wasm.workspace = true
 # Carries the .8bf plug-in helpers, which are binaries for architectures
 # other than this one and are unpacked on first use. See the Makefile.
 schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
-schist-colormgmt.workspace = true
 # The AI sidebar: shared MCP catalog/dispatch, and the agent SDKs that
 # drive the user's installed `claude` / `codex` CLIs against it.
 schist-mcp.workspace = true
 claude-agent-sdk-rs.workspace = true
 codex-codes.workspace = true
 tokio.workspace = true
-futures.workspace = true
 async-trait.workspace = true
+
+# The browser build. wasm-bindgen is pinned exactly: the CLI that
+# post-processes the binary (see tools/web-build.sh) must match the crate
+# version byte for byte.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlAnchorElement",
+    "CssStyleDeclaration",
+    "File",
+    "FileList",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "Event",
+    "Response",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Storage",
+] }
 
 # The pre-flight Vulkan probe in `src/vulkan.rs`. Blade already links this
 # exact version to do the real thing, so it is not another crate in the

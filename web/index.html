@@ -1,0 +1,90 @@
+<!doctype html>
+<!-- The web shell for Schist. `tools/web-build.sh` assembles the servable
+     directory (this file, loader.js, the wasm chunks, and the fetched
+     assets) into dist/web/. Serve it from any static file server over a
+     secure context (localhost or https) — WebGPU requires one. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Schist</title>
+    <link rel="icon" href="assets/logo/schist.svg" type="image/svg+xml" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #2a2a2e;
+      }
+      /* The loading page. gpui appends its own full-viewport canvas
+         underneath; this overlay fades out once the window is up. */
+      #schist-loading {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #2a2a2e;
+        color: #d6d6da;
+        font: 13px/1.5 system-ui, sans-serif;
+        transition: opacity 240ms ease-out;
+      }
+      #schist-loading.done {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #schist-loading img {
+        width: 72px;
+        height: 72px;
+      }
+      #schist-loading .name {
+        font-size: 17px;
+        letter-spacing: 0.04em;
+        color: #ececf0;
+      }
+      #schist-loading .bar {
+        width: 260px;
+        height: 5px;
+        border-radius: 999px;
+        background: #3d3d42;
+        overflow: hidden;
+      }
+      #schist-loading .bar > div {
+        height: 100%;
+        width: 0;
+        border-radius: 999px;
+        background: #8ab4d8;
+        transition: width 120ms linear;
+      }
+      #schist-loading .status {
+        color: #98989e;
+        font-size: 12px;
+        min-height: 1.5em;
+      }
+      #schist-loading .error {
+        max-width: 420px;
+        padding: 12px 16px;
+        border-radius: 8px;
+        background: #46323264;
+        border: 1px solid #7a4a4a;
+        color: #e8c8c4;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="schist-loading">
+      <img src="assets/logo/schist.svg" alt="" />
+      <div class="name">Schist</div>
+      <div class="bar"><div id="schist-loading-fill"></div></div>
+      <div class="status" id="schist-loading-status">Loading&hellip;</div>
+    </div>
+    <script type="module" src="loader.js"></script>
+  </body>
+</html>

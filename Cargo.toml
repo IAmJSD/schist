@@ -96,7 +96,7 @@ schist-mcp = { path = "crates/mcp" }
 # carries images to the Linux clipboards, which upstream writes as an
 # empty string.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "4ab83c7d970241f8b3027dc4ce614f3062f99843" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "75e6ffb88c81200d38e68e3d17e5f075b5ecbf96" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -164,3 +164,20 @@ debug = 1
 inherits = "release"
 debug = false
 strip = true
+
+# The browser build (tools/web-build.sh). `release` keeps debuginfo for
+# Sentry's symbolication; in a wasm download that is a third of the bytes
+# and nothing reads DWARF in a browser, so it goes.
+[profile.web]
+inherits = "release"
+debug = false
+strip = "debuginfo"
+
+# gpui's wasm32 support needs its vendored gpui_util/gpui_http_client (the
+# registry versions pull smol, dirs, which, walkdir — none of which build on
+# wasm32). `[patch.crates-io]` is only honored in the top-level manifest, so
+# the fork's two patch entries are restated here; on native targets the
+# vendored crates are byte-identical to the registry sources.
+[patch.crates-io]
+gpui_util = { git = "https://github.com/IAmJSD/gpui", rev = "75e6ffb88c81200d38e68e3d17e5f075b5ecbf96" }
+gpui_http_client = { git = "https://github.com/IAmJSD/gpui", rev = "75e6ffb88c81200d38e68e3d17e5f075b5ecbf96" }
