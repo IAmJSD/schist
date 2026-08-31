@@ -25,6 +25,18 @@ Safari 26+). WebGPU needs a secure context, so serve from `localhost` or
 https. On macOS build hosts, see the archiver note in the gpui fork's
 `docs/web.md` (`psm`'s prebuilt object vs Xcode's `ar`).
 
+## Deployment (try.schist.app)
+
+`.github/workflows/web.yml` builds `dist/web/` on every push to main and
+PR (uploading it as an artifact either way), and on main deploys it to
+Cloudflare Workers as an assets-only Worker — `wrangler.jsonc` at the
+repository root names it `schist-try` and binds the `try.schist.app`
+custom domain. The deploy needs two repository secrets and skips itself
+politely without them: `CLOUDFLARE_API_TOKEN` (Workers Scripts:Edit plus
+the schist.app zone, which the custom domain's DNS and certificate come
+from) and `CLOUDFLARE_ACCOUNT_ID`. By hand: `make web && npx wrangler
+deploy`.
+
 ## How the page loads
 
 `dist/web/` is entirely static:

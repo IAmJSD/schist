@@ -1,0 +1,22 @@
+// The Cloudflare Workers deployment of the web build: an assets-only
+// Worker (no script) serving what tools/web-build.sh puts in dist/web/,
+// on try.schist.app. `.github/workflows/web.yml` builds and deploys it
+// on every push to main; to deploy by hand, run the build and then
+// `npx wrangler deploy`.
+//
+// The custom domain needs the schist.app zone to live in the same
+// Cloudflare account the API token belongs to; wrangler then creates
+// the DNS record and certificate itself.
+{
+  "name": "schist-try",
+  "compatibility_date": "2026-08-31",
+  "assets": {
+    "directory": "./dist/web"
+  },
+  "routes": [
+    {
+      "pattern": "try.schist.app",
+      "custom_domain": true
+    }
+  ]
+}
