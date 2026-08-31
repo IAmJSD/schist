@@ -79,7 +79,12 @@ wasm-bindgen --target web --out-name schist --out-dir "$OUT/pkg" \
 # Table.grow(): failed to grow table". Verified against version 123.
 # A too-old binaryen is therefore skipped, never trusted.
 WASM_OPT_MIN=116
-WASM_OPT_VER=$(wasm-opt --version 2>/dev/null | sed -n 's/.*version \([0-9]*\).*/\1/p')
+# Probed behind command -v: under `set -e` a bare $(wasm-opt ...) on a
+# machine without binaryen kills the whole script with a silent 127.
+WASM_OPT_VER=''
+if command -v wasm-opt >/dev/null; then
+  WASM_OPT_VER=$(wasm-opt --version | sed -n 's/.*version \([0-9]*\).*/\1/p')
+fi
 if [ -n "$WASM_OPT_VER" ] && [ "$WASM_OPT_VER" -ge "$WASM_OPT_MIN" ] \
   && [ "$PROFILE" = web ]; then
   echo "-- wasm-opt -Oz (binaryen $WASM_OPT_VER)"
@@ -99,7 +104,9 @@ elif [ "$PROFILE" = web ]; then
 fi
 
 echo "-- chunking ($CHUNK_MIB MiB)"
-split -b "${CHUNK_MIB}m" -d -a 3 "$OUT/pkg/schist_bg.wasm" "$OUT/pkg/schist_bg.wasm."
+# Alphabetic suffixes (.aaa, .aab, ...): they sort the same as numeric
+# ones, and macOS's BSD split has no -d.
+split -b "${CHUNK_MIB}m" -a 3 "$OUT/pkg/schist_bg.wasm" "$OUT/pkg/schist_bg.wasm."
 rm "$OUT/pkg/schist_bg.wasm"
 # TypeScript declarations aren't served.
 rm -f "$OUT"/pkg/*.d.ts
