@@ -7,10 +7,9 @@
 
 use crate::actions::*;
 use crate::workspace::Workspace;
-use gpui::{
-    Action, Context, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate,
-    PathPromptOptions, Window,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use gpui::PathPromptOptions;
+use gpui::{Action, Context, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, Window};
 use schist_plugin_api::PluginRegistry;
 use std::path::PathBuf;
 
@@ -254,6 +253,29 @@ fn dirs_config() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".config"))
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn open_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    // gpui's web backend has no path prompt to offer (there are no
+    // paths); a transient <input type=file> stands in, and the picked
+    // bytes land in the in-memory map under an invented path.
+    let accept: String = ws
+        .registry
+        .codecs()
+        .flat_map(|c| c.extensions())
+        .map(|e| format!(".{e}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rx = crate::web::pick_file(&accept);
+    cx.spawn_in(window, async move |this, cx| {
+        if let Ok(Some(path)) = rx.await {
+            this.update_in(cx, |ws, _window, cx| ws.load_file(path, cx))
+                .ok();
+        }
+    })
+    .detach();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_file_dialog(_ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let rx = cx.prompt_for_paths(PathPromptOptions {
         files: true,
@@ -273,6 +295,7 @@ pub fn open_file_dialog(_ws: &mut Workspace, window: &mut Window, cx: &mut Conte
 }
 
 /// Pick a `.wasm` plugin to install.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn install_plugin_dialog(
     _ws: &mut Workspace,
     window: &mut Window,
@@ -295,18 +318,28 @@ pub fn install_plugin_dialog(
     .detach();
 }
 
-pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let dir = ws
-        .doc
-        .as_ref()
-        .and_then(|d| d.path.as_ref())
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    // PSD is the native save format; keep an existing
-    // extension when the document already has a writable one.
-    let suggested = ws
-        .doc
+#[cfg(target_arch = "wasm32")]
+pub fn save_file_dialog(ws: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) {
+    // No paths to prompt for: the one open question is the file's name
+    // (whose extension picks the format), and the browser's own prompt
+    // answers it. The save lands as a download.
+    let suggested = suggested_name(ws);
+    match crate::web::prompt_string(
+        "Save as \u{2014} the extension picks the format:",
+        &suggested,
+    ) {
+        Some(name) => {
+            let path = PathBuf::from("/web/save").join(name);
+            ws.save_file_as(path, cx);
+        }
+        None => ws.cancel_pending_save(),
+    }
+}
+
+/// The name a save prompt starts from: the document's stem plus a
+/// writable extension, PSD when it has none.
+fn suggested_name(ws: &Workspace) -> String {
+    ws.doc
         .as_ref()
         .map(|d| {
             let stem = std::path::Path::new(&d.title)
@@ -322,7 +355,21 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
                 .unwrap_or("psd");
             format!("{stem}.{ext}")
         })
-        .unwrap_or_else(|| "untitled.psd".into());
+        .unwrap_or_else(|| "untitled.psd".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let dir = ws
+        .doc
+        .as_ref()
+        .and_then(|d| d.path.as_ref())
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    // PSD is the native save format; keep an existing
+    // extension when the document already has a writable one.
+    let suggested = suggested_name(ws);
     let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
     cx.spawn_in(window, async move |this, cx| {
         match rx.await {

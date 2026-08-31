@@ -56,6 +56,7 @@ pub(super) fn drop_image(
 /// of executable code (hash-pinned to a schist release) and the
 /// libraries carry their own (LGPL-3.0) licenses, which are installed
 /// alongside.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn heif_support(
     ws: &Workspace,
     path: std::path::PathBuf,

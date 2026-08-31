@@ -33,6 +33,10 @@ only the part that finds one. On Debian and Fedora that is
 on a virtual machine with no GPU driver of its own. With no driver
 installed Schist stops at startup and says which package is missing.
 
+Schist also runs in the browser: `make web` assembles a static
+deployment (WebGPU, chunked wasm, a loading page) into `dist/web/` —
+see [docs/web.md](docs/web.md) for what's included and what isn't.
+
 `cargo test --workspace` runs everything. `make helpers` cross-compiles
 the Photoshop plug-in helpers, which are separate binaries for the
 architectures a `.8bf` plug-in might be built for — see

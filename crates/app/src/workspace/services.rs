@@ -13,7 +13,9 @@ impl Workspace {
         let Some(spec) = schist_neural::spec(id) else {
             return;
         };
-        let Some(url) = spec.url else { return };
+        let Some(url) = schist_neural::download_url(spec) else {
+            return;
+        };
         if self.model_downloads.iter().any(|d| d.id == id) {
             return;
         }
@@ -44,10 +46,16 @@ impl Workspace {
         })
         .detach();
         cx.spawn(async move |this, cx| {
+            #[cfg(not(target_arch = "wasm32"))]
             let fetched = cx
                 .background_executor()
-                .spawn(async move { fetch_model(url, &got) })
+                .spawn(async move { fetch_model(&url, &got) })
                 .await;
+            // No second thread in a browser, and no need for one: fetch
+            // is async where ureq blocks, so it runs right here on the
+            // foreground executor.
+            #[cfg(target_arch = "wasm32")]
+            let fetched = crate::web::fetch_bytes(url, got).await;
             this.update(cx, |ws, cx| {
                 ws.model_downloads.retain(|d| d.id != id);
                 let Some(spec) = schist_neural::spec(id) else {
@@ -79,7 +87,9 @@ impl Workspace {
 
     /// Ask upstream whether a newer release exists. Opt-in and
     /// user-initiated, like the font fetch — the app makes no other
-    /// network requests.
+    /// network requests. (The whole update path is desktop-only: a web
+    /// deployment updates by serving newer files.)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
         self.status = "Checking for updates…".into();
         cx.notify();
@@ -90,10 +100,12 @@ impl Workspace {
     /// nobody opening a document wants to be told their editor is
     /// current, and a machine that is offline at login should not be
     /// shown a failure it never asked for.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn check_for_update_quietly(&mut self, cx: &mut Context<Self>) {
         self.run_update_check(true, cx);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn run_update_check(&mut self, quiet: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let status = cx
@@ -146,6 +158,7 @@ impl Workspace {
     /// The dialog stays up throughout: it is what shows the progress,
     /// and there is nothing useful to do in an editor whose executable
     /// is being replaced underneath it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_update(&mut self, update: crate::update::Update, cx: &mut Context<Self>) {
         let Some(installer) = update.install.clone() else {
             return;
@@ -249,6 +262,7 @@ impl Workspace {
     /// The transfer itself is left to run out into the temporary
     /// directory, since a blocking read cannot be interrupted, but its
     /// result is dropped and nothing is installed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn cancel_update(&mut self, cx: &mut Context<Self>) {
         self.update_progress = None;
         self.status = "Update cancelled".into();
@@ -257,6 +271,7 @@ impl Workspace {
     }
 
     /// Give up on an update, leaving the user where they were.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn update_failed(&mut self, err: &str, cx: &mut Context<Self>) {
         log::error!("update failed: {err}");
         crate::update::clean_downloads();
@@ -272,6 +287,18 @@ impl Workspace {
     /// legally install, which for a proprietary name is its
     /// metric-compatible twin. Both are needed: we download the twin but
     /// re-render the layers that named the original.
+    /// Not on the web: the catalogue trick relies on a spoofed legacy
+    /// user agent to be served TTFs, and a browser fetch sends its own —
+    /// Google would answer with woff2, which the text engine cannot
+    /// parse. The dialog still names the missing family and its
+    /// metric-compatible substitute.
+    #[cfg(target_arch = "wasm32")]
+    pub fn download_font(&mut self, _family: String, target: String, cx: &mut Context<Self>) {
+        self.status = format!("{target}: font downloads aren't available in the browser").into();
+        cx.notify();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_font(&mut self, family: String, target: String, cx: &mut Context<Self>) {
         if self.font_downloads.contains(&family) {
             return;
@@ -333,6 +360,7 @@ impl Workspace {
 
     /// Drop rows from the open Missing Fonts dialog that are now
     /// satisfied, and close it once nothing is left to install.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn refresh_missing_fonts(&mut self) {
         let Some(Modal::MissingFonts { .. }) = &self.modal else {
             return;
@@ -372,6 +400,7 @@ impl Workspace {
 
     /// Enable or disable a third-party plugin. The id says which host it
     /// belongs to: Photoshop plug-ins are the ones the 8BF host found.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_plugin_enabled(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
         if id.starts_with("8bf.") {
             let Some(dir) = schist_plugin_host_8bf::manager::PluginManager::plugin_dir() else {
@@ -403,6 +432,7 @@ impl Workspace {
     /// Install a plugin file into the plugin directory. A `.8bf` or a
     /// `.plugin` bundle goes to the Photoshop folder, anything else to
     /// the WebAssembly one, so one Install button serves both.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn install_plugin(&mut self, source: PathBuf, cx: &mut Context<Self>) {
         let photoshop = source
             .extension()

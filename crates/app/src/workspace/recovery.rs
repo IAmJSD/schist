@@ -65,6 +65,7 @@ impl Workspace {
 
     /// Every recovery snapshot left behind by a previous run, newest
     /// first. Snapshots this process owns are skipped.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn pending_recoveries() -> Vec<PathBuf> {
         let Some(dir) = Self::recovery_dir() else {
             return Vec::new();
@@ -86,6 +87,7 @@ impl Workspace {
     ///
     /// Split out from the directory walk so the filtering and ordering can
     /// be tested without a filesystem.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn rank_snapshots(
         mut found: Vec<(std::time::SystemTime, PathBuf)>,
         own_pid: u32,
@@ -110,6 +112,7 @@ impl Workspace {
     /// `autosave` writes one snapshot per dirty document, so recovering
     /// only the newest silently dropped the rest and left their files on
     /// disk to be offered one per launch afterwards.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recover_all(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let codecs = self.registry.shared_codecs();
         let mut recovered = 0usize;

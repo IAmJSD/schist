@@ -327,6 +327,10 @@ impl Workspace {
         result: anyhow::Result<Document>,
         cx: &mut Context<Self>,
     ) {
+        // Only the HEIC retry arm reads the path, and that arm is
+        // desktop-only.
+        #[cfg(target_arch = "wasm32")]
+        let _ = &path;
         match result {
             Ok(doc) => {
                 self.status = match &doc.path {
@@ -339,6 +343,9 @@ impl Workspace {
             // A HEIC on a machine with no libheif — or a libheif with
             // no HEVC decoder, as stock Ubuntu ships: downloading the
             // managed build fixes both, so offer that instead of failing.
+            // (The web build has no dlopen and no HEIC codec at all, so
+            // the plain error arm below is what a .heic gets there.)
+            #[cfg(not(target_arch = "wasm32"))]
             Err(err)
                 if schist_codecs_common::heif::download_would_help(&err)
                     && schist_codecs_common::heif::managed_library().is_some()
@@ -357,6 +364,7 @@ impl Workspace {
     /// Download the pinned decode-only libheif build and its license
     /// texts — only ever called from the consent dialog — then retry
     /// opening the file that needed it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_heif_support(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.heif_download {
             return;
@@ -609,9 +617,24 @@ impl Workspace {
         let bytes = codec.export(doc)?;
         // Write to a sibling temp file and rename, so an interrupted save
         // can't truncate the user's existing file.
-        let tmp = path.with_extension("schist-tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let tmp = path.with_extension("schist-tmp");
+            std::fs::write(&tmp, bytes)?;
+            std::fs::rename(&tmp, path)?;
+        }
+        // The browser has no user-visible file system to write into: the
+        // bytes go to the in-memory map (so the path reads back, and a
+        // plain ⌘S keeps working on it) and out as a download.
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web::write_file(path, bytes.clone());
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled.psd".into());
+            crate::web::download_bytes(&name, &bytes)?;
+        }
         Ok(())
     }
 }

@@ -6,6 +6,7 @@
 
 pub use affinity::AffinityCodec;
 use anyhow::Context as _;
+#[cfg(not(target_arch = "wasm32"))]
 pub use heif::HeifCodec;
 use image::ImageFormat;
 use schist_color::Depth;
@@ -13,6 +14,7 @@ use schist_core::{blit_rgba8, blit_rgba_f32, Document, IntRect, Layer};
 use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
 
 mod affinity;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod heif;
 
 /// A single-"Background"-layer document from decoded RGBA8 pixels.
@@ -394,6 +396,7 @@ impl PluginManifest for CommonCodecsPlugin {
         registry.register_codec(Box::new(JpegCodec));
         registry.register_codec(Box::new(WebPCodec));
         registry.register_codec(Box::new(TiffCodec));
+        #[cfg(not(target_arch = "wasm32"))]
         registry.register_codec(Box::new(HeifCodec));
         registry.register_codec(Box::new(AffinityCodec));
     }

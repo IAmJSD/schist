@@ -28,23 +28,35 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let dir = doc
-            .path
-            .as_ref()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let rx = cx.prompt_for_new_path(&dir, Some("export"));
-        let doc_regions = regions;
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(path))) = rx.await {
-                this.update_in(cx, |ws, _window, cx| {
-                    ws.write_regions(&path, &doc_regions, cx);
-                })
-                .ok();
-            }
-        })
-        .detach();
+        // No directory to pick in a browser: each region goes straight
+        // out as its own download (the browser may ask once about
+        // multiple downloads).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = window;
+            let base = PathBuf::from("/web/save/export");
+            self.write_regions(&base, &regions, cx);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = doc
+                .path
+                .as_ref()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let rx = cx.prompt_for_new_path(&dir, Some("export"));
+            let doc_regions = regions;
+            cx.spawn_in(window, async move |this, cx| {
+                if let Ok(Ok(Some(path))) = rx.await {
+                    this.update_in(cx, |ws, _window, cx| {
+                        ws.write_regions(&path, &doc_regions, cx);
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
     }
 
     /// Write one PNG per region, named `<stem>-<region>.png`.
@@ -93,8 +105,19 @@ impl Workspace {
             };
             match codec.export(&region_doc) {
                 Ok(bytes) => {
+                    #[cfg(not(target_arch = "wasm32"))]
                     if std::fs::write(&out, bytes).is_ok() {
                         written += 1;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let file_name = out
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| format!("{safe}.png"));
+                        if crate::web::download_bytes(&file_name, &bytes).is_ok() {
+                            written += 1;
+                        }
                     }
                 }
                 Err(e) => log::error!("export {name}: {e}"),
@@ -135,40 +158,65 @@ impl Workspace {
                     .unwrap_or_else(|| "untitled".into())
             })
             .unwrap_or_else(|| "untitled".into());
-        let dir = doc
-            .and_then(|d| d.path.as_ref())
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
         let suggested = format!("{stem}.{ext}");
-        let codec_id = codec_id.to_string();
-        let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(path))) = rx.await {
-                this.update_in(cx, |ws, _window, cx| {
-                    let result = (|| -> anyhow::Result<()> {
-                        let doc = ws
-                            .doc
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("no document"))?;
-                        let codec = ws
-                            .registry
-                            .codecs()
-                            .find(|c| c.id() == codec_id)
-                            .ok_or_else(|| anyhow::anyhow!("codec vanished"))?;
-                        let bytes = codec.export_with(doc, &options)?;
-                        std::fs::write(&path, bytes)?;
-                        Ok(())
-                    })();
-                    ws.status = match result {
-                        Ok(()) => format!("Exported {}", path.display()).into(),
-                        Err(err) => format!("Export failed: {err}").into(),
-                    };
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
+        // The browser flow is synchronous: its own prompt asks for the
+        // name, and the encoded bytes leave as a download.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = window;
+            let Some(name) = crate::web::prompt_string("Export as:", &suggested) else {
+                return;
+            };
+            let result = (|| -> anyhow::Result<()> {
+                let doc = self
+                    .doc
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no document"))?;
+                let bytes = codec.export_with(doc, &options)?;
+                crate::web::download_bytes(&name, &bytes)
+            })();
+            self.status = match result {
+                Ok(()) => format!("Exported {name}").into(),
+                Err(err) => format!("Export failed: {err}").into(),
+            };
+            cx.notify();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = doc
+                .and_then(|d| d.path.as_ref())
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let codec_id = codec_id.to_string();
+            let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+            cx.spawn_in(window, async move |this, cx| {
+                if let Ok(Ok(Some(path))) = rx.await {
+                    this.update_in(cx, |ws, _window, cx| {
+                        let result = (|| -> anyhow::Result<()> {
+                            let doc = ws
+                                .doc
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("no document"))?;
+                            let codec = ws
+                                .registry
+                                .codecs()
+                                .find(|c| c.id() == codec_id)
+                                .ok_or_else(|| anyhow::anyhow!("codec vanished"))?;
+                            let bytes = codec.export_with(doc, &options)?;
+                            std::fs::write(&path, bytes)?;
+                            Ok(())
+                        })();
+                        ws.status = match result {
+                            Ok(()) => format!("Exported {}", path.display()).into(),
+                            Err(err) => format!("Export failed: {err}").into(),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
     }
 }

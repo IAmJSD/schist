@@ -22,10 +22,16 @@ use schist_plugin_api::{
 };
 use smallvec::smallvec;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 mod adjustments;
+#[cfg(not(target_arch = "wasm32"))]
+mod ai;
+#[cfg(target_arch = "wasm32")]
+#[path = "ai_stub.rs"]
 mod ai;
 mod chrome;
 mod clipboard;
@@ -92,6 +98,7 @@ const PREFETCH_TICK_MS: u64 = 30;
 /// prefetch at roughly 0.5-1 GiB -- a ~134 MP document end to end.
 const PREFETCH_TILE_BUDGET: usize = 2048;
 /// Where view preferences are stored.
+#[cfg(not(target_arch = "wasm32"))]
 fn prefs_path() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
@@ -104,9 +111,17 @@ fn prefs_path() -> Option<PathBuf> {
     Some(base.join("schist/preferences.json"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_view_options() -> ViewOptions {
     prefs_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn load_view_options() -> ViewOptions {
+    crate::web::local_get(crate::web::PREFS_KEY)
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
@@ -209,6 +224,9 @@ pub struct Workspace {
     pub font_downloads: Vec<String>,
     /// Whether the HEIC decode library is currently downloading, so a
     /// second HEIC open does not start a second download.
+    // Written but never read on the web: its writer flows are compiled
+    // out with the subsystem it belongs to.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub heif_download: bool,
     /// How far along the update the user asked for is, if one is
     /// running. Its presence is also what stops a second click starting
@@ -266,12 +284,17 @@ pub struct Workspace {
     /// captured while the dialog rendered.
     pub default_action: Option<crate::ui::DialogAction>,
     /// Third-party plugin registry state.
+    #[cfg(not(target_arch = "wasm32"))]
     pub plugins: schist_plugin_host_wasm::PluginManager,
     /// Discovered Photoshop plug-ins, including the ones this machine
     /// cannot run — the manager lists those with the reason.
+    #[cfg(not(target_arch = "wasm32"))]
     pub photoshop_plugins: schist_plugin_host_8bf::manager::PluginManager,
     /// Plugin enable/disable requested from the manager UI, applied on the
     /// next render pass (the checkbox callback has no context to do it).
+    // Written but never read on the web: its writer flows are compiled
+    // out with the subsystem it belongs to.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub pending_plugin_toggle: Option<(String, bool)>,
     /// View toggles (rulers, grid, guides, snapping, theme).
     pub view: ViewOptions,
@@ -627,26 +650,38 @@ impl Default for ViewOptions {
 /// preference flips; falls back to the CPU with a log line when no adapter
 /// exists.
 pub fn init_compositor_backend(prefer_gpu: bool) {
-    let enabled = match std::env::var("SCHIST_GPU").ok().as_deref() {
-        Some("0") => false,
-        Some("1") => true,
-        _ => prefer_gpu,
-    };
-    if !enabled {
+    // The GPU backend opens a second wgpu device with a blocking wait,
+    // which the browser's single thread cannot make progress under; the
+    // web build composites on the CPU reference backend instead.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = prefer_gpu;
         schist_compositor::set_backend(Arc::new(schist_compositor::CpuCompositor));
         schist_fx::set_backend(Arc::new(schist_fx::CpuFx));
-        return;
     }
-    if schist_compositor::backend().name() == "gpu" {
-        return;
-    }
-    match schist_compositor_gpu::GpuCompositor::new() {
-        Ok(gpu) => {
-            log::info!("GPU compositing and filter kernels on ({})", gpu.describe());
-            schist_fx::set_backend(Arc::new(gpu.fx()));
-            schist_compositor::set_backend(Arc::new(gpu));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let enabled = match std::env::var("SCHIST_GPU").ok().as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => prefer_gpu,
+        };
+        if !enabled {
+            schist_compositor::set_backend(Arc::new(schist_compositor::CpuCompositor));
+            schist_fx::set_backend(Arc::new(schist_fx::CpuFx));
+            return;
         }
-        Err(err) => log::warn!("GPU compositing unavailable, staying on the CPU: {err}"),
+        if schist_compositor::backend().name() == "gpu" {
+            return;
+        }
+        match schist_compositor_gpu::GpuCompositor::new() {
+            Ok(gpu) => {
+                log::info!("GPU compositing and filter kernels on ({})", gpu.describe());
+                schist_fx::set_backend(Arc::new(gpu.fx()));
+                schist_compositor::set_backend(Arc::new(gpu));
+            }
+            Err(err) => log::warn!("GPU compositing unavailable, staying on the CPU: {err}"),
+        }
     }
 }
 
@@ -687,6 +722,10 @@ struct ViewportKey {
 
 /// How far along an update the user asked for is.
 #[derive(Debug, Clone, PartialEq)]
+// Some variants belong to desktop-only flows (updates, plug-ins, HEIC)
+// and are never constructed on the web; the types stay so the modal
+// plumbing matches exhaustively on every target.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum UpdateProgress {
     /// `total` is what the release says the download weighs; it is never
     /// zero, since an asset that lists no size is not offered.
@@ -698,6 +737,10 @@ pub enum UpdateProgress {
 
 /// Which modal dialog is open.
 #[derive(Debug, Clone, PartialEq)]
+// Some variants belong to desktop-only flows (updates, plug-ins, HEIC)
+// and are never constructed on the web; the types stay so the modal
+// plumbing matches exhaustively on every target.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum Modal {
     ImageSize {
         width: u32,
@@ -942,7 +985,8 @@ struct Preview {
 impl Workspace {
     pub fn new(
         registry: PluginRegistry,
-        plugins: schist_plugin_host_wasm::PluginManager,
+        #[cfg(not(target_arch = "wasm32"))] plugins: schist_plugin_host_wasm::PluginManager,
+        #[cfg(not(target_arch = "wasm32"))]
         photoshop_plugins: schist_plugin_host_8bf::manager::PluginManager,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1003,7 +1047,9 @@ impl Workspace {
             field_buffer: String::new(),
             field_fresh: false,
             default_action: None,
+            #[cfg(not(target_arch = "wasm32"))]
             plugins,
+            #[cfg(not(target_arch = "wasm32"))]
             photoshop_plugins,
             pending_plugin_toggle: None,
             view: load_view_options(),
@@ -1024,20 +1070,27 @@ impl Workspace {
             color: schist_colormgmt::ColorSettings::default(),
             display_transform: None,
             proof_transform: None,
+            #[cfg(not(target_arch = "wasm32"))]
             ai: crate::ai::AiState::new(crate::ai::Backend::Claude),
+            #[cfg(target_arch = "wasm32")]
+            ai: crate::ai::AiState::default(),
         };
-        ws.ai.backend = crate::ai::Backend::from_pref(&ws.view.ai_backend);
-        ws.ai.menu_backend = ws.ai.backend;
-        if ws.view.ai_panel {
-            ws.ensure_ai_models(cx);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ws.ai.backend = crate::ai::Backend::from_pref(&ws.view.ai_backend);
+            ws.ai.menu_backend = ws.ai.backend;
+            if ws.view.ai_panel {
+                ws.ensure_ai_models(cx);
+            }
+            ws.watch_agent_path(cx);
         }
-        ws.watch_agent_path(cx);
         ws.rebuild_tool_groups();
         ws.sync_note_defaults();
         // A launch-time update check, when the preference allows one and
         // the last one was long enough ago. Delayed: the first seconds
         // after launch belong to opening whatever the user
         // double-clicked, not to a network round trip.
+        #[cfg(not(target_arch = "wasm32"))]
         if ws.view.check_updates && crate::update::check_due() {
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
@@ -1270,6 +1323,7 @@ fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &
 }
 
 /// Write downloaded faces into the user font directory.
+#[cfg(not(target_arch = "wasm32"))]
 fn install_faces(faces: &[crate::fonts::Face]) -> Result<usize, String> {
     let mut installed = 0;
     for (name, bytes) in faces {
@@ -1285,7 +1339,12 @@ fn decode_file(
     codecs: &[Arc<dyn schist_plugin_api::CodecPlugin>],
     path: &std::path::Path,
 ) -> anyhow::Result<Document> {
+    #[cfg(not(target_arch = "wasm32"))]
     let bytes = std::fs::read(path)?;
+    // Browser paths are invented names over an in-memory map; the bytes
+    // arrived when the file was picked or dropped.
+    #[cfg(target_arch = "wasm32")]
+    let bytes = crate::web::read_file(path)?;
     let ext = path.extension().and_then(|e| e.to_str());
     let codec = codecs
         .iter()
@@ -1307,6 +1366,9 @@ fn decode_file(
 }
 
 /// Fetch a model over HTTP. Blocking, so it runs on a background thread.
+/// (The web build fetches through `crate::web::fetch_bytes` instead —
+/// there is no thread to block.)
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_model(url: &str, got: &AtomicU64) -> Result<Vec<u8>, String> {
     use std::io::Read as _;
     // The largest model in the catalogue is 66 MB; the cap is a guard

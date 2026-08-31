@@ -60,7 +60,12 @@ pub(crate) fn run_app_item(
                 ws.open_modal(modal, cx);
             }
         }
+        // Unreachable on the web — the entries are filtered out of the
+        // menu — but the match must still cover the variants.
+        #[cfg(not(target_arch = "wasm32"))]
         AppItem::Plugins => ws.open_modal(Modal::PluginManager, cx),
+        #[cfg(target_arch = "wasm32")]
+        AppItem::Plugins => {}
         AppItem::Export => {
             let codec = ws
                 .registry
@@ -243,7 +248,10 @@ pub(crate) fn run_app_item(
                 ws.show_layer_style(id, cx);
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
         AppItem::CheckForUpdates => ws.check_for_update(cx),
+        #[cfg(target_arch = "wasm32")]
+        AppItem::CheckForUpdates => {}
         AppItem::FreeTransform => ws.activate_tool("transform", cx),
         AppItem::Crop => {
             let rect = ws

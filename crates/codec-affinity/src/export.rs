@@ -79,8 +79,14 @@ pub fn write_affinity(
     }];
     entries.append(&mut ex.entries);
 
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    // web-time on wasm32: std's SystemTime::now() panics in a browser,
+    // and a saved file deserves a real creation stamp there too.
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     Ok((write_container(&entries, thumbnail_png, created), ex.report))

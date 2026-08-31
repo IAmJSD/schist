@@ -12,3 +12,10 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold", "-C", "link-arg=-Wl,--build-id=sha1
 # that has to be there either way is set here.
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-Wl,--build-id=sha1"]
+
+# getrandom 0.3 requires the backend to be selected explicitly on
+# wasm32-unknown-unknown; "wasm_js" uses the browser's crypto API (this is
+# what gpui's own .cargo/config.toml sets, restated here because rustflags
+# don't travel with dependencies).
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

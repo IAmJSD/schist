@@ -23,7 +23,7 @@ pub(crate) enum MenuEntry {
 pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;
-    vec![
+    let menus = vec![
         (
             "File",
             vec![
@@ -233,7 +233,22 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Preferences…", Preferences, Some("cmd-k")),
             ],
         ),
-    ]
+    ];
+    // Items whose whole subsystem is compiled out on the web: plug-in
+    // hosts (no subprocesses or JITs in a tab), the self-updater (a web
+    // deployment updates by serving newer files), and the AI panel
+    // (drives locally installed CLIs). A menu item that answers "this
+    // does nothing in a browser" is worse than no item.
+    #[cfg(target_arch = "wasm32")]
+    let menus = {
+        let mut menus = menus;
+        for (_, entries) in &mut menus {
+            entries
+                .retain(|e| !matches!(e, App(_, Plugins | CheckForUpdates | ToggleAi | Quit, _)));
+        }
+        menus
+    };
+    menus
 }
 
 /// Filters grouped by category, in registration order.

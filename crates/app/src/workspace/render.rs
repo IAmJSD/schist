@@ -529,6 +529,7 @@ impl Render for Workspace {
             self.focused_once = true;
             window.focus(&self.focus);
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some((id, enabled)) = self.pending_plugin_toggle.take() {
             self.set_plugin_enabled(id, enabled, cx);
         }
