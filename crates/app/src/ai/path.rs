@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock};
 
 /// How long the shell gets to answer before the app gives up on it.
+#[cfg(not(windows))]
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The longest [`resolved`] will wait — the shell's own budget plus a
