@@ -76,6 +76,53 @@
         white-space: pre-wrap;
         word-break: break-word;
       }
+      /* First-run notice: the desktop app is the better Schist. Sits
+         above the loading overlay and outlives it; loader.js shows it
+         until it has been accepted once (localStorage). */
+      #schist-desktop-notice {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: #17171acc;
+        color: #d6d6da;
+        font: 13px/1.55 system-ui, sans-serif;
+      }
+      #schist-desktop-notice .card {
+        max-width: 400px;
+        padding: 20px 24px;
+        border-radius: 10px;
+        background: #313136;
+        border: 1px solid #47474d;
+        box-shadow: 0 12px 40px #0008;
+      }
+      #schist-desktop-notice h2 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        color: #ececf0;
+      }
+      #schist-desktop-notice p {
+        margin: 0 0 14px;
+      }
+      #schist-desktop-notice a {
+        color: #8ab4d8;
+      }
+      #schist-desktop-notice button {
+        display: block;
+        margin-left: auto;
+        padding: 6px 22px;
+        border: 0;
+        border-radius: 6px;
+        background: #4a7ba6;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      #schist-desktop-notice button:hover {
+        background: #578bb8;
+      }
     </style>
   </head>
   <body>
@@ -84,6 +131,20 @@
       <div class="name">Schist</div>
       <div class="bar"><div id="schist-loading-fill"></div></div>
       <div class="status" id="schist-loading-status">Loading&hellip;</div>
+    </div>
+    <div id="schist-desktop-notice">
+      <div class="card">
+        <h2>Schist runs best as a desktop app</h2>
+        <p>
+          You're using the web version, which is a lighter build: it
+          composites on the CPU and leaves out some features &mdash;
+          Photoshop and third-party plug-ins, the AI panel, HEIC import
+          and font downloads &mdash; and files are saved as downloads.
+          The free desktop app for macOS, Windows and Linux has all of
+          it. <a href="https://github.com/Infrawrench/schist/releases" target="_blank" rel="noopener">Get the desktop app</a>.
+        </p>
+        <button id="schist-desktop-notice-ok">OK</button>
+      </div>
     </div>
     <script type="module" src="loader.js"></script>
   </body>

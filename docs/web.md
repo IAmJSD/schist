@@ -30,7 +30,10 @@ https. On macOS build hosts, see the archiver note in the gpui fork's
 `dist/web/` is entirely static:
 
 - `index.html` is the **loading page**: logo, a byte-accurate progress
-  bar, and a status line. It fades out when the app's window is up. The
+  bar, and a status line. On a first visit it also shows a one-time
+  notice that the desktop app is the fuller Schist (with a link to the
+  releases page); OK records the acceptance in localStorage
+  (`schist.desktop-notice-accepted`) and it never shows again. It fades out when the app's window is up. The
   app's panic hook turns it into an error card, so a crash during boot
   never reads as "still loading". A browser without WebGPU is told so
   before anything downloads.

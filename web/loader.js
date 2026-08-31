@@ -16,6 +16,24 @@ const overlay = document.getElementById("schist-loading");
 const fill = document.getElementById("schist-loading-fill");
 const status = document.getElementById("schist-loading-status");
 
+// First visit only: say that the desktop app is the fuller Schist, while
+// the download runs. OK records the acceptance so it never shows again.
+// localStorage can throw (private modes with storage off); a visitor we
+// cannot remember just sees the notice each time.
+const NOTICE_KEY = "schist.desktop-notice-accepted";
+try {
+  if (!localStorage.getItem(NOTICE_KEY)) {
+    const notice = document.getElementById("schist-desktop-notice");
+    notice.style.display = "flex";
+    document.getElementById("schist-desktop-notice-ok").onclick = () => {
+      try {
+        localStorage.setItem(NOTICE_KEY, new Date().toISOString());
+      } catch {}
+      notice.remove();
+    };
+  }
+} catch {}
+
 window.__schistLoadingDone = () => {
   overlay.classList.add("done");
   // Gone entirely once the fade finishes, so it can't sit over the canvas.
