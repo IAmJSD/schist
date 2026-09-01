@@ -61,9 +61,15 @@ chip. Applying with nothing drawn turns it off; the boundary is shared
 with the import dialog, so what you import by is one Apply from what
 you browse by.
 
+The grid has a real scrollbar on its right edge — the thumb sized and
+placed from the scroll extents, draggable, with track clicks jumping
+straight there — because a five-thousand-photo grid without one gives
+no sense of where you are.
+
 Selection is plural: click selects one, ⌘-click toggles, Shift-click
 (and Shift+arrows) span a range, and the tray counts the take. A drag
-carries the selection — drop it on a sidebar **folder** to move the
+carries the selection — as the picked-up photo's own thumbnail square
+riding the pointer, with a count badge when it carries several — drop it on a sidebar **folder** to move the
 files (each photo's `.schist` sidecar and versions travel with it), or
 on a **bucket**. Buckets are Picasa's tray with names: persisted
 baskets photos are dragged into, viewed by clicking their sidebar row,

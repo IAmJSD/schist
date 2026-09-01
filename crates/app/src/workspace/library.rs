@@ -33,6 +33,8 @@ const THUMB_KEEP: usize = 1024;
 /// What the map shrinks to while the gallery is off screen: enough for
 /// the first screenfuls to reappear instantly, a fraction of the RAM.
 const THUMB_KEEP_PARKED: usize = 256;
+/// The grid scrollbar's breathing room at each end of its track.
+const SCROLLBAR_INSET: f32 = 4.0;
 /// Folder scanning stops here rather than following a loop of symlinks
 /// (or someone's home directory) forever.
 const SCAN_MAX_DEPTH: usize = 6;
@@ -322,6 +324,9 @@ pub struct Library {
     /// notion of rows to ask about.
     pub grid_scroll: gpui::ScrollHandle,
     pub grid_bounds: Bounds<Pixels>,
+    /// A scrollbar-thumb drag in progress: the pointer's offset from
+    /// the thumb's top when it was grabbed, in pixels.
+    pub scrollbar_grab: Option<f32>,
     pub selected_bounds: Option<Bounds<Pixels>>,
     /// The keyboard moved the selection; scroll until it is visible.
     reveal_selection: bool,
@@ -464,6 +469,7 @@ impl Library {
             engine_warmed: false,
             grid_scroll: gpui::ScrollHandle::new(),
             grid_bounds: Bounds::default(),
+            scrollbar_grab: None,
             selected_bounds: None,
             reveal_selection: false,
             heif_needed: None,
@@ -571,6 +577,37 @@ impl Library {
     /// on are "current", the one age eviction refuses to touch.
     pub(super) fn begin_thumb_frame(&mut self) {
         self.thumb_frame += 1;
+    }
+
+    /// The grid scrollbar's geometry: (track inset, thumb height,
+    /// thumb travel, max scroll), exact because it reads the scroll
+    /// handle's own extents. `None` while nothing scrolls.
+    pub(super) fn scrollbar_geometry(&self) -> Option<(f32, f32, f32, f32)> {
+        let view_h = f32::from(self.grid_bounds.size.height);
+        let max_y = f32::from(self.grid_scroll.max_offset().height);
+        if view_h <= 0.0 || max_y <= 1.0 {
+            return None;
+        }
+        let track_h = view_h - 2.0 * SCROLLBAR_INSET;
+        let thumb_h = (track_h * view_h / (view_h + max_y)).clamp(30.0, track_h);
+        let travel = (track_h - thumb_h).max(1.0);
+        Some((SCROLLBAR_INSET, thumb_h, travel, max_y))
+    }
+
+    /// Scroll so the thumb follows the pointer of an active grab;
+    /// `pointer_y` is in window coordinates.
+    pub(super) fn scrollbar_drag_to(&mut self, pointer_y: f32) {
+        let Some(grab) = self.scrollbar_grab else {
+            return;
+        };
+        let Some((inset, _, travel, max_y)) = self.scrollbar_geometry() else {
+            return;
+        };
+        let top = f32::from(self.grid_bounds.origin.y);
+        let thumb_top = (pointer_y - top - inset - grab).clamp(0.0, travel);
+        let mut offset = self.grid_scroll.offset();
+        offset.y = px(-(thumb_top / travel * max_y));
+        self.grid_scroll.set_offset(offset);
     }
 
     /// The gallery left the screen: give back what only it was using.

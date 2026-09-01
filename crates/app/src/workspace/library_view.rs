@@ -958,7 +958,80 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         }
         column = column.child(body);
     }
-    column
+    // The scrollbar gpui doesn't paint: a track along the viewport's
+    // right edge, exact because the thumb reads the scroll handle's
+    // own extents. Clicking the track jumps there; dragging is
+    // handled by the wrapper below, so the pointer may wander off the
+    // twelve-pixel strip mid-drag without dropping the thumb.
+    let scrollbar = ws
+        .library
+        .scrollbar_geometry()
+        .map(|(inset, thumb_h, travel, max_y)| {
+            let scroll_y = (-f32::from(ws.library.grid_scroll.offset().y)).clamp(0.0, max_y);
+            let thumb_top = inset + scroll_y / max_y * travel;
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(12.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                        let y =
+                            f32::from(ev.position.y) - f32::from(ws.library.grid_bounds.origin.y);
+                        ws.library.scrollbar_grab =
+                            Some(if (thumb_top..thumb_top + thumb_h).contains(&y) {
+                                // Grabbed the thumb: keep the grip point.
+                                y - thumb_top
+                            } else {
+                                // Clicked the track: the thumb jumps
+                                // there, held by its middle.
+                                thumb_h / 2.0
+                            });
+                        ws.library.scrollbar_drag_to(f32::from(ev.position.y));
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(thumb_top))
+                        .right(px(2.0))
+                        .w(px(8.0))
+                        .h(px(thumb_h))
+                        .rounded_md()
+                        .bg(gpui::rgb(pal().cell_edge))
+                        .hover(|s| s.bg(gpui::rgb(pal().cell_hover))),
+                )
+        });
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h(px(0.0))
+        .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, _w, cx| {
+            if ws.library.scrollbar_grab.is_none() {
+                return;
+            }
+            if ev.pressed_button == Some(MouseButton::Left) {
+                ws.library.scrollbar_drag_to(f32::from(ev.position.y));
+                cx.notify();
+            } else {
+                // The button went up somewhere we never heard about.
+                ws.library.scrollbar_grab = None;
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|ws, _ev: &gpui::MouseUpEvent, _w, _cx| {
+                ws.library.scrollbar_grab = None;
+            }),
+        )
+        .child(column)
+        .children(scrollbar)
 }
 
 fn cell_element(
@@ -970,6 +1043,9 @@ fn cell_element(
 ) -> impl IntoElement {
     use super::library::{GalleryContext, GalleryDrag};
     let thumb = ws.library.thumb(&entry);
+    // The drag ghost shows the square being carried, so it wants the
+    // same picture the cell shows.
+    let ghost_thumb = thumb.clone();
     let probe_entity = cx.entity();
     let probe_entry = entry.clone();
     let is_selected = selected.iter().any(|p| p == &entry.path);
@@ -1050,7 +1126,14 @@ fn cell_element(
                 } else {
                     format!("{} photos", drag.paths.len())
                 };
-                cx.new(|_| DragGhost { label })
+                let thumb = ghost_thumb.clone();
+                let count = drag.paths.len();
+                cx.new(|_| DragGhost {
+                    label,
+                    thumb,
+                    count,
+                    size: cell,
+                })
             },
         )
         .on_mouse_down(
@@ -1124,21 +1207,61 @@ fn cell_element(
         }))
 }
 
-/// The little ghost that rides the pointer during a drag.
+/// The ghost that rides the pointer during a drag: the picked-up
+/// photo's whole square when its thumbnail is in memory (with a count
+/// badge for a multi-drag), the old name pill only when it is not.
 struct DragGhost {
     label: String,
+    thumb: Option<Arc<gpui::RenderImage>>,
+    count: usize,
+    size: f32,
 }
 
 impl gpui::Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(thumb) = self.thumb.clone() else {
+            return div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(gpui::rgb(pal().select_border))
+                .text_color(gpui::rgb(0xFFFFFF))
+                .text_size(px(11.0))
+                .child(SharedString::from(self.label.clone()))
+                .into_any_element();
+        };
+        let inner = self.size - 10.0;
         div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(gpui::rgb(pal().select_border))
-            .text_color(gpui::rgb(0xFFFFFF))
-            .text_size(px(11.0))
-            .child(SharedString::from(self.label.clone()))
+            .w(px(self.size))
+            .h(px(self.size))
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .bg(gpui::rgb(pal().grid_bg))
+            .border_2()
+            .border_color(gpui::rgb(pal().select_border))
+            .opacity(0.85)
+            .child(img(thumb).max_w(px(inner)).max_h(px(inner)))
+            .children((self.count > 1).then(|| {
+                div()
+                    .absolute()
+                    .top(px(-6.0))
+                    .right(px(-6.0))
+                    .min_w(px(18.0))
+                    .h(px(18.0))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(gpui::rgb(pal().select_border))
+                    .text_color(gpui::rgb(0xFFFFFF))
+                    .text_size(px(10.0))
+                    .child(format!("{}", self.count))
+            }))
+            .into_any_element()
     }
 }
 
