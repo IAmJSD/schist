@@ -142,6 +142,9 @@ impl Workspace {
         // loader is running for whatever this frame asked for — and if
         // decodes have been failing for want of HEIC support, offer it.
         self.kick_thumb_loader(cx);
+        // Smart buckets re-score whenever the index moved, so they
+        // fill themselves as photos are indexed and imported.
+        self.refresh_smart_buckets(cx);
         self.maybe_offer_heif(cx);
         self.gallery_reveal_tick(cx);
         root
@@ -578,17 +581,19 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .child("BUCKETS"),
         )
         .children({
-            let buckets: Vec<(usize, String, usize)> = ws
+            let buckets: Vec<(usize, String, usize, bool)> = ws
                 .library
                 .buckets
                 .iter()
                 .enumerate()
-                .map(|(i, b)| (i, b.name.clone(), b.photos.len()))
+                .map(|(i, b)| (i, b.name.clone(), b.contents().len(), b.is_smart()))
                 .collect();
             let viewing = ws.library.bucket_filter;
             let mut rows: Vec<gpui::AnyElement> = Vec::new();
-            for (i, name, count) in buckets {
-                rows.push(bucket_row(i, name, count, viewing == Some(i), cx).into_any_element());
+            for (i, name, count, smart) in buckets {
+                rows.push(
+                    bucket_row(i, name, count, smart, viewing == Some(i), cx).into_any_element(),
+                );
             }
             rows
         })
@@ -616,11 +621,13 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
 }
 
 /// One bucket in the sidebar: a drop target, a view of its contents on
-/// click, and its own right-click menu for the group actions.
+/// click, and its own right-click menu for the group actions. Smart
+/// buckets — the self-filling kind — wear a ✦.
 fn bucket_row(
     index: usize,
     name: String,
     count: usize,
+    smart: bool,
     viewing: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -664,7 +671,16 @@ fn bucket_row(
                 cx.notify();
             }),
         )
-        .child(div().flex_grow().truncate().child(SharedString::from(name)))
+        .child(
+            div()
+                .flex_grow()
+                .truncate()
+                .child(SharedString::from(if smart {
+                    format!("\u{2726} {name}")
+                } else {
+                    name
+                })),
+        )
         .child(
             div()
                 .text_size(px(10.0))
@@ -816,15 +832,28 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .p_4()
                 .text_size(px(12.0))
                 .text_color(gpui::rgb(pal().text_dim))
-                .child(if ws.library.bucket_filter.is_some() {
-                    "This bucket is empty. Drag photos onto its row in the sidebar to add them."
-                } else if scanning {
-                    "Scanning folders\u{2026}"
-                } else {
-                    "No photos found in the watched folders. Images Schist can open \
-                     (PNG, JPEG, WebP, TIFF, HEIC, PSD, Affinity) appear here; \
-                     sub-folders are scanned six levels deep."
-                }),
+                .child(
+                    match ws
+                        .library
+                        .bucket_filter
+                        .and_then(|i| ws.library.buckets.get(i))
+                    {
+                        Some(bucket) if bucket.is_smart() => {
+                            "Nothing matches this bucket's rule yet — matches appear as \
+                         photos are indexed. Dragging photos in works too."
+                        }
+                        Some(_) => {
+                            "This bucket is empty. Drag photos onto its row in the sidebar \
+                         to add them."
+                        }
+                        None if scanning => "Scanning folders\u{2026}",
+                        None => {
+                            "No photos found in the watched folders. Images Schist can open \
+                         (PNG, JPEG, WebP, TIFF, HEIC, PSD, Affinity) appear here; \
+                         sub-folders are scanned six levels deep."
+                        }
+                    },
+                ),
         );
     }
     for (title, subtitle, entries) in sections {
@@ -1704,30 +1733,26 @@ pub(crate) fn map_filter_dialog(
     crate::ui::modal_frame("Map Filter", 580.0, body, actions)
 }
 
-/// Name a new bucket. The field is focused the moment the dialog
-/// opens, so typing goes straight in; the dimmed "Bucket N" is what an
-/// empty name falls back to.
-pub(crate) fn bucket_name_dialog(
+/// One text field of the bucket dialog: the layer-name pattern, with a
+/// dimmed placeholder while nothing is typed.
+fn bucket_field(
+    id: &'static str,
+    value: String,
+    placeholder: String,
     ws: &Workspace,
-    name: String,
-    photos: usize,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let focused = ws.focused_field == Some("bucket-name");
+    let focused = ws.focused_field == Some(id);
     let typed = if focused && !ws.field_buffer.is_empty() {
         ws.field_buffer.clone()
     } else {
-        name
+        value
     };
     let empty = typed.is_empty();
-    let shown = if empty {
-        format!("Bucket {}", ws.library.buckets.len() + 1)
-    } else {
-        typed.clone()
-    };
+    let shown = if empty { placeholder } else { typed.clone() };
     let display = if focused { format!("{shown}|") } else { shown };
-    let field = div()
-        .w(px(220.0))
+    div()
+        .w(px(360.0))
         .h(px(22.0))
         .px_1()
         .flex()
@@ -1741,25 +1766,92 @@ pub(crate) fn bucket_name_dialog(
             crate::ui::palette().field_bg
         }))
         .text_size(px(12.0))
-        // The fallback name renders dim, the way a placeholder does.
         .text_color(gpui::rgb(if empty {
             crate::ui::palette().text_dim
         } else {
             crate::ui::palette().text
         }))
+        .overflow_hidden()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
-                ws.focus_field("bucket-name", typed.clone());
+                ws.commit_focused_field();
+                ws.focus_field(id, typed.clone());
                 cx.notify();
             }),
         )
-        .child(display);
+        .child(display)
+}
+
+/// Create or edit a bucket: its name, and the optional smart rule —
+/// a search query, an area drawn on the map, or both — that keeps it
+/// filling itself as photos are indexed and imported.
+pub(crate) fn bucket_name_dialog(
+    ws: &mut Workspace,
+    name: String,
+    query: String,
+    photos: usize,
+    editing: Option<usize>,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let name_fallback = match editing.and_then(|i| ws.library.buckets.get(i)) {
+        Some(bucket) => bucket.name.clone(),
+        None => format!("Bucket {}", ws.library.buckets.len() + 1),
+    };
+    let name_field = bucket_field("bucket-name", name, name_fallback, ws, cx);
+    let query_field = bucket_field(
+        "bucket-query",
+        query.clone(),
+        "e.g. dog on a beach (optional)".to_string(),
+        ws,
+        cx,
+    );
+    // What the rule adds up to right now, so nothing is set silently —
+    // the map keeps its boundary between dialogs by design, and this
+    // line is where a leftover one gets noticed.
+    let area_name = ws.library.map.selection.map(|_| {
+        ws.library
+            .map
+            .selection_name
+            .clone()
+            .unwrap_or_else(|| "the drawn area".to_string())
+    });
+    let live_query = if ws.focused_field == Some("bucket-query") && !ws.field_buffer.is_empty() {
+        ws.field_buffer.clone()
+    } else {
+        query
+    };
+    let rule_line = match (live_query.trim(), &area_name) {
+        ("", None) => "No rule: an ordinary bucket, filled by dragging photos in.".to_string(),
+        (q, None) => format!("Keeps every photo matching \u{201c}{q}\u{201d}."),
+        ("", Some(area)) => format!("Keeps every photo taken in {area}."),
+        (q, Some(area)) => {
+            format!("Keeps every photo matching \u{201c}{q}\u{201d} taken in {area}.")
+        }
+    };
     let mut body = div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(crate::ui::field_row("Name", field));
+        .child(crate::ui::field_row("Name", name_field))
+        .child(crate::ui::field_row("Search", query_field))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(
+                    "Shift-drag the map (or pick a preset) to add an area; \
+                     a tiny drag clears it. Rules keep the bucket filled \
+                     automatically.",
+                ),
+        )
+        .child(boundary_editor(ws, cx))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(rule_line),
+        );
     if photos > 0 {
         body = body.child(
             div()
@@ -1783,22 +1875,51 @@ pub(crate) fn bucket_name_dialog(
             cx,
         ))
         .child(crate::ui::button(
-            "Create",
+            if editing.is_some() { "Save" } else { "Create" },
             true,
             |ws, _w, cx| {
                 ws.commit_focused_field();
-                let Some(Modal::BucketName { name, photos }) = ws.modal.clone() else {
+                let Some(Modal::BucketName {
+                    name,
+                    query,
+                    photos,
+                    editing,
+                }) = ws.modal.clone()
+                else {
                     return;
                 };
-                let bucket = ws.library.add_bucket(name);
+                let query = {
+                    let q = query.trim();
+                    (!q.is_empty()).then(|| q.to_string())
+                };
+                let area = ws.library.map.selection.map(|bounds| {
+                    (
+                        bounds,
+                        ws.library
+                            .map
+                            .selection_name
+                            .clone()
+                            .unwrap_or_else(|| "Selected Area".to_string()),
+                    )
+                });
+                let index = match editing {
+                    Some(index) => index,
+                    None => ws.library.add_bucket(name.clone()),
+                };
+                ws.library.configure_bucket(index, name, query, area);
                 if !photos.is_empty() {
-                    ws.library.add_to_bucket(bucket, &photos);
+                    ws.library.add_to_bucket(index, &photos);
                 }
                 ws.close_modal(cx);
             },
             cx,
         ));
-    crate::ui::modal_frame("New Bucket", 320.0, body, actions)
+    let title = if editing.is_some() {
+        "Edit Bucket"
+    } else {
+        "New Bucket"
+    };
+    crate::ui::modal_frame(title, 580.0, body, actions)
 }
 
 /// The gallery's right-click menu: on a photo it acts on the whole
@@ -1901,7 +2022,15 @@ fn gallery_context_menu(
                     }),
                 );
             }
-            if let Some(bucket) = ws.library.bucket_filter {
+            // Only hand-added photos can be removed — a smart rule's
+            // match would just come back on the next pass.
+            let removable = ws.library.bucket_filter.filter(|&b| {
+                ws.library
+                    .buckets
+                    .get(b)
+                    .is_some_and(|bucket| bucket.photos.contains(&path))
+            });
+            if let Some(bucket) = removable {
                 let drop_path = path.clone();
                 row(
                     "Remove from this bucket".into(),
@@ -1947,18 +2076,23 @@ fn gallery_context_menu(
             }
         }
         GalleryContext::Bucket(index) => {
-            let photos = ws
+            // The group actions act on everything the bucket holds:
+            // the hand-picked photos and the smart rule's matches.
+            let (photos, name, smart) = ws
                 .library
                 .buckets
                 .get(index)
-                .map(|b| b.photos.clone())
+                .map(|b| (b.contents(), b.name.clone(), b.is_smart()))
                 .unwrap_or_default();
-            let name = ws
-                .library
-                .buckets
-                .get(index)
-                .map(|b| b.name.clone())
-                .unwrap_or_default();
+            row(
+                "Edit bucket…".into(),
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, cx| {
+                    ws.gallery_edit_bucket(index, cx);
+                }),
+            );
+            sep(&mut rows);
             {
                 let zip = photos.clone();
                 let suggested = format!("{}.zip", name.to_lowercase().replace(' ', "-"));
@@ -1984,7 +2118,13 @@ fn gallery_context_menu(
             }
             sep(&mut rows);
             row(
-                "Clear bucket".into(),
+                // A smart bucket's matches come back on the next pass;
+                // only the hand-added photos are the user's to clear.
+                if smart {
+                    "Clear added photos".into()
+                } else {
+                    "Clear bucket".into()
+                },
                 &mut rows,
                 cx,
                 std::rc::Rc::new(move |ws, _w, _cx| {

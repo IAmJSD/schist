@@ -966,9 +966,18 @@ pub enum Modal {
     /// The gallery's map filter: the navigable map, a drawn boundary,
     /// and Apply — the grid then shows only photos taken inside it.
     MapFilter,
-    /// Name a new gallery bucket, created on Create and born holding
-    /// `photos`. An empty name falls back to "Bucket N".
-    BucketName { name: String, photos: Vec<PathBuf> },
+    /// Create or edit a gallery bucket: its name, and optionally a
+    /// smart rule — a search query and/or a map area (the drawn
+    /// boundary lives on the shared map state, not here) that keeps
+    /// the bucket filling itself. `editing` is the bucket being
+    /// reconfigured; `None` creates one, born holding `photos`. An
+    /// empty name falls back to "Bucket N" (create) or stays (edit).
+    BucketName {
+        name: String,
+        query: String,
+        photos: Vec<PathBuf>,
+        editing: Option<usize>,
+    },
     /// The full new-document dialog: everything a fresh document needs,
     /// asked up front as Photoshop does.
     NewDocument {
@@ -1001,8 +1010,9 @@ pub enum ImportSource {
 /// A boundary in degrees: what the import map's rectangle means, and
 /// what the EXIF-position filter tests. Defined here rather than in the
 /// (desktop-only) gallery so the modal enum can carry one on every
-/// target; its methods live with the map in `library_geo`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// target; its methods live with the map in `library_geo`. Serde
+/// because a smart bucket's area persists in `library.json`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct GeoBounds {
     pub south: f64,

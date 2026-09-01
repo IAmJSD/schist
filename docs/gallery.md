@@ -76,6 +76,23 @@ current selection. Photos have their own right-click menu too: Edit,
 Reveal in file manager, Add to bucket, Save as ZIP, Upscale — acting
 on the whole selection when the click lands in it.
 
+A bucket can also fill itself. The New/Edit Bucket dialog (right-click
+▸ Edit bucket…) takes an optional **rule**: a search query ("dog on a
+beach" — same engine and same 0.15 floor as the search box, place
+names understood the same fuzzy way), an **area** drawn on the same
+navigable map the import filter uses, or both — both means both must
+hold. A smart bucket (marked ✦ in the sidebar) re-scores whenever the
+index moves, so it keeps itself current as photos are imported, edited
+and indexed; its header says what the rule is, and its contents are
+the hand-added photos in drop order followed by the matches, best
+first. Hand-adds still work on top of a rule; removing a matched photo
+doesn't (the rule would just put it back), which is why the menu only
+offers it for hand-added ones, and why "Clear" on a smart bucket is
+"Clear added photos". A query rule waits politely when the Search
+models aren't installed — it matches nothing rather than everything —
+while an area rule works standalone from EXIF alone. Rules persist;
+the matches are recomputed each session.
+
 The grid drives from the keyboard too: arrow keys move the selection —
 left/right by one photo, up/down by a visual row, worked out from the
 grid's real width — Enter opens it in the editor, and the grid scrolls

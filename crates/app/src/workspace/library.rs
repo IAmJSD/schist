@@ -82,11 +82,70 @@ struct ThumbJob {
     for_index: bool,
 }
 
-/// A named basket of photos, dragged in and acted on as a group.
+/// A named basket of photos, dragged in and acted on as a group — or,
+/// with a rule set, a smart one that keeps filling itself.
 #[derive(Clone)]
 pub struct Bucket {
     pub name: String,
+    /// Photos put in by hand (drag, right-click). Persisted.
     pub photos: Vec<PathBuf>,
+    /// The smart rule: a search query and/or a map area. Either being
+    /// set makes the bucket fill itself from the index — both set
+    /// means both must hold. Persisted.
+    pub query: Option<String>,
+    pub area: Option<(GeoBounds, String)>,
+    /// What the rule currently matches, best first. Derived — rebuilt
+    /// whenever the index moves — so never persisted.
+    pub matches: Vec<PathBuf>,
+}
+
+impl Bucket {
+    pub fn is_smart(&self) -> bool {
+        self.query.is_some() || self.area.is_some()
+    }
+
+    /// Everything in the bucket: the hand-picked photos in the order
+    /// they were dropped, then what the rule matched.
+    pub fn contents(&self) -> Vec<PathBuf> {
+        let mut all = self.photos.clone();
+        for path in &self.matches {
+            if !all.contains(path) {
+                all.push(path.clone());
+            }
+        }
+        all
+    }
+
+    /// The rule, described for people: what shows under the bucket's
+    /// header and in its editor.
+    pub fn rule_label(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(query) = &self.query {
+            parts.push(format!("matches \u{201c}{query}\u{201d}"));
+        }
+        if let Some((_, name)) = &self.area {
+            parts.push(format!("taken in {name}"));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// A bucket as `library.json` holds it. Untagged so the shape saved
+/// before buckets had rules — a bare `[name, [photos]]` pair — still
+/// reads; writes always use the named form.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum BucketFile {
+    Rich {
+        name: String,
+        #[serde(default)]
+        photos: Vec<PathBuf>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        area: Option<(GeoBounds, String)>,
+    },
+    Plain(String, Vec<PathBuf>),
 }
 
 /// What the gallery's right-click menu was opened on.
@@ -131,7 +190,7 @@ struct LibraryFile {
     #[serde(default)]
     group_by: Option<String>,
     #[serde(default)]
-    buckets: Vec<(String, Vec<PathBuf>)>,
+    buckets: Vec<BucketFile>,
 }
 
 pub struct Library {
@@ -153,6 +212,15 @@ pub struct Library {
     /// The buckets: named baskets photos are dragged into, acted on as
     /// a group (ZIP them, upscale them). Persisted.
     pub buckets: Vec<Bucket>,
+    /// Bumped whenever any bucket's rule changes (or a bucket goes
+    /// away, which shifts the indices an in-flight compute is keyed
+    /// by), so stale smart-bucket results can be recognised.
+    rule_rev: u64,
+    /// The `(index_gen, rule_rev)` the smart buckets were last scored
+    /// against, and whether a scoring pass is in flight. `None` = never
+    /// scored this session.
+    smart_synced: Option<(u64, u64)>,
+    smart_running: bool,
     /// Showing one bucket's contents instead of the folders.
     pub bucket_filter: Option<usize>,
     /// The gallery's own right-click menu: where, and on what.
@@ -307,8 +375,31 @@ impl Library {
             buckets: file
                 .buckets
                 .into_iter()
-                .map(|(name, photos)| Bucket { name, photos })
+                .map(|b| match b {
+                    BucketFile::Rich {
+                        name,
+                        photos,
+                        query,
+                        area,
+                    } => Bucket {
+                        name,
+                        photos,
+                        query,
+                        area,
+                        matches: Vec::new(),
+                    },
+                    BucketFile::Plain(name, photos) => Bucket {
+                        name,
+                        photos,
+                        query: None,
+                        area: None,
+                        matches: Vec::new(),
+                    },
+                })
                 .collect(),
+            rule_rev: 0,
+            smart_synced: None,
+            smart_running: false,
             bucket_filter: None,
             context: None,
             thumb_px: file.thumb_px.unwrap_or(144.0).clamp(80.0, 240.0),
@@ -364,7 +455,12 @@ impl Library {
             buckets: self
                 .buckets
                 .iter()
-                .map(|b| (b.name.clone(), b.photos.clone()))
+                .map(|b| BucketFile::Rich {
+                    name: b.name.clone(),
+                    photos: b.photos.clone(),
+                    query: b.query.clone(),
+                    area: b.area.clone(),
+                })
                 .collect(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&file) {
@@ -509,11 +605,12 @@ impl Library {
     /// The visible photos grouped the way `group_by` asks:
     /// (title, subtitle, entries) per group.
     pub fn grouped(&self) -> Vec<(String, String, Vec<Entry>)> {
-        // A bucket on show replaces the grouping: its photos, in the
-        // order they were dropped in.
+        // A bucket on show replaces the grouping: the hand-picked
+        // photos in the order they were dropped in, then whatever its
+        // rule matched, best first.
         if let Some(bucket) = self.bucket_filter.and_then(|i| self.buckets.get(i)) {
             let entries: Vec<Entry> = bucket
-                .photos
+                .contents()
                 .iter()
                 .filter_map(|path| {
                     self.sections
@@ -524,7 +621,11 @@ impl Library {
                 })
                 .filter(|e| self.passes_map(&e.path))
                 .collect();
-            return vec![(format!("Bucket · {}", bucket.name), String::new(), entries)];
+            return vec![(
+                format!("Bucket · {}", bucket.name),
+                bucket.rule_label(),
+                entries,
+            )];
         }
         match self.group_by {
             GroupBy::Folder => self
@@ -617,9 +718,36 @@ impl Library {
         self.buckets.push(Bucket {
             name,
             photos: Vec::new(),
+            query: None,
+            area: None,
+            matches: Vec::new(),
         });
         self.save();
         self.buckets.len() - 1
+    }
+
+    /// Rename a bucket and set (or clear) its smart rule. An empty
+    /// name keeps the one it has.
+    pub fn configure_bucket(
+        &mut self,
+        index: usize,
+        name: String,
+        query: Option<String>,
+        area: Option<(GeoBounds, String)>,
+    ) {
+        let Some(bucket) = self.buckets.get_mut(index) else {
+            return;
+        };
+        if !name.trim().is_empty() {
+            bucket.name = name.trim().to_string();
+        }
+        if bucket.query != query || bucket.area != area {
+            bucket.query = query;
+            bucket.area = area;
+            bucket.matches.clear();
+            self.rule_rev += 1;
+        }
+        self.save();
     }
 
     /// Drop photos into a bucket, keeping each once.
@@ -652,6 +780,9 @@ impl Library {
     pub fn delete_bucket(&mut self, index: usize) {
         if index < self.buckets.len() {
             self.buckets.remove(index);
+            // Later buckets just shifted down a slot; an in-flight
+            // smart-bucket pass is keyed by the old indices.
+            self.rule_rev += 1;
             if self.bucket_filter == Some(index) {
                 self.bucket_filter = None;
             } else if let Some(f) = self.bucket_filter {
@@ -1530,18 +1661,227 @@ impl Workspace {
         self.library.open && self.library.search_active
     }
 
-    /// Ask what to call a new bucket; it is created on the dialog's
-    /// Create, born holding `photos`.
+    /// Ask what to call a new bucket — and, optionally, its smart rule
+    /// (a query, an area drawn on the dialog's map); it is created on
+    /// the dialog's Create, born holding `photos`.
     pub(super) fn gallery_new_bucket(&mut self, photos: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.open_modal(
             Modal::BucketName {
                 name: String::new(),
+                query: String::new(),
                 photos,
+                editing: None,
             },
             cx,
         );
-        // The dialog is one field; put the keyboard straight in it.
+        // The name is what everyone types first; put the keyboard in it.
         self.focus_field("bucket-name", "");
+    }
+
+    /// Reopen the bucket dialog on an existing bucket: rename it, give
+    /// it a rule, change or remove the one it has.
+    pub(super) fn gallery_edit_bucket(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(bucket) = self.library.buckets.get(index) else {
+            return;
+        };
+        let name = bucket.name.clone();
+        let query = bucket.query.clone().unwrap_or_default();
+        let area = bucket.area.clone();
+        self.open_modal(
+            Modal::BucketName {
+                name,
+                query,
+                photos: Vec::new(),
+                editing: Some(index),
+            },
+            cx,
+        );
+        // Show the rule being edited: the shared map takes the
+        // bucket's boundary (and jumps to it), or clears so a leftover
+        // selection from the import dialog cannot pass as this
+        // bucket's.
+        match area {
+            Some((bounds, place)) => self.library.map.jump_to(&place, bounds),
+            None => {
+                self.library.map.selection = None;
+                self.library.map.selection_name = None;
+            }
+        }
+    }
+
+    /// Keep the smart buckets current: whenever the index moved — or a
+    /// rule changed — since the last pass, re-score every rule against
+    /// the index snapshot in the background. Called from the gallery's
+    /// render, so a bucket keeps filling itself as photos are indexed,
+    /// imported, or edited.
+    pub(super) fn refresh_smart_buckets(&mut self, cx: &mut Context<Self>) {
+        if self.library.smart_running || !self.library.buckets.iter().any(|b| b.is_smart()) {
+            return;
+        }
+        let target = (self.library.index_gen, self.library.rule_rev);
+        if self.library.smart_synced == Some(target) {
+            return;
+        }
+        self.library.smart_running = true;
+        // One job per smart bucket: its slot, the query (with the
+        // engine's cached answer when it has one), and the area.
+        struct SmartRule {
+            index: usize,
+            query: Option<String>,
+            cached: Option<CachedQuery>,
+            area: Option<GeoBounds>,
+        }
+        let rules: Vec<SmartRule> = self
+            .library
+            .buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_smart())
+            .map(|(index, b)| {
+                let query = b
+                    .query
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|q| !q.is_empty())
+                    .map(str::to_string);
+                let cached = query
+                    .as_ref()
+                    .and_then(|q| self.library.query_cache.get(q).cloned());
+                SmartRule {
+                    index,
+                    query,
+                    cached,
+                    area: b.area.as_ref().map(|(bounds, _)| *bounds),
+                }
+            })
+            .collect();
+        let snapshot = self.library.search_snapshot();
+        cx.spawn(async move |this, cx| {
+            let computed = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut fresh: Vec<(String, CachedQuery)> = Vec::new();
+                    let mut out: Vec<(usize, Vec<PathBuf>, bool)> = Vec::new();
+                    for SmartRule {
+                        index,
+                        query,
+                        cached,
+                        area,
+                    } in rules
+                    {
+                        let answer = match (&query, cached) {
+                            (Some(q), None) => {
+                                // Same engine as the search box, cached
+                                // in the same place.
+                                let answer = CachedQuery {
+                                    text: schist_neural::embed::embed_text(q).map(Arc::new),
+                                    place: library_geo::find_place(q),
+                                };
+                                fresh.push((q.clone(), answer.clone()));
+                                Some(answer)
+                            }
+                            (_, cached) => cached,
+                        };
+                        let readable = answer
+                            .as_ref()
+                            .is_some_and(|a| a.text.is_some() || a.place.is_some());
+                        let (mut matched, by_score) = if readable {
+                            // Score exactly as the search box does, but
+                            // keep everything above the floor — a
+                            // bucket holds all its matches, not a
+                            // screenful.
+                            let answer = answer.unwrap();
+                            let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
+                            if let Some(text) = &answer.text {
+                                for (path, v) in snapshot.vectors.iter() {
+                                    let s =
+                                        v.iter().zip(text.iter()).map(|(a, b)| a * b).sum::<f32>();
+                                    scored.insert(path, s);
+                                }
+                            }
+                            if let Some(place) = &answer.place {
+                                for (path, (lat, lon)) in snapshot.positions.iter() {
+                                    let affinity = library_geo::geo_affinity(place, *lat, *lon);
+                                    if affinity > 0.0 {
+                                        *scored.entry(path).or_insert(0.0) += GEO_BOOST * affinity;
+                                    }
+                                }
+                            }
+                            let floor = if answer.text.is_some() {
+                                SEARCH_FLOOR
+                            } else {
+                                GEO_BOOST * 0.3
+                            };
+                            let mut scored: Vec<(&PathBuf, f32)> =
+                                scored.into_iter().filter(|(_, s)| *s >= floor).collect();
+                            scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                            (scored.into_iter().map(|(p, _)| p.clone()).collect(), true)
+                        } else if query.is_some() {
+                            // A query the engine cannot read yet — the
+                            // models aren't installed and it names no
+                            // place. Match nothing, not everything.
+                            (Vec::new(), false)
+                        } else {
+                            // Area-only: every positioned photo is a
+                            // candidate; the clip below is the rule.
+                            (
+                                snapshot
+                                    .positions
+                                    .iter()
+                                    .map(|(p, _)| p.clone())
+                                    .collect::<Vec<_>>(),
+                                false,
+                            )
+                        };
+                        if let Some(area) = area {
+                            let at: FxHashMap<&PathBuf, (f64, f64)> = snapshot
+                                .positions
+                                .iter()
+                                .map(|(p, pos)| (p, *pos))
+                                .collect();
+                            matched.retain(|p| {
+                                at.get(p)
+                                    .is_some_and(|(lat, lon)| area.contains(*lat, *lon))
+                            });
+                        }
+                        out.push((index, matched, by_score));
+                    }
+                    (out, fresh)
+                })
+                .await;
+            this.update(cx, |ws, cx| {
+                let (out, fresh) = computed;
+                for (query, answer) in fresh {
+                    if ws.library.query_cache.len() > 512 {
+                        ws.library.query_cache.clear();
+                    }
+                    ws.library.query_cache.insert(query, answer);
+                }
+                // The rules (or the bucket list) changed underneath
+                // the pass: throw it away, the next render re-runs it.
+                if ws.library.rule_rev == target.1 {
+                    for (index, mut matched, by_score) in out {
+                        if !by_score {
+                            // Unscored matches show newest first, like
+                            // the grid.
+                            matched.sort_by_key(|p| {
+                                std::cmp::Reverse(
+                                    ws.library.taken.get(p).cloned().unwrap_or_default(),
+                                )
+                            });
+                        }
+                        if let Some(bucket) = ws.library.buckets.get_mut(index) {
+                            bucket.matches = matched;
+                        }
+                    }
+                    ws.library.smart_synced = Some(target);
+                }
+                ws.library.smart_running = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A keystroke for the search box. Returns whether it was taken.
@@ -2401,6 +2741,49 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buckets_saved_before_they_had_rules_still_read() {
+        // The pre-rule shape was a bare (name, photos) tuple; the
+        // untagged enum must take both it and the named form.
+        let legacy: Vec<BucketFile> =
+            serde_json::from_str(r#"[["Trip", ["/a.jpg"]]]"#).expect("legacy shape");
+        assert!(matches!(&legacy[0], BucketFile::Plain(name, photos)
+            if name == "Trip" && photos == &[PathBuf::from("/a.jpg")]));
+        let rich: Vec<BucketFile> = serde_json::from_str(
+            r#"[{"name": "NYC dogs", "query": "dog",
+                 "area": [{"south": 40.0, "west": -75.0, "north": 41.0, "east": -73.0}, "New York City"]}]"#,
+        )
+        .expect("rich shape");
+        assert!(
+            matches!(&rich[0], BucketFile::Rich { name, photos, query, area }
+            if name == "NYC dogs"
+                && photos.is_empty()
+                && query.as_deref() == Some("dog")
+                && area.as_ref().is_some_and(|(b, place)| place == "New York City" && b.contains(40.7, -74.0)))
+        );
+    }
+
+    #[test]
+    fn bucket_contents_are_the_hand_picked_photos_then_the_matches() {
+        let bucket = Bucket {
+            name: "b".into(),
+            photos: vec![PathBuf::from("/hand.jpg"), PathBuf::from("/both.jpg")],
+            query: Some("dog".into()),
+            area: None,
+            matches: vec![PathBuf::from("/both.jpg"), PathBuf::from("/matched.jpg")],
+        };
+        // Drop order first, matches after, nothing twice.
+        assert_eq!(
+            bucket.contents(),
+            vec![
+                PathBuf::from("/hand.jpg"),
+                PathBuf::from("/both.jpg"),
+                PathBuf::from("/matched.jpg"),
+            ]
+        );
+        assert!(bucket.is_smart());
+    }
 
     #[test]
     fn the_sidecar_lives_in_a_hidden_directory_beside_the_photo() {

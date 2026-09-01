@@ -186,7 +186,10 @@ impl Workspace {
         // Text fields (layer and document names) take any printable
         // character; the picker's hex field takes hex digits up to a full
         // triplet; numeric fields only digits.
-        let textual = id == "layer-name" || id == "new-doc-name" || id == "bucket-name";
+        let textual = id == "layer-name"
+            || id == "new-doc-name"
+            || id == "bucket-name"
+            || id == "bucket-query";
         let hex = id == "cp-hex";
         match key {
             "space" if textual => self.field_buffer.push(' '),
@@ -251,10 +254,14 @@ impl Workspace {
             });
             return;
         }
-        if id == "bucket-name" {
+        if id == "bucket-name" || id == "bucket-query" {
             self.update_modal(|m| {
-                if let Modal::BucketName { name, .. } = m {
-                    *name = buffer;
+                if let Modal::BucketName { name, query, .. } = m {
+                    if id == "bucket-name" {
+                        *name = buffer;
+                    } else {
+                        *query = buffer;
+                    }
                 }
             });
             return;
