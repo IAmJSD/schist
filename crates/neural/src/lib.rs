@@ -39,6 +39,10 @@ use tract_onnx::prelude::*;
 mod colour;
 mod compat;
 mod depth;
+// The gallery's search embeddings. Desktop only with the gallery — the
+// tokenizer tables it carries would be dead weight in the wasm module.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod embed;
 mod faces;
 mod framed;
 mod inpaint;
@@ -151,6 +155,9 @@ pub enum Input {
         height: usize,
         fit: Fit,
     },
+    /// A fixed run of token ids — no pixels at all. What the text half
+    /// of a dual-encoder wants; `context` is its sequence length.
+    Tokens { context: usize },
 }
 
 impl Input {
@@ -159,6 +166,7 @@ impl Input {
         match self {
             Input::Tiles { size, .. } => (size, size),
             Input::Frame { width, height, .. } => (width, height),
+            Input::Tokens { context } => (context, 1),
         }
     }
 
@@ -166,7 +174,7 @@ impl Input {
     fn scale(self) -> usize {
         match self {
             Input::Tiles { scale, .. } => scale,
-            Input::Frame { .. } => 1,
+            Input::Frame { .. } | Input::Tokens { .. } => 1,
         }
     }
 }
@@ -425,6 +433,40 @@ pub const CATALOG: &[ModelSpec] = &[
                so the gallery can hide what the content-filter \
                preference asks it to.",
     },
+    // The two halves of the gallery's search: pictures and words mapped
+    // into the same 512 dimensions, so "dog on a beach" lands near the
+    // photographs of one. MobileCLIP-S0 because its image tower is
+    // convolutional — a ViT this size took forty times longer under
+    // tract — and the text tower's bulk is its embedding table, so a
+    // query costs milliseconds.
+    ModelSpec {
+        id: "embed-image",
+        name: "Search (Image Embeddings)",
+        file: "embed-image.onnx",
+        url: Some("https://huggingface.co/Xenova/mobileclip_s0/resolve/757d59c9c6870a76a4b0306f05f5061bca15c39f/onnx/vision_model.onnx"),
+        sha256: Some("17d3c037b1d488c10c50e09f6009ea5a198caef4e0e8f4ea5617b7cb2d067ac0"),
+        bytes: 45_543_630,
+        input: Input::Frame { width: 256, height: 256, fit: Fit::Stretch },
+        range: Range::Unit,
+        license: "MobileCLIP-S0 weights (Apple ML research licence); ONNX export by Xenova",
+        note: "Turns a photograph into the coordinates the gallery's \
+               search ranks against. Runs once per photo, on its \
+               thumbnail, in the background.",
+    },
+    ModelSpec {
+        id: "embed-text",
+        name: "Search (Text Embeddings)",
+        file: "embed-text.onnx",
+        url: Some("https://huggingface.co/Xenova/mobileclip_s0/resolve/757d59c9c6870a76a4b0306f05f5061bca15c39f/onnx/text_model.onnx"),
+        sha256: Some("f6e9bd5742bfc515889e901634d8a2ff2a57fab8564e4ad3760e800b1a51b77c"),
+        bytes: 169_807_789,
+        input: Input::Tokens { context: 77 },
+        range: Range::Unit,
+        license: "MobileCLIP-S0 weights (Apple ML research licence); ONNX export by Xenova",
+        note: "Turns a search query into the same coordinates the \
+               photographs live in. Most of its weight is the \
+               vocabulary table; a query runs in milliseconds.",
+    },
 ];
 
 pub fn spec(id: &str) -> Option<&'static ModelSpec> {
@@ -559,6 +601,26 @@ impl Model {
         if compat::modernise(&mut proto) {
             log::debug!("{}: rewrote a pre-opset-10 graph", spec.id);
         }
+        // A text tower takes token ids, not pixels: one integer row.
+        if let Input::Tokens { context } = spec.input {
+            if let Some(graph) = proto.graph.as_mut() {
+                graph.value_info.clear();
+            }
+            let plan = onnx
+                .model_for_proto_model(&proto)
+                .context("not a model tract can parse")?
+                .with_input_fact(0, i64::fact([1, context]).into())
+                .context("model does not take a 1xN token input")?
+                .into_optimized()
+                .context("model uses an operator tract cannot run")?
+                .into_runnable()?;
+            return Ok(Model {
+                plan,
+                channels: 0,
+                nhwc: false,
+                spec,
+            });
+        }
         // Almost every vision model takes three planes of colour, but an
         // inpainting one takes four -- the fourth says which pixels are
         // missing, and it has to be a channel rather than a convention
@@ -650,6 +712,19 @@ impl Model {
     /// — softmax scores or logits, whatever the graph emits.
     pub fn run_scores(&self, rgb: &[f32]) -> Result<Vec<f32>> {
         let out = self.run(rgb)?;
+        let view = out[0].to_plain_array_view::<f32>()?;
+        Ok(view.iter().copied().collect())
+    }
+
+    /// Run a token-input model (a text encoder) over one padded row of
+    /// ids and hand back the first output flattened.
+    pub fn run_token_scores(&self, ids: &[i64]) -> Result<Vec<f32>> {
+        let (context, _) = self.spec.input.dims();
+        if ids.len() != context {
+            bail!("expected {context} token ids, got {}", ids.len());
+        }
+        let input = tract_ndarray::Array2::<i64>::from_shape_vec((1, context), ids.to_vec())?;
+        let out = self.plan.run(tvec!(input.into_tensor().into()))?;
         let view = out[0].to_plain_array_view::<f32>()?;
         Ok(view.iter().copied().collect())
     }

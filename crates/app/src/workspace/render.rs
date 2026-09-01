@@ -544,6 +544,7 @@ impl Render for Workspace {
             || self.note_edit.is_some()
             || self.ai.input_active
             || self.ai.model_menu
+            || self.gallery_typing()
         {
             "Workspace text_entry"
         } else {
@@ -697,6 +698,12 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &CancelGesture, _w, cx| {
+                // Escape leaves the gallery's search before anything
+                // else — it is the innermost thing open.
+                #[cfg(not(target_arch = "wasm32"))]
+                if ws.gallery_open() && ws.gallery_search_clear(cx) {
+                    return;
+                }
                 ws.cancel_gesture(cx);
             }))
             .on_action(cx.listener(|ws, _: &CommitGesture, _w, cx| {

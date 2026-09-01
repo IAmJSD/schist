@@ -110,6 +110,11 @@ impl Workspace {
             // (⌘K preferences, ⌘⇧G back to the editor, ⌘O open) to
             // dispatch, exactly as the canvas and start screen keep it.
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
+                if ws.gallery_search_key(ev, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .child(top_strip(self, cx))
             .child(body)
             .child(tray(self, cx));
@@ -199,12 +204,7 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             cx,
         ))
         .child(div().flex_grow())
-        .child(
-            div()
-                .text_size(px(13.0))
-                .text_color(gpui::rgb(pal().text_dim))
-                .child("Gallery"),
-        )
+        .child(search_box(ws, cx))
         .child(div().flex_grow())
         .child(gallery_button(
             "Settings…",
@@ -234,6 +234,77 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
                 },
                 cx,
             )
+        }))
+}
+
+/// The search box: type a description, photos rank by it. Takes the
+/// keyboard while active (the key context flips to text entry, so
+/// letters stop being tool shortcuts). Without the two Search models it
+/// is a doorway to Manage Models instead of a lie.
+fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let ready = schist_neural::embed::ready();
+    let active = ws.library.search_active;
+    let text = ws.library.search.clone();
+    let (indexed, total) = ws.library.index_progress();
+    let shown: SharedString = if !ready {
+        "Search — download the models…".into()
+    } else if text.is_empty() && !active {
+        if indexed < total {
+            format!("Search ({indexed}/{total} indexed)").into()
+        } else {
+            "Search photos…".into()
+        }
+    } else {
+        format!("{text}{}", if active { "\u{258f}" } else { "" }).into()
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .w(px(260.0))
+        .h(px(24.0))
+        .px_2()
+        .rounded_md()
+        .bg(gpui::rgb(pal().grid_bg))
+        .border_1()
+        .border_color(gpui::rgb(if active {
+            pal().select_border
+        } else {
+            pal().chrome_edge
+        }))
+        .text_size(px(12.0))
+        .text_color(gpui::rgb(if text.is_empty() {
+            pal().text_dim
+        } else {
+            pal().text
+        }))
+        .cursor(gpui::CursorStyle::IBeam)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                if schist_neural::embed::ready() {
+                    ws.library.search_active = true;
+                } else {
+                    ws.open_modal(Modal::ModelManager, cx);
+                }
+                cx.notify();
+            }),
+        )
+        .child(div().flex_grow().truncate().child(shown))
+        .children((!text.is_empty()).then(|| {
+            div()
+                .px_1()
+                .text_color(gpui::rgb(pal().text_dim))
+                .hover(|s| s.text_color(gpui::rgb(pal().text)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _e: &MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        ws.gallery_search_clear(cx);
+                    }),
+                )
+                .child("\u{2715}")
         }))
 }
 
@@ -415,19 +486,36 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let hide_flagged = ws.view.gallery_hide_nsfw;
     // Owned snapshot: the cells below borrow the workspace mutably to
     // fetch thumbnails, so they cannot also iterate `sections` in place.
-    let sections: Vec<(PathBuf, Vec<super::library::Entry>)> = ws
-        .library
-        .visible_sections()
-        .map(|s| {
-            let entries = s
-                .entries
+    let sections: Vec<(PathBuf, Vec<super::library::Entry>)> =
+        if let Some(results) = &ws.library.search_results {
+            // A search flattens the folders into one ranked strip.
+            let by_path: FxHashMap<&PathBuf, &super::library::Entry> = ws
+                .library
+                .sections
                 .iter()
-                .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
-                .cloned()
+                .flat_map(|s| s.entries.iter())
+                .map(|e| (&e.path, e))
                 .collect();
-            (s.dir.clone(), entries)
-        })
-        .collect();
+            let entries: Vec<super::library::Entry> = results
+                .iter()
+                .filter_map(|(path, _)| by_path.get(path).map(|e| (*e).clone()))
+                .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
+                .collect();
+            vec![(PathBuf::from("Search results"), entries)]
+        } else {
+            ws.library
+                .visible_sections()
+                .map(|s| {
+                    let entries = s
+                        .entries
+                        .iter()
+                        .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
+                        .cloned()
+                        .collect();
+                    (s.dir.clone(), entries)
+                })
+                .collect()
+        };
     let scanning = ws.library.scanning;
     let mut column = div()
         .id("gallery-grid")

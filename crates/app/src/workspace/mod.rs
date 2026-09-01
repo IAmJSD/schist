@@ -390,6 +390,19 @@ impl Workspace {
             false
         }
     }
+
+    /// Whether the gallery's search box is taking typing, for the key
+    /// context. Always false on the web, with the gallery itself.
+    pub fn gallery_typing(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.gallery_search_active()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
 }
 
 /// One filter in the Filter Gallery's stack.

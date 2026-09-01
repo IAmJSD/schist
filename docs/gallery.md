@@ -128,6 +128,29 @@ Deleting a photo's `.schist` entry — or the whole directory — reverts it
 to the original everywhere; Schist treats an absent sidecar as "never
 edited".
 
+## Search
+
+The box in the gallery's top strip searches photos by what is *in*
+them: type "dog on a beach" and the grid becomes one strip ranked by
+similarity. It works on embeddings — every photo mapped into the same
+512 dimensions as the words, by the two **Search** models in Manage
+Models (MobileCLIP-S0's towers, ~46 MB for images and ~170 MB for text,
+revision-pinned and hash-verified; the pair was chosen empirically —
+its convolutional image tower runs in ~200 ms under tract where a same-
+size ViT took eight seconds).
+
+Photos are embedded in the background as their thumbnails process, and
+when nothing on screen wants a thumbnail the loader spends its idle
+time indexing the rest of the library; the box shows the index's
+progress. Vectors are cached beside the thumbnails (`.embed`) and held
+in memory — ranking is a dot product over the lot, which at gallery
+scale needs no database fancier than a loop. The text side runs a
+CLIP byte-level BPE tokenizer implemented in `schist-neural` and pinned
+against the reference tokenizer's output, then the text tower, in
+milliseconds per query; results update per keystroke, Escape clears,
+and results below a 0.15 cosine are dropped rather than padded with
+shrugs.
+
 ## What is persisted
 
 `~/.config/schist/library.json`: the watched folders, the recent-files

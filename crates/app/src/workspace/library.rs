@@ -31,6 +31,11 @@ const SCAN_MAX_DEPTH: usize = 6;
 const SCAN_MAX_FILES: usize = 5000;
 /// How many recently opened files the start screen lists.
 const RECENTS_KEPT: usize = 10;
+/// The most results a search shows, and the similarity below which a
+/// result is the model shrugging rather than matching (cosines from the
+/// MobileCLIP pair sit around 0.2–0.3 for a real match).
+const SEARCH_KEPT: usize = 200;
+const SEARCH_FLOOR: f32 = 0.15;
 
 /// One scanned directory and the images in it, a section of the grid.
 pub struct Section {
@@ -67,6 +72,10 @@ struct ThumbJob {
     /// What actually gets rendered: the PSD sidecar when one exists.
     source: PathBuf,
     mtime: u64,
+    /// Queued by the search indexer rather than a visible cell: score
+    /// and embed, but don't keep the pixels — a whole camera roll of
+    /// retained thumbnails would be gigabytes.
+    for_index: bool,
 }
 
 /// What `library.json` persists: the watched folders and the recents.
@@ -117,6 +126,17 @@ pub struct Library {
     /// Photos the content filter flagged as explicit, filled by the
     /// thumbnail loader. Only consulted while the preference is on.
     flagged: FxHashMap<PathBuf, bool>,
+    /// The search index: one unit vector per embedded photo, filled by
+    /// the thumbnail loader and the background indexer. Ranking is a
+    /// dot product over the lot — thousands of photos is nothing.
+    embeddings: FxHashMap<PathBuf, Arc<Vec<f32>>>,
+    /// The search box: its text, whether it is taking keystrokes, and
+    /// the current query's ranked results (`None` = not searching).
+    pub search: String,
+    pub search_active: bool,
+    pub search_results: Option<Vec<(PathBuf, f32)>>,
+    /// Bumped per query so a slow embedding cannot land on a newer one.
+    search_seq: u64,
     /// A thumbnail failed for want of the HEIC support download; the
     /// gallery offers it once.
     heif_needed: Option<PathBuf>,
@@ -147,6 +167,11 @@ impl Library {
             edit_backings: FxHashMap::default(),
             map: library_geo::MapState::default(),
             flagged: FxHashMap::default(),
+            embeddings: FxHashMap::default(),
+            search: String::new(),
+            search_active: false,
+            search_results: None,
+            search_seq: 0,
             heif_needed: None,
             heif_prompted: false,
         }
@@ -184,8 +209,38 @@ impl Library {
             key: entry.path.clone(),
             source: thumb_source(&entry.path, entry.edited),
             mtime: entry.mtime,
+            for_index: false,
         });
         None
+    }
+
+    /// Feed the loader the next photos missing a search embedding, when
+    /// the model to make one is here. Returns whether anything queued.
+    fn refill_index_queue(&mut self) -> bool {
+        if !schist_neural::installed("embed-image") {
+            return false;
+        }
+        let jobs: Vec<ThumbJob> = self
+            .sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .filter(|e| !self.embeddings.contains_key(&e.path))
+            .take(THUMB_BATCH)
+            .map(|e| ThumbJob {
+                key: e.path.clone(),
+                source: thumb_source(&e.path, e.edited),
+                mtime: e.mtime,
+                for_index: true,
+            })
+            .collect();
+        self.queue.extend(jobs);
+        !self.queue.is_empty()
+    }
+
+    /// How much of the gallery the search index covers: (embedded, all).
+    pub fn index_progress(&self) -> (usize, usize) {
+        let total = self.sections.iter().map(|s| s.entries.len()).sum();
+        (self.embeddings.len().min(total), total)
     }
 
     /// Whether any queued decode is waiting for a loader task.
@@ -383,6 +438,10 @@ struct ThumbOutcome {
     img: Option<Arc<RenderImage>>,
     /// The photo's content scores, when the model is installed.
     score: Option<ExplicitScore>,
+    /// The photo's search embedding, when that model is installed. An
+    /// empty vector marks "tried and cannot" — an undecodable file —
+    /// so the indexer does not queue it forever.
+    embedding: Option<Vec<f32>>,
     /// The decode failed for want of the HEIC support download.
     needs_heif: bool,
 }
@@ -403,10 +462,26 @@ fn is_explicit(score: ExplicitScore) -> bool {
     score.explicit >= 0.5 || score.sexy >= 0.9
 }
 
-/// Decode one thumbnail, through the disk cache when it can, and score
-/// it for the content filter on the way past. Blocking.
+/// Decode one thumbnail, through the disk cache when it can, scoring it
+/// for the content filter and embedding it for search on the way past.
+/// Blocking.
 fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
     let cache = thumb_cache_path(&job.source, job.mtime);
+    // An index pass whose answers are all cached needs no pixels at all:
+    // this is what makes re-indexing a warm library a file-read sweep
+    // rather than a decode of everything.
+    if job.for_index {
+        let cached_embed = read_embed_cache(&cache);
+        let cached_score = read_score_cache(&cache);
+        if cached_embed.is_some() && (cached_score.is_some() || !nsfw_installed()) {
+            return ThumbOutcome {
+                img: None,
+                score: cached_score,
+                embedding: cached_embed,
+                needs_heif: false,
+            };
+        }
+    }
     let mut needs_heif = false;
     let rgba: Option<(u32, u32, Vec<u8>)> = if let Some(cached) = cache
         .as_ref()
@@ -436,11 +511,96 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
     let score = rgba
         .as_ref()
         .and_then(|(w, h, rgba)| explicit_score(&cache, *w, *h, rgba));
+    let embedding = match &rgba {
+        Some((w, h, rgba)) => photo_embedding(&cache, *w, *h, rgba),
+        // Undecodable: leave the "tried and cannot" marker so the
+        // indexer moves on, but only when a model was here to try.
+        None if schist_neural::installed("embed-image") => Some(Vec::new()),
+        None => None,
+    };
     ThumbOutcome {
-        img: rgba.and_then(|(w, h, rgba)| rgba_to_render_image(w, h, rgba)),
+        img: if job.for_index {
+            None
+        } else {
+            rgba.and_then(|(w, h, rgba)| rgba_to_render_image(w, h, rgba))
+        },
         score,
+        embedding,
         needs_heif,
     }
+}
+
+fn nsfw_installed() -> bool {
+    schist_neural::installed("nsfw")
+}
+
+fn read_score_cache(cache: &Option<PathBuf>) -> Option<ExplicitScore> {
+    let text = cache
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p.with_extension("score2")).ok())?;
+    let mut parts = text
+        .split_whitespace()
+        .filter_map(|v| v.parse::<f32>().ok());
+    match (parts.next(), parts.next()) {
+        (Some(explicit), Some(sexy)) => Some(ExplicitScore { explicit, sexy }),
+        _ => None,
+    }
+}
+
+fn read_embed_cache(cache: &Option<PathBuf>) -> Option<Vec<f32>> {
+    let bytes = cache
+        .as_ref()
+        .and_then(|p| std::fs::read(p.with_extension("embed")).ok())?;
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect(),
+    )
+}
+
+/// The photo's search embedding, cached beside the thumbnail. `None`
+/// when the model is not installed.
+fn photo_embedding(
+    cache: &Option<PathBuf>,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Option<Vec<f32>> {
+    if let Some(cached) = read_embed_cache(cache) {
+        return Some(cached);
+    }
+    let spec = schist_neural::spec("embed-image")?;
+    if !schist_neural::installed("embed-image") {
+        return None;
+    }
+    let (mw, mh) = spec.input.dims();
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let img = image::imageops::resize(
+        &img,
+        mw as u32,
+        mh as u32,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut rgb = Vec::with_capacity(mw * mh * 3);
+    for px in img.pixels() {
+        rgb.extend([
+            px.0[0] as f32 / 255.0,
+            px.0[1] as f32 / 255.0,
+            px.0[2] as f32 / 255.0,
+        ]);
+    }
+    let vector = schist_neural::embed::embed_image(&rgb)?;
+    if let Some(path) = cache {
+        let bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let _ = std::fs::write(path.with_extension("embed"), bytes);
+    }
+    Some(vector)
 }
 
 /// The model's judgement of a photo, cached beside the thumbnail so
@@ -454,18 +614,10 @@ fn explicit_score(
 ) -> Option<ExplicitScore> {
     // "score2": the first format cached one blended number that mixed
     // "sexy" in; those verdicts were wrong and are left to rot.
-    let score_cache = cache.as_ref().map(|p| p.with_extension("score2"));
-    if let Some(text) = score_cache
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-    {
-        let mut parts = text
-            .split_whitespace()
-            .filter_map(|v| v.parse::<f32>().ok());
-        if let (Some(explicit), Some(sexy)) = (parts.next(), parts.next()) {
-            return Some(ExplicitScore { explicit, sexy });
-        }
+    if let Some(cached) = read_score_cache(cache) {
+        return Some(cached);
     }
+    let score_cache = cache.as_ref().map(|p| p.with_extension("score2"));
     let model = schist_neural::get("nsfw")?;
     let (mw, mh) = model.spec.input.dims();
     let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
@@ -762,6 +914,14 @@ impl Workspace {
                 Err(_) => return,
             };
             if batch.is_empty() {
+                // Nothing on screen wants a thumbnail; spend the idle
+                // time indexing the rest of the library for search.
+                let refilled = this
+                    .update(cx, |ws, _| ws.library.refill_index_queue())
+                    .unwrap_or(false);
+                if refilled {
+                    continue;
+                }
                 this.update(cx, |ws, _| ws.library.ticker = false).ok();
                 return;
             }
@@ -774,7 +934,7 @@ impl Workspace {
                 .map(|job| {
                     cx.background_executor().spawn(async move {
                         let outcome = load_thumb(&job);
-                        (job.key, job.mtime, outcome)
+                        (job.key, job.mtime, job.for_index, outcome)
                     })
                 })
                 .collect();
@@ -783,24 +943,138 @@ impl Workspace {
                 results.push(task.await);
             }
             let keep = this.update(cx, |ws, cx| {
-                for (key, mtime, outcome) in results {
+                for (key, mtime, for_index, outcome) in results {
                     if let Some(score) = outcome.score {
                         ws.library.flagged.insert(key.clone(), is_explicit(score));
+                    }
+                    if let Some(vector) = outcome.embedding {
+                        ws.library.embeddings.insert(key.clone(), Arc::new(vector));
                     }
                     if outcome.needs_heif && ws.library.heif_needed.is_none() {
                         ws.library.heif_needed = Some(key.clone());
                     }
-                    let state = match outcome.img {
-                        Some(img) => Thumb::Ready(img),
-                        None => Thumb::Failed,
-                    };
-                    ws.library.thumbs.insert(key, (mtime, state));
+                    // Index passes keep no pixels; the map slot stays
+                    // free for a real cell to claim later.
+                    if !for_index {
+                        let state = match outcome.img {
+                            Some(img) => Thumb::Ready(img),
+                            None => Thumb::Failed,
+                        };
+                        ws.library.thumbs.insert(key, (mtime, state));
+                    }
                 }
                 cx.notify();
             });
             if keep.is_err() {
                 return;
             }
+        })
+        .detach();
+    }
+
+    /// Whether the gallery's search box is taking keystrokes — what
+    /// flips the key context to text entry so letters reach the box
+    /// instead of the tool shortcuts.
+    pub fn gallery_search_active(&self) -> bool {
+        self.library.open && self.library.search_active
+    }
+
+    /// A keystroke for the search box. Returns whether it was taken.
+    pub(super) fn gallery_search_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.library.search_active {
+            return false;
+        }
+        match ev.keystroke.key.as_str() {
+            "backspace" => {
+                self.library.search.pop();
+                self.gallery_search_changed(cx);
+            }
+            "enter" => {
+                // The results are already live; Enter just puts the
+                // keyboard back on the shortcuts.
+                self.library.search_active = false;
+                cx.notify();
+            }
+            _ => {
+                let Some(text) = ev.keystroke.key_char.as_deref() else {
+                    return false;
+                };
+                if text.chars().any(char::is_control) {
+                    return false;
+                }
+                self.library.search.push_str(text);
+                self.gallery_search_changed(cx);
+            }
+        }
+        true
+    }
+
+    /// Leave the search: clear the box and show the folders again.
+    /// Wired into the always-on Escape path.
+    pub(super) fn gallery_search_clear(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.library.open
+            || (!self.library.search_active && self.library.search_results.is_none())
+        {
+            return false;
+        }
+        self.library.search.clear();
+        self.library.search_active = false;
+        self.library.search_results = None;
+        self.library.search_seq += 1;
+        cx.notify();
+        true
+    }
+
+    /// Re-rank for the current query: embed the text on a background
+    /// thread and dot it against every photo's vector.
+    pub(super) fn gallery_search_changed(&mut self, cx: &mut Context<Self>) {
+        self.library.search_seq += 1;
+        let seq = self.library.search_seq;
+        let query = self.library.search.trim().to_string();
+        if query.is_empty() {
+            self.library.search_results = None;
+            cx.notify();
+            return;
+        }
+        let vectors: Vec<(PathBuf, Arc<Vec<f32>>)> = self
+            .library
+            .embeddings
+            .iter()
+            .map(|(p, v)| (p.clone(), v.clone()))
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let ranked = cx
+                .background_executor()
+                .spawn(async move {
+                    let text = schist_neural::embed::embed_text(&query)?;
+                    let mut scored: Vec<(PathBuf, f32)> = vectors
+                        .into_iter()
+                        .map(|(path, v)| {
+                            let score = v.iter().zip(&text).map(|(a, b)| a * b).sum::<f32>();
+                            (path, score)
+                        })
+                        .collect();
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    scored.truncate(SEARCH_KEPT);
+                    // Below this the model is shrugging, not matching.
+                    scored.retain(|(_, s)| *s >= SEARCH_FLOOR);
+                    Some(scored)
+                })
+                .await;
+            this.update(cx, |ws, cx| {
+                // A newer keystroke owns the results now.
+                if ws.library.search_seq == seq {
+                    if let Some(ranked) = ranked {
+                        ws.library.search_results = Some(ranked);
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
     }
