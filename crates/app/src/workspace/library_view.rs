@@ -585,6 +585,16 @@ fn tray(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .child("edited — versions kept beside the file")
         }))
         .child(div().flex_grow())
+        // The editor's status bar is hidden here, so the tray carries the
+        // status line — otherwise an import's outcome lands nowhere.
+        .child(
+            div()
+                .max_w(px(420.0))
+                .truncate()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child(ws.status.clone()),
+        )
         .child(
             div()
                 .text_size(px(11.0))
@@ -661,11 +671,49 @@ fn size_slider(ratio: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
 }
 
-/// Several mounted cameras: ask which one to import.
+/// The camera picker. Several mounted cameras ask which one; none says
+/// so and offers a rescan, because Import… must always answer the click.
 pub(crate) fn camera_import_dialog(
     sources: &[PathBuf],
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    if sources.is_empty() {
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_size(px(12.0)).child("No camera volumes found."))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                    .child(
+                        "Cameras and memory cards that mount as a disk — anything with a DCIM \
+                         folder — appear here. A phone in PTP mode does not mount as a disk; \
+                         use a card reader or the camera's mass-storage mode.",
+                    ),
+            );
+        let actions = div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(crate::ui::button(
+                "Cancel",
+                false,
+                |ws, _w, cx| ws.close_modal(cx),
+                cx,
+            ))
+            .child(crate::ui::button(
+                "Scan Again",
+                true,
+                |ws, _w, cx| {
+                    ws.close_modal(cx);
+                    ws.gallery_import_camera(cx);
+                },
+                cx,
+            ));
+        return crate::ui::modal_frame("Import from Camera", 420.0, body, actions);
+    }
     let mut body = div().flex().flex_col().gap_1().child(
         div()
             .text_size(px(12.0))

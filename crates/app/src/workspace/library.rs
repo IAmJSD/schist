@@ -573,21 +573,18 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Import from a mounted camera. One source imports straight away; a
-    /// choice of several opens the picker dialog.
+    /// Import from a mounted camera. One source imports straight away;
+    /// none or several open the dialog — "none" gets a dialog too, since
+    /// a button that answers with nothing visible reads as broken.
     pub fn gallery_import_camera(&mut self, cx: &mut Context<Self>) {
         if self.library.importing {
             return;
         }
         let mut sources = camera_sources();
-        match sources.len() {
-            0 => {
-                self.status =
-                    "No camera found — mount one and look for a volume with a DCIM folder".into();
-                cx.notify();
-            }
-            1 => self.import_camera(sources.remove(0), cx),
-            _ => self.open_modal(Modal::CameraImport { sources }, cx),
+        if sources.len() == 1 {
+            self.import_camera(sources.remove(0), cx);
+        } else {
+            self.open_modal(Modal::CameraImport { sources }, cx);
         }
     }
 
