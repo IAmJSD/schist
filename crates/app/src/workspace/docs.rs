@@ -123,7 +123,12 @@ impl Workspace {
         self.reset_per_document_caches();
         self.zoom = 1.0;
         self.offset = point(px(40.0), px(40.0));
+        // Fit now when the canvas has a size, and again on the first
+        // real paint regardless: opened from the gallery (or at boot)
+        // the canvas has never laid out, and fitting against zero — or
+        // stale — bounds left a 12-megapixel photo at 100%, top-left.
         self.fit_to_view();
+        self.pending_fit = true;
     }
 
     // ----- tabs -----

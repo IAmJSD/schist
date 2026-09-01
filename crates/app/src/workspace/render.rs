@@ -6,6 +6,12 @@ impl Workspace {
     /// Everything the paint closure needs, computed with &mut self.
     pub(super) fn prepare_paint(&mut self, bounds: Bounds<Pixels>, scale_factor: f32) -> PaintJob {
         self.canvas_bounds = bounds;
+        // The fit a fresh document owes itself, now that the bounds are
+        // real rather than whatever the canvas last knew.
+        if self.pending_fit {
+            self.pending_fit = false;
+            self.fit_to_view();
+        }
         let mut job = PaintJob::default();
         let Some(doc) = self.doc.as_ref() else {
             return job;

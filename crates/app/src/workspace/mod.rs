@@ -364,6 +364,11 @@ pub struct Workspace {
     /// The canvas takes focus on the first frame so keyboard shortcuts work
     /// before the user clicks anything.
     focused_once: bool,
+    /// A freshly opened document still owes itself a Fit to Screen: the
+    /// open may have happened while the canvas had no size at all (from
+    /// the gallery, or at boot), so the fit is redone on the first paint
+    /// that knows the real bounds.
+    pending_fit: bool,
     /// Bumped whenever colour settings change, so cached pixels drawn with
     /// the old transform are rebuilt.
     color_epoch: u64,
@@ -1180,6 +1185,7 @@ impl Workspace {
             selection_outline: None,
             nav_thumb: None,
             focused_once: false,
+            pending_fit: false,
             color_epoch: 0,
             color: schist_colormgmt::ColorSettings::default(),
             display_transform: None,
