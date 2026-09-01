@@ -138,9 +138,12 @@ impl Workspace {
             .child(body)
             .child(tray(self, cx))
             .children(context_menu);
-        // Rendering cells is what queues their thumbnails; make sure a
-        // loader is running for whatever this frame asked for — and if
-        // decodes have been failing for want of HEIC support, offer it.
+        // Each cell's paint-time probe is what queues its thumbnail;
+        // mark the frame so those probes stamp as "current" (the age
+        // eviction refuses), and make sure a loader is running for
+        // whatever the last frame asked for — and if decodes have been
+        // failing for want of HEIC support, offer it.
+        self.library.begin_thumb_frame();
         self.kick_thumb_loader(cx);
         // Smart buckets re-score whenever the index moved, so they
         // fill themselves as photos are indexed and imported.
@@ -816,11 +819,22 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .bg(gpui::rgb(pal().grid_bg))
         .p_2()
         // Record the viewport rectangle, so keyboard navigation can
-        // work out columns per row and keep the selection on screen.
+        // work out columns per row, the reveal logic can keep the
+        // selection on screen, and the cells' visibility probes know
+        // what "on screen" means. The canvas sits inside the scrolled
+        // content, so its bounds scroll along with it — subtract the
+        // scroll offset to get back to window coordinates, the space
+        // every cell's own bounds are reported in.
         .child(
             canvas(
                 move |bounds, _window, cx| {
-                    grid_entity.update(cx, |ws, _| ws.library.grid_bounds = bounds);
+                    grid_entity.update(cx, |ws, _| {
+                        let offset = ws.library.grid_scroll.offset();
+                        ws.library.grid_bounds = gpui::Bounds {
+                            origin: bounds.origin - offset,
+                            size: bounds.size,
+                        };
+                    });
                 },
                 |_, _, _, _| {},
             )
@@ -906,6 +920,8 @@ fn cell_element(
 ) -> impl IntoElement {
     use super::library::{GalleryContext, GalleryDrag};
     let thumb = ws.library.thumb(&entry);
+    let probe_entity = cx.entity();
+    let probe_entry = entry.clone();
     let is_selected = selected.iter().any(|p| p == &entry.path);
     let is_lead = selected.last() == Some(&entry.path);
     let click_path = entry.path.clone();
@@ -929,6 +945,30 @@ fn cell_element(
         .h(px(cell))
         .flex_none()
         .relative()
+        // The visibility probe: at paint time it knows the cell's real
+        // rectangle, and a cell within a viewport's height of the
+        // screen is what queues its decode and stamps its thumbnail in
+        // use. Building the element (this function) must stay free —
+        // the whole grid builds every frame.
+        .child(
+            canvas(
+                move |bounds, _window, cx| {
+                    probe_entity.update(cx, |ws, cx| {
+                        // One viewport of margin either side, so
+                        // scrolling meets thumbnails, not placeholders.
+                        let mut near = ws.library.grid_bounds;
+                        near.origin.y -= near.size.height;
+                        near.size.height *= 3.0;
+                        if near.intersects(&bounds) && ws.library.note_visible(&probe_entry) {
+                            ws.kick_thumb_loader(cx);
+                        }
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
         .rounded_sm()
         .bg(gpui::rgb(if is_selected {
             pal().select_fill

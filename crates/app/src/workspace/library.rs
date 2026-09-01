@@ -242,12 +242,13 @@ pub struct Library {
     /// file that changed underneath — a photo still landing off a
     /// camera when its first decode ran, an edit — loads again.
     thumbs: FxHashMap<PathBuf, (u64, Thumb)>,
-    /// When each thumbnail was last wanted by a cell, in ticks of
-    /// `thumb_tick` — what decides who goes when the map is over
-    /// budget. On-screen cells re-stamp every frame, so eviction only
-    /// ever takes what scrolled away.
+    /// The frame each thumbnail was last visible on — what decides who
+    /// goes when the map is over budget. Cells near the viewport
+    /// re-stamp every frame, and eviction refuses anything stamped
+    /// with the current frame, so what is on screen can never be taken
+    /// no matter how far over budget a huge window gets.
     thumb_used: FxHashMap<PathBuf, u64>,
-    thumb_tick: u64,
+    thumb_frame: u64,
     queue: Vec<ThumbJob>,
     /// Whether a thumbnail loader task is live (only ever one at a time).
     ticker: bool,
@@ -421,7 +422,7 @@ impl Library {
             importing: false,
             thumbs: FxHashMap::default(),
             thumb_used: FxHashMap::default(),
-            thumb_tick: 0,
+            thumb_frame: 0,
             queue: Vec::new(),
             ticker: false,
             pending_backing: None,
@@ -484,19 +485,28 @@ impl Library {
         }
     }
 
-    /// The thumbnail for `entry`, queueing a decode the first time a cell
-    /// asks. Rendering is what drives loading, so only images that have
-    /// been on screen ever cost a decode.
-    pub fn thumb(&mut self, entry: &Entry) -> Option<Arc<RenderImage>> {
-        // Every ask is a use: what the eviction pass keeps is whatever
-        // was wanted most recently.
-        self.thumb_tick += 1;
-        self.thumb_used.insert(entry.path.clone(), self.thumb_tick);
+    /// The decoded thumbnail for `entry`, if one is in memory. A pure
+    /// read: the whole grid builds an element per photo every frame
+    /// while only a screenful is on screen, so building must not queue
+    /// work or count as use — `note_visible`, called from each cell's
+    /// paint-time probe, is what does both.
+    pub fn thumb(&self, entry: &Entry) -> Option<Arc<RenderImage>> {
         match self.thumbs.get(&entry.path) {
-            Some((mtime, Thumb::Ready(img))) if *mtime == entry.mtime => return Some(img.clone()),
-            // Same file, still in flight or given up: leave it be. A
-            // different mtime falls through and queues a fresh decode.
-            Some((mtime, _)) if *mtime == entry.mtime => return None,
+            Some((mtime, Thumb::Ready(img))) if *mtime == entry.mtime => Some(img.clone()),
+            _ => None,
+        }
+    }
+
+    /// A cell reported itself inside (or near) the viewport: stamp its
+    /// thumbnail as in use — what the eviction pass keeps — and queue
+    /// a decode when none is ready or in flight. Returns whether new
+    /// work was queued, so the caller knows to kick the loader.
+    pub(super) fn note_visible(&mut self, entry: &Entry) -> bool {
+        self.thumb_used.insert(entry.path.clone(), self.thumb_frame);
+        match self.thumbs.get(&entry.path) {
+            // Ready, in flight, or given up — leave it be. A different
+            // mtime falls through and queues a fresh decode.
+            Some((mtime, _)) if *mtime == entry.mtime => return false,
             _ => {}
         }
         self.thumbs
@@ -507,7 +517,7 @@ impl Library {
             mtime: entry.mtime,
             for_index: false,
         });
-        None
+        true
     }
 
     /// Keep at most `keep` decoded thumbnails, dropping the least
@@ -525,17 +535,30 @@ impl Library {
         if over == 0 {
             return;
         }
+        // Anything stamped with the current frame is on (or near) the
+        // screen right now and is never a candidate, even if that
+        // leaves the map over budget — a giant window at the smallest
+        // thumb size beats the budget, never the other way round.
         let mut by_age: Vec<(u64, PathBuf)> = self
             .thumbs
             .iter()
             .filter(|(_, t)| ready(t))
-            .map(|(p, _)| (self.thumb_used.get(p).copied().unwrap_or(0), p.clone()))
+            .filter_map(|(p, _)| {
+                let stamp = self.thumb_used.get(p).copied().unwrap_or(0);
+                (stamp < self.thumb_frame).then(|| (stamp, p.clone()))
+            })
             .collect();
         by_age.sort_unstable();
         for (_, path) in by_age.into_iter().take(over) {
             self.thumbs.remove(&path);
             self.thumb_used.remove(&path);
         }
+    }
+
+    /// A new gallery frame is rendering: visibility stamps from here
+    /// on are "current", the one age eviction refuses to touch.
+    pub(super) fn begin_thumb_frame(&mut self) {
+        self.thumb_frame += 1;
     }
 
     /// The gallery left the screen: give back what only it was using.
@@ -2813,6 +2836,7 @@ mod tests {
     #[test]
     fn thumbnail_eviction_takes_the_least_recently_shown_and_only_them() {
         let mut lib = Library::load();
+        lib.thumb_frame = 100;
         let img = || {
             Thumb::Ready(Arc::new(RenderImage::new(smallvec![image::Frame::new(
                 image::RgbaImage::new(2, 2),
@@ -2823,6 +2847,10 @@ mod tests {
             lib.thumbs.insert(path.clone(), (0, img()));
             lib.thumb_used.insert(path, i);
         }
+        // On screen this very frame: over budget or not, untouchable.
+        lib.thumbs
+            .insert(PathBuf::from("/p/visible.jpg"), (0, img()));
+        lib.thumb_used.insert(PathBuf::from("/p/visible.jpg"), 100);
         // Pending and Failed hold no pixels; they must never be
         // evicted (a Failed that went away would retry forever).
         lib.thumbs
@@ -2830,15 +2858,18 @@ mod tests {
         lib.thumbs
             .insert(PathBuf::from("/p/failed.jpg"), (0, Thumb::Failed));
         lib.evict_thumbs(2);
-        // The two oldest Ready thumbs went; the two newest and both
-        // pixel-less states stayed.
+        // Three Ready over budget, but only the oldest off-screen pair
+        // plus one more go; the current-frame one and both pixel-less
+        // states stay.
         assert!(!lib.thumbs.contains_key(Path::new("/p/0.jpg")));
         assert!(!lib.thumbs.contains_key(Path::new("/p/1.jpg")));
-        assert!(lib.thumbs.contains_key(Path::new("/p/2.jpg")));
+        assert!(!lib.thumbs.contains_key(Path::new("/p/2.jpg")));
         assert!(lib.thumbs.contains_key(Path::new("/p/3.jpg")));
+        assert!(lib.thumbs.contains_key(Path::new("/p/visible.jpg")));
         assert!(lib.thumbs.contains_key(Path::new("/p/pending.jpg")));
         assert!(lib.thumbs.contains_key(Path::new("/p/failed.jpg")));
-        // Under budget: nothing more to do.
+        // Nothing more evictable: what's left is the current-frame
+        // thumb, the last off-screen one, and the pixel-less states.
         lib.evict_thumbs(2);
         assert_eq!(lib.thumbs.len(), 4);
     }
