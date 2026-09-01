@@ -113,6 +113,7 @@ pub(super) fn image_size(
         .child(ui::field_row(
             "Resample",
             ui::dropdown(
+                &ws.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("image-size-filter"),
                     is_open: state.open_popup == Some(Popup::Field("image-size-filter")),

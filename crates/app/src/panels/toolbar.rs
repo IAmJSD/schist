@@ -135,24 +135,27 @@ pub(super) fn tool_option_control(
             // never has to truncate its own value.
             let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
             let width = (longest as f32 * 6.2 + 34.0).clamp(80.0, 210.0);
-            let control = ui::dropdown(
-                ui::Dropdown {
-                    popup: Popup::Field(key),
-                    is_open: ws.open_popup == Some(Popup::Field(key)),
-                    current,
-                    label: labels.get(current).copied().unwrap_or("").into(),
-                    width,
-                    options: labels
-                        .iter()
-                        .enumerate()
-                        .map(|(i, l)| (SharedString::from(*l), i))
-                        .collect(),
-                },
-                move |ws, i, cx| {
-                    ws.set_tool_option(key, schist_plugin_api::OptionValue::Choice(i), cx)
-                },
-                cx,
-            );
+            let spec = ui::Dropdown {
+                popup: Popup::Field(key),
+                is_open: ws.open_popup == Some(Popup::Field(key)),
+                current,
+                label: labels.get(current).copied().unwrap_or("").into(),
+                width,
+                options: labels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| (SharedString::from(*l), i))
+                    .collect(),
+            };
+            let on_select = move |ws: &mut Workspace, i, cx: &mut Context<Workspace>| {
+                ws.set_tool_option(key, schist_plugin_api::OptionValue::Choice(i), cx)
+            };
+            // The font menu's rows are font names, so show each in itself.
+            let control = if key == "type-family" {
+                ui::font_dropdown(&ws.dropdown_scroll, spec, on_select, cx).into_any_element()
+            } else {
+                ui::dropdown(&ws.dropdown_scroll, spec, on_select, cx).into_any_element()
+            };
             // Sliders carry their own label; a dropdown does not, and an
             // unlabelled one reading "Point Sample" does not say what it
             // is choosing.

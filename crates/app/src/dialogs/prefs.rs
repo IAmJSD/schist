@@ -21,6 +21,7 @@ pub(super) fn preferences(
         .child(ui::field_row(
             "Theme",
             ui::dropdown(
+                &ws.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("pref-theme"),
                     is_open: state.open_popup == Some(Popup::Field("pref-theme")),
@@ -69,6 +70,7 @@ pub(super) fn preferences(
         .child(ui::field_row(
             "Rendering intent",
             ui::dropdown(
+                &ws.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("pref-intent"),
                     is_open: state.open_popup == Some(Popup::Field("pref-intent")),

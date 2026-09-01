@@ -30,6 +30,7 @@ pub(super) fn export_dialog(
     let mut body = div().flex().flex_col().gap_1().child(ui::field_row(
         "Format",
         ui::dropdown(
+            &ws.dropdown_scroll,
             ui::Dropdown {
                 popup: Popup::Field("export-format"),
                 is_open: state.open_popup == Some(Popup::Field("export-format")),

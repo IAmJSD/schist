@@ -64,6 +64,9 @@ struct DialogState {
     open_popup: Option<Popup>,
     focused_field: Option<&'static str>,
     field_buffer: String,
+    /// Shares the workspace's dropdown scroll state (it clones as a
+    /// handle), so dialog dropdowns open at their current value too.
+    dropdown_scroll: ui::DropdownScroll,
 }
 
 /// Render whichever modal is open, if any.
@@ -75,6 +78,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         open_popup: ws.open_popup,
         focused_field: ws.focused_field,
         field_buffer: ws.field_buffer.clone(),
+        dropdown_scroll: ws.dropdown_scroll.clone(),
     };
     // Each dialog's primary button registers itself as the default
     // action while it builds, so Enter can fire it.

@@ -264,6 +264,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         .child(ui::field_row(
             "Channel",
             ui::dropdown(
+                &ws.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("curve-channel"),
                     is_open: ws.open_popup == Some(Popup::Field("curve-channel")),

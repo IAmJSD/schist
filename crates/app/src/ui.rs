@@ -382,6 +382,36 @@ pub fn checkbox(
         .child(label.into())
 }
 
+/// Scroll state for the open dropdown's option list.
+///
+/// One instance serves every dropdown because only one popup can be open
+/// at a time. Cloning shares the underlying state, which is how the
+/// per-frame `DialogState` snapshot hands it to dialog widgets.
+#[derive(Clone)]
+pub struct DropdownScroll {
+    handle: gpui::ScrollHandle,
+    /// Whether the open dropdown has been scrolled to its value yet:
+    /// once per opening, after which the list is the user's to scroll.
+    scrolled: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl Default for DropdownScroll {
+    fn default() -> Self {
+        DropdownScroll {
+            handle: gpui::ScrollHandle::new(),
+            scrolled: Default::default(),
+        }
+    }
+}
+
+impl DropdownScroll {
+    /// Forget the last scroll, so the next dropdown to open gets one
+    /// scroll to its selection. Called whenever a popup opens or closes.
+    pub fn reset(&self) {
+        self.scrolled.set(false);
+    }
+}
+
 /// Placement and state for a [`dropdown`].
 pub struct Dropdown<T> {
     pub popup: Popup,
@@ -394,7 +424,30 @@ pub struct Dropdown<T> {
 
 /// A dropdown button that opens its popup with the given options.
 pub fn dropdown<T: Clone + PartialEq + 'static>(
+    scroll: &DropdownScroll,
     spec: Dropdown<T>,
+    on_select: impl Fn(&mut Workspace, T, &mut Context<Workspace>) + Clone + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    dropdown_impl(scroll, spec, false, on_select, cx)
+}
+
+/// A [`dropdown`] whose rows are each set in the typeface they name, the
+/// way Figma's font menu previews its families. Falls back to the UI font
+/// for a family the window's text system cannot resolve.
+pub fn font_dropdown<T: Clone + PartialEq + 'static>(
+    scroll: &DropdownScroll,
+    spec: Dropdown<T>,
+    on_select: impl Fn(&mut Workspace, T, &mut Context<Workspace>) + Clone + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    dropdown_impl(scroll, spec, true, on_select, cx)
+}
+
+fn dropdown_impl<T: Clone + PartialEq + 'static>(
+    scroll: &DropdownScroll,
+    spec: Dropdown<T>,
+    preview_fonts: bool,
     on_select: impl Fn(&mut Workspace, T, &mut Context<Workspace>) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -430,6 +483,15 @@ pub fn dropdown<T: Clone + PartialEq + 'static>(
             palette().text_dim,
         ));
     if is_open {
+        // Open at the current value rather than the top of the list, so
+        // re-opening a long menu (fonts, blend modes) shows where you are
+        // instead of starting from the beginning. Once per opening: after
+        // that the list is the user's to scroll.
+        if !scroll.scrolled.replace(true) {
+            if let Some(ix) = options.iter().position(|(_, v)| v == current) {
+                scroll.handle.scroll_to_top_of_item(ix);
+            }
+        }
         let rows: Vec<gpui::AnyElement> = options
             .into_iter()
             .map(|(text, value)| {
@@ -442,6 +504,9 @@ pub fn dropdown<T: Clone + PartialEq + 'static>(
                     .flex()
                     .items_center()
                     .text_size(px(11.0))
+                    // Each family's name set in itself is what tells you
+                    // what you are choosing; the label alone does not.
+                    .when(preview_fonts, |d| d.font_family(text.clone()))
                     .bg(gpui::rgb(if selected {
                         palette().accent
                     } else {
@@ -480,6 +545,7 @@ pub fn dropdown<T: Clone + PartialEq + 'static>(
                 .w(px(width.max(140.0)))
                 .max_h(px(300.0))
                 .overflow_y_scroll()
+                .track_scroll(&scroll.handle)
                 .py_1()
                 .bg(gpui::rgb(palette().popup_bg))
                 .text_color(gpui::rgb(palette().text))

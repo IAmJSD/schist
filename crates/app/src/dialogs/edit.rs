@@ -129,6 +129,7 @@ pub(super) fn stroke_dialog(
         .child(ui::field_row(
             "Location",
             ui::dropdown(
+                &ws.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("stroke-position"),
                     is_open: ws.open_popup == Some(Popup::Field("stroke-position")),
@@ -208,6 +209,7 @@ pub(super) fn fill_dialog(
         .child(ui::field_row(
             "Contents",
             ui::dropdown(
+                &ws.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("fill-source"),
                     is_open: ws.open_popup == Some(Popup::Field("fill-source")),

@@ -31,6 +31,7 @@ pub(super) fn profile_dialog(
         .child(ui::field_row(
             "Profile",
             ui::dropdown(
+                &state.dropdown_scroll,
                 ui::Dropdown {
                     popup: Popup::Field("profile-pick"),
                     is_open: state.open_popup == Some(Popup::Field("profile-pick")),

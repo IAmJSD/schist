@@ -13,11 +13,14 @@ impl Workspace {
         } else {
             Some(popup)
         };
+        // A dropdown that just opened gets one scroll to its selection.
+        self.dropdown_scroll.reset();
         cx.notify();
     }
 
     pub fn close_popup(&mut self, cx: &mut Context<Self>) {
         self.open_submenu.clear();
+        self.dropdown_scroll.reset();
         if self.open_popup.take().is_some() {
             cx.notify();
         }

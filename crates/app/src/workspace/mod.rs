@@ -206,6 +206,9 @@ pub struct Workspace {
     pub status: SharedString,
     /// Which transient popup (menu / dropdown) is open.
     pub open_popup: Option<Popup>,
+    /// Scroll state of the open dropdown's list, so it can open at its
+    /// current value instead of the top.
+    pub dropdown_scroll: crate::ui::DropdownScroll,
     /// Path to the open submenu in the menu bar, e.g. [2, 4] for the fifth
     /// row of the third menu. Empty means none.
     pub open_submenu: Vec<usize>,
@@ -1018,6 +1021,7 @@ impl Workspace {
             pointer_down: false,
             status: "Ready".into(),
             open_popup: None,
+            dropdown_scroll: Default::default(),
             open_submenu: Vec::new(),
             native_menu: None,
             rotation: 0.0,
