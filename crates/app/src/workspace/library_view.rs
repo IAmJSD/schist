@@ -206,8 +206,9 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
         ))
         .child(div().flex_grow())
         .children(ws.library.map_filter_label().map(|label| {
-            // The map filter persists across launches, so while it is
-            // on it wears the least ignorable thing in the strip.
+            // While the map filter is on it wears the least
+            // ignorable thing in the strip — a filter you forgot is a
+            // gallery that looks mysteriously empty.
             div()
                 .flex()
                 .flex_row()
