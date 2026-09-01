@@ -20,9 +20,11 @@ use std::path::Path;
 /// Longest edge of a rendered thumbnail. Cells scale the image down from
 /// here, so one render serves every position of the size slider.
 const THUMB_EDGE: u32 = 256;
-/// Thumbnails decoded per background batch. Small enough that the first
-/// screenful streams in rather than arriving all at once at the end.
-const THUMB_BATCH: usize = 4;
+/// Thumbnails decoded per background batch — in parallel, one task
+/// each, so a batch costs its slowest decode rather than their sum.
+/// Small enough that the first screenful streams in rather than
+/// arriving all at once at the end.
+const THUMB_BATCH: usize = 8;
 /// Folder scanning stops here rather than following a loop of symlinks
 /// (or someone's home directory) forever.
 const SCAN_MAX_DEPTH: usize = 6;
@@ -96,7 +98,10 @@ pub struct Library {
     pub scanning: bool,
     /// A camera import in flight, so a second click does not start one.
     pub importing: bool,
-    thumbs: FxHashMap<PathBuf, Thumb>,
+    /// Thumbnail states, tagged with the mtime they were built from: a
+    /// file that changed underneath — a photo still landing off a
+    /// camera when its first decode ran, an edit — loads again.
+    thumbs: FxHashMap<PathBuf, (u64, Thumb)>,
     queue: Vec<ThumbJob>,
     /// Whether a thumbnail loader task is live (only ever one at a time).
     ticker: bool,
@@ -167,11 +172,14 @@ impl Library {
     /// been on screen ever cost a decode.
     pub fn thumb(&mut self, entry: &Entry) -> Option<Arc<RenderImage>> {
         match self.thumbs.get(&entry.path) {
-            Some(Thumb::Ready(img)) => return Some(img.clone()),
-            Some(_) => return None,
-            None => {}
+            Some((mtime, Thumb::Ready(img))) if *mtime == entry.mtime => return Some(img.clone()),
+            // Same file, still in flight or given up: leave it be. A
+            // different mtime falls through and queues a fresh decode.
+            Some((mtime, _)) if *mtime == entry.mtime => return None,
+            _ => {}
         }
-        self.thumbs.insert(entry.path.clone(), Thumb::Pending);
+        self.thumbs
+            .insert(entry.path.clone(), (entry.mtime, Thumb::Pending));
         self.queue.push(ThumbJob {
             key: entry.path.clone(),
             source: thumb_source(&entry.path, entry.edited),
@@ -187,7 +195,7 @@ impl Library {
 
     /// Whether a thumbnail decode gave up, so the cell can say so.
     pub fn thumb_failed(&self, path: &Path) -> bool {
-        matches!(self.thumbs.get(path), Some(Thumb::Failed))
+        matches!(self.thumbs.get(path), Some((_, Thumb::Failed)))
     }
 
     /// Whether the content filter flagged a photo as explicit.
@@ -207,7 +215,7 @@ impl Library {
     /// Forget failed thumbnails so they load again — what the HEIC
     /// support download makes worth retrying.
     pub fn retry_failed_thumbs(&mut self) {
-        self.thumbs.retain(|_, t| !matches!(t, Thumb::Failed));
+        self.thumbs.retain(|_, (_, t)| !matches!(t, Thumb::Failed));
     }
 
     /// Sections after the sidebar filter.
@@ -373,10 +381,26 @@ pub(super) fn rgba_to_render_image(
 /// What loading one thumbnail produced.
 struct ThumbOutcome {
     img: Option<Arc<RenderImage>>,
-    /// The photo's explicit-content score, when the model is installed.
-    score: Option<f32>,
+    /// The photo's content scores, when the model is installed.
+    score: Option<ExplicitScore>,
     /// The decode failed for want of the HEIC support download.
     needs_heif: bool,
+}
+
+/// The two signals the flag rule reads out of the model's five softmax
+/// classes: porn+hentai together, and "sexy" alone.
+#[derive(Clone, Copy)]
+struct ExplicitScore {
+    explicit: f32,
+    sexy: f32,
+}
+
+/// Whether a photo counts as explicit. The nsfwjs guidance, learned
+/// again the hard way: flag on the porn and hentai classes, and only on
+/// a near-certain "sexy" — that class fires on bare shoulders and
+/// swimwear, and summing it in flagged most of a real camera roll.
+fn is_explicit(score: ExplicitScore) -> bool {
+    score.explicit >= 0.5 || score.sexy >= 0.9
 }
 
 /// Decode one thumbnail, through the disk cache when it can, and score
@@ -419,21 +443,27 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
     }
 }
 
-/// How sure the model must be before a photo counts as explicit: the
-/// sum of its hentai/porn/sexy classes against this.
-const NSFW_THRESHOLD: f32 = 0.7;
-
-/// The chance a photo is explicit, by the "nsfw" model, with the answer
-/// cached beside the thumbnail so each photo is judged once. `None`
-/// when the model is not installed — nothing is flagged without it.
-fn explicit_score(cache: &Option<PathBuf>, width: u32, height: u32, rgba: &[u8]) -> Option<f32> {
-    let score_cache = cache.as_ref().map(|p| p.with_extension("score"));
+/// The model's judgement of a photo, cached beside the thumbnail so
+/// each photo is judged once. `None` when the model is not installed —
+/// nothing is flagged without it.
+fn explicit_score(
+    cache: &Option<PathBuf>,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Option<ExplicitScore> {
+    // "score2": the first format cached one blended number that mixed
+    // "sexy" in; those verdicts were wrong and are left to rot.
+    let score_cache = cache.as_ref().map(|p| p.with_extension("score2"));
     if let Some(text) = score_cache
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
     {
-        if let Ok(score) = text.trim().parse::<f32>() {
-            return Some(score);
+        let mut parts = text
+            .split_whitespace()
+            .filter_map(|v| v.parse::<f32>().ok());
+        if let (Some(explicit), Some(sexy)) = (parts.next(), parts.next()) {
+            return Some(ExplicitScore { explicit, sexy });
         }
     }
     let model = schist_neural::get("nsfw")?;
@@ -458,9 +488,12 @@ fn explicit_score(cache: &Option<PathBuf>, width: u32, height: u32, rgba: &[u8])
     if scores.len() != 5 {
         return None;
     }
-    let score = scores[1] + scores[3] + scores[4];
+    let score = ExplicitScore {
+        explicit: scores[1] + scores[3],
+        sexy: scores[4],
+    };
     if let Some(path) = score_cache {
-        let _ = std::fs::write(path, format!("{score}"));
+        let _ = std::fs::write(path, format!("{} {}", score.explicit, score.sexy));
     }
     Some(score)
 }
@@ -732,24 +765,27 @@ impl Workspace {
                 this.update(cx, |ws, _| ws.library.ticker = false).ok();
                 return;
             }
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    batch
-                        .into_iter()
-                        .map(|job| {
-                            let outcome = load_thumb(&job);
-                            (job.key, outcome)
-                        })
-                        .collect::<Vec<_>>()
+            // One task per decode: the executor runs them across its
+            // threads, so a batch costs its slowest member — a full
+            // HEIC decode plus a classifier pass each, which in single
+            // file was slow enough to look stuck on a camera roll.
+            let tasks: Vec<_> = batch
+                .into_iter()
+                .map(|job| {
+                    cx.background_executor().spawn(async move {
+                        let outcome = load_thumb(&job);
+                        (job.key, job.mtime, outcome)
+                    })
                 })
-                .await;
+                .collect();
+            let mut results = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                results.push(task.await);
+            }
             let keep = this.update(cx, |ws, cx| {
-                for (key, outcome) in results {
+                for (key, mtime, outcome) in results {
                     if let Some(score) = outcome.score {
-                        ws.library
-                            .flagged
-                            .insert(key.clone(), score >= NSFW_THRESHOLD);
+                        ws.library.flagged.insert(key.clone(), is_explicit(score));
                     }
                     if outcome.needs_heif && ws.library.heif_needed.is_none() {
                         ws.library.heif_needed = Some(key.clone());
@@ -758,7 +794,7 @@ impl Workspace {
                         Some(img) => Thumb::Ready(img),
                         None => Thumb::Failed,
                     };
-                    ws.library.thumbs.insert(key, state);
+                    ws.library.thumbs.insert(key, (mtime, state));
                 }
                 cx.notify();
             });
@@ -1272,6 +1308,34 @@ mod tests {
         // And the photo with a sidecar knows it has been edited.
         assert!(sections[0].entries[0].edited);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ordinary_photos_of_people_are_not_flagged() {
+        // The first formula summed "sexy" into the verdict, and on a
+        // real camera roll — people, beaches, shoulders — it flagged
+        // nearly everything. The rule now needs porn/hentai, or a
+        // near-certain sexy.
+        let portrait = ExplicitScore {
+            explicit: 0.05,
+            sexy: 0.55,
+        };
+        assert!(!is_explicit(portrait));
+        let beach = ExplicitScore {
+            explicit: 0.10,
+            sexy: 0.85,
+        };
+        assert!(!is_explicit(beach));
+        let explicit = ExplicitScore {
+            explicit: 0.60,
+            sexy: 0.30,
+        };
+        assert!(is_explicit(explicit));
+        let sure_sexy = ExplicitScore {
+            explicit: 0.04,
+            sexy: 0.95,
+        };
+        assert!(is_explicit(sure_sexy));
     }
 
     #[test]

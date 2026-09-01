@@ -56,10 +56,12 @@ the tray saying how many are hidden. The judgement comes from the
 **Content (NSFW Filter)** model — the NSFWJS MobileNet (Infinite Red /
 GantMan, MIT), 17 MB, fetched like any other model under Filter ▸
 Neural Filters ▸ Manage Models and verified against a pinned hash.
-Each photo is scored once, on its thumbnail as it loads (the sum of the
-model's hentai/porn/sexy softmax classes against a 0.7 threshold), and
-the score is cached beside the thumbnail. Without the model nothing is
-flagged — the preference says so.
+Each photo is scored once, on its thumbnail as it loads, and the scores
+are cached beside the thumbnail. A photo is flagged when porn+hentai
+reach 0.5, or "sexy" alone is nearly certain (0.9) — that class fires
+on bare shoulders and swimwear, so summing it in flagged most of a real
+camera roll. Without the model nothing is flagged — the preference says
+so, and its switch stays disabled until the model is installed.
 
 ## Cameras
 
