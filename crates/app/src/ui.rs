@@ -114,11 +114,17 @@ pub fn set_light(light: bool) {
 }
 
 pub fn palette() -> &'static Palette {
-    if LIGHT_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+    if is_light() {
         &LIGHT
     } else {
         &DARK
     }
+}
+
+/// Whether the light theme is active this frame, for chrome that keeps
+/// its own palette (the gallery) but still follows the theme choice.
+pub fn is_light() -> bool {
+    LIGHT_THEME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A labelled push button.

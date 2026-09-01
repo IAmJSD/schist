@@ -28,11 +28,14 @@ opens it from anywhere; the same key closes it again. While it is up the
 menu bar swaps to the gallery's own menus — on macOS the system bar, in
 the window elsewhere, both built from the same description.
 
-The layout is Picasa's: a folder list on the left, a white grid of
-thumbnails grouped under blue per-folder headers, and a tray along the
-bottom with the green Edit button, the selected file's name, the photo
-count and the thumbnail-size slider. The chrome stays pale whatever the
-editor theme — a lightbox for photographs, not a panel set.
+The layout is Picasa's: a folder list on the left, a grid of thumbnails
+grouped under blue per-folder headers, and a tray along the bottom with
+the green Edit button, the selected file's name, the photo count and the
+thumbnail-size slider. It keeps its own quieter palette rather than the
+panel chrome, but follows the theme choice: the light theme gets
+Picasa's warm white lightbox, the dark theme a Lightroom-grey version of
+the same room — opening the gallery from a dark editor must not be a
+flashbang.
 
 Folders are watched in place, never copied. Scanning is recursive
 (skipping dot-directories), capped at 5000 files, and re-runs every time
