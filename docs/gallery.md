@@ -13,7 +13,10 @@ Picasa boots into its library. An empty one offers the ways in (add a
 folder, import from a camera), and the top strip always carries Open…
 and New File…. Opening a document from the shell (`schist file.psd`),
 from Finder, or recovering unsaved work from a crash all win over the
-gallery: the editor is where a document lives.
+gallery: the editor is where a document lives. Closing the last tab
+returns to the gallery exactly as it was left — search, selection,
+filters and grouping are session state on the library, so leaving for
+the editor and coming back loses nothing until the app closes.
 
 File ▸ New (⌘N, anywhere) opens the preset picker — one card per common
 size, a click creates the document on the spot, Custom… opens the full
@@ -51,11 +54,12 @@ thumbnail (`.meta`).
 navigable map as the import dialog: draw a boundary (or jump to a
 preset) and Apply, and the grid shows only photos whose EXIF position
 falls inside it — everywhere: every grouping, the search results, the
-counts. Because it persists across launches, it announces itself while
-on: a blue "Map filter: <place> ✕" banner in the top strip (click to
-edit, ✕ to turn off) and a lit sidebar chip. Applying with nothing
-drawn turns it off; the boundary is shared with the import dialog, so
-what you import by is one Apply from what you browse by.
+counts. It lasts for the session (a fresh launch starts unfiltered)
+and announces itself while on: a blue "Map filter: <place> ✕" banner
+in the top strip (click to edit, ✕ to turn off) and a lit sidebar
+chip. Applying with nothing drawn turns it off; the boundary is shared
+with the import dialog, so what you import by is one Apply from what
+you browse by.
 
 Folders are watched in place, never copied. Scanning is recursive
 (skipping dot-directories), capped at 5000 files, and re-runs every time

@@ -314,6 +314,13 @@ impl Workspace {
         } else {
             return;
         }
+        // The last tab closing empties the editor; the gallery is home,
+        // and it comes back exactly as it was left — search, selection,
+        // filters and all live for the session on the library.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.doc.is_none() && self.background_tabs.is_empty() && !self.library.open {
+            self.toggle_gallery(cx);
+        }
         cx.notify();
     }
 

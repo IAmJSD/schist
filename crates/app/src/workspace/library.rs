@@ -93,10 +93,6 @@ struct LibraryFile {
     thumb_px: Option<f32>,
     #[serde(default)]
     group_by: Option<String>,
-    #[serde(default)]
-    map_filter: Option<(f64, f64, f64, f64)>,
-    #[serde(default)]
-    map_filter_name: Option<String>,
 }
 
 pub struct Library {
@@ -152,8 +148,8 @@ pub struct Library {
     /// roll is a diary before it is a directory tree.
     pub group_by: GroupBy,
     /// The map filter: when set, the grid shows only photos whose EXIF
-    /// position falls inside it. Persisted — which is exactly why the
-    /// gallery wears a loud banner while it is on.
+    /// position falls inside it. Session-only — a fresh launch starts
+    /// unfiltered — and loudly bannered while it is on.
     pub map_filter: Option<GeoBounds>,
     pub map_filter_name: Option<String>,
     /// The search box: its text, whether it is taking keystrokes, and
@@ -259,13 +255,8 @@ impl Library {
                 .as_deref()
                 .and_then(GroupBy::from_key)
                 .unwrap_or(GroupBy::Date),
-            map_filter: file.map_filter.map(|(south, west, north, east)| GeoBounds {
-                south,
-                west,
-                north,
-                east,
-            }),
-            map_filter_name: file.map_filter_name,
+            map_filter: None,
+            map_filter_name: None,
             search: String::new(),
             search_active: false,
             search_selected: false,
@@ -287,8 +278,6 @@ impl Library {
             recents: self.recents.clone(),
             thumb_px: Some(self.thumb_px),
             group_by: Some(self.group_by.key().to_string()),
-            map_filter: self.map_filter.map(|b| (b.south, b.west, b.north, b.east)),
-            map_filter_name: self.map_filter_name.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&file) {
             let _ = std::fs::write(path, json);
@@ -1976,7 +1965,6 @@ impl Workspace {
             .library
             .map_filter
             .and(self.library.map.selection_name.clone());
-        self.library.save();
         self.close_modal(cx);
         cx.notify();
     }
@@ -1986,7 +1974,6 @@ impl Workspace {
     pub fn clear_map_filter(&mut self, cx: &mut Context<Self>) {
         self.library.map_filter = None;
         self.library.map_filter_name = None;
-        self.library.save();
         cx.notify();
     }
 
