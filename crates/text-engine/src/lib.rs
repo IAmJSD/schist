@@ -239,6 +239,16 @@ fn scan_fonts() -> fontdb::Database {
     if let Some(dir) = font_dir() {
         db.load_fonts_dir(dir);
     }
+    // Font Book is sandboxed on modern macOS, so a font "installed" by
+    // double-clicking lands in its container rather than ~/Library/Fonts.
+    // Every CoreText app sees it; a directory scan does not, which is why
+    // user-installed fonts were missing from the font menu.
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        db.load_fonts_dir(
+            PathBuf::from(home).join("Library/Containers/com.apple.FontBook/Data/Library/Fonts"),
+        );
+    }
     #[cfg(target_arch = "wasm32")]
     if let Ok(faces) = web_faces().lock() {
         for bytes in faces.iter() {
