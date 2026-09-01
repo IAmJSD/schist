@@ -347,6 +347,10 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                 ws.library.search_active = true;
                 // A click lands a caret, not a selection.
                 ws.library.search_selected = false;
+                // Focusing the box is the signal to start loading the
+                // towers, so the first query answers quickly without
+                // every gallery open paying their ~300 MB up front.
+                ws.warm_search_engine(cx);
                 cx.notify();
             }),
         )

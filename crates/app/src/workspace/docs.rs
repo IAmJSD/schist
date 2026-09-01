@@ -102,10 +102,11 @@ impl Workspace {
     pub(super) fn open_in_tab(&mut self, mut doc: Document, replace_pristine: bool) {
         // A document arriving is what ends the gallery: whether it came
         // from File ▸ New, a gallery double-click or a crash recovery,
-        // the editor is where it lives.
+        // the editor is where it lives — and its memory goes with it.
         #[cfg(not(target_arch = "wasm32"))]
-        {
+        if self.library.open {
             self.library.open = false;
+            self.library.shed_memory();
         }
         // Photoshop's History Brush paints back from the state the file
         // was opened in, so that is what gets snapshotted here.

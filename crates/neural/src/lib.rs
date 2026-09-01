@@ -875,6 +875,17 @@ pub fn get(id: &str) -> Option<Arc<Model>> {
     loaded
 }
 
+/// Drop a loaded model from the cache; its memory comes back once any
+/// in-flight users let go of their `Arc`s. The next `get` reloads it
+/// from disk — callers use this when a model's whole feature has left
+/// the screen (the gallery's scorer and search towers are hundreds of
+/// resident megabytes between them).
+pub fn release(id: &str) {
+    if let Ok(mut c) = cache().write() {
+        c.remove(id);
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn load(spec: &'static ModelSpec) -> Result<Model> {
     let store = match web_store().read() {

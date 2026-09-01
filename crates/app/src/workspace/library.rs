@@ -25,6 +25,14 @@ const THUMB_EDGE: u32 = 256;
 /// Small enough that the first screenful streams in rather than
 /// arriving all at once at the end.
 const THUMB_BATCH: usize = 8;
+/// Decoded thumbnails kept in memory before the least recently shown
+/// go back to the disk cache. Each is up to 256 KB of BGRA, so this is
+/// a ~256 MB ceiling where an afternoon of scrolling used to pin every
+/// photo it ever passed.
+const THUMB_KEEP: usize = 1024;
+/// What the map shrinks to while the gallery is off screen: enough for
+/// the first screenfuls to reappear instantly, a fraction of the RAM.
+const THUMB_KEEP_PARKED: usize = 256;
 /// Folder scanning stops here rather than following a loop of symlinks
 /// (or someone's home directory) forever.
 const SCAN_MAX_DEPTH: usize = 6;
@@ -234,6 +242,12 @@ pub struct Library {
     /// file that changed underneath — a photo still landing off a
     /// camera when its first decode ran, an edit — loads again.
     thumbs: FxHashMap<PathBuf, (u64, Thumb)>,
+    /// When each thumbnail was last wanted by a cell, in ticks of
+    /// `thumb_tick` — what decides who goes when the map is over
+    /// budget. On-screen cells re-stamp every frame, so eviction only
+    /// ever takes what scrolled away.
+    thumb_used: FxHashMap<PathBuf, u64>,
+    thumb_tick: u64,
     queue: Vec<ThumbJob>,
     /// Whether a thumbnail loader task is live (only ever one at a time).
     ticker: bool,
@@ -406,6 +420,8 @@ impl Library {
             scanning: false,
             importing: false,
             thumbs: FxHashMap::default(),
+            thumb_used: FxHashMap::default(),
+            thumb_tick: 0,
             queue: Vec::new(),
             ticker: false,
             pending_backing: None,
@@ -472,6 +488,10 @@ impl Library {
     /// asks. Rendering is what drives loading, so only images that have
     /// been on screen ever cost a decode.
     pub fn thumb(&mut self, entry: &Entry) -> Option<Arc<RenderImage>> {
+        // Every ask is a use: what the eviction pass keeps is whatever
+        // was wanted most recently.
+        self.thumb_tick += 1;
+        self.thumb_used.insert(entry.path.clone(), self.thumb_tick);
         match self.thumbs.get(&entry.path) {
             Some((mtime, Thumb::Ready(img))) if *mtime == entry.mtime => return Some(img.clone()),
             // Same file, still in flight or given up: leave it be. A
@@ -488,6 +508,48 @@ impl Library {
             for_index: false,
         });
         None
+    }
+
+    /// Keep at most `keep` decoded thumbnails, dropping the least
+    /// recently shown back to the disk cache they reload from. Pending
+    /// and failed states stay — they hold no pixels, and a Failed that
+    /// went away would retry forever.
+    fn evict_thumbs(&mut self, keep: usize) {
+        let ready = |t: &(u64, Thumb)| matches!(t.1, Thumb::Ready(_));
+        let over = self
+            .thumbs
+            .values()
+            .filter(|t| ready(t))
+            .count()
+            .saturating_sub(keep);
+        if over == 0 {
+            return;
+        }
+        let mut by_age: Vec<(u64, PathBuf)> = self
+            .thumbs
+            .iter()
+            .filter(|(_, t)| ready(t))
+            .map(|(p, _)| (self.thumb_used.get(p).copied().unwrap_or(0), p.clone()))
+            .collect();
+        by_age.sort_unstable();
+        for (_, path) in by_age.into_iter().take(over) {
+            self.thumbs.remove(&path);
+            self.thumb_used.remove(&path);
+        }
+    }
+
+    /// The gallery left the screen: give back what only it was using.
+    /// The scorer and the two search towers are hundreds of resident
+    /// megabytes; they reload lazily, and a fully indexed library
+    /// never asks for them again until a new photo or a new search.
+    /// Thumbnails shrink to a parked handful — the PNGs are on disk,
+    /// so reopening costs a moment of decode, not a rebuild.
+    pub(super) fn shed_memory(&mut self) {
+        for id in ["nsfw", "embed-image", "embed-text"] {
+            schist_neural::release(id);
+        }
+        self.engine_warmed = false;
+        self.evict_thumbs(THUMB_KEEP_PARKED);
     }
 
     /// Feed the loader the next photos missing index work — a search
@@ -1527,11 +1589,14 @@ impl Workspace {
         self.open_submenu.clear();
         if self.library.open {
             self.library_rescan(cx);
-            self.warm_search_engine(cx);
             // Warm up device discovery, so an iPhone plugged in before
-            // the Import click is already on the list.
+            // the Import click is already on the list. The search
+            // towers are NOT warmed here — they are ~300 MB resident,
+            // so they wait for the search box to be focused.
             #[cfg(target_os = "macos")]
             super::library_icc::start_browsing();
+        } else {
+            self.library.shed_memory();
         }
         cx.notify();
     }
@@ -1645,6 +1710,9 @@ impl Workspace {
                         ws.library.thumbs.insert(key, (mtime, state));
                     }
                 }
+                // The batch may have pushed the map over budget; shed
+                // whatever scrolled away longest ago.
+                ws.library.evict_thumbs(THUMB_KEEP);
                 cx.notify();
             });
             if keep.is_err() {
@@ -2741,6 +2809,39 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnail_eviction_takes_the_least_recently_shown_and_only_them() {
+        let mut lib = Library::load();
+        let img = || {
+            Thumb::Ready(Arc::new(RenderImage::new(smallvec![image::Frame::new(
+                image::RgbaImage::new(2, 2),
+            )])))
+        };
+        for i in 0..4 {
+            let path = PathBuf::from(format!("/p/{i}.jpg"));
+            lib.thumbs.insert(path.clone(), (0, img()));
+            lib.thumb_used.insert(path, i);
+        }
+        // Pending and Failed hold no pixels; they must never be
+        // evicted (a Failed that went away would retry forever).
+        lib.thumbs
+            .insert(PathBuf::from("/p/pending.jpg"), (0, Thumb::Pending));
+        lib.thumbs
+            .insert(PathBuf::from("/p/failed.jpg"), (0, Thumb::Failed));
+        lib.evict_thumbs(2);
+        // The two oldest Ready thumbs went; the two newest and both
+        // pixel-less states stayed.
+        assert!(!lib.thumbs.contains_key(Path::new("/p/0.jpg")));
+        assert!(!lib.thumbs.contains_key(Path::new("/p/1.jpg")));
+        assert!(lib.thumbs.contains_key(Path::new("/p/2.jpg")));
+        assert!(lib.thumbs.contains_key(Path::new("/p/3.jpg")));
+        assert!(lib.thumbs.contains_key(Path::new("/p/pending.jpg")));
+        assert!(lib.thumbs.contains_key(Path::new("/p/failed.jpg")));
+        // Under budget: nothing more to do.
+        lib.evict_thumbs(2);
+        assert_eq!(lib.thumbs.len(), 4);
+    }
 
     #[test]
     fn buckets_saved_before_they_had_rules_still_read() {

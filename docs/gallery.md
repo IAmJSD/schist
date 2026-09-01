@@ -109,6 +109,18 @@ the same libheif the editor uses; when they start failing for want of
 it, the gallery raises the managed-download offer once, and retries the
 failed thumbnails after it installs.
 
+Memory stays bounded. Decoded thumbnails live under a ~256 MB budget —
+past it, the least recently shown are dropped back to the disk cache
+they reload from — and the gallery's neural models (the content scorer
+and the two search towers, several hundred resident megabytes between
+them) load only when their feature is exercised: the towers wait for
+the search box to be focused rather than loading on open. When the
+gallery leaves the screen for the editor, the models are released and
+the thumbnail set parks at a fraction of its budget. Scores, positions
+and embeddings persist in caches beside the thumbnails, so a fully
+indexed library never reloads the models at all — not for reopening,
+not for smart buckets, only for a photo or a query it has never seen.
+
 ## The content filter
 
 Preferences ▸ Gallery ▸ "Hide photos the content filter flags as
