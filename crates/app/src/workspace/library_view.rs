@@ -874,6 +874,31 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 ),
         );
     }
+    // Virtualisation: only rows near the viewport build real cells —
+    // a cell is ~20 elements with listeners, and a big library built
+    // every one of them each frame, which is what "a bit laggy" was.
+    // Rows are exact (uniform cells); header heights are an estimate,
+    // and the viewport of margin either side absorbs the drift. The
+    // lead-selected row always builds, so its bounds keep feeding the
+    // keep-on-screen scroll even when it is far away.
+    const HEADER_ESTIMATE: f32 = 41.0;
+    let lead = ws.library.lead_selected().cloned();
+    let columns = {
+        let width = f32::from(ws.library.grid_bounds.size.width);
+        // p_2 padding both sides, gap_2 between cells — the keyboard
+        // navigation's formula, so rows agree with up/down arrows.
+        (((width - 16.0 + 8.0) / (cell + 8.0)).floor() as usize).max(1)
+    };
+    let view_h = f32::from(ws.library.grid_bounds.size.height);
+    // The first frame has no recorded viewport yet: build everything
+    // once, and virtualise from the second frame on.
+    let (win_top, win_bottom) = if view_h > 0.0 {
+        let scroll_y = -f32::from(ws.library.grid_scroll.offset().y);
+        (scroll_y - view_h, scroll_y + 2.0 * view_h)
+    } else {
+        (f32::MIN, f32::MAX)
+    };
+    let mut content_y = 8.0; // the column's p_2 top padding
     for (title, subtitle, entries) in sections {
         let detail = if subtitle.is_empty() {
             format!("{} photos", entries.len())
@@ -902,11 +927,36 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 ),
         );
         column = column.child(div().h(px(1.0)).mb_2().bg(gpui::rgb(pal().cell_edge)));
-        let mut wrap = div().flex().flex_row().flex_wrap().gap_2().pb_2();
-        for entry in entries {
-            wrap = wrap.child(cell_element(ws, entry, cell, &selected, cx));
+        content_y += HEADER_ESTIMATE;
+        let mut body = div().flex().flex_col();
+        // Consecutive off-screen rows collapse into one spacer, so a
+        // scrolled-away month costs a single empty div.
+        let mut hidden = 0.0f32;
+        for row_entries in entries.chunks(columns) {
+            let row_top = content_y;
+            content_y += cell + 8.0;
+            let near = row_top <= win_bottom && row_top + cell >= win_top;
+            let holds_lead = lead
+                .as_ref()
+                .is_some_and(|l| row_entries.iter().any(|e| &e.path == l));
+            if !near && !holds_lead {
+                hidden += cell + 8.0;
+                continue;
+            }
+            if hidden > 0.0 {
+                body = body.child(div().h(px(hidden)));
+                hidden = 0.0;
+            }
+            let mut row = div().flex().flex_row().gap_2().mb_2();
+            for entry in row_entries {
+                row = row.child(cell_element(ws, entry.clone(), cell, &selected, cx));
+            }
+            body = body.child(row);
         }
-        column = column.child(wrap);
+        if hidden > 0.0 {
+            body = body.child(div().h(px(hidden)));
+        }
+        column = column.child(body);
     }
     column
 }

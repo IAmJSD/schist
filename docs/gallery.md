@@ -109,6 +109,13 @@ the same libheif the editor uses; when they start failing for want of
 it, the gallery raises the managed-download offer once, and retries the
 failed thumbnails after it installs.
 
+The grid is virtualised: rows of cells only really exist within a
+viewport's height of the screen, and everything further collapses to
+measured spacers — a five-thousand-photo library lays out a screenful
+of real cells per frame, not five thousand. Index-only loader batches
+also repaint on a throttle rather than per batch, so background
+indexing cannot saturate the UI with rebuilds.
+
 Memory stays bounded. Decoded thumbnails live under a ~256 MB budget —
 past it, the least recently shown are dropped back to the disk cache
 they reload from — and the gallery's neural models (the content scorer
@@ -215,7 +222,11 @@ size ViT took eight seconds).
 Photos are embedded in the background as their thumbnails process, and
 when nothing on screen wants a thumbnail the loader spends its idle
 time indexing the rest of the library; the box shows the index's
-progress. Vectors are cached beside the thumbnails (`.embed`) and held
+progress. The finished index persists as one snapshot file in the
+state directory, written whenever the loader catches up and restored
+in one read at the next launch — so a library is indexed once, not
+once per session, and only new or edited photos (matched by mtime)
+ever go through the loader again. Vectors are cached beside the thumbnails (`.embed`) and held
 in memory — ranking is a dot product over the lot, which at gallery
 scale needs no database fancier than a loop. The text side runs a
 CLIP byte-level BPE tokenizer implemented in `schist-neural` and pinned

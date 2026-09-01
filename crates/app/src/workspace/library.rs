@@ -303,6 +303,15 @@ pub struct Library {
     /// Bumped whenever the index gains entries; the snapshot below is
     /// rebuilt only when this moved.
     index_gen: u64,
+    /// Whether this session already loaded the persisted index file,
+    /// and the generation it last wrote — so the file is read once and
+    /// written only when something new was learned.
+    index_loaded: bool,
+    index_saved_gen: u64,
+    /// When the loader last repainted for index-only work: those
+    /// batches finish in milliseconds off warm caches, and notifying
+    /// per batch rebuilt the grid hundreds of times per second.
+    last_loader_notify: Option<std::time::Instant>,
     index_snapshot: Option<(u64, SearchSnapshot)>,
     /// The towers were pre-loaded this session (parsing and optimizing
     /// the text model is the slow part of a first search).
@@ -448,6 +457,9 @@ impl Library {
             search_seq: 0,
             query_cache: FxHashMap::default(),
             index_gen: 0,
+            index_loaded: false,
+            index_saved_gen: 0,
+            last_loader_notify: None,
             index_snapshot: None,
             engine_warmed: false,
             grid_scroll: gpui::ScrollHandle::new(),
@@ -573,6 +585,9 @@ impl Library {
         }
         self.engine_warmed = false;
         self.evict_thumbs(THUMB_KEEP_PARKED);
+        // Leaving the gallery is also a fine moment to persist what
+        // indexing learned, in case the loader never went idle.
+        self.save_index_snapshot();
     }
 
     /// Feed the loader the next photos missing index work — a search
@@ -604,6 +619,90 @@ impl Library {
     pub fn index_progress(&self) -> (usize, usize) {
         let total = self.sections.iter().map(|s| s.entries.len()).sum();
         (self.embeddings.len().min(total), total)
+    }
+
+    /// Everything the index knows, one row per photo that has any of
+    /// it — what the snapshot file persists between runs.
+    fn collect_index_rows(&self) -> Vec<IndexRow> {
+        self.sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .filter_map(|e| {
+                let row = IndexRow {
+                    path: e.path.clone(),
+                    mtime: e.mtime,
+                    embed: self.embeddings.get(&e.path).cloned(),
+                    gps: self.positions.get(&e.path).copied(),
+                    taken: self.taken.get(&e.path).cloned(),
+                    place: self.places.get(&e.path).cloned(),
+                    flagged: self.flagged.get(&e.path).copied(),
+                };
+                let empty = row.embed.is_none()
+                    && row.gps.is_none()
+                    && row.taken.is_none()
+                    && row.place.is_none()
+                    && row.flagged.is_none();
+                (!empty).then_some(row)
+            })
+            .collect()
+    }
+
+    /// Take a loaded snapshot into the live index. Rows only count for
+    /// photos the scan still knows with the same mtime — an edited
+    /// photo re-indexes — and never overwrite what this session
+    /// already learned.
+    fn apply_index_rows(&mut self, mut rows: Vec<IndexRow>) {
+        {
+            let current: FxHashMap<&Path, u64> = self
+                .sections
+                .iter()
+                .flat_map(|s| s.entries.iter())
+                .map(|e| (e.path.as_path(), e.mtime))
+                .collect();
+            rows.retain(|r| current.get(r.path.as_path()) == Some(&r.mtime));
+        }
+        if rows.is_empty() {
+            return;
+        }
+        log::info!("gallery: index snapshot restored {} photos", rows.len());
+        for row in rows {
+            if let Some(embed) = row.embed {
+                self.embeddings.entry(row.path.clone()).or_insert(embed);
+            }
+            if let Some(gps) = row.gps {
+                self.positions.entry(row.path.clone()).or_insert(gps);
+            }
+            if let Some(taken) = row.taken {
+                self.taken.entry(row.path.clone()).or_insert(taken);
+            }
+            if let Some(place) = row.place {
+                self.places.entry(row.path.clone()).or_insert(place);
+            }
+            if let Some(flagged) = row.flagged {
+                self.flagged.entry(row.path).or_insert(flagged);
+            }
+        }
+        self.index_gen += 1;
+    }
+
+    /// Write the index to its snapshot file (on a plain thread — pure
+    /// file work, and some callers have no async context), if anything
+    /// changed since the last write. ~2 KB per photo, one read at the
+    /// next launch instead of thousands of per-photo cache probes.
+    pub(super) fn save_index_snapshot(&mut self) {
+        if self.index_gen == self.index_saved_gen {
+            return;
+        }
+        self.index_saved_gen = self.index_gen;
+        let rows = self.collect_index_rows();
+        if rows.is_empty() {
+            return;
+        }
+        std::thread::spawn(move || {
+            if let Err(err) = write_index_snapshot(&rows) {
+                log::warn!("gallery: index snapshot not saved: {err:#}");
+            }
+        });
     }
 
     /// Whether any queued decode is waiting for a loader task.
@@ -1046,6 +1145,185 @@ fn walk(
             edited,
         });
     }
+}
+
+/// One photo's index entry as the snapshot file stores it. The outer
+/// Option per field means "was this ever computed" — `gps: Some(None)`
+/// is a probed photo with no position, worth remembering so it is not
+/// probed again.
+struct IndexRow {
+    path: PathBuf,
+    mtime: u64,
+    embed: Option<Arc<Vec<f32>>>,
+    gps: Option<Option<(f64, f64)>>,
+    taken: Option<String>,
+    place: Option<Option<String>>,
+    flagged: Option<bool>,
+}
+
+/// Where the index snapshot lives between runs.
+fn index_snapshot_path() -> Option<PathBuf> {
+    Some(crate::crash::state_dir()?.join("schist/index.v1"))
+}
+
+const INDEX_MAGIC: &[u8; 8] = b"SCHIDX1\n";
+
+/// Serialize the index rows: magic, a count, then per row the path,
+/// mtime, a presence-flags byte and the present fields, all
+/// little-endian. Hand-rolled because 10 MB of f32s deserves neither
+/// JSON nor a new dependency. Non-UTF-8 paths are skipped — they
+/// cannot round-trip through this file, and re-indexing them is only
+/// what happens today.
+fn write_index_snapshot(rows: &[IndexRow]) -> anyhow::Result<()> {
+    let Some(path) = index_snapshot_path() else {
+        return Ok(());
+    };
+    write_index_snapshot_to(&path, rows)
+}
+
+fn write_index_snapshot_to(path: &Path, rows: &[IndexRow]) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(rows.len() * 2200 + 16);
+    out.extend_from_slice(INDEX_MAGIC);
+    let counted: Vec<&IndexRow> = rows.iter().filter(|r| r.path.to_str().is_some()).collect();
+    out.extend_from_slice(&(counted.len() as u32).to_le_bytes());
+    let put_str = |out: &mut Vec<u8>, s: &str| {
+        out.extend_from_slice(&(s.len() as u16).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    };
+    for row in counted {
+        put_str(&mut out, row.path.to_str().expect("filtered above"));
+        out.extend_from_slice(&row.mtime.to_le_bytes());
+        let mut flags = 0u8;
+        if row.embed.is_some() {
+            flags |= 1;
+        }
+        if let Some(gps) = row.gps {
+            flags |= 2;
+            if gps.is_some() {
+                flags |= 4;
+            }
+        }
+        if row.taken.is_some() {
+            flags |= 8;
+        }
+        if let Some(place) = &row.place {
+            flags |= 16;
+            if place.is_some() {
+                flags |= 32;
+            }
+        }
+        if let Some(flagged) = row.flagged {
+            flags |= 64;
+            if flagged {
+                flags |= 128;
+            }
+        }
+        out.push(flags);
+        if let Some(embed) = &row.embed {
+            out.extend_from_slice(&(embed.len() as u16).to_le_bytes());
+            for v in embed.iter() {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        if let Some(Some((lat, lon))) = row.gps {
+            out.extend_from_slice(&lat.to_le_bytes());
+            out.extend_from_slice(&lon.to_le_bytes());
+        }
+        if let Some(taken) = &row.taken {
+            put_str(&mut out, taken);
+        }
+        if let Some(Some(place)) = &row.place {
+            put_str(&mut out, place);
+        }
+    }
+    // Atomically: a crash mid-write must not leave a torn file.
+    let tmp = path.with_extension("v1.tmp");
+    std::fs::write(&tmp, &out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Read the snapshot back; `None` for a missing, foreign or torn file
+/// — every failure just means indexing from the per-photo caches, the
+/// way every launch worked before the snapshot existed.
+fn read_index_snapshot() -> Option<Vec<IndexRow>> {
+    let bytes = std::fs::read(index_snapshot_path()?).ok()?;
+    parse_index_snapshot(&bytes)
+}
+
+fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
+    let mut at = 0usize;
+    let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
+        let slice = bytes.get(*at..*at + n)?;
+        *at += n;
+        Some(slice)
+    };
+    if take(&mut at, 8)? != INDEX_MAGIC {
+        return None;
+    }
+    let count = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
+    let get_str = |at: &mut usize| -> Option<String> {
+        let len = u16::from_le_bytes(take(at, 2)?.try_into().ok()?) as usize;
+        String::from_utf8(take(at, len)?.to_vec()).ok()
+    };
+    let get_f64 =
+        |at: &mut usize| -> Option<f64> { Some(f64::from_le_bytes(take(at, 8)?.try_into().ok()?)) };
+    let mut rows = Vec::with_capacity(count.min(65536));
+    for _ in 0..count {
+        let path = PathBuf::from(get_str(&mut at)?);
+        let mtime = u64::from_le_bytes(take(&mut at, 8)?.try_into().ok()?);
+        let flags = take(&mut at, 1)?[0];
+        let embed = if flags & 1 != 0 {
+            let dim = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
+            let raw = take(&mut at, dim * 4)?;
+            Some(Arc::new(
+                raw.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes(*c))
+                    .collect::<Vec<f32>>(),
+            ))
+        } else {
+            None
+        };
+        let gps = if flags & 2 != 0 {
+            Some(if flags & 4 != 0 {
+                Some((get_f64(&mut at)?, get_f64(&mut at)?))
+            } else {
+                None
+            })
+        } else {
+            None
+        };
+        let taken = if flags & 8 != 0 {
+            Some(get_str(&mut at)?)
+        } else {
+            None
+        };
+        let place = if flags & 16 != 0 {
+            Some(if flags & 32 != 0 {
+                Some(get_str(&mut at)?)
+            } else {
+                None
+            })
+        } else {
+            None
+        };
+        let flagged = (flags & 64 != 0).then_some(flags & 128 != 0);
+        rows.push(IndexRow {
+            path,
+            mtime,
+            embed,
+            gps,
+            taken,
+            place,
+            flagged,
+        });
+    }
+    Some(rows)
 }
 
 /// Where rendered thumbnails are cached between runs, keyed by source
@@ -1644,6 +1922,33 @@ impl Workspace {
             this.update(cx, |ws, cx| {
                 ws.library.scanning = false;
                 ws.library.sections = sections;
+                ws.maybe_load_index_snapshot(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Restore the persisted index once per session, now that a scan
+    /// knows which photos (and mtimes) it may vouch for. This is what
+    /// makes a relaunch open already indexed instead of re-reading
+    /// thousands of per-photo cache files through the loader.
+    fn maybe_load_index_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.library.index_loaded {
+            return;
+        }
+        self.library.index_loaded = true;
+        cx.spawn(async move |this, cx| {
+            let rows = cx
+                .background_executor()
+                .spawn(async move { read_index_snapshot() })
+                .await;
+            let Some(rows) = rows else { return };
+            this.update(cx, |ws, cx| {
+                ws.library.apply_index_rows(rows);
+                // Nothing new to learn is nothing new to write back.
+                ws.library.index_saved_gen = ws.library.index_gen;
                 cx.notify();
             })
             .ok();
@@ -1686,7 +1991,13 @@ impl Workspace {
                 if refilled {
                     continue;
                 }
-                this.update(cx, |ws, _| ws.library.ticker = false).ok();
+                this.update(cx, |ws, _| {
+                    ws.library.ticker = false;
+                    // The loader going idle is "indexing caught up":
+                    // the moment to persist what it learned.
+                    ws.library.save_index_snapshot();
+                })
+                .ok();
                 return;
             }
             // One task per decode: the executor runs them across its
@@ -1708,6 +2019,7 @@ impl Workspace {
             }
             let keep = this.update(cx, |ws, cx| {
                 ws.library.index_gen += 1;
+                let visible_work = results.iter().any(|(_, _, for_index, _)| !for_index);
                 for (key, mtime, for_index, outcome) in results {
                     if let Some(score) = outcome.score {
                         ws.library.flagged.insert(key.clone(), is_explicit(score));
@@ -1736,7 +2048,19 @@ impl Workspace {
                 // The batch may have pushed the map over budget; shed
                 // whatever scrolled away longest ago.
                 ws.library.evict_thumbs(THUMB_KEEP);
-                cx.notify();
+                // A thumbnail someone can see always repaints; pure
+                // index batches — milliseconds each off warm caches —
+                // repaint at most a few times a second, or the counter
+                // in the search box would rebuild the grid per batch.
+                let now = std::time::Instant::now();
+                let due = ws
+                    .library
+                    .last_loader_notify
+                    .is_none_or(|last| now.duration_since(last).as_millis() >= 250);
+                if visible_work || due || ws.library.queue.is_empty() {
+                    ws.library.last_loader_notify = Some(now);
+                    cx.notify();
+                }
             });
             if keep.is_err() {
                 return;
@@ -2832,6 +3156,54 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_index_snapshot_round_trips_every_field_shape() {
+        // Each Option layer matters: gps Some(None) is "probed, no
+        // position", which saves a re-probe on every future launch.
+        let rows = vec![
+            IndexRow {
+                path: PathBuf::from("/p/full.jpg"),
+                mtime: 7,
+                embed: Some(Arc::new(vec![0.25f32, -1.0, 3.5])),
+                gps: Some(Some((40.7, -74.0))),
+                taken: Some("2026-09-01 12:00:00".into()),
+                place: Some(Some("New York City".into())),
+                flagged: Some(true),
+            },
+            IndexRow {
+                path: PathBuf::from("/p/bare.jpg"),
+                mtime: 9,
+                embed: None,
+                gps: Some(None),
+                taken: None,
+                place: Some(None),
+                flagged: Some(false),
+            },
+        ];
+        let dir = std::env::temp_dir().join(format!("schist-idx-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("index.v1");
+        write_index_snapshot_to(&file, &rows).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let back = parse_index_snapshot(&bytes).expect("parses");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].path, rows[0].path);
+        assert_eq!(back[0].mtime, 7);
+        assert_eq!(back[0].embed.as_deref(), Some(&vec![0.25f32, -1.0, 3.5]));
+        assert_eq!(back[0].gps, Some(Some((40.7, -74.0))));
+        assert_eq!(back[0].taken.as_deref(), Some("2026-09-01 12:00:00"));
+        assert_eq!(back[0].place, Some(Some("New York City".into())));
+        assert_eq!(back[0].flagged, Some(true));
+        assert_eq!(back[1].gps, Some(None));
+        assert_eq!(back[1].place, Some(None));
+        assert_eq!(back[1].flagged, Some(false));
+        assert_eq!(back[1].embed, None);
+        // A torn file is a miss, not a crash.
+        assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
+        assert!(parse_index_snapshot(b"not an index").is_none());
+    }
 
     #[test]
     fn thumbnail_eviction_takes_the_least_recently_shown_and_only_them() {
