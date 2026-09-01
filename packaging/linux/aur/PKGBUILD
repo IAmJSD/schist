@@ -19,7 +19,7 @@ makedepends=(cargo clang mold)
 # that the clang-driven link cannot read.
 options=(!lto)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('62aa593d3d7d2fa88800f215f26a75251b48c267c222a217e0e216c848e30203')
+sha256sums=('3fbe29d3e9842cd539be529f9ddc1fd1f1055fde3ff3e6b600cb9267be2d7a9f')
 
 prepare() {
   cd "$pkgname-$pkgver"
