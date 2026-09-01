@@ -561,3 +561,206 @@ mod tests {
         }
     }
 }
+
+// ----- places by name: the gazetteer -----
+
+/// A place the search box named: where it is, and how far out a photo
+/// still counts as "there".
+pub struct GeoMatch {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub radius_km: f64,
+}
+
+/// GeoNames cities of 100k+ people plus a handful of aliases (nyc, sf,
+/// vegas…), a quarter-megabyte in the binary. CC-BY 4.0, geonames.org.
+struct City {
+    /// Lowercase, what queries match against; aliases included.
+    name: String,
+    /// What people see: the canonical name, properly cased.
+    display: String,
+    lat: f64,
+    lon: f64,
+    pop: u64,
+}
+
+fn gazetteer() -> &'static Vec<City> {
+    static GAZETTEER: std::sync::OnceLock<Vec<City>> = std::sync::OnceLock::new();
+    GAZETTEER.get_or_init(|| {
+        include_str!("../../assets/gazetteer.tsv")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                Some(City {
+                    name: f.next()?.to_string(),
+                    display: f.next()?.to_string(),
+                    lat: f.next()?.parse().ok()?,
+                    lon: f.next()?.parse().ok()?,
+                    pop: f.next()?.parse().ok()?,
+                })
+            })
+            .collect()
+    })
+}
+
+/// How far out of town a photo still counts as taken there: big cities
+/// sprawl, small ones don't.
+fn radius_for(pop: u64) -> f64 {
+    if pop >= 5_000_000 {
+        40.0
+    } else if pop >= 1_000_000 {
+        25.0
+    } else if pop >= 250_000 {
+        15.0
+    } else {
+        10.0
+    }
+}
+
+/// Levenshtein distance, capped: the caller only cares about "close".
+fn edit_distance(a: &str, b: &str, cap: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > cap {
+        return cap + 1;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut row = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            row.push((prev[j] + cost).min(prev[j + 1] + 1).min(row[j] + 1));
+        }
+        if row.iter().min().copied().unwrap_or(0) > cap {
+            return cap + 1;
+        }
+        prev = row;
+    }
+    prev[b.len()]
+}
+
+/// The best place the query names, if any: every one- to three-word
+/// window of it, matched exactly, by prefix ("san fran"), or within a
+/// typo or two ("new yrok"). Longer windows and better matches win;
+/// population breaks ties, so "paris" is France's before Texas's.
+pub(super) fn find_place(query: &str) -> Option<GeoMatch> {
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    // (window length, match quality, population) — all ascending.
+    let mut best: Option<((usize, u8, u64), &City)> = None;
+    for n in 1..=3.min(tokens.len()) {
+        for window in tokens.windows(n) {
+            let cand = window.join(" ");
+            if cand.len() < 2 {
+                continue;
+            }
+            let cap = match cand.chars().count() {
+                0..=4 => 0,
+                5..=7 => 1,
+                _ => 2,
+            };
+            for city in gazetteer() {
+                let quality = if city.name == cand {
+                    3
+                } else if cap > 0 && edit_distance(&cand, &city.name, cap) <= cap {
+                    2
+                } else if cand.len() >= 4 && city.name.starts_with(&cand) {
+                    1
+                } else {
+                    continue;
+                };
+                let key = (n, quality, city.pop);
+                if best.map(|(k, _)| key > k).unwrap_or(true) {
+                    best = Some((key, city));
+                }
+            }
+        }
+    }
+    let (_, city) = best?;
+    Some(GeoMatch {
+        name: city.display.clone(),
+        lat: city.lat,
+        lon: city.lon,
+        radius_km: radius_for(city.pop),
+    })
+}
+
+/// Great-circle distance in kilometres.
+fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (lat1, lon1) = (a.0.to_radians(), a.1.to_radians());
+    let (lat2, lon2) = (b.0.to_radians(), b.1.to_radians());
+    let dlat = lat2 - lat1;
+    let dlon = lon2 - lon1;
+    let h = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * 6371.0 * h.sqrt().asin()
+}
+
+/// How much a photo's position agrees with the named place: 1 inside
+/// its radius, fading to nothing by three radii out.
+pub(super) fn geo_affinity(place: &GeoMatch, lat: f64, lon: f64) -> f32 {
+    let d = haversine_km((place.lat, place.lon), (lat, lon));
+    if d <= place.radius_km {
+        1.0
+    } else if d >= place.radius_km * 3.0 {
+        0.0
+    } else {
+        (1.0 - (d - place.radius_km) / (place.radius_km * 2.0)) as f32
+    }
+}
+
+#[cfg(test)]
+mod gazetteer_tests {
+    use super::*;
+
+    #[test]
+    fn place_names_resolve_however_people_type_them() {
+        // Exact, alias, prefix, and a typo or two — "fuzzy" as typed.
+        for query in [
+            "new york city",
+            "nyc",
+            "new york",
+            "new yrok city",
+            "dog in new york",
+        ] {
+            let m = find_place(query).unwrap_or_else(|| panic!("{query:?} should resolve"));
+            assert_eq!(m.name, "New York City", "{query:?}");
+        }
+        let m = find_place("san fran").expect("prefix resolves");
+        assert_eq!(m.name, "San Francisco");
+        let m = find_place("sunset in tokyio").expect("typo resolves");
+        assert_eq!(m.name, "Tokyo");
+        assert!(find_place("qqqxyzzy").is_none());
+        assert!(find_place("").is_none());
+    }
+
+    #[test]
+    fn bigger_names_and_bigger_cities_win() {
+        // "paris" alone is France's, not Texas's or an arrondissement.
+        let m = find_place("paris").unwrap();
+        assert!((m.lat - 48.85).abs() < 0.1, "{}", m.lat);
+        // A longer window beats a shorter one: "york" alone is York,
+        // but "new york" is not.
+        let m = find_place("new york").unwrap();
+        assert_eq!(m.name, "New York City");
+    }
+
+    #[test]
+    fn photos_near_the_place_count_and_far_ones_do_not() {
+        let nyc = find_place("nyc").unwrap();
+        // Times Square: squarely inside.
+        assert!((geo_affinity(&nyc, 40.758, -73.985) - 1.0).abs() < 1e-6);
+        // Newark airport: just over the river, inside the fade.
+        assert!(geo_affinity(&nyc, 40.6925, -74.1687) > 0.5);
+        // Boston: another city's photos.
+        assert_eq!(geo_affinity(&nyc, 42.355, -71.065), 0.0);
+    }
+}

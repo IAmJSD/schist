@@ -36,6 +36,10 @@ const RECENTS_KEPT: usize = 10;
 /// MobileCLIP pair sit around 0.2–0.3 for a real match).
 const SEARCH_KEPT: usize = 200;
 const SEARCH_FLOOR: f32 = 0.15;
+/// What being squarely *in* the named place adds to a photo's score —
+/// bigger than any cosine gap, so location dominates the ordering when
+/// the query names one, without exiling good semantic matches.
+const GEO_BOOST: f32 = 0.35;
 
 /// One scanned directory and the images in it, a section of the grid.
 pub struct Section {
@@ -130,11 +134,18 @@ pub struct Library {
     /// the thumbnail loader and the background indexer. Ranking is a
     /// dot product over the lot — thousands of photos is nothing.
     embeddings: FxHashMap<PathBuf, Arc<Vec<f32>>>,
+    /// Where each probed photo was taken, from its EXIF, so a place
+    /// named in the search can pull its photos in. `None` = probed and
+    /// positionless, which is most photos off most cameras.
+    positions: FxHashMap<PathBuf, Option<(f64, f64)>>,
     /// The search box: its text, whether it is taking keystrokes, and
     /// the current query's ranked results (`None` = not searching).
     pub search: String,
     pub search_active: bool,
     pub search_results: Option<Vec<(PathBuf, f32)>>,
+    /// The place the current query named, when it named one — shown on
+    /// the results header.
+    pub search_place: Option<String>,
     /// Bumped per query so a slow embedding cannot land on a newer one.
     search_seq: u64,
     /// A thumbnail failed for want of the HEIC support download; the
@@ -168,9 +179,11 @@ impl Library {
             map: library_geo::MapState::default(),
             flagged: FxHashMap::default(),
             embeddings: FxHashMap::default(),
+            positions: FxHashMap::default(),
             search: String::new(),
             search_active: false,
             search_results: None,
+            search_place: None,
             search_seq: 0,
             heif_needed: None,
             heif_prompted: false,
@@ -214,17 +227,19 @@ impl Library {
         None
     }
 
-    /// Feed the loader the next photos missing a search embedding, when
-    /// the model to make one is here. Returns whether anything queued.
+    /// Feed the loader the next photos missing index work — a search
+    /// embedding (when the model to make one is here) or an EXIF
+    /// position probe. Returns whether anything queued.
     fn refill_index_queue(&mut self) -> bool {
-        if !schist_neural::installed("embed-image") {
-            return false;
-        }
+        let embeds = schist_neural::installed("embed-image");
         let jobs: Vec<ThumbJob> = self
             .sections
             .iter()
             .flat_map(|s| s.entries.iter())
-            .filter(|e| !self.embeddings.contains_key(&e.path))
+            .filter(|e| {
+                (embeds && !self.embeddings.contains_key(&e.path))
+                    || !self.positions.contains_key(&e.path)
+            })
             .take(THUMB_BATCH)
             .map(|e| ThumbJob {
                 key: e.path.clone(),
@@ -442,6 +457,8 @@ struct ThumbOutcome {
     /// empty vector marks "tried and cannot" — an undecodable file —
     /// so the indexer does not queue it forever.
     embedding: Option<Vec<f32>>,
+    /// Where the camera said the photo was taken, from its EXIF.
+    gps: Option<(f64, f64)>,
     /// The decode failed for want of the HEIC support download.
     needs_heif: bool,
 }
@@ -473,11 +490,15 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
     if job.for_index {
         let cached_embed = read_embed_cache(&cache);
         let cached_score = read_score_cache(&cache);
-        if cached_embed.is_some() && (cached_score.is_some() || !nsfw_installed()) {
+        let embeds_wanted = schist_neural::installed("embed-image");
+        if (cached_embed.is_some() || !embeds_wanted)
+            && (cached_score.is_some() || !nsfw_installed())
+        {
             return ThumbOutcome {
                 img: None,
                 score: cached_score,
                 embedding: cached_embed,
+                gps: photo_position(&cache, &job.key),
                 needs_heif: false,
             };
         }
@@ -526,8 +547,37 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         },
         score,
         embedding,
+        gps: photo_position(&cache, &job.key),
         needs_heif,
     }
+}
+
+/// Where the photo was taken, from the original file's EXIF, cached
+/// beside the thumbnail — "none" included, so a positionless camera
+/// roll is probed once, not every index pass.
+fn photo_position(cache: &Option<PathBuf>, original: &Path) -> Option<(f64, f64)> {
+    let gps_cache = cache.as_ref().map(|p| p.with_extension("gps"));
+    if let Some(text) = gps_cache
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+    {
+        let mut parts = text
+            .split_whitespace()
+            .filter_map(|v| v.parse::<f64>().ok());
+        return match (parts.next(), parts.next()) {
+            (Some(lat), Some(lon)) => Some((lat, lon)),
+            _ => None,
+        };
+    }
+    let position = photo_gps(original);
+    if let Some(path) = gps_cache {
+        let text = match position {
+            Some((lat, lon)) => format!("{lat} {lon}"),
+            None => "none".into(),
+        };
+        let _ = std::fs::write(path, text);
+    }
+    position
 }
 
 fn nsfw_installed() -> bool {
@@ -950,6 +1000,7 @@ impl Workspace {
                     if let Some(vector) = outcome.embedding {
                         ws.library.embeddings.insert(key.clone(), Arc::new(vector));
                     }
+                    ws.library.positions.insert(key.clone(), outcome.gps);
                     if outcome.needs_heif && ws.library.heif_needed.is_none() {
                         ws.library.heif_needed = Some(key.clone());
                     }
@@ -1024,6 +1075,7 @@ impl Workspace {
         self.library.search.clear();
         self.library.search_active = false;
         self.library.search_results = None;
+        self.library.search_place = None;
         self.library.search_seq += 1;
         cx.notify();
         true
@@ -1046,30 +1098,59 @@ impl Workspace {
             .iter()
             .map(|(p, v)| (p.clone(), v.clone()))
             .collect();
+        let positions: Vec<(PathBuf, (f64, f64))> = self
+            .library
+            .positions
+            .iter()
+            .filter_map(|(p, pos)| pos.map(|pos| (p.clone(), pos)))
+            .collect();
         cx.spawn(async move |this, cx| {
             let ranked = cx
                 .background_executor()
                 .spawn(async move {
-                    let text = schist_neural::embed::embed_text(&query)?;
-                    let mut scored: Vec<(PathBuf, f32)> = vectors
-                        .into_iter()
-                        .map(|(path, v)| {
-                            let score = v.iter().zip(&text).map(|(a, b)| a * b).sum::<f32>();
-                            (path, score)
-                        })
-                        .collect();
+                    // Two readings of the query, blended: what the
+                    // photos look like, and — when it names somewhere
+                    // the gazetteer knows — where they were taken.
+                    let place = library_geo::find_place(&query);
+                    let text = schist_neural::embed::embed_text(&query);
+                    if text.is_none() && place.is_none() {
+                        return None;
+                    }
+                    let mut scored: FxHashMap<PathBuf, f32> = FxHashMap::default();
+                    if let Some(text) = &text {
+                        for (path, v) in vectors {
+                            let s = v.iter().zip(text).map(|(a, b)| a * b).sum::<f32>();
+                            scored.insert(path, s);
+                        }
+                    }
+                    if let Some(place) = &place {
+                        for (path, (lat, lon)) in positions {
+                            let affinity = library_geo::geo_affinity(place, lat, lon);
+                            if affinity > 0.0 {
+                                *scored.entry(path).or_insert(0.0) += GEO_BOOST * affinity;
+                            }
+                        }
+                    }
+                    let floor = if text.is_some() {
+                        SEARCH_FLOOR
+                    } else {
+                        // Location-only search (no text model): being
+                        // near the place is the whole of the score.
+                        GEO_BOOST * 0.3
+                    };
+                    let mut scored: Vec<(PathBuf, f32)> = scored.into_iter().collect();
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
                     scored.truncate(SEARCH_KEPT);
-                    // Below this the model is shrugging, not matching.
-                    scored.retain(|(_, s)| *s >= SEARCH_FLOOR);
-                    Some(scored)
+                    scored.retain(|(_, s)| *s >= floor);
+                    Some((scored, place.map(|p| p.name)))
                 })
                 .await;
             this.update(cx, |ws, cx| {
                 // A newer keystroke owns the results now.
                 if ws.library.search_seq == seq {
-                    if let Some(ranked) = ranked {
+                    if let Some((ranked, place)) = ranked {
                         ws.library.search_results = Some(ranked);
+                        ws.library.search_place = place;
                     }
                     cx.notify();
                 }

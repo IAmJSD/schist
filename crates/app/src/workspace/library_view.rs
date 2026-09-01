@@ -246,10 +246,12 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
     let active = ws.library.search_active;
     let text = ws.library.search.clone();
     let (indexed, total) = ws.library.index_progress();
-    let shown: SharedString = if !ready {
-        "Search — download the models…".into()
-    } else if text.is_empty() && !active {
-        if indexed < total {
+    let shown: SharedString = if text.is_empty() && !active {
+        if !ready {
+            // Places work off EXIF alone; content search needs the two
+            // Search models (Gallery ▸ Manage Models…).
+            "Search places… (models add content search)".into()
+        } else if indexed < total {
             format!("Search ({indexed}/{total} indexed)").into()
         } else {
             "Search photos…".into()
@@ -283,11 +285,7 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
-                if schist_neural::embed::ready() {
-                    ws.library.search_active = true;
-                } else {
-                    ws.open_modal(Modal::ModelManager, cx);
-                }
+                ws.library.search_active = true;
                 cx.notify();
             }),
         )
@@ -501,7 +499,11 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .filter_map(|(path, _)| by_path.get(path).map(|e| (*e).clone()))
                 .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
                 .collect();
-            vec![(PathBuf::from("Search results"), entries)]
+            let title = match &ws.library.search_place {
+                Some(place) => format!("Search results · near {place}"),
+                None => "Search results".to_string(),
+            };
+            vec![(PathBuf::from(title), entries)]
         } else {
             ws.library
                 .visible_sections()

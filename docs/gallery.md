@@ -151,6 +151,17 @@ milliseconds per query; results update per keystroke, Escape clears,
 and results below a 0.15 cosine are dropped rather than padded with
 shrugs.
 
+A query that names somewhere also searches *where* photos were taken:
+each photo's EXIF position is probed and cached during indexing, and
+every one- to three-word window of the query is matched against an
+embedded gazetteer (GeoNames cities of 100k+ people plus aliases,
+CC-BY 4.0) — exactly, by prefix ("san fran"), or within a typo or two
+("new yrok"). A resolved place boosts photos by distance to it, fading
+out by three city-radii, and the results header says which place was
+understood ("Search results · near New York City"). Location search
+works even without the embedding models; with them, "dog in new york"
+blends both readings.
+
 ## What is persisted
 
 `~/.config/schist/library.json`: the watched folders, the recent-files
