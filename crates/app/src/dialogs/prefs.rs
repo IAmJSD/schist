@@ -104,32 +104,8 @@ pub(super) fn preferences(
         .children(
             // The gallery is compiled out of the web build, so a switch
             // for it would be furniture there.
-            (!cfg!(target_arch = "wasm32")).then(|| {
-                ui::field_row(
-                    "Gallery",
-                    ui::checkbox(
-                        "Hide photos the content filter flags as explicit",
-                        view.gallery_hide_nsfw,
-                        |ws, _cx| {
-                            ws.view.gallery_hide_nsfw = !ws.view.gallery_hide_nsfw;
-                            ws.save_view_options();
-                        },
-                        cx,
-                    ),
-                )
-            }),
+            (!cfg!(target_arch = "wasm32")).then(|| gallery_filter_row(&view, cx)),
         )
-        .children((!cfg!(target_arch = "wasm32")).then(|| {
-            div()
-                .pl(px(110.0))
-                .text_size(px(10.0))
-                .text_color(gpui::rgb(ui::palette().text_faint))
-                .child(
-                    "Judged by the Content (NSFW Filter) model — fetch it under \
-                     Filter ▸ Neural Filters ▸ Manage Models. Without it, nothing \
-                     is flagged.",
-                )
-        }))
         .child(ui::field_row(
             "Rendering",
             ui::checkbox(
@@ -229,4 +205,99 @@ pub(super) fn preferences(
             cx,
         ));
     ui::modal_frame("Preferences", 400.0, body, actions)
+}
+
+/// The gallery's content-filter row. The switch only works once the
+/// model that does the judging is installed; until then it is disabled,
+/// with the warning above it saying what to download and a link that
+/// goes straight there.
+fn gallery_filter_row(
+    view: &crate::workspace::ViewOptions,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let installed = schist_neural::installed("nsfw");
+    let mut control = div().flex().flex_col().gap_1().max_w(px(260.0));
+    if !installed {
+        control = control.child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap_1()
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child("Needs the Content (NSFW Filter) model —")
+                .child(
+                    div()
+                        .text_color(gpui::rgb(ui::palette().accent))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|ws, _e, _w, cx| {
+                                // Leaving Preferences for the model
+                                // manager keeps what was changed.
+                                ws.keep_preferences();
+                                ws.open_modal(Modal::ModelManager, cx);
+                            }),
+                        )
+                        .child("download it in Manage Models…"),
+                ),
+        );
+    }
+    control = control.child(if installed {
+        ui::checkbox(
+            "Hide flagged photos",
+            view.gallery_hide_nsfw,
+            |ws, _cx| {
+                ws.view.gallery_hide_nsfw = !ws.view.gallery_hide_nsfw;
+                ws.save_view_options();
+            },
+            cx,
+        )
+        .into_any_element()
+    } else {
+        // The disabled twin of `ui::checkbox`: same shape, faint, and
+        // listening to nothing.
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .text_size(px(12.0))
+            .text_color(gpui::rgb(ui::palette().text_faint))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(14.0))
+                    .rounded_sm()
+                    .bg(gpui::rgb(ui::palette().deep_bg))
+                    .border_1()
+                    .border_color(gpui::rgb(ui::palette().divider))
+                    // Still honest about the stored preference, even
+                    // while it cannot be changed from here.
+                    .children(
+                        view.gallery_hide_nsfw
+                            .then(|| crate::panels::icon("check", 10.0, ui::palette().text_faint)),
+                    ),
+            )
+            .child("Hide flagged photos")
+            .into_any_element()
+    });
+    div()
+        .flex()
+        .flex_row()
+        .justify_between()
+        .gap_3()
+        .child(
+            div()
+                .w(px(110.0))
+                .flex_none()
+                .pt(px(4.0))
+                .text_size(px(12.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child("Gallery"),
+        )
+        .child(control)
 }
