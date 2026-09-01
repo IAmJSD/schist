@@ -401,6 +401,14 @@ pub(super) fn volume_label(root: &Path) -> String {
     }
 }
 
+/// What to call an import source in dialogs and status lines.
+pub(super) fn source_label(source: &ImportSource) -> String {
+    match source {
+        ImportSource::Volume(path) => volume_label(path),
+        ImportSource::Device { name, .. } => name.clone(),
+    }
+}
+
 /// Mounted volumes that look like cameras or cards: anything under the
 /// removable-media roots with a `DCIM` directory, which is what the
 /// design rule every camera follows requires them to create. GVFS
@@ -539,6 +547,10 @@ impl Workspace {
         self.open_submenu.clear();
         if self.library.open {
             self.library_rescan(cx);
+            // Warm up device discovery, so an iPhone plugged in before
+            // the Import click is already on the list.
+            #[cfg(target_os = "macos")]
+            super::library_icc::start_browsing();
         }
         cx.notify();
     }
@@ -674,14 +686,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Import from a mounted camera. One source imports straight away;
-    /// none or several open the dialog — "none" gets a dialog too, since
+    /// Import from a camera. One source goes straight to the options;
+    /// none or several open the picker — "none" gets a dialog too, since
     /// a button that answers with nothing visible reads as broken.
     pub fn gallery_import_camera(&mut self, cx: &mut Context<Self>) {
         if self.library.importing {
             return;
         }
-        let mut sources = camera_sources();
+        let mut sources: Vec<ImportSource> = camera_sources()
+            .into_iter()
+            .map(ImportSource::Volume)
+            .collect();
+        // iPhones and PTP cameras don't mount on macOS; ask
+        // ImageCaptureCore what is plugged in.
+        #[cfg(target_os = "macos")]
+        {
+            super::library_icc::start_browsing();
+            sources.extend(
+                super::library_icc::devices()
+                    .into_iter()
+                    .map(|(id, name)| ImportSource::Device { id, name }),
+            );
+        }
         if sources.len() == 1 {
             // Straight to the options (place filter, destination) rather
             // than importing on the spot: the filter is part of the ask.
@@ -698,11 +724,16 @@ impl Workspace {
     }
 
     /// Copy a camera volume's DCIM into ~/Pictures and watch the result.
-    pub fn import_camera(&mut self, source: PathBuf, place: Option<usize>, cx: &mut Context<Self>) {
+    pub fn import_camera(
+        &mut self,
+        source: ImportSource,
+        place: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         if self.library.importing {
             return;
         }
-        let volume = volume_label(&source);
+        let label = source_label(&source);
         let place = place.and_then(|i| library_geo::PLACES.get(i));
         let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
             self.status = "Import needs a home directory to copy into".into();
@@ -710,17 +741,39 @@ impl Workspace {
         };
         // A place filter is a sorting instruction, so it names the
         // destination: photos taken in New York land in a New York
-        // folder, whatever card they came off.
+        // folder, whatever camera they came off.
         let dest_name = place
             .map(|p| p.name.to_string())
-            .unwrap_or_else(|| volume.clone());
+            .unwrap_or_else(|| label.clone());
         let dest = home.join("Pictures/Schist Imports").join(&dest_name);
         self.library.importing = true;
         self.status = match place {
-            Some(p) => format!("Importing photos taken in {} from {volume}\u{2026}", p.name).into(),
-            None => format!("Importing from {volume}\u{2026}").into(),
+            Some(p) => format!("Importing photos taken in {} from {label}\u{2026}", p.name).into(),
+            None => format!("Importing from {label}\u{2026}").into(),
         };
         cx.notify();
+        match source {
+            ImportSource::Volume(volume) => self.import_volume(volume, dest, place, cx),
+            #[cfg(target_os = "macos")]
+            ImportSource::Device { id, name } => self.import_device(id, name, dest, place, cx),
+            #[cfg(not(target_os = "macos"))]
+            ImportSource::Device { .. } => {
+                // Never constructed off macOS; the arm exists for the
+                // exhaustiveness check.
+                self.library.importing = false;
+                self.status = "Direct device import is a macOS feature".into();
+            }
+        }
+    }
+
+    /// A mounted DCIM volume: plain file copies on a background thread.
+    fn import_volume(
+        &mut self,
+        source: PathBuf,
+        dest: PathBuf,
+        place: Option<&'static library_geo::Place>,
+        cx: &mut Context<Self>,
+    ) {
         let exts = self.codec_extensions();
         let copy_dest = dest.clone();
         cx.spawn(async move |this, cx| {
@@ -732,25 +785,7 @@ impl Workspace {
                 ws.library.importing = false;
                 match result {
                     Ok((copied, filtered)) => {
-                        if !ws.library.folders.contains(&dest) {
-                            ws.library.folders.push(dest.clone());
-                            ws.library.folders.sort();
-                            ws.library.save();
-                        }
-                        ws.status = match place {
-                            Some(p) => format!(
-                                "Imported {copied} photos taken in {} to {} \
-                                 ({filtered} elsewhere or without a position left on the camera)",
-                                p.name,
-                                dest.display()
-                            )
-                            .into(),
-                            None => {
-                                format!("Imported {copied} photos to {}", dest.display()).into()
-                            }
-                        };
-                        ws.library.open = true;
-                        ws.library_rescan(cx);
+                        ws.finish_camera_import(dest, copied, filtered, 0, place, cx)
                     }
                     Err(err) => {
                         log::error!("camera import failed: {err:#}");
@@ -762,6 +797,119 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// An ImageCaptureCore device (an iPhone, a PTP camera): downloads
+    /// run through the main-thread delegate; this side polls for
+    /// progress and finishes the bookkeeping when the delegate is done.
+    #[cfg(target_os = "macos")]
+    fn import_device(
+        &mut self,
+        id: u64,
+        name: String,
+        dest: PathBuf,
+        place: Option<&'static library_geo::Place>,
+        cx: &mut Context<Self>,
+    ) {
+        use super::library_icc;
+        // The filter runs per downloaded file, on the file itself: a
+        // device gives no way to read EXIF without downloading, so a
+        // declined photo is downloaded, inspected and removed.
+        let keep = place.map(|p| {
+            Box::new(move |path: &Path| {
+                photo_gps(path).is_some_and(|(lat, lon)| library_geo::place_contains(p, lat, lon))
+            }) as library_icc::KeepFilter
+        });
+        if let Err(err) = library_icc::begin_import(id, dest.clone(), keep) {
+            self.library.importing = false;
+            self.status = format!("Import failed: {err}").into();
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            let finished = this.update(cx, |ws, cx| {
+                let Some(status) = library_icc::poll_import() else {
+                    ws.library.importing = false;
+                    return true;
+                };
+                if let Some(result) = status.finished {
+                    library_icc::finish_import();
+                    ws.library.importing = false;
+                    match result {
+                        Ok((copied, filtered, failed)) => {
+                            ws.finish_camera_import(
+                                dest.clone(),
+                                copied,
+                                filtered,
+                                failed,
+                                place,
+                                cx,
+                            );
+                        }
+                        Err(err) => {
+                            log::error!("camera import failed: {err}");
+                            ws.status = format!("Import failed: {err}").into();
+                        }
+                    }
+                    cx.notify();
+                    return true;
+                }
+                ws.status = if status.locked {
+                    format!("{name} is locked — unlock it and tap Trust to continue").into()
+                } else {
+                    match status.total {
+                        None => format!("Reading {name}'s photo catalog\u{2026}").into(),
+                        Some(total) => format!(
+                            "Importing photo {}/{total} from {name}\u{2026}",
+                            (status.done + 1).min(total.max(1))
+                        )
+                        .into(),
+                    }
+                };
+                cx.notify();
+                false
+            });
+            if finished.unwrap_or(true) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Shared tail of every camera import: watch the destination, tell
+    /// the user what happened, show the result.
+    fn finish_camera_import(
+        &mut self,
+        dest: PathBuf,
+        copied: usize,
+        filtered: usize,
+        failed: usize,
+        place: Option<&'static library_geo::Place>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.library.folders.contains(&dest) {
+            self.library.folders.push(dest.clone());
+            self.library.folders.sort();
+            self.library.save();
+        }
+        let mut message = match place {
+            Some(p) => format!(
+                "Imported {copied} photos taken in {} to {} \
+                 ({filtered} elsewhere or without a position left on the camera)",
+                p.name,
+                dest.display()
+            ),
+            None => format!("Imported {copied} photos to {}", dest.display()),
+        };
+        if failed > 0 {
+            message.push_str(&format!(" — {failed} failed"));
+        }
+        self.status = message.into();
+        self.library.open = true;
+        self.library_rescan(cx);
     }
 
     /// Open a gallery photo for editing. The PSD sidecar is what opens

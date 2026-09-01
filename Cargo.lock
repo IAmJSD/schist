@@ -6152,6 +6152,8 @@ dependencies = [
  "js-sys",
  "kamadak-exif",
  "log",
+ "objc2",
+ "objc2-foundation",
  "rustc-hash 2.1.3",
  "schist-adjustments",
  "schist-codec-psd",

@@ -674,7 +674,7 @@ fn size_slider(ratio: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
 /// The camera picker. Several mounted cameras ask which one; none says
 /// so and offers a rescan, because Import… must always answer the click.
 pub(crate) fn camera_import_dialog(
-    sources: &[PathBuf],
+    sources: &[ImportSource],
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     if sources.is_empty() {
@@ -682,18 +682,16 @@ pub(crate) fn camera_import_dialog(
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_size(px(12.0)).child("No camera volumes found."))
+            .child(div().text_size(px(12.0)).child("No cameras found."))
             .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(gpui::rgb(crate::ui::palette().text_dim))
                     .child(
-                        "Anything with a DCIM folder counts: memory cards, cameras in \
-                         mass-storage mode, and — on Linux — iPhones and Android phones the \
-                         file manager has mounted (unlock the phone and tap Trust/Allow \
-                         first). On macOS an iPhone never mounts as a disk: copy with the \
-                         Image Capture app or AirDrop into a folder, then add that folder \
-                         to the gallery.",
+                        "Plug a camera, memory card or iPhone in. An iPhone must be \
+                         unlocked, with Trust This Computer answered, before it shows its \
+                         photos — do that, give it a moment, and press Scan Again. Anything \
+                         that mounts as a disk with a DCIM folder counts too.",
                     ),
             );
         let actions = div()
@@ -720,11 +718,15 @@ pub(crate) fn camera_import_dialog(
     let mut body = div().flex().flex_col().gap_1().child(
         div()
             .text_size(px(12.0))
-            .child("More than one camera volume is mounted. Import from:"),
+            .child("More than one camera is reachable. Import from:"),
     );
     for source in sources {
         let pick = source.clone();
-        let label = super::library::volume_label(source);
+        let label = super::library::source_label(source);
+        let detail = match source {
+            ImportSource::Volume(path) => path.display().to_string(),
+            ImportSource::Device { .. } => "via Image Capture".to_string(),
+        };
         body = body.child(
             div()
                 .flex()
@@ -755,7 +757,7 @@ pub(crate) fn camera_import_dialog(
                     div()
                         .text_size(px(10.0))
                         .text_color(gpui::rgb(crate::ui::palette().text_dim))
-                        .child(source.display().to_string()),
+                        .child(detail),
                 ),
         );
     }
@@ -772,7 +774,7 @@ pub(crate) fn camera_import_dialog(
 /// filter drawn on an OpenStreetMap preview, and where the photos land.
 pub(crate) fn camera_import_options_dialog(
     ws: &mut Workspace,
-    source: PathBuf,
+    source: ImportSource,
     place: Option<usize>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -780,7 +782,7 @@ pub(crate) fn camera_import_options_dialog(
     if let Some(i) = place {
         ws.ensure_map_preview(i, cx);
     }
-    let label = super::library::volume_label(&source);
+    let label = super::library::source_label(&source);
 
     // The place list: Anywhere, then the named boxes.
     let place_row = |name: String,

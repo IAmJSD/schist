@@ -54,6 +54,11 @@ mod layers_panel;
 mod library;
 #[cfg(not(target_arch = "wasm32"))]
 mod library_geo;
+// iPhones and PTP cameras never mount as filesystems on macOS;
+// ImageCaptureCore is the door Image Capture and Photos use, and this
+// module knocks on it the same way.
+#[cfg(target_os = "macos")]
+mod library_icc;
 #[cfg(not(target_arch = "wasm32"))]
 mod library_view;
 mod modals;
@@ -869,14 +874,13 @@ pub enum Modal {
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
     HeifSupport { path: PathBuf },
-    /// More than one mounted volume has a DCIM directory: ask which
-    /// camera to import from.
-    CameraImport { sources: Vec<PathBuf> },
-    /// Import options for one camera volume: an optional place filter
-    /// (only photos whose EXIF position falls inside it import), shown
-    /// on an OpenStreetMap preview.
+    /// More than one camera is reachable: ask which to import from.
+    CameraImport { sources: Vec<ImportSource> },
+    /// Import options for one camera: an optional place filter (only
+    /// photos whose EXIF position falls inside it import), shown on an
+    /// OpenStreetMap preview.
     CameraImportOptions {
-        source: PathBuf,
+        source: ImportSource,
         /// Index into `library_geo::PLACES`; `None` imports everything.
         place: Option<usize>,
     },
@@ -930,6 +934,21 @@ pub enum Modal {
         depth: Depth,
         background: NewDocBackground,
     },
+}
+
+/// Where a camera import reads from.
+// Plain data on every target so the Modal enum stays portable; the
+// Device variant is only ever constructed on macOS.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum ImportSource {
+    /// A mounted volume with a DCIM directory.
+    Volume(PathBuf),
+    /// An ImageCaptureCore device (macOS): an iPhone or a PTP camera,
+    /// which never mounts as a filesystem. The id keys the connected-
+    /// device list; the name is for people.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Device { id: u64, name: String },
 }
 
 /// What fills the bottom layer of a document made by File ▸ New.

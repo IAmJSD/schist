@@ -52,10 +52,19 @@ or one storage-folder down, the way MTP phones nest it. The roots
 scanned are `/Volumes`, `/media`, `/run/media/$USER`, `/mnt`, and the
 GVFS mount directory (`$XDG_RUNTIME_DIR/gvfs`), which is how an
 unlocked iPhone (`afc:`), a PTP camera (`gphoto2:`) or an Android phone
-(`mtp:`) appears as files on a Linux desktop. On macOS an iPhone never
-mounts as a filesystem (that would need ImageCaptureCore); Image
-Capture or AirDrop into a watched folder is the path there, and the
-no-camera dialog says so.
+(`mtp:`) appears as files on a Linux desktop.
+
+On macOS an iPhone never mounts as a filesystem, so the gallery asks
+**ImageCaptureCore** — the framework behind Image Capture and Photos —
+what is plugged in (`crates/app/src/workspace/library_icc.rs`; the
+delegate class is assembled at runtime, like the Quick Look providers).
+Connected iPhones and PTP cameras appear beside the mounted volumes in
+the picker; downloading runs through `requestDownloadFile` with
+progress in the tray, the phone must be unlocked with Trust answered
+(a locked phone is reported, not hung on), and the place filter is
+applied to each file as it lands — a declined photo is downloaded,
+inspected and removed, since a device gives no way to read EXIF without
+downloading.
 
 Picking a source opens the import options:
 
