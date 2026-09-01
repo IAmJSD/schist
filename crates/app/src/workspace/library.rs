@@ -82,6 +82,23 @@ struct ThumbJob {
     for_index: bool,
 }
 
+/// A query the engine already answered: its text embedding and the
+/// place it named, so retyping — every prefix, every backspace — costs
+/// a lookup instead of a model run.
+#[derive(Clone)]
+struct CachedQuery {
+    text: Option<Arc<Vec<f32>>>,
+    place: Option<library_geo::GeoMatch>,
+}
+
+/// The ranking task's view of the index, shared rather than copied: a
+/// keystroke used to clone every path and vector in the library.
+#[derive(Clone)]
+struct SearchSnapshot {
+    vectors: Arc<Vec<(PathBuf, Arc<Vec<f32>>)>>,
+    positions: Arc<Vec<(PathBuf, (f64, f64))>>,
+}
+
 /// What `library.json` persists: the watched folders and the recents.
 /// Everything else — sections, thumbnails — is derived from the disk.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -166,6 +183,15 @@ pub struct Library {
     pub search_place: Option<String>,
     /// Bumped per query so a slow embedding cannot land on a newer one.
     search_seq: u64,
+    /// Answered queries, so the engine is only asked once per string.
+    query_cache: FxHashMap<String, CachedQuery>,
+    /// Bumped whenever the index gains entries; the snapshot below is
+    /// rebuilt only when this moved.
+    index_gen: u64,
+    index_snapshot: Option<(u64, SearchSnapshot)>,
+    /// The towers were pre-loaded this session (parsing and optimizing
+    /// the text model is the slow part of a first search).
+    engine_warmed: bool,
     /// The grid's scroll handle, plus the viewport and selected-cell
     /// rectangles recorded each paint — what keyboard navigation needs
     /// to keep the selection on screen in a wrap layout that has no
@@ -272,6 +298,10 @@ impl Library {
             search_results: None,
             search_place: None,
             search_seq: 0,
+            query_cache: FxHashMap::default(),
+            index_gen: 0,
+            index_snapshot: None,
+            engine_warmed: false,
             grid_scroll: gpui::ScrollHandle::new(),
             grid_bounds: Bounds::default(),
             selected_bounds: None,
@@ -514,6 +544,32 @@ impl Library {
                 groups
             }
         }
+    }
+
+    /// The index as the ranking task sees it, rebuilt only when the
+    /// index actually changed.
+    fn search_snapshot(&mut self) -> SearchSnapshot {
+        if let Some((gen, snapshot)) = &self.index_snapshot {
+            if *gen == self.index_gen {
+                return snapshot.clone();
+            }
+        }
+        let snapshot = SearchSnapshot {
+            vectors: Arc::new(
+                self.embeddings
+                    .iter()
+                    .map(|(p, v)| (p.clone(), v.clone()))
+                    .collect(),
+            ),
+            positions: Arc::new(
+                self.positions
+                    .iter()
+                    .filter_map(|(p, pos)| pos.map(|pos| (p.clone(), pos)))
+                    .collect(),
+            ),
+        };
+        self.index_snapshot = Some((self.index_gen, snapshot.clone()));
+        snapshot
     }
 
     /// The selected entry, if it still exists in a section.
@@ -1197,6 +1253,7 @@ impl Workspace {
         self.open_submenu.clear();
         if self.library.open {
             self.library_rescan(cx);
+            self.warm_search_engine(cx);
             // Warm up device discovery, so an iPhone plugged in before
             // the Import click is already on the list.
             #[cfg(target_os = "macos")]
@@ -1288,6 +1345,7 @@ impl Workspace {
                 results.push(task.await);
             }
             let keep = this.update(cx, |ws, cx| {
+                ws.library.index_gen += 1;
                 for (key, mtime, for_index, outcome) in results {
                     if let Some(score) = outcome.score {
                         ws.library.flagged.insert(key.clone(), is_explicit(score));
@@ -1515,29 +1573,22 @@ impl Workspace {
         true
     }
 
-    /// Re-rank for the current query: embed the text on a background
-    /// thread and dot it against every photo's vector.
+    /// Re-rank for the current query. The engine is consulted at most
+    /// once per string — answered queries come from the cache — and the
+    /// index rides into the task as a shared snapshot instead of a
+    /// per-keystroke copy of every path and vector.
     pub(super) fn gallery_search_changed(&mut self, cx: &mut Context<Self>) {
         self.library.search_seq += 1;
         let seq = self.library.search_seq;
         let query = self.library.search.trim().to_string();
         if query.is_empty() {
             self.library.search_results = None;
+            self.library.search_place = None;
             cx.notify();
             return;
         }
-        let vectors: Vec<(PathBuf, Arc<Vec<f32>>)> = self
-            .library
-            .embeddings
-            .iter()
-            .map(|(p, v)| (p.clone(), v.clone()))
-            .collect();
-        let positions: Vec<(PathBuf, (f64, f64))> = self
-            .library
-            .positions
-            .iter()
-            .filter_map(|(p, pos)| pos.map(|pos| (p.clone(), pos)))
-            .collect();
+        let cached = self.library.query_cache.get(&query).cloned();
+        let snapshot = self.library.search_snapshot();
         cx.spawn(async move |this, cx| {
             let ranked = cx
                 .background_executor()
@@ -1545,53 +1596,97 @@ impl Workspace {
                     // Two readings of the query, blended: what the
                     // photos look like, and — when it names somewhere
                     // the gazetteer knows — where they were taken.
-                    let place = library_geo::find_place(&query);
-                    let text = schist_neural::embed::embed_text(&query);
-                    if text.is_none() && place.is_none() {
+                    let (fresh, answer) = match cached {
+                        Some(answer) => (false, answer),
+                        None => (
+                            true,
+                            CachedQuery {
+                                text: schist_neural::embed::embed_text(&query).map(Arc::new),
+                                place: library_geo::find_place(&query),
+                            },
+                        ),
+                    };
+                    if answer.text.is_none() && answer.place.is_none() {
                         return None;
                     }
-                    let mut scored: FxHashMap<PathBuf, f32> = FxHashMap::default();
-                    if let Some(text) = &text {
-                        for (path, v) in vectors {
-                            let s = v.iter().zip(text).map(|(a, b)| a * b).sum::<f32>();
+                    // Scores keyed by borrowed path; only what survives
+                    // the cut gets cloned.
+                    let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
+                    if let Some(text) = &answer.text {
+                        for (path, v) in snapshot.vectors.iter() {
+                            let s = v.iter().zip(text.iter()).map(|(a, b)| a * b).sum::<f32>();
                             scored.insert(path, s);
                         }
                     }
-                    if let Some(place) = &place {
-                        for (path, (lat, lon)) in positions {
-                            let affinity = library_geo::geo_affinity(place, lat, lon);
+                    if let Some(place) = &answer.place {
+                        for (path, (lat, lon)) in snapshot.positions.iter() {
+                            let affinity = library_geo::geo_affinity(place, *lat, *lon);
                             if affinity > 0.0 {
                                 *scored.entry(path).or_insert(0.0) += GEO_BOOST * affinity;
                             }
                         }
                     }
-                    let floor = if text.is_some() {
+                    let floor = if answer.text.is_some() {
                         SEARCH_FLOOR
                     } else {
                         // Location-only search (no text model): being
                         // near the place is the whole of the score.
                         GEO_BOOST * 0.3
                     };
-                    let mut scored: Vec<(PathBuf, f32)> = scored.into_iter().collect();
+                    let mut scored: Vec<(&PathBuf, f32)> = scored.into_iter().collect();
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
                     scored.truncate(SEARCH_KEPT);
                     scored.retain(|(_, s)| *s >= floor);
-                    Some((scored, place.map(|p| p.name)))
+                    let ranked: Vec<(PathBuf, f32)> = scored
+                        .into_iter()
+                        .map(|(path, score)| (path.clone(), score))
+                        .collect();
+                    let place_name = answer.place.as_ref().map(|p| p.name.clone());
+                    Some((ranked, place_name, fresh.then_some((query, answer))))
                 })
                 .await;
             this.update(cx, |ws, cx| {
+                let Some((ranked, place_name, fresh)) = ranked else {
+                    return;
+                };
+                if let Some((query, answer)) = fresh {
+                    // Session cache; a typo-storm cannot grow it forever.
+                    if ws.library.query_cache.len() > 512 {
+                        ws.library.query_cache.clear();
+                    }
+                    ws.library.query_cache.insert(query, answer);
+                }
                 // A newer keystroke owns the results now.
                 if ws.library.search_seq == seq {
-                    if let Some((ranked, place)) = ranked {
-                        ws.library.search_results = Some(ranked);
-                        ws.library.search_place = place;
-                    }
+                    ws.library.search_results = Some(ranked);
+                    ws.library.search_place = place_name;
                     cx.notify();
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Load both towers off the UI thread before the first keystroke
+    /// needs them: parsing and optimizing the text model is the slow
+    /// part of a first search, and it memoizes.
+    pub(super) fn warm_search_engine(&mut self, cx: &mut Context<Self>) {
+        if self.library.engine_warmed || !schist_neural::embed::ready() {
+            return;
+        }
+        self.library.engine_warmed = true;
+        cx.background_executor()
+            .spawn(async move {
+                let started = std::time::Instant::now();
+                let text = schist_neural::get("embed-text").is_some();
+                let image = schist_neural::get("embed-image").is_some();
+                log::info!(
+                    "gallery: search engine warmed in {:?} (text: {text}, image: {image})",
+                    started.elapsed()
+                );
+            })
+            .detach();
     }
 
     /// Offer the HEIC support download once, when thumbnails have been

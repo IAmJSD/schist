@@ -566,6 +566,7 @@ mod tests {
 
 /// A place the search box named: where it is, and how far out a photo
 /// still counts as "there".
+#[derive(Clone)]
 pub struct GeoMatch {
     pub name: String,
     pub lat: f64,
