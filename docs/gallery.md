@@ -9,9 +9,11 @@ menu entries with it.
 ## Boot
 
 A launch with nothing to open lands in the gallery, empty or not — as
-Picasa boots into its library. An empty one offers the ways in (add a
-folder, import from a camera), and the top strip always carries Open…
-and New File…. Opening a document from the shell (`schist file.psd`),
+Picasa boots into its library. An empty one is the app's welcome
+screen, since a fresh Schist has no other: it says hello and offers
+all four ways in — Add Folder… and Import from Camera… to fill the
+gallery, Open… and New File… to go straight to a document — and the
+top strip carries the last two at every other moment too. Opening a document from the shell (`schist file.psd`),
 from Finder, or recovering unsaved work from a crash all win over the
 gallery: the editor is where a document lives. Closing the last tab
 returns to the gallery exactly as it was left — search, selection,

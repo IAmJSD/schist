@@ -410,27 +410,48 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         }))
 }
 
-/// Nothing watched yet: say what the gallery is and offer the two ways in.
+/// Nothing watched yet, which for most people is the first launch:
+/// welcome them, and offer all four ways in — the two that fill the
+/// gallery, and the two that open the editor — since a fresh Schist
+/// has no other screen to say hello from.
 fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
+    let caption = |text: &'static str| {
+        div()
+            .text_size(px(12.0))
+            .text_color(gpui::rgb(pal().text_dim))
+            .child(text)
+    };
     div()
         .flex()
         .flex_col()
         .flex_grow()
         .items_center()
         .justify_center()
-        .gap_3()
+        .gap_2()
         .child(
             div()
-                .text_size(px(16.0))
+                .text_size(px(22.0))
                 .text_color(gpui::rgb(pal().text))
-                .child("Your gallery is empty"),
+                .child("Welcome to Schist"),
         )
         .child(
+            // Held to a readable measure: centred prose across a wide
+            // window is a headline, not a sentence.
             div()
+                .max_w(px(520.0))
+                .text_center()
                 .text_size(px(12.0))
                 .text_color(gpui::rgb(pal().text_dim))
-                .child("Watch folders of photos, or import from a camera. Files stay where they are; edits are versioned beside them."),
+                .child(
+                    "An image editor with a photo gallery attached. \
+                     Start with a library of photos, or go straight to a document.",
+                ),
         )
+        .child(div().h(px(12.0)))
+        .child(caption(
+            "Watch folders of photos, or import from a camera. Files stay \
+             where they are; edits are versioned beside them.",
+        ))
         .child(
             div()
                 .flex()
@@ -449,6 +470,41 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
                     cx,
                 )),
         )
+        .child(div().h(px(4.0)))
+        .child(
+            // A hairline between the two ways in, as wide as the row
+            // above it rather than the whole window.
+            div()
+                .w(px(360.0))
+                .h(px(1.0))
+                .my_2()
+                .bg(gpui::rgb(pal().cell_edge)),
+        )
+        .child(caption("Or open an image to edit, and come back later."))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(gallery_button(
+                    "Open…",
+                    false,
+                    crate::keymap::open_file_dialog,
+                    cx,
+                ))
+                .child(gallery_button(
+                    "New File…",
+                    false,
+                    |ws, _w, cx| ws.open_new_file_picker(cx),
+                    cx,
+                )),
+        )
+        .child(div().h(px(8.0)))
+        .child(caption(if cfg!(target_os = "macos") {
+            "The gallery is always \u{2318}\u{21e7}G away, whatever you are editing."
+        } else {
+            "The gallery is always Ctrl+Shift+G away, whatever you are editing."
+        }))
 }
 
 /// The folder list: Picasa's left column, minus the years.
