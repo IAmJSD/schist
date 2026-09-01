@@ -47,6 +47,16 @@ content filter applies whatever the grouping. Capture time, position
 and city are read in one EXIF pass per photo and cached beside the
 thumbnail (`.meta`).
 
+**Map filter** (sidebar, or Gallery ▸ Map Filter…) opens the same
+navigable map as the import dialog: draw a boundary (or jump to a
+preset) and Apply, and the grid shows only photos whose EXIF position
+falls inside it — everywhere: every grouping, the search results, the
+counts. Because it persists across launches, it announces itself while
+on: a blue "Map filter: <place> ✕" banner in the top strip (click to
+edit, ✕ to turn off) and a lit sidebar chip. Applying with nothing
+drawn turns it off; the boundary is shared with the import dialog, so
+what you import by is one Apply from what you browse by.
+
 Folders are watched in place, never copied. Scanning is recursive
 (skipping dot-directories), capped at 5000 files, and re-runs every time
 the gallery opens. Thumbnails render lazily — a cell coming on screen is

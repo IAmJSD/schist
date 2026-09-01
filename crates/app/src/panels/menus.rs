@@ -322,6 +322,7 @@ fn gallery_menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
             vec![
                 App("Edit Selected", GalleryEditSelected, None),
                 App("Refresh", GalleryRefresh, None),
+                App("Map Filter…", GalleryMapFilter, None),
                 Sep,
                 // The content filter's model downloads live here too, so
                 // turning the filter on never requires leaving the room.

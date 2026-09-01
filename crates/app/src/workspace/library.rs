@@ -93,6 +93,10 @@ struct LibraryFile {
     thumb_px: Option<f32>,
     #[serde(default)]
     group_by: Option<String>,
+    #[serde(default)]
+    map_filter: Option<(f64, f64, f64, f64)>,
+    #[serde(default)]
+    map_filter_name: Option<String>,
 }
 
 pub struct Library {
@@ -147,6 +151,11 @@ pub struct Library {
     /// How the grid is grouped, persisted. Date by default: a camera
     /// roll is a diary before it is a directory tree.
     pub group_by: GroupBy,
+    /// The map filter: when set, the grid shows only photos whose EXIF
+    /// position falls inside it. Persisted — which is exactly why the
+    /// gallery wears a loud banner while it is on.
+    pub map_filter: Option<GeoBounds>,
+    pub map_filter_name: Option<String>,
     /// The search box: its text, whether it is taking keystrokes, and
     /// the current query's ranked results (`None` = not searching).
     pub search: String,
@@ -250,6 +259,13 @@ impl Library {
                 .as_deref()
                 .and_then(GroupBy::from_key)
                 .unwrap_or(GroupBy::Date),
+            map_filter: file.map_filter.map(|(south, west, north, east)| GeoBounds {
+                south,
+                west,
+                north,
+                east,
+            }),
+            map_filter_name: file.map_filter_name,
             search: String::new(),
             search_active: false,
             search_selected: false,
@@ -271,6 +287,8 @@ impl Library {
             recents: self.recents.clone(),
             thumb_px: Some(self.thumb_px),
             group_by: Some(self.group_by.key().to_string()),
+            map_filter: self.map_filter.map(|b| (b.south, b.west, b.north, b.east)),
+            map_filter_name: self.map_filter_name.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&file) {
             let _ = std::fs::write(path, json);
@@ -350,7 +368,7 @@ impl Library {
     pub fn flagged_count(&self) -> usize {
         self.visible_sections()
             .flat_map(|s| s.entries.iter())
-            .filter(|e| self.is_flagged(&e.path))
+            .filter(|e| self.passes_map(e) && self.is_flagged(&e.path))
             .count()
     }
 
@@ -373,7 +391,33 @@ impl Library {
     }
 
     pub fn photo_count(&self) -> usize {
-        self.visible_sections().map(|s| s.entries.len()).sum()
+        self.visible_sections()
+            .flat_map(|s| s.entries.iter())
+            .filter(|e| self.passes_map(e))
+            .count()
+    }
+
+    /// Whether the map filter lets a photo through: no filter passes
+    /// everything, a filter passes only photos whose EXIF position
+    /// falls inside it — the point of asking for a place.
+    pub fn passes_map(&self, entry: &Entry) -> bool {
+        let Some(bounds) = self.map_filter else {
+            return true;
+        };
+        matches!(
+            self.positions.get(&entry.path),
+            Some(Some((lat, lon))) if bounds.contains(*lat, *lon)
+        )
+    }
+
+    /// What the active map filter is called, for the banner.
+    pub fn map_filter_label(&self) -> Option<String> {
+        self.map_filter.as_ref()?;
+        Some(
+            self.map_filter_name
+                .clone()
+                .unwrap_or_else(|| "drawn area".to_string()),
+        )
     }
 
     /// A photo's capture time as sortable text: EXIF when probed, the
@@ -397,14 +441,24 @@ impl Library {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| s.dir.display().to_string());
-                    (title, s.dir.display().to_string(), s.entries.clone())
+                    let entries = s
+                        .entries
+                        .iter()
+                        .filter(|e| self.passes_map(e))
+                        .cloned()
+                        .collect();
+                    (title, s.dir.display().to_string(), entries)
                 })
                 .collect(),
             GroupBy::Date => {
                 // Month buckets keyed "YYYY-MM", newest first, photos
                 // newest first inside each.
                 let mut buckets: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
-                for entry in self.visible_sections().flat_map(|s| s.entries.iter()) {
+                for entry in self
+                    .visible_sections()
+                    .flat_map(|s| s.entries.iter())
+                    .filter(|e| self.passes_map(e))
+                {
                     let taken = self.taken_of(entry);
                     let key = taken.get(..7).unwrap_or("0000-00").to_string();
                     buckets.entry(key).or_default().push(entry.clone());
@@ -431,7 +485,11 @@ impl Library {
                 // City buckets, biggest first; the unprobed and the
                 // positionless gather at the end.
                 let mut buckets: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
-                for entry in self.visible_sections().flat_map(|s| s.entries.iter()) {
+                for entry in self
+                    .visible_sections()
+                    .flat_map(|s| s.entries.iter())
+                    .filter(|e| self.passes_map(e))
+                {
                     let key = match self.places.get(&entry.path) {
                         Some(Some(city)) => city.clone(),
                         Some(None) => "No location".to_string(),
@@ -1897,6 +1955,39 @@ impl Workspace {
         self.library.recents.insert(0, path.to_path_buf());
         self.library.recents.truncate(RECENTS_KEPT);
         self.library.save();
+    }
+
+    /// Open the map-filter dialog, seeded with the active filter so
+    /// editing starts from what is on.
+    pub fn open_map_filter(&mut self, cx: &mut Context<Self>) {
+        if let Some(bounds) = self.library.map_filter {
+            self.library.map.selection = Some(bounds);
+            self.library.map.selection_name = self.library.map_filter_name.clone();
+            self.library.map.center = bounds.center();
+        }
+        self.open_modal(Modal::MapFilter, cx);
+    }
+
+    /// Make the drawn boundary the gallery's filter (or clear it, when
+    /// nothing is drawn), and remember it.
+    pub fn apply_map_filter(&mut self, cx: &mut Context<Self>) {
+        self.library.map_filter = self.library.map.selection;
+        self.library.map_filter_name = self
+            .library
+            .map_filter
+            .and(self.library.map.selection_name.clone());
+        self.library.save();
+        self.close_modal(cx);
+        cx.notify();
+    }
+
+    /// Turn the map filter off. The boundary stays drawn on the map, so
+    /// turning it back on is one Apply away.
+    pub fn clear_map_filter(&mut self, cx: &mut Context<Self>) {
+        self.library.map_filter = None;
+        self.library.map_filter_name = None;
+        self.library.save();
+        cx.notify();
     }
 
     /// Regroup the grid and remember the choice.

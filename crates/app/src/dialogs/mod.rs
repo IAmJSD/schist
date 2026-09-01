@@ -196,6 +196,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
             profile_dialog(&state, convert, selected, cx).into_any_element()
         }
         Modal::NewFilePicker => new_file_picker(cx).into_any_element(),
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::MapFilter => crate::workspace::map_filter_dialog(ws, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::MapFilter => return None,
         m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
     };
     ws.default_action = ui::take_default_action();

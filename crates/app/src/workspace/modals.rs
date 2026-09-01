@@ -351,6 +351,7 @@ impl Workspace {
             | Modal::CameraImportOptions { .. }
             | Modal::CameraImportFailed { .. }
             | Modal::NewFilePicker
+            | Modal::MapFilter
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }

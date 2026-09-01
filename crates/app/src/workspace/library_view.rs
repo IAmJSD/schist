@@ -204,6 +204,40 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             cx,
         ))
         .child(div().flex_grow())
+        .children(ws.library.map_filter_label().map(|label| {
+            // The map filter persists across launches, so while it is
+            // on it wears the least ignorable thing in the strip.
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .h(px(24.0))
+                .px_2()
+                .rounded_md()
+                .bg(gpui::rgb(pal().select_border))
+                .text_color(gpui::rgb(0xFFFFFF))
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _e: &MouseDownEvent, _w, cx| ws.open_map_filter(cx)),
+                )
+                .child(format!("Map filter: {label}"))
+                .child(
+                    div()
+                        .px_1()
+                        .hover(|s| s.bg(gpui::rgb(0xFFFFFF30)).rounded_sm())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _e: &MouseDownEvent, _w, cx| {
+                                cx.stop_propagation();
+                                ws.clear_map_filter(cx);
+                            }),
+                        )
+                        .child("\u{2715}"),
+                )
+        }))
         .child(search_box(ws, cx))
         .child(div().flex_grow())
         .child(gallery_button(
@@ -447,6 +481,43 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
             }
             row
         })
+        .child({
+            let active = ws.library.map_filter.is_some();
+            div()
+                .mx_2()
+                .mb_1()
+                .px_2()
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .rounded_md()
+                .text_size(px(11.0))
+                .cursor_pointer()
+                .bg(gpui::rgb(if active {
+                    pal().select_border
+                } else {
+                    pal().button_bg
+                }))
+                .text_color(gpui::rgb(if active { 0xFFFFFF } else { pal().text }))
+                .hover(move |s| {
+                    if active {
+                        s
+                    } else {
+                        s.bg(gpui::rgb(pal().button_hover))
+                    }
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _e: &MouseDownEvent, _w, cx| ws.open_map_filter(cx)),
+                )
+                .child(if active {
+                    "Map filter on"
+                } else {
+                    "Map filter…"
+                })
+                .children(active.then(|| div().child("\u{25cf}")))
+        })
         .child(
             div()
                 .px_2()
@@ -558,6 +629,7 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             let entries: Vec<super::library::Entry> = results
                 .iter()
                 .filter_map(|(path, _)| by_path.get(path).map(|e| (*e).clone()))
+                .filter(|e| ws.library.passes_map(e))
                 .collect();
             let title = match &ws.library.search_place {
                 Some(place) => format!("Search results · near {place}"),
@@ -955,13 +1027,11 @@ pub(crate) fn camera_import_dialog(
 /// Drag pans, the wheel zooms about the pointer, Shift-drag (or the
 /// Draw button) sets the boundary, and the preset chips jump to known
 /// cities — every one of which can then be panned away from or redrawn.
-pub(crate) fn camera_import_options_dialog(
-    ws: &mut Workspace,
-    source: ImportSource,
-    cx: &mut Context<Workspace>,
-) -> impl IntoElement {
+/// The shared boundary editor: preset chips, the navigable map, and
+/// the draw/clear/zoom tools under it. The import dialog and the map
+/// filter both edit the same drawn boundary through this.
+fn boundary_editor(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     use super::library_geo::PLACES;
-    let label = super::library::source_label(&source);
     let selection = ws.library.map.selection;
     let selection_name = ws.library.map.selection_name.clone();
     let draw_mode = ws.library.map.draw_mode;
@@ -1062,6 +1132,23 @@ pub(crate) fn camera_import_options_dialog(
             cx,
         ));
 
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(chips)
+        .child(map_element(ws, cx))
+        .child(tools)
+}
+
+pub(crate) fn camera_import_options_dialog(
+    ws: &mut Workspace,
+    source: ImportSource,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let label = super::library::source_label(&source);
+    let selection = ws.library.map.selection;
+    let selection_name = ws.library.map.selection_name.clone();
     let summary = match (&selection, &selection_name) {
         (Some(_), Some(name)) => format!(
             "Boundary: {name} — only photos whose EXIF position falls inside it import; \
@@ -1084,9 +1171,7 @@ pub(crate) fn camera_import_options_dialog(
         .flex()
         .flex_col()
         .gap_2()
-        .child(chips)
-        .child(map_element(ws, cx))
-        .child(tools)
+        .child(boundary_editor(ws, cx))
         .child(
             div()
                 .text_size(px(11.0))
@@ -1313,4 +1398,65 @@ pub(crate) fn camera_import_failed_dialog(
             cx,
         ));
     crate::ui::modal_frame(format!("Import from {label}"), 420.0, body, actions)
+}
+
+/// The gallery's map filter: draw where, Apply, and the grid shows
+/// only photos taken there — with the loud banner in the top strip
+/// saying so until it is turned off.
+pub(crate) fn map_filter_dialog(
+    ws: &mut Workspace,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let selection = ws.library.map.selection;
+    let filtering = ws.library.map_filter.is_some();
+    let status = match (&selection, &ws.library.map.selection_name) {
+        (Some(_), Some(name)) => format!(
+            "Apply shows only photos taken in {name}; photos without an EXIF position hide."
+        ),
+        (Some(b), None) => format!(
+            "Apply shows only photos taken inside {:.3}°, {:.3}° to {:.3}°, {:.3}°; \
+             photos without an EXIF position hide.",
+            b.south, b.west, b.north, b.east
+        ),
+        (None, _) => "Draw a boundary (Shift-drag, or a preset chip), then Apply. Applying with \
+             nothing drawn turns the filter off."
+            .to_string(),
+    };
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(boundary_editor(ws, cx))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(status),
+        );
+    let mut actions = div().flex().flex_row().gap_2();
+    if filtering {
+        actions = actions.child(crate::ui::button(
+            "Turn Filter Off",
+            false,
+            |ws, _w, cx| {
+                ws.clear_map_filter(cx);
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    }
+    actions = actions
+        .child(crate::ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(crate::ui::button(
+            "Apply",
+            true,
+            |ws, _w, cx| ws.apply_map_filter(cx),
+            cx,
+        ));
+    crate::ui::modal_frame("Map Filter", 580.0, body, actions)
 }
