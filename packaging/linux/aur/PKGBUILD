@@ -1,6 +1,6 @@
 # Maintainer: Infrawrench LLC <astrid@infrawrench.com>
 pkgname=schist
-pkgver=0.9.0
+pkgver=0.9.1
 pkgrel=1
 pkgdesc="Layered image editor with PSD and Affinity support"
 arch=(x86_64 aarch64)
