@@ -1171,8 +1171,10 @@ mod tests {
         // layer kept the colour it was created with forever, so picking a
         // colour and clicking back into the text changed nothing.
         let mut doc = doc();
-        let mut state = EditorState::default();
-        state.foreground = Rgba::from_u8(255, 255, 255, 255);
+        let mut state = EditorState {
+            foreground: Rgba::from_u8(255, 255, 255, 255),
+            ..Default::default()
+        };
         {
             let mut ctx = ToolCtx {
                 doc: &mut doc,
