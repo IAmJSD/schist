@@ -111,7 +111,25 @@ impl Workspace {
             // (⌘K preferences, ⌘⇧G back to the editor, ⌘O open) to
             // dispatch, exactly as the canvas and start screen keep it.
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
+            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
+                // A dialog over the gallery owns the keyboard, exactly
+                // as the editor body arranges for its own dialogs:
+                // Enter fires the primary button, everything else goes
+                // to the focused field.
+                if ws.modal.is_some() {
+                    match ev.keystroke.key.as_str() {
+                        "enter" => {
+                            ws.commit_focused_field();
+                            ws.confirm_modal(window, cx);
+                        }
+                        key => {
+                            ws.field_key(key, ev.keystroke.key_char.as_deref());
+                        }
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if ws.gallery_search_key(ev, cx) || ws.gallery_nav_key(ev, cx) {
                     cx.stop_propagation();
                 }
@@ -588,13 +606,9 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                     MouseButton::Left,
                     cx.listener(|ws, _e: &MouseDownEvent, _w, cx| {
                         // Born holding the selection, so "new bucket
-                        // from these" is one click.
+                        // from these" is the dialog's Create away.
                         let selected = ws.library.selected.clone();
-                        let bucket = ws.library.add_bucket();
-                        if !selected.is_empty() {
-                            ws.library.add_to_bucket(bucket, &selected);
-                        }
-                        cx.notify();
+                        ws.gallery_new_bucket(selected, cx);
                     }),
                 )
                 .child("+ New bucket"),
@@ -794,15 +808,17 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             .size_full(),
         );
     if sections.is_empty() {
-        // Say why the grid is bare, rather than showing a void: a scan
-        // may be running, or the watched folders may hold nothing
-        // Schist can decode.
+        // Say why the grid is bare, rather than showing a void: a
+        // bucket may simply be empty, a scan may be running, or the
+        // watched folders may hold nothing Schist can decode.
         column = column.child(
             div()
                 .p_4()
                 .text_size(px(12.0))
                 .text_color(gpui::rgb(pal().text_dim))
-                .child(if scanning {
+                .child(if ws.library.bucket_filter.is_some() {
+                    "This bucket is empty. Drag photos onto its row in the sidebar to add them."
+                } else if scanning {
                     "Scanning folders\u{2026}"
                 } else {
                     "No photos found in the watched folders. Images Schist can open \
@@ -1688,6 +1704,103 @@ pub(crate) fn map_filter_dialog(
     crate::ui::modal_frame("Map Filter", 580.0, body, actions)
 }
 
+/// Name a new bucket. The field is focused the moment the dialog
+/// opens, so typing goes straight in; the dimmed "Bucket N" is what an
+/// empty name falls back to.
+pub(crate) fn bucket_name_dialog(
+    ws: &Workspace,
+    name: String,
+    photos: usize,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let focused = ws.focused_field == Some("bucket-name");
+    let typed = if focused && !ws.field_buffer.is_empty() {
+        ws.field_buffer.clone()
+    } else {
+        name
+    };
+    let empty = typed.is_empty();
+    let shown = if empty {
+        format!("Bucket {}", ws.library.buckets.len() + 1)
+    } else {
+        typed.clone()
+    };
+    let display = if focused { format!("{shown}|") } else { shown };
+    let field = div()
+        .w(px(220.0))
+        .h(px(22.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .bg(gpui::rgb(crate::ui::palette().field_bg))
+        .border_1()
+        .border_color(gpui::rgb(if focused {
+            crate::ui::palette().accent
+        } else {
+            crate::ui::palette().field_bg
+        }))
+        .text_size(px(12.0))
+        // The fallback name renders dim, the way a placeholder does.
+        .text_color(gpui::rgb(if empty {
+            crate::ui::palette().text_dim
+        } else {
+            crate::ui::palette().text
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                ws.focus_field("bucket-name", typed.clone());
+                cx.notify();
+            }),
+        )
+        .child(display);
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(crate::ui::field_row("Name", field));
+    if photos > 0 {
+        body = body.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(if photos == 1 {
+                    "Starts holding the selected photo.".to_string()
+                } else {
+                    format!("Starts holding the {photos} selected photos.")
+                }),
+        );
+    }
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(crate::ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(crate::ui::button(
+            "Create",
+            true,
+            |ws, _w, cx| {
+                ws.commit_focused_field();
+                let Some(Modal::BucketName { name, photos }) = ws.modal.clone() else {
+                    return;
+                };
+                let bucket = ws.library.add_bucket(name);
+                if !photos.is_empty() {
+                    ws.library.add_to_bucket(bucket, &photos);
+                }
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    crate::ui::modal_frame("New Bucket", 320.0, body, actions)
+}
+
 /// The gallery's right-click menu: on a photo it acts on the whole
 /// selection, on a bucket it acts on the bucket.
 fn gallery_context_menu(
@@ -1783,9 +1896,8 @@ fn gallery_context_menu(
                     "Add to new bucket".into(),
                     &mut rows,
                     cx,
-                    std::rc::Rc::new(move |ws, _w, _cx| {
-                        let bucket = ws.library.add_bucket();
-                        ws.library.add_to_bucket(bucket, &add);
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.gallery_new_bucket(add.clone(), cx);
                     }),
                 );
             }

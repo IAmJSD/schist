@@ -186,7 +186,7 @@ impl Workspace {
         // Text fields (layer and document names) take any printable
         // character; the picker's hex field takes hex digits up to a full
         // triplet; numeric fields only digits.
-        let textual = id == "layer-name" || id == "new-doc-name";
+        let textual = id == "layer-name" || id == "new-doc-name" || id == "bucket-name";
         let hex = id == "cp-hex";
         match key {
             "space" if textual => self.field_buffer.push(' '),
@@ -246,6 +246,14 @@ impl Workspace {
         if id == "new-doc-name" {
             self.update_modal(|m| {
                 if let Modal::NewDocument { name, .. } = m {
+                    *name = buffer;
+                }
+            });
+            return;
+        }
+        if id == "bucket-name" {
+            self.update_modal(|m| {
+                if let Modal::BucketName { name, .. } = m {
                     *name = buffer;
                 }
             });
@@ -352,6 +360,9 @@ impl Workspace {
             | Modal::CameraImportFailed { .. }
             | Modal::NewFilePicker
             | Modal::MapFilter
+            // Handled above, before the numeric parse, like the other
+            // text fields.
+            | Modal::BucketName { .. }
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }

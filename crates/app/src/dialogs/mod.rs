@@ -200,6 +200,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::MapFilter => crate::workspace::map_filter_dialog(ws, cx).into_any_element(),
         #[cfg(target_arch = "wasm32")]
         Modal::MapFilter => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::BucketName { name, photos } => {
+            crate::workspace::bucket_name_dialog(ws, name, photos.len(), cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::BucketName { .. } => return None,
         m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
     };
     ws.default_action = ui::take_default_action();

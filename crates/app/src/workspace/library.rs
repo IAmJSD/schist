@@ -608,11 +608,14 @@ impl Library {
         }
     }
 
-    /// A fresh, unimaginatively named bucket; returns its index.
-    pub fn add_bucket(&mut self) -> usize {
-        let n = self.buckets.len() + 1;
+    /// A fresh bucket; an empty name falls back to "Bucket N".
+    pub fn add_bucket(&mut self, name: String) -> usize {
+        let name = match name.trim() {
+            "" => format!("Bucket {}", self.buckets.len() + 1),
+            typed => typed.to_string(),
+        };
         self.buckets.push(Bucket {
-            name: format!("Bucket {n}"),
+            name,
             photos: Vec::new(),
         });
         self.save();
@@ -1525,6 +1528,20 @@ impl Workspace {
     /// instead of the tool shortcuts.
     pub fn gallery_search_active(&self) -> bool {
         self.library.open && self.library.search_active
+    }
+
+    /// Ask what to call a new bucket; it is created on the dialog's
+    /// Create, born holding `photos`.
+    pub(super) fn gallery_new_bucket(&mut self, photos: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.open_modal(
+            Modal::BucketName {
+                name: String::new(),
+                photos,
+            },
+            cx,
+        );
+        // The dialog is one field; put the keyboard straight in it.
+        self.focus_field("bucket-name", "");
     }
 
     /// A keystroke for the search box. Returns whether it was taken.

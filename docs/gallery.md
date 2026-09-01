@@ -70,7 +70,8 @@ baskets photos are dragged into, viewed by clicking their sidebar row,
 and acted on as a group from their right-click menu — **Save all as
 ZIP…** (a stored archive, written by hand — photos don't recompress)
 and **Upscale all ×2** (the built-in waifu2x, `<name>@2x.png` beside
-each original, no download needed). "+ New bucket" is born holding the
+each original, no download needed). "+ New bucket" asks for a name (an
+empty one falls back to "Bucket N") and the bucket is born holding the
 current selection. Photos have their own right-click menu too: Edit,
 Reveal in file manager, Add to bucket, Save as ZIP, Upscale — acting
 on the whole selection when the click lands in it.

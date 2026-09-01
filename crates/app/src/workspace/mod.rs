@@ -76,8 +76,8 @@ mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_view::{
-    camera_import_dialog, camera_import_failed_dialog, camera_import_options_dialog,
-    map_filter_dialog,
+    bucket_name_dialog, camera_import_dialog, camera_import_failed_dialog,
+    camera_import_options_dialog, map_filter_dialog,
 };
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
@@ -966,6 +966,9 @@ pub enum Modal {
     /// The gallery's map filter: the navigable map, a drawn boundary,
     /// and Apply — the grid then shows only photos taken inside it.
     MapFilter,
+    /// Name a new gallery bucket, created on Create and born holding
+    /// `photos`. An empty name falls back to "Bucket N".
+    BucketName { name: String, photos: Vec<PathBuf> },
     /// The full new-document dialog: everything a fresh document needs,
     /// asked up front as Photoshop does.
     NewDocument {
