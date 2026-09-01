@@ -291,9 +291,16 @@ fn gallery_menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 App("Edit Selected", GalleryEditSelected, None),
                 App("Refresh", GalleryRefresh, None),
                 Sep,
+                // The content filter's model downloads live here too, so
+                // turning the filter on never requires leaving the room.
+                App("Manage Models…", ManageModels, None),
+                Sep,
                 App("Back to Editor", OpenGallery, Some("cmd-shift-g")),
             ],
         ),
+        // On macOS Preferences sits in the application menu instead and
+        // this menu converts to nothing; the native bar drops menus that
+        // end up empty.
         (
             "View",
             vec![App("Preferences…", Preferences, Some("cmd-k"))],

@@ -106,6 +106,10 @@ impl Workspace {
             .min_h(px(0.0))
             .bg(gpui::rgb(pal().grid_bg))
             .text_color(gpui::rgb(pal().text))
+            // The focus handle has to stay in the tree for keybindings
+            // (⌘K preferences, ⌘⇧G back to the editor, ⌘O open) to
+            // dispatch, exactly as the canvas and start screen keep it.
+            .track_focus(&self.focus)
             .child(top_strip(self, cx))
             .child(body)
             .child(tray(self, cx));
@@ -202,6 +206,15 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
                 .child("Gallery"),
         )
         .child(div().flex_grow())
+        .child(gallery_button(
+            "Settings…",
+            false,
+            |ws, _w, cx| {
+                ws.snapshot_preferences();
+                ws.open_modal(Modal::Preferences, cx);
+            },
+            cx,
+        ))
         .children(has_doc.then(|| {
             gallery_button(
                 "Back to Editing",

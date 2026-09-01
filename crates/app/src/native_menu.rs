@@ -57,10 +57,18 @@ fn signature(ws: &Workspace) -> String {
 
 fn build(ws: &Workspace) -> Vec<Menu> {
     let mut menus = vec![app_menu()];
-    menus.extend(panels::menus(ws).into_iter().map(|(title, entries)| Menu {
-        name: title.into(),
-        items: items(ws, entries),
-    }));
+    menus.extend(
+        panels::menus(ws)
+            .into_iter()
+            .map(|(title, entries)| Menu {
+                name: title.into(),
+                items: items(ws, entries),
+            })
+            // A menu whose every item moved to the application menu —
+            // the gallery's View, which holds only Preferences — would
+            // open onto nothing; drop it instead.
+            .filter(|menu| !menu.items.is_empty()),
+    );
     menus
 }
 
