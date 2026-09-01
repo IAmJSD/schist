@@ -80,6 +80,19 @@ their right-click menu — **Save all as ZIP…** and **Upscale all ×2**
 (the built-in waifu2x, `<name>@2x.png` beside each original, no
 download needed).
 
+A drag that leaves for another window leaves Schist altogether: the
+moment the pointer is over someone else's window, the internal drag is
+handed to the platform's own drag-and-drop — a pasteboard session on
+macOS, OLE on Windows, XDND on X11 — so dropping on Finder, Explorer
+or a Linux file manager **copies** the photos there. Copy, always and
+only: the gallery watches folders in place, and a drag that quietly
+moved the originals out of a library would be a poor surprise. The
+trigger is "over a foreign window" rather than "outside our
+rectangle", since a file-manager window sitting on top of the gallery
+is both. Wayland sessions do not get this — a client cannot begin a
+drag there without a serial the toolkit never hands out — so it is
+X11 and XWayland on Linux.
+
 An archive holds what the gallery shows: an edited photo goes in as
 its edit, never the untouched original, and each entry keeps the
 photo's own format when that format is lossy — a JPEG stays a JPEG,

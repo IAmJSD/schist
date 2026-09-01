@@ -330,6 +330,10 @@ pub struct Library {
     /// A scrollbar-thumb drag in progress: the pointer's offset from
     /// the thumb's top when it was grabbed, in pixels.
     pub scrollbar_grab: Option<f32>,
+    /// The photos a gpui drag is currently carrying. Kept so that a
+    /// drag which wanders out of the window can be handed to the
+    /// platform's own drag-and-drop, and dropped on a file manager.
+    pub dragging: Option<Vec<PathBuf>>,
     pub selected_bounds: Option<Bounds<Pixels>>,
     /// The keyboard moved the selection; scroll until it is visible.
     reveal_selection: bool,
@@ -474,6 +478,7 @@ impl Library {
             grid_scroll: gpui::ScrollHandle::new(),
             grid_bounds: Bounds::default(),
             scrollbar_grab: None,
+            dragging: None,
             selected_bounds: None,
             reveal_selection: false,
             heif_needed: None,

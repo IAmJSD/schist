@@ -111,6 +111,36 @@ impl Workspace {
             // (⌘K preferences, ⌘⇧G back to the editor, ⌘O open) to
             // dispatch, exactly as the canvas and start screen keep it.
             .track_focus(&self.focus)
+            // A drag that leaves the window is a drag onto the desktop:
+            // hand it to the platform's own drag-and-drop, which is
+            // what Finder, Explorer and the Linux file managers listen
+            // to. gpui's drag is internal and would simply be lost out
+            // there, so it ends here.
+            .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
+                let Some(paths) = ws.library.dragging.clone() else {
+                    return;
+                };
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    // The button came up somewhere we never heard about.
+                    ws.library.dragging = None;
+                    return;
+                }
+                if !crate::drag_out::over_foreign_window(window) {
+                    return;
+                }
+                ws.library.dragging = None;
+                if crate::drag_out::start(&paths, window) {
+                    // The platform owns the drag now; two ghosts
+                    // following one pointer is one too many.
+                    cx.stop_active_drag(window);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|ws, _e: &gpui::MouseUpEvent, _w, _cx| {
+                    ws.library.dragging = None;
+                }),
+            )
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
                 // A dialog over the gallery owns the keyboard, exactly
                 // as the editor body arranges for its own dialogs:
@@ -1125,6 +1155,7 @@ fn cell_element(
     // The drag ghost shows the square being carried, so it wants the
     // same picture the cell shows.
     let ghost_thumb = thumb.clone();
+    let drag_entity = cx.entity();
     let probe_entity = cx.entity();
     let probe_entry = entry.clone();
     let is_selected = selected.iter().any(|p| p == &entry.path);
@@ -1197,6 +1228,10 @@ fn cell_element(
         .on_drag(
             GalleryDrag { paths: drag_paths },
             move |drag, _offset, _window, cx| {
+                // What the drag carries, in case it leaves the window
+                // and the platform's own drag-and-drop takes it on.
+                let carried = drag.paths.clone();
+                drag_entity.update(cx, |ws, _| ws.library.dragging = Some(carried));
                 let label = if drag.paths.len() == 1 {
                     drag_path
                         .file_name()
