@@ -38,6 +38,14 @@ impl Workspace {
         self.retired_images.push(image);
     }
 
+    /// Drop the cached viewport image, retiring it so its atlas slot is
+    /// freed after the next paint rather than leaked.
+    pub(super) fn invalidate_viewport_image(&mut self) {
+        if let Some((_, old)) = self.viewport_image.take() {
+            self.retired_images.push(old);
+        }
+    }
+
     pub fn box_position(&self, id: &'static str, window_pos: Point<Pixels>) -> Option<(f32, f32)> {
         let b = self.slider_bounds.get(id)?;
         let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
@@ -199,11 +207,23 @@ impl Workspace {
         let buffer = image::RgbaImage::from_raw(w as u32, h as u32, bgra)?;
         let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
         let rev = doc.revision;
-        self.thumbs.insert(id, (rev, img.clone()));
+        if let Some((_, old)) = self.thumbs.insert(id, (rev, img.clone())) {
+            self.retire_image(old);
+        }
         // Drop cache entries for layers that no longer exist.
         if self.thumbs.len() > 64 {
             if let Some(doc) = self.doc.as_ref() {
-                self.thumbs.retain(|lid, _| doc.tree.find(*lid).is_some());
+                let dead: Vec<_> = self
+                    .thumbs
+                    .keys()
+                    .copied()
+                    .filter(|lid| doc.tree.find(*lid).is_none())
+                    .collect();
+                for lid in dead {
+                    if let Some((_, old)) = self.thumbs.remove(&lid) {
+                        self.retired_images.push(old);
+                    }
+                }
             }
         }
         Some(img)
@@ -290,7 +310,9 @@ impl Workspace {
         }
         let buffer = image::RgbaImage::from_raw(w, h, bgra)?;
         let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
-        self.nav_thumb = Some((revision, img.clone()));
+        if let Some((_, old)) = self.nav_thumb.replace((revision, img.clone())) {
+            self.retire_image(old);
+        }
         Some(img)
     }
 

@@ -97,7 +97,9 @@ impl Workspace {
             let s = (key.surround & 0xFF) as u8;
             let buffer = image::RgbaImage::from_raw(1, 1, vec![s, s, s, 255])?;
             let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
-            self.viewport_image = Some((key, img.clone()));
+            if let Some((_, old)) = self.viewport_image.replace((key, img.clone())) {
+                self.retired_images.push(old);
+            }
             return Some(img);
         }
 
@@ -311,7 +313,9 @@ impl Workspace {
         }
         let buffer = image::RgbaImage::from_raw(w, h, self.preview.buf.clone())?;
         let img = Arc::new(RenderImage::new(smallvec![image::Frame::new(buffer)]));
-        self.preview.image = Some(img.clone());
+        if let Some(old) = self.preview.image.replace(img.clone()) {
+            self.retired_images.push(old);
+        }
         Some(img)
     }
 }

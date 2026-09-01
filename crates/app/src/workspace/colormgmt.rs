@@ -16,9 +16,14 @@ impl Workspace {
         self.proof_transform = self.color.proof_transform(icc.as_deref()).map(Arc::new);
         self.cache.invalidate_all();
         self.display_tiles.clear();
-        self.viewport_image = None;
+        self.invalidate_viewport_image();
+        if let Some(old) = self.preview.image.take() {
+            self.retired_images.push(old);
+        }
         self.preview = Preview::default();
-        self.thumbs.clear();
+        for (_, (_, old)) in self.thumbs.drain() {
+            self.retired_images.push(old);
+        }
         self.color_epoch += 1;
     }
 

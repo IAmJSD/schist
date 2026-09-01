@@ -140,10 +140,33 @@ pub enum EditOp {
     },
 }
 
+impl EditOp {
+    /// Rough heap bytes this op keeps alive, for the history byte budget.
+    /// Only the bulky pixel payloads are counted, and shared `Arc`s are
+    /// counted at full size, so this overestimates what evicting the op
+    /// actually frees — the safe direction for a cap.
+    fn retained_bytes(&self) -> usize {
+        let tile = |t: &Option<Arc<TileBuf>>| t.as_ref().map_or(0, |t| t.byte_len());
+        match self {
+            EditOp::TileWrite { before, after, .. } => tile(before) + tile(after),
+            EditOp::MaskTileWrite { before, after, .. } => {
+                (before.is_some() as usize + after.is_some() as usize) * TILE_PIXELS
+            }
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Edit {
     pub name: String,
     pub ops: Vec<EditOp>,
+}
+
+impl Edit {
+    fn retained_bytes(&self) -> usize {
+        self.ops.iter().map(EditOp::retained_bytes).sum()
+    }
 }
 
 /// Linear undo history. `undo_stack.last()` is the most recent edit.
@@ -153,6 +176,11 @@ pub struct History {
     redo_stack: Vec<Edit>,
     /// Cap on retained edits; oldest are dropped past this.
     pub limit: usize,
+    /// Cap on retained pixel bytes across the undo stack; oldest edits are
+    /// dropped past this. One large stroke can hold tens of megabytes of
+    /// tiles, so an edit-count cap alone lets a painting session retain
+    /// gigabytes. The newest edit always stays, however large.
+    pub byte_limit: usize,
     /// How deep the undo stack was when the document was last saved, so
     /// undoing back to that point can clear the dirty flag again. `None`
     /// once that edit has aged out past `limit`, since we can no longer
@@ -166,6 +194,7 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             limit: 200,
+            byte_limit: 1 << 30,
             saved_depth: Some(0),
         }
     }
@@ -182,8 +211,19 @@ impl History {
         }
         self.redo_stack.clear();
         self.undo_stack.push(edit);
+        let mut excess = 0;
         if self.undo_stack.len() > self.limit {
-            let excess = self.undo_stack.len() - self.limit;
+            excess = self.undo_stack.len() - self.limit;
+        }
+        let mut retained: usize = self.undo_stack[excess..]
+            .iter()
+            .map(Edit::retained_bytes)
+            .sum();
+        while retained > self.byte_limit && excess + 1 < self.undo_stack.len() {
+            retained -= self.undo_stack[excess].retained_bytes();
+            excess += 1;
+        }
+        if excess > 0 {
             self.undo_stack.drain(0..excess);
             // Dropping the oldest edits shifts every depth down; a save
             // point that falls off the bottom is gone for good.

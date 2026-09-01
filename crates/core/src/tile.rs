@@ -80,6 +80,15 @@ impl TileBuf {
         }
     }
 
+    /// Heap bytes held by the pixel data.
+    pub fn byte_len(&self) -> usize {
+        match self {
+            TileBuf::U8(b) => b.len(),
+            TileBuf::U16(b) => b.len() * 2,
+            TileBuf::F32(b) => b.len() * 4,
+        }
+    }
+
     #[inline]
     pub fn get(&self, ix: usize) -> Rgba {
         let i = ix * 4;

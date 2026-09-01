@@ -13,6 +13,9 @@ impl Workspace {
             self.fit_to_view();
         }
         let mut job = PaintJob::default();
+        // Taken before the no-document return so replaced images still get
+        // their atlas slots released while no document is open.
+        job.retired.extend(std::mem::take(&mut self.retired_images));
         let Some(doc) = self.doc.as_ref() else {
             return job;
         };
@@ -131,7 +134,7 @@ impl Workspace {
             job.tiles.push((bounds, img));
         }
 
-        job.retired = std::mem::take(&mut self.retired_images);
+        job.retired.extend(std::mem::take(&mut self.retired_images));
 
         // Document border. An axis-aligned rectangle cannot follow a
         // rotated view, so when the view is turned it is drawn as a path
@@ -673,10 +676,15 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &ZoomIn, _w, cx| {
                 ws.zoom_by(1.25, None);
+                // Damp like wheel zoom: a burst of key presses stretches the
+                // previous image and rebuilds once settled, instead of
+                // rebuilding a window-sized atlas image per press.
+                ws.view_gesture_event(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ZoomOut, _w, cx| {
                 ws.zoom_by(0.8, None);
+                ws.view_gesture_event(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ZoomFit, _w, cx| {
