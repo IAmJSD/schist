@@ -365,8 +365,10 @@ fn main() {
                                 // open lands in the gallery when one
                                 // exists. Recovered tabs win — unsaved
                                 // work is more urgent than browsing.
-                                ws.library.open = true;
-                                ws.library_rescan(cx);
+                                // Through the toggle so the open does
+                                // everything an interactive open does
+                                // (rescan, camera discovery on macOS).
+                                ws.toggle_gallery(cx);
                             }
                         }
                         ws

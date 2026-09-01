@@ -267,13 +267,17 @@ fn delegate() -> *mut AnyObject {
                 sel!(cameraDeviceDidChangeCapability:),
                 one_arg_noop as extern "C" fn(_, _, _),
             );
+            // Four selector arguments each: (device, payload, item,
+            // error). objc2 checks the count when the class is built,
+            // so a miscount here is a launch-time abort, not a bug that
+            // waits for a callback.
             builder.add_method(
                 sel!(cameraDevice:didReceiveThumbnail:forItem:error:),
-                three_args_noop as extern "C" fn(_, _, _, _, _),
+                four_args_noop as extern "C" fn(_, _, _, _, _, _),
             );
             builder.add_method(
                 sel!(cameraDevice:didReceiveMetadata:forItem:error:),
-                three_args_noop as extern "C" fn(_, _, _, _, _),
+                four_args_noop as extern "C" fn(_, _, _, _, _, _),
             );
             // A passcode-locked iPhone: say so instead of hanging.
             builder.add_method(
@@ -304,12 +308,13 @@ extern "C" fn two_args_noop(
     _b: *mut AnyObject,
 ) {
 }
-extern "C" fn three_args_noop(
+extern "C" fn four_args_noop(
     _this: *mut AnyObject,
     _sel: Sel,
     _a: *mut AnyObject,
     _b: *mut AnyObject,
     _c: *mut AnyObject,
+    _d: *mut AnyObject,
 ) {
 }
 
