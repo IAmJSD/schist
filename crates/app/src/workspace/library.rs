@@ -91,6 +91,8 @@ struct LibraryFile {
     recents: Vec<PathBuf>,
     #[serde(default)]
     thumb_px: Option<f32>,
+    #[serde(default)]
+    group_by: Option<String>,
 }
 
 pub struct Library {
@@ -138,6 +140,13 @@ pub struct Library {
     /// named in the search can pull its photos in. `None` = probed and
     /// positionless, which is most photos off most cameras.
     positions: FxHashMap<PathBuf, Option<(f64, f64)>>,
+    /// Capture times as sortable text, and the city each positioned
+    /// photo groups under — the other two readings of the same EXIF.
+    taken: FxHashMap<PathBuf, String>,
+    places: FxHashMap<PathBuf, Option<String>>,
+    /// How the grid is grouped, persisted. Date by default: a camera
+    /// roll is a diary before it is a directory tree.
+    pub group_by: GroupBy,
     /// The search box: its text, whether it is taking keystrokes, and
     /// the current query's ranked results (`None` = not searching).
     pub search: String,
@@ -157,6 +166,56 @@ pub struct Library {
     heif_needed: Option<PathBuf>,
     heif_prompted: bool,
 }
+
+/// How the grid is grouped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupBy {
+    /// By capture month, newest first — the diary reading.
+    Date,
+    /// By the directory scanning found them in.
+    Folder,
+    /// By the nearest city their EXIF position names.
+    Place,
+}
+
+impl GroupBy {
+    pub const ALL: [GroupBy; 3] = [GroupBy::Date, GroupBy::Folder, GroupBy::Place];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupBy::Date => "Date",
+            GroupBy::Folder => "Folder",
+            GroupBy::Place => "Place",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            GroupBy::Date => "date",
+            GroupBy::Folder => "folder",
+            GroupBy::Place => "place",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<GroupBy> {
+        GroupBy::ALL.into_iter().find(|g| g.key() == key)
+    }
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 impl Library {
     /// Load the persisted folder list and recents.
@@ -184,6 +243,13 @@ impl Library {
             flagged: FxHashMap::default(),
             embeddings: FxHashMap::default(),
             positions: FxHashMap::default(),
+            taken: FxHashMap::default(),
+            places: FxHashMap::default(),
+            group_by: file
+                .group_by
+                .as_deref()
+                .and_then(GroupBy::from_key)
+                .unwrap_or(GroupBy::Date),
             search: String::new(),
             search_active: false,
             search_selected: false,
@@ -204,6 +270,7 @@ impl Library {
             folders: self.folders.clone(),
             recents: self.recents.clone(),
             thumb_px: Some(self.thumb_px),
+            group_by: Some(self.group_by.key().to_string()),
         };
         if let Ok(json) = serde_json::to_string_pretty(&file) {
             let _ = std::fs::write(path, json);
@@ -307,6 +374,86 @@ impl Library {
 
     pub fn photo_count(&self) -> usize {
         self.visible_sections().map(|s| s.entries.len()).sum()
+    }
+
+    /// A photo's capture time as sortable text: EXIF when probed, the
+    /// file's own clock until then.
+    fn taken_of(&self, entry: &Entry) -> String {
+        self.taken
+            .get(&entry.path)
+            .cloned()
+            .unwrap_or_else(|| taken_from_unix(entry.mtime))
+    }
+
+    /// The visible photos grouped the way `group_by` asks:
+    /// (title, subtitle, entries) per group.
+    pub fn grouped(&self) -> Vec<(String, String, Vec<Entry>)> {
+        match self.group_by {
+            GroupBy::Folder => self
+                .visible_sections()
+                .map(|s| {
+                    let title = s
+                        .dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| s.dir.display().to_string());
+                    (title, s.dir.display().to_string(), s.entries.clone())
+                })
+                .collect(),
+            GroupBy::Date => {
+                // Month buckets keyed "YYYY-MM", newest first, photos
+                // newest first inside each.
+                let mut buckets: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+                for entry in self.visible_sections().flat_map(|s| s.entries.iter()) {
+                    let taken = self.taken_of(entry);
+                    let key = taken.get(..7).unwrap_or("0000-00").to_string();
+                    buckets.entry(key).or_default().push(entry.clone());
+                }
+                buckets
+                    .into_iter()
+                    .rev()
+                    .map(|(key, mut entries)| {
+                        entries.sort_by_key(|e| std::cmp::Reverse(self.taken_of(e)));
+                        let title = match (
+                            key.get(..4),
+                            key.get(5..7).and_then(|m| m.parse::<usize>().ok()),
+                        ) {
+                            (Some(year), Some(month)) if (1..=12).contains(&month) => {
+                                format!("{} {year}", MONTHS[month - 1])
+                            }
+                            _ => "Undated".to_string(),
+                        };
+                        (title, String::new(), entries)
+                    })
+                    .collect()
+            }
+            GroupBy::Place => {
+                // City buckets, biggest first; the unprobed and the
+                // positionless gather at the end.
+                let mut buckets: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+                for entry in self.visible_sections().flat_map(|s| s.entries.iter()) {
+                    let key = match self.places.get(&entry.path) {
+                        Some(Some(city)) => city.clone(),
+                        Some(None) => "No location".to_string(),
+                        None => "Not indexed yet".to_string(),
+                    };
+                    buckets.entry(key).or_default().push(entry.clone());
+                }
+                let mut groups: Vec<(String, String, Vec<Entry>)> = buckets
+                    .into_iter()
+                    .map(|(city, mut entries)| {
+                        entries.sort_by_key(|e| std::cmp::Reverse(self.taken_of(e)));
+                        (city, String::new(), entries)
+                    })
+                    .collect();
+                groups.sort_by(|a, b| {
+                    let tail = |t: &str| t == "No location" || t == "Not indexed yet";
+                    (tail(&a.0), std::cmp::Reverse(a.2.len()))
+                        .cmp(&(tail(&b.0), std::cmp::Reverse(b.2.len())))
+                });
+                groups
+            }
+        }
     }
 
     /// The selected entry, if it still exists in a section.
@@ -462,8 +609,8 @@ struct ThumbOutcome {
     /// empty vector marks "tried and cannot" — an undecodable file —
     /// so the indexer does not queue it forever.
     embedding: Option<Vec<f32>>,
-    /// Where the camera said the photo was taken, from its EXIF.
-    gps: Option<(f64, f64)>,
+    /// Position, capture time and grouping city, from the EXIF.
+    meta: PhotoMeta,
     /// The decode failed for want of the HEIC support download.
     needs_heif: bool,
 }
@@ -503,7 +650,7 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
                 img: None,
                 score: cached_score,
                 embedding: cached_embed,
-                gps: photo_position(&cache, &job.key),
+                meta: photo_meta(&cache, &job.key),
                 needs_heif: false,
             };
         }
@@ -552,37 +699,111 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         },
         score,
         embedding,
-        gps: photo_position(&cache, &job.key),
+        meta: photo_meta(&cache, &job.key),
         needs_heif,
     }
 }
 
-/// Where the photo was taken, from the original file's EXIF, cached
-/// beside the thumbnail — "none" included, so a positionless camera
-/// roll is probed once, not every index pass.
-fn photo_position(cache: &Option<PathBuf>, original: &Path) -> Option<(f64, f64)> {
-    let gps_cache = cache.as_ref().map(|p| p.with_extension("gps"));
-    if let Some(text) = gps_cache
+/// A photo's EXIF-derived metadata — position, the city it groups
+/// under, and when it was taken — cached beside the thumbnail in one
+/// file, so a whole camera roll is parsed once, not per launch.
+struct PhotoMeta {
+    gps: Option<(f64, f64)>,
+    /// "YYYY-MM-DD HH:MM:SS": sortable as text, no calendar needed.
+    taken: Option<String>,
+    place: Option<String>,
+}
+
+fn photo_meta(cache: &Option<PathBuf>, original: &Path) -> PhotoMeta {
+    let meta_cache = cache.as_ref().map(|p| p.with_extension("meta"));
+    if let Some(text) = meta_cache
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
     {
-        let mut parts = text
-            .split_whitespace()
-            .filter_map(|v| v.parse::<f64>().ok());
-        return match (parts.next(), parts.next()) {
-            (Some(lat), Some(lon)) => Some((lat, lon)),
-            _ => None,
+        let mut lines = text.lines();
+        let gps = lines.next().and_then(|l| {
+            let mut parts = l.split_whitespace().filter_map(|v| v.parse::<f64>().ok());
+            match (parts.next(), parts.next()) {
+                (Some(lat), Some(lon)) => Some((lat, lon)),
+                _ => None,
+            }
+        });
+        let field = |l: Option<&str>| {
+            l.filter(|l| *l != "none" && !l.is_empty())
+                .map(str::to_string)
+        };
+        return PhotoMeta {
+            gps,
+            taken: field(lines.next()),
+            place: field(lines.next()),
         };
     }
-    let position = photo_gps(original);
-    if let Some(path) = gps_cache {
-        let text = match position {
+    let data = exif_of(original);
+    let gps = data.as_ref().and_then(gps_from);
+    let taken = data.as_ref().and_then(datetime_from);
+    let place = gps.and_then(|(lat, lon)| library_geo::nearest_city(lat, lon));
+    if let Some(path) = meta_cache {
+        let line1 = match gps {
             Some((lat, lon)) => format!("{lat} {lon}"),
             None => "none".into(),
         };
+        let text = format!(
+            "{line1}\n{}\n{}",
+            taken.as_deref().unwrap_or("none"),
+            place.as_deref().unwrap_or("none")
+        );
         let _ = std::fs::write(path, text);
     }
-    position
+    PhotoMeta { gps, taken, place }
+}
+
+/// The capture time as sortable text, from DateTimeOriginal (else
+/// DateTime): "YYYY:MM:DD HH:MM:SS" with the date's colons swapped out.
+fn datetime_from(data: &exif::Exif) -> Option<String> {
+    let field = data
+        .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
+        .or_else(|| data.get_field(exif::Tag::DateTime, exif::In::PRIMARY))?;
+    let raw = field.display_value().to_string();
+    let raw = raw.trim();
+    // "2026:08:14 17:03:22" — sanity before trusting it to sort.
+    if raw.len() < 10 || !raw.as_bytes()[..4].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut normalized: Vec<u8> = raw.bytes().collect();
+    if normalized.get(4) == Some(&b':') {
+        normalized[4] = b'-';
+    }
+    if normalized.get(7) == Some(&b':') {
+        normalized[7] = b'-';
+    }
+    String::from_utf8(normalized).ok()
+}
+
+/// A unix time as the same sortable text, for photos whose EXIF says
+/// nothing — the file's own clock is better than no clock.
+fn taken_from_unix(secs: u64) -> String {
+    let (y, m, d) = ymd_from_unix(secs);
+    let rem = secs % 86_400;
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    )
+}
+
+/// Civil date from days-since-epoch (Howard Hinnant's algorithm).
+fn ymd_from_unix(secs: u64) -> (i64, u32, u32) {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn nsfw_installed() -> bool {
@@ -810,11 +1031,20 @@ pub(crate) fn camera_sources() -> Vec<PathBuf> {
     out
 }
 
-/// The GPS position a camera wrote into a file, if any. Blocking.
-fn photo_gps(path: &Path) -> Option<(f64, f64)> {
+/// One EXIF parse of a file, shared by every reader below.
+fn exif_of(path: &Path) -> Option<exif::Exif> {
     let file = std::fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file);
-    let data = exif::Reader::new().read_from_container(&mut reader).ok()?;
+    exif::Reader::new().read_from_container(&mut reader).ok()
+}
+
+/// The GPS position a camera wrote into a file, if any. Blocking.
+fn photo_gps(path: &Path) -> Option<(f64, f64)> {
+    gps_from(&exif_of(path)?)
+}
+
+/// The GPS position out of a parsed EXIF block.
+fn gps_from(data: &exif::Exif) -> Option<(f64, f64)> {
     // Degrees/minutes/seconds as three rationals, hemisphere in the
     // companion Ref tag ("S"/"W" flip the sign).
     let axis = |tag: exif::Tag, ref_tag: exif::Tag, negative: char| -> Option<f64> {
@@ -1005,7 +1235,11 @@ impl Workspace {
                     if let Some(vector) = outcome.embedding {
                         ws.library.embeddings.insert(key.clone(), Arc::new(vector));
                     }
-                    ws.library.positions.insert(key.clone(), outcome.gps);
+                    ws.library.positions.insert(key.clone(), outcome.meta.gps);
+                    if let Some(taken) = outcome.meta.taken {
+                        ws.library.taken.insert(key.clone(), taken);
+                    }
+                    ws.library.places.insert(key.clone(), outcome.meta.place);
                     if outcome.needs_heif && ws.library.heif_needed.is_none() {
                         ws.library.heif_needed = Some(key.clone());
                     }
@@ -1665,6 +1899,13 @@ impl Workspace {
         self.library.save();
     }
 
+    /// Regroup the grid and remember the choice.
+    pub fn set_gallery_group(&mut self, group: GroupBy, cx: &mut Context<Self>) {
+        self.library.group_by = group;
+        self.library.save();
+        cx.notify();
+    }
+
     /// Set the tray slider's cell size.
     pub fn set_gallery_thumb_px(&mut self, value: f32) {
         self.library.thumb_px = value.clamp(80.0, 240.0);
@@ -1808,5 +2049,33 @@ mod tests {
         // whole of "import photos taken in NYC".
         let nyc = &library_geo::PLACES[0];
         assert!(nyc.bounds.contains(lat, lon));
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+
+    #[test]
+    fn unix_times_become_civil_dates() {
+        assert_eq!(ymd_from_unix(0), (1970, 1, 1));
+        // Constants checked against `date -u`.
+        assert_eq!(ymd_from_unix(1_787_270_400), (2026, 8, 21));
+        assert_eq!(taken_from_unix(1_788_264_000), "2026-09-01 12:00:00");
+        assert_eq!(taken_from_unix(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn exif_datetimes_normalize_to_sortable_text() {
+        // The date's colons swap for dashes so plain string order is
+        // chronological order; the time keeps its own.
+        let taken = "2026:08:14 17:03:22";
+        let mut bytes: Vec<u8> = taken.bytes().collect();
+        bytes[4] = b'-';
+        bytes[7] = b'-';
+        let normalized = String::from_utf8(bytes).unwrap();
+        assert_eq!(normalized, "2026-08-14 17:03:22");
+        assert!(normalized.get(..7) == Some("2026-08"));
+        assert!("2026-09-01 00:00:00" > normalized.as_str());
     }
 }

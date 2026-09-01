@@ -408,6 +408,52 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .pb_1()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(pal().text_dim))
+                .child("GROUP BY"),
+        )
+        .child({
+            let current = ws.library.group_by;
+            let mut row = div().flex().flex_row().gap_1().px_2().pb_2();
+            for group in super::library::GroupBy::ALL {
+                let active = group == current;
+                row = row.child(
+                    div()
+                        .px_2()
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .text_size(px(11.0))
+                        .cursor_pointer()
+                        .bg(gpui::rgb(if active {
+                            pal().sidebar_selected
+                        } else {
+                            pal().button_bg
+                        }))
+                        .hover(move |s| {
+                            if active {
+                                s
+                            } else {
+                                s.bg(gpui::rgb(pal().button_hover))
+                            }
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                                ws.set_gallery_group(group, cx);
+                            }),
+                        )
+                        .child(group.label()),
+                );
+            }
+            row
+        })
+        .child(
+            div()
+                .px_2()
+                .pt_1()
+                .pb_1()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(pal().text_dim))
                 .child("FOLDERS"),
         )
         .children(rows)
@@ -499,9 +545,9 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let hide_flagged = ws.view.gallery_hide_nsfw;
     // Owned snapshot: the cells below borrow the workspace mutably to
     // fetch thumbnails, so they cannot also iterate `sections` in place.
-    let sections: Vec<(PathBuf, Vec<super::library::Entry>)> =
+    let mut sections: Vec<(String, String, Vec<super::library::Entry>)> =
         if let Some(results) = &ws.library.search_results {
-            // A search flattens the folders into one ranked strip.
+            // A search flattens the groups into one ranked strip.
             let by_path: FxHashMap<&PathBuf, &super::library::Entry> = ws
                 .library
                 .sections
@@ -512,27 +558,20 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             let entries: Vec<super::library::Entry> = results
                 .iter()
                 .filter_map(|(path, _)| by_path.get(path).map(|e| (*e).clone()))
-                .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
                 .collect();
             let title = match &ws.library.search_place {
                 Some(place) => format!("Search results · near {place}"),
                 None => "Search results".to_string(),
             };
-            vec![(PathBuf::from(title), entries)]
+            vec![(title, String::new(), entries)]
         } else {
-            ws.library
-                .visible_sections()
-                .map(|s| {
-                    let entries = s
-                        .entries
-                        .iter()
-                        .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
-                        .cloned()
-                        .collect();
-                    (s.dir.clone(), entries)
-                })
-                .collect()
+            ws.library.grouped()
         };
+    // The content filter applies whatever the grouping.
+    for (_, _, entries) in &mut sections {
+        entries.retain(|e| !(hide_flagged && ws.library.is_flagged(&e.path)));
+    }
+    sections.retain(|(_, _, entries)| !entries.is_empty());
     let scanning = ws.library.scanning;
     let mut column = div()
         .id("gallery-grid")
@@ -561,11 +600,12 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 }),
         );
     }
-    for (dir, entries) in sections {
-        let title = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| dir.display().to_string());
+    for (title, subtitle, entries) in sections {
+        let detail = if subtitle.is_empty() {
+            format!("{} photos", entries.len())
+        } else {
+            format!("{subtitle} — {}", entries.len())
+        };
         column = column.child(
             div()
                 .flex()
@@ -584,7 +624,7 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     div()
                         .text_size(px(10.0))
                         .text_color(gpui::rgb(pal().text_dim))
-                        .child(format!("{} — {}", dir.display(), entries.len())),
+                        .child(detail),
                 ),
         );
         column = column.child(div().h(px(1.0)).mb_2().bg(gpui::rgb(pal().cell_edge)));

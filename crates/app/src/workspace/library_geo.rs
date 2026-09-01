@@ -694,6 +694,29 @@ pub(super) fn find_place(query: &str) -> Option<GeoMatch> {
     })
 }
 
+/// The city a photo groups under: the *largest* one within 60 km —
+/// the gazetteer lists big neighbourhoods too, and a Manhattan photo
+/// belongs to "New York City", not "Upper West Side" — else the
+/// nearest within 300, else `None`: mid-ocean photos are nobody's.
+pub(super) fn nearest_city(lat: f64, lon: f64) -> Option<String> {
+    let mut biggest: Option<(u64, &City)> = None;
+    let mut nearest: Option<(f64, &City)> = None;
+    for city in gazetteer() {
+        let d = haversine_km((city.lat, city.lon), (lat, lon));
+        if d <= 60.0 && biggest.map(|(pop, _)| city.pop > pop).unwrap_or(true) {
+            biggest = Some((city.pop, city));
+        }
+        if nearest.map(|(b, _)| d < b).unwrap_or(true) {
+            nearest = Some((d, city));
+        }
+    }
+    if let Some((_, city)) = biggest {
+        return Some(city.display.clone());
+    }
+    let (d, city) = nearest?;
+    (d <= 300.0).then(|| city.display.clone())
+}
+
 /// Great-circle distance in kilometres.
 fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
     let (lat1, lon1) = (a.0.to_radians(), a.1.to_radians());
@@ -751,6 +774,17 @@ mod gazetteer_tests {
         // but "new york" is not.
         let m = find_place("new york").unwrap();
         assert_eq!(m.name, "New York City");
+    }
+
+    #[test]
+    fn photos_group_under_their_nearest_city() {
+        assert_eq!(
+            nearest_city(40.758, -73.985).as_deref(),
+            Some("New York City")
+        );
+        assert_eq!(nearest_city(35.66, 139.7).as_deref(), Some("Tokyo"));
+        // The mid-Atlantic belongs to nobody.
+        assert_eq!(nearest_city(30.0, -40.0), None);
     }
 
     #[test]

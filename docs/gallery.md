@@ -36,6 +36,17 @@ Picasa's warm white lightbox, the dark theme a Lightroom-grey version of
 the same room — opening the gallery from a dark editor must not be a
 flashbang.
 
+The sidebar's **Group by** chips arrange the grid three ways — **Date**
+(the default: capture months, newest first, from EXIF DateTimeOriginal
+with the file's own clock as fallback), **Folder** (the directories
+scanning found), and **Place** (the nearest gazetteer city to each
+photo's EXIF position; the largest within 60 km, so a Manhattan photo
+groups under "New York City" rather than a neighbourhood). The choice
+persists, the folder list keeps filtering in every mode, and the
+content filter applies whatever the grouping. Capture time, position
+and city are read in one EXIF pass per photo and cached beside the
+thumbnail (`.meta`).
+
 Folders are watched in place, never copied. Scanning is recursive
 (skipping dot-directories), capped at 5000 files, and re-runs every time
 the gallery opens. Thumbnails render lazily — a cell coming on screen is
