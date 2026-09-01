@@ -47,6 +47,13 @@ mod filters;
 mod image_ops;
 mod input;
 mod layers_panel;
+// The gallery: watched photo folders, thumbnails, camera import and the
+// PSD sidecars behind gallery edits. A browser tab has no folders to
+// watch, so the web build compiles the whole thing out.
+#[cfg(not(target_arch = "wasm32"))]
+mod library;
+#[cfg(not(target_arch = "wasm32"))]
+mod library_view;
 mod modals;
 mod notes;
 mod recovery;
@@ -57,6 +64,9 @@ mod tiles;
 mod toolbar;
 mod view_options;
 mod viewport;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_view::camera_import_dialog;
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
 
@@ -353,6 +363,24 @@ pub struct Workspace {
     proof_transform: Option<Arc<schist_colormgmt::ColorTransform>>,
     /// The AI sidebar: transcript, conversation worker, MCP queues.
     pub ai: crate::ai::AiState,
+    /// The photo gallery: watched folders, thumbnails, edit sidecars.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub library: library::Library,
+}
+
+impl Workspace {
+    /// Whether the gallery view is showing instead of the editor. Always
+    /// false on the web, where the gallery does not exist.
+    pub fn gallery_open(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.library.open
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
 }
 
 /// One filter in the Filter Gallery's stack.
@@ -839,6 +867,9 @@ pub enum Modal {
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
     HeifSupport { path: PathBuf },
+    /// More than one mounted volume has a DCIM directory: ask which
+    /// camera to import from.
+    CameraImport { sources: Vec<PathBuf> },
     /// A release newer than this build. On macOS and Windows it offers
     /// to install itself and restart; everywhere else it points at the
     /// release page, since the copy came from a package manager.
@@ -1078,6 +1109,8 @@ impl Workspace {
             ai: crate::ai::AiState::new(crate::ai::Backend::Claude),
             #[cfg(target_arch = "wasm32")]
             ai: crate::ai::AiState::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            library: library::Library::load(),
         };
         #[cfg(not(target_arch = "wasm32"))]
         {

@@ -4,7 +4,7 @@ use super::*;
 
 /// (label, width, height, ppi) rows of the File ▸ New preset dropdown,
 /// matched against the dialog's current values to show which is selected.
-pub(super) const NEW_DOC_PRESETS: &[(&str, u32, u32, f32)] = &[
+pub(crate) const NEW_DOC_PRESETS: &[(&str, u32, u32, f32)] = &[
     ("Default (1280 × 800)", 1280, 800, 72.0),
     ("HD (1920 × 1080)", 1920, 1080, 72.0),
     ("4K UHD (3840 × 2160)", 3840, 2160, 72.0),

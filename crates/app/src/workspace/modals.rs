@@ -347,6 +347,7 @@ impl Workspace {
             | Modal::ConfirmCloseTab
             | Modal::DropImage { .. }
             | Modal::HeifSupport { .. }
+            | Modal::CameraImport { .. }
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }

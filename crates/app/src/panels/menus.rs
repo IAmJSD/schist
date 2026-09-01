@@ -23,12 +23,19 @@ pub(crate) enum MenuEntry {
 pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;
+    // The gallery is a different room with different furniture: while it
+    // is showing, the bar holds its menus instead of the editor's.
+    #[cfg(not(target_arch = "wasm32"))]
+    if ws.gallery_open() {
+        return gallery_menus();
+    }
     let menus = vec![
         (
             "File",
             vec![
                 App("New", New, Some("cmd-n")),
                 App("Open…", Open, Some("cmd-o")),
+                App("Browse Gallery…", OpenGallery, Some("cmd-shift-g")),
                 App("Close", Close, Some("cmd-w")),
                 App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
@@ -243,12 +250,55 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     let menus = {
         let mut menus = menus;
         for (_, entries) in &mut menus {
-            entries
-                .retain(|e| !matches!(e, App(_, Plugins | CheckForUpdates | ToggleAi | Quit, _)));
+            entries.retain(|e| {
+                !matches!(
+                    e,
+                    App(
+                        _,
+                        Plugins | CheckForUpdates | ToggleAi | Quit | OpenGallery,
+                        _
+                    )
+                )
+            });
         }
         menus
     };
     menus
+}
+
+/// The menu bar while the gallery is showing. Small on purpose: the
+/// gallery browses and hands photos to the editor, it does not edit.
+#[cfg(not(target_arch = "wasm32"))]
+fn gallery_menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
+    use AppItem::*;
+    use MenuEntry::*;
+    vec![
+        (
+            "File",
+            vec![
+                App("New", New, Some("cmd-n")),
+                App("Open…", Open, Some("cmd-o")),
+                Sep,
+                App("Add Folder to Gallery…", GalleryAddFolder, None),
+                App("Import from Camera…", GalleryImportCamera, None),
+                Sep,
+                App("Quit", Quit, Some("cmd-q")),
+            ],
+        ),
+        (
+            "Gallery",
+            vec![
+                App("Edit Selected", GalleryEditSelected, None),
+                App("Refresh", GalleryRefresh, None),
+                Sep,
+                App("Back to Editor", OpenGallery, Some("cmd-shift-g")),
+            ],
+        ),
+        (
+            "View",
+            vec![App("Preferences…", Preferences, Some("cmd-k"))],
+        ),
+    ]
 }
 
 /// Filters grouped by category, in registration order.

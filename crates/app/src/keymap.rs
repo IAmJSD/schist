@@ -114,6 +114,7 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         KeyBinding::new("tab", TogglePanels, TYPING_SAFE),
         KeyBinding::new("f", CycleScreenMode, TYPING_SAFE),
         KeyBinding::new(&translate("cmd-shift-a"), ToggleAiPanel, CONTEXT),
+        KeyBinding::new(&translate("cmd-shift-g"), ToggleGallery, CONTEXT),
         // Adjustment layers, matching Photoshop's Image ▸ Adjustments keys.
         KeyBinding::new(
             &translate("cmd-l"),

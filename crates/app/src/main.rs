@@ -360,6 +360,13 @@ fn main() {
                             }
                             if let Some(path) = std::env::args().nth(1) {
                                 ws.load_file(path.into(), cx);
+                            } else if ws.tab_count() == 0 && !ws.library.folders.is_empty() {
+                                // Picasa boot: a launch with nothing to
+                                // open lands in the gallery when one
+                                // exists. Recovered tabs win — unsaved
+                                // work is more urgent than browsing.
+                                ws.library.open = true;
+                                ws.library_rescan(cx);
                             }
                         }
                         ws

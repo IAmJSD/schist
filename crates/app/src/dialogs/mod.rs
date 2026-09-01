@@ -39,6 +39,7 @@ use filters::*;
 use fonts::*;
 use layer_props::*;
 use models::*;
+pub(crate) use new_doc::NEW_DOC_PRESETS;
 use new_doc::*;
 use open::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -154,6 +155,12 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::HeifSupport { path } => heif_support(ws, path, cx).into_any_element(),
         #[cfg(target_arch = "wasm32")]
         Modal::HeifSupport { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::CameraImport { sources } => {
+            crate::workspace::camera_import_dialog(&sources, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::CameraImport { .. } => return None,
         #[cfg(not(target_arch = "wasm32"))]
         Modal::UpdateAvailable { update } => update_available(ws, update, cx).into_any_element(),
         #[cfg(target_arch = "wasm32")]

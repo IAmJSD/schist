@@ -94,6 +94,13 @@ impl Workspace {
     }
 
     pub(super) fn open_in_tab(&mut self, mut doc: Document, replace_pristine: bool) {
+        // A document arriving is what ends the gallery: whether it came
+        // from File ▸ New, a gallery double-click or a crash recovery,
+        // the editor is where it lives.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.library.open = false;
+        }
         // Photoshop's History Brush paints back from the state the file
         // was opened in, so that is what gets snapshotted here.
         doc.snapshot_history_source();
@@ -272,6 +279,8 @@ impl Workspace {
         if index == self.active_tab {
             if let Some(doc) = self.doc.take() {
                 self.remove_recovery_for(doc.id);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.forget_backing(doc.id);
             }
             if self.background_tabs.is_empty() {
                 self.active_tab = 0;
@@ -291,6 +300,8 @@ impl Workspace {
             };
             let tab = self.background_tabs.remove(parked);
             self.remove_recovery_for(tab.doc.id);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.forget_backing(tab.doc.id);
             if index < self.active_tab {
                 self.active_tab -= 1;
             }
@@ -338,6 +349,10 @@ impl Workspace {
                     None => format!("Opened {}", doc.title).into(),
                 };
                 self.install_document(doc);
+                // Adopt a gallery edit's sidecar arrangement, or record
+                // an ordinary open in the recents.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.finish_load_bookkeeping(&path);
                 self.offer_missing_fonts(cx);
             }
             // A HEIC on a machine with no libheif — or a libheif with
@@ -525,6 +540,10 @@ impl Workspace {
 
     /// Serialize the document to `path`, choosing the codec by extension.
     pub fn save_file_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // A save landing on a gallery sidecar keeps the previous state as
+        // a version first — that is the gallery's automatic versioning.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pre_save_backing(&path);
         match self.write_document_to(&path) {
             Ok(()) => {
                 if let Some(doc) = &mut self.doc {
@@ -535,6 +554,13 @@ impl Workspace {
                     }
                 }
                 self.clear_recovery();
+                // A sidecar save refreshes its photo's thumbnail instead
+                // of joining the recents; anything else is a real file
+                // the user may want back quickly.
+                #[cfg(not(target_arch = "wasm32"))]
+                if !self.post_save_backing(&path) {
+                    self.note_recent(&path);
+                }
                 self.status = format!("Saved {}", path.display()).into();
                 // Only if this is the document the close was asked for.
                 // The Save As portal does not block the window on Linux,

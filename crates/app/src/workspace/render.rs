@@ -556,6 +556,46 @@ impl Render for Workspace {
         let modal = crate::dialogs::render(self, cx);
         let context_menu = panels::context_menu(self, window.viewport_size(), cx);
         let tool_flyout = panels::tool_flyout(self, cx);
+        // Three bodies share the shell (menu bar, action handlers, modal
+        // overlay): the gallery when it is open, the start screen when
+        // nothing is, and otherwise the editor.
+        let gallery = self.gallery_open();
+        let editor_chrome = !gallery && self.doc.is_some() && chrome;
+        let body: gpui::AnyElement = if gallery {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.render_gallery(cx).into_any_element()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                unreachable!("the gallery is not compiled into the web build")
+            }
+        } else if self.doc.is_none() {
+            panels::start_screen(self, cx).into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .flex_grow()
+                .min_h(px(0.0))
+                .children(chrome.then(|| panels::toolbar(self, cx)))
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_grow()
+                        .size_full()
+                        .child(self.render_canvas(cx))
+                        .children((chrome && self.view.rulers).then(|| panels::rulers(self, cx))),
+                )
+                .children(chrome.then(|| panels::side_panels(self, cx)))
+                .children(if chrome {
+                    panels::ai_sidebar(self, cx)
+                } else {
+                    None
+                })
+                .into_any_element()
+        };
         div()
             .size_full()
             .flex()
@@ -689,6 +729,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &CycleScreenMode, _w, cx| ws.cycle_screen_mode(cx)))
             .on_action(cx.listener(|ws, _: &TogglePanels, _w, cx| ws.cycle_screen_mode(cx)))
             .on_action(cx.listener(|ws, _: &ToggleAiPanel, _w, cx| ws.toggle_ai_panel(cx)))
+            .on_action(cx.listener(|_ws, _: &ToggleGallery, _w, _cx| {
+                #[cfg(not(target_arch = "wasm32"))]
+                _ws.toggle_gallery(_cx);
+            }))
             .on_action(cx.listener(|ws, _: &ShowLayerStyle, _w, cx| {
                 if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
                     ws.show_layer_style(id, cx);
@@ -714,34 +758,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &NextTab, _w, cx| ws.cycle_tab(1, cx)))
             .on_action(cx.listener(|ws, _: &PrevTab, _w, cx| ws.cycle_tab(-1, cx)))
             .children(in_window_menus.then(|| panels::menu_bar(self, cx)))
-            .children(chrome.then(|| panels::tool_options_bar(self, cx)))
-            .children(chrome.then(|| panels::tab_bar(self, cx)))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_grow()
-                    .min_h(px(0.0))
-                    .children(chrome.then(|| panels::toolbar(self, cx)))
-                    .child(
-                        div()
-                            .relative()
-                            .flex()
-                            .flex_grow()
-                            .size_full()
-                            .child(self.render_canvas(cx))
-                            .children(
-                                (chrome && self.view.rulers).then(|| panels::rulers(self, cx)),
-                            ),
-                    )
-                    .children(chrome.then(|| panels::side_panels(self, cx)))
-                    .children(if chrome {
-                        panels::ai_sidebar(self, cx)
-                    } else {
-                        None
-                    }),
-            )
-            .children(chrome.then(|| panels::status_bar(self)))
+            .children(editor_chrome.then(|| panels::tool_options_bar(self, cx)))
+            .children(editor_chrome.then(|| panels::tab_bar(self, cx)))
+            .child(body)
+            .children(editor_chrome.then(|| panels::status_bar(self)))
             .children(tool_flyout)
             .children(context_menu)
             .children(modal)

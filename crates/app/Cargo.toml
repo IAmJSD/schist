@@ -65,6 +65,9 @@ schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
 # The AI sidebar: shared MCP catalog/dispatch, and the agent SDKs that
 # drive the user's installed `claude` / `codex` CLIs against it.
 schist-mcp.workspace = true
+# Gallery thumbnails: one windowless image of a file. Native-only with the
+# rest of the gallery — a browser tab has no folders to browse.
+schist-preview.workspace = true
 claude-agent-sdk-rs.workspace = true
 codex-codes.workspace = true
 tokio.workspace = true

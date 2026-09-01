@@ -89,6 +89,7 @@ actions!(
         CycleScreenMode,
         TogglePanels,
         ToggleAiPanel,
+        ToggleGallery,
         HideApp,
         HideOthers,
         ShowAll,
@@ -179,6 +180,19 @@ pub enum AppItem {
     PathStroke,
     PathToSelection,
     PathDelete,
+    /// Show or hide the gallery view. Desktop only; the entries carrying
+    /// these are filtered out of the web build's menus. The four below
+    /// are never even constructed there — the gallery menus that carry
+    /// them are compiled out with the gallery itself.
+    OpenGallery,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    GalleryAddFolder,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    GalleryImportCamera,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    GalleryRefresh,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    GalleryEditSelected,
 }
 
 /// The string [`AddAdjustment`] carries for each adjustment kind. Kept

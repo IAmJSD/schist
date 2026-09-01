@@ -194,6 +194,31 @@ pub(crate) fn run_app_item(
                 ws.activate_tool("transform.selection", cx);
             }
         }
+        // Gallery items. Unreachable on the web — the entries are
+        // filtered out of the menus and the view never opens — but the
+        // match must still cover the variants.
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::OpenGallery => ws.toggle_gallery(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryAddFolder => ws.gallery_add_folder(window, cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryImportCamera => ws.gallery_import_camera(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryRefresh => ws.library_rescan(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryEditSelected => {
+            if let Some(path) = ws.library.selected.clone() {
+                ws.open_from_gallery(path, cx);
+            } else {
+                ws.status = "Select a photo to edit".into();
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        AppItem::OpenGallery
+        | AppItem::GalleryAddFolder
+        | AppItem::GalleryImportCamera
+        | AppItem::GalleryRefresh
+        | AppItem::GalleryEditSelected => {}
         AppItem::PathFill => ws.use_active_path(crate::workspace::PathOp::Fill, cx),
         AppItem::PathStroke => ws.use_active_path(crate::workspace::PathOp::Stroke, cx),
         AppItem::PathToSelection => ws.use_active_path(crate::workspace::PathOp::Select, cx),

@@ -6154,6 +6154,7 @@ dependencies = [
  "schist-plugin-api",
  "schist-plugin-host-8bf",
  "schist-plugin-host-wasm",
+ "schist-preview",
  "schist-text-engine",
  "schist-tools-basic",
  "schist-tools-doc",
