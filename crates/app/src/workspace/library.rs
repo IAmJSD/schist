@@ -142,6 +142,10 @@ pub struct Library {
     /// the current query's ranked results (`None` = not searching).
     pub search: String,
     pub search_active: bool,
+    /// ⌘A selected the whole query: the next keystroke replaces it,
+    /// backspace clears it, ⌘C/⌘X take it — the minimal selection a
+    /// one-line box owes the keyboard.
+    pub search_selected: bool,
     pub search_results: Option<Vec<(PathBuf, f32)>>,
     /// The place the current query named, when it named one — shown on
     /// the results header.
@@ -182,6 +186,7 @@ impl Library {
             positions: FxHashMap::default(),
             search: String::new(),
             search_active: false,
+            search_selected: false,
             search_results: None,
             search_place: None,
             search_seq: 0,
@@ -1039,15 +1044,52 @@ impl Workspace {
         if !self.library.search_active {
             return false;
         }
+        let primary = ev.keystroke.modifiers.platform || ev.keystroke.modifiers.control;
         match ev.keystroke.key.as_str() {
-            "backspace" => {
-                self.library.search.pop();
+            "a" if primary => {
+                self.library.search_selected = !self.library.search.is_empty();
+                cx.notify();
+            }
+            "c" if primary && self.library.search_selected => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.library.search.clone()));
+            }
+            "x" if primary && self.library.search_selected => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.library.search.clone()));
+                self.library.search.clear();
+                self.library.search_selected = false;
+                self.gallery_search_changed(cx);
+            }
+            "v" if primary => {
+                let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                    return true;
+                };
+                // One line: a pasted paragraph flattens rather than
+                // breaking the box.
+                let pasted: String = pasted
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                if self.library.search_selected {
+                    self.library.search.clear();
+                    self.library.search_selected = false;
+                }
+                self.library.search.push_str(&pasted);
+                self.gallery_search_changed(cx);
+            }
+            "backspace" | "delete" => {
+                if self.library.search_selected {
+                    self.library.search.clear();
+                    self.library.search_selected = false;
+                } else {
+                    self.library.search.pop();
+                }
                 self.gallery_search_changed(cx);
             }
             "enter" => {
                 // The results are already live; Enter just puts the
                 // keyboard back on the shortcuts.
                 self.library.search_active = false;
+                self.library.search_selected = false;
                 cx.notify();
             }
             _ => {
@@ -1056,6 +1098,11 @@ impl Workspace {
                 };
                 if text.chars().any(char::is_control) {
                     return false;
+                }
+                // Typing over a selection replaces it, as anywhere.
+                if self.library.search_selected {
+                    self.library.search.clear();
+                    self.library.search_selected = false;
                 }
                 self.library.search.push_str(text);
                 self.gallery_search_changed(cx);
@@ -1074,6 +1121,7 @@ impl Workspace {
         }
         self.library.search.clear();
         self.library.search_active = false;
+        self.library.search_selected = false;
         self.library.search_results = None;
         self.library.search_place = None;
         self.library.search_seq += 1;

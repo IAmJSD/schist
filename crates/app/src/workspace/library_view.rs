@@ -286,10 +286,25 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
             MouseButton::Left,
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
                 ws.library.search_active = true;
+                // A click lands a caret, not a selection.
+                ws.library.search_selected = false;
                 cx.notify();
             }),
         )
-        .child(div().flex_grow().truncate().child(shown))
+        .child(div().flex_grow().truncate().child(
+            // ⌘A's selection, drawn the way every field draws one.
+            if ws.library.search_selected && !text.is_empty() {
+                div()
+                    .rounded_sm()
+                    .px(px(1.0))
+                    .bg(gpui::rgb(pal().select_border))
+                    .text_color(gpui::rgb(0xFFFFFF))
+                    .child(SharedString::from(text.clone()))
+                    .into_any_element()
+            } else {
+                div().child(shown).into_any_element()
+            },
+        ))
         .children((!text.is_empty()).then(|| {
             div()
                 .px_1()
