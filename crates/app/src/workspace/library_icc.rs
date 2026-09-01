@@ -227,8 +227,11 @@ fn delegate() -> *mut AnyObject {
                 sel!(deviceBrowser:didAddDevice:moreComing:),
                 did_add_device as extern "C" fn(_, _, _, _, _),
             );
+            // Not a typo: additions announce "moreComing", removals
+            // "moreGoing". Registering the wrong spelling is an
+            // unrecognized-selector abort the moment a camera unplugs.
             builder.add_method(
-                sel!(deviceBrowser:didRemoveDevice:moreComing:),
+                sel!(deviceBrowser:didRemoveDevice:moreGoing:),
                 did_remove_device as extern "C" fn(_, _, _, _, _),
             );
             // Device session.

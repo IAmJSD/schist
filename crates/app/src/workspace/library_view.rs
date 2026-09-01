@@ -851,7 +851,8 @@ pub(crate) fn camera_import_options_dialog(
             div()
                 .text_size(px(10.0))
                 .text_color(gpui::rgb(crate::ui::palette().text_dim))
-                .child("drag to pan · scroll to zoom · shift-drag to draw"),
+                .truncate()
+                .child("drag pans · scroll zooms · shift-drag draws"),
         )
         .child(div().flex_grow())
         .child(map_tool_button(
@@ -903,19 +904,7 @@ pub(crate) fn camera_import_options_dialog(
         .gap_2()
         .child(chips)
         .child(map_element(ws, cx))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .justify_between()
-                .child(tools)
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .text_color(gpui::rgb(crate::ui::palette().text_faint))
-                        .child("Map data \u{a9} OpenStreetMap contributors"),
-                ),
-        )
+        .child(tools)
         .child(
             div()
                 .text_size(px(11.0))
@@ -1005,6 +994,7 @@ fn map_element(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
     let draw_mode = ws.library.map.draw_mode;
     div()
         .id("gallery-map")
+        .relative()
         .w_full()
         .h(px(300.0))
         .flex_none()
@@ -1082,4 +1072,63 @@ fn map_element(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             )
             .size_full(),
         )
+        // Attribution rides the map's own corner, the way every web map
+        // carries it, where it cannot collide with the dialog's rows.
+        .child(
+            div()
+                .absolute()
+                .bottom(px(2.0))
+                .right(px(4.0))
+                .px_1()
+                .rounded_sm()
+                .bg(gpui::rgba(0xFFFFFFB0))
+                .text_size(px(9.0))
+                .text_color(gpui::rgb(0x333333))
+                .child("\u{a9} OpenStreetMap contributors"),
+        )
+}
+
+/// A device import failed: what happened, what to do about it, and a
+/// Try Again that keeps the source and the drawn boundary.
+pub(crate) fn camera_import_failed_dialog(
+    source: ImportSource,
+    area: Option<(crate::workspace::GeoBounds, String)>,
+    message: String,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let label = super::library::source_label(&source);
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(div().text_size(px(12.0)).child(message))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(
+                    "If the device is locked: unlock it, tap Trust This Computer when it \
+                     asks, keep it plugged in, and try again.",
+                ),
+        );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(crate::ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(crate::ui::button(
+            "Try Again",
+            true,
+            move |ws, _w, cx| {
+                ws.close_modal(cx);
+                ws.import_camera(source.clone(), area.clone(), cx);
+            },
+            cx,
+        ));
+    crate::ui::modal_frame(format!("Import from {label}"), 420.0, body, actions)
 }

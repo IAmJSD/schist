@@ -349,6 +349,7 @@ impl Workspace {
             | Modal::HeifSupport { .. }
             | Modal::CameraImport { .. }
             | Modal::CameraImportOptions { .. }
+            | Modal::CameraImportFailed { .. }
             | Modal::ModelManager
             | Modal::FilterGallery { .. }
             | Modal::Stroke { .. }

@@ -73,7 +73,9 @@ mod view_options;
 mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use library_view::{camera_import_dialog, camera_import_options_dialog};
+pub(crate) use library_view::{
+    camera_import_dialog, camera_import_failed_dialog, camera_import_options_dialog,
+};
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
 
@@ -881,6 +883,16 @@ pub enum Modal {
     /// falls inside it import). The map's own state lives on the
     /// library, not here — it changes every pointer move.
     CameraImportOptions { source: ImportSource },
+    /// A device import failed (a locked iPhone, most often): say so in
+    /// a dialog with the way forward, and offer to try again with the
+    /// same source and boundary. Only ever constructed on macOS, where
+    /// device imports exist.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    CameraImportFailed {
+        source: ImportSource,
+        area: Option<(GeoBounds, String)>,
+        message: String,
+    },
     /// A release newer than this build. On macOS and Windows it offers
     /// to install itself and restart; everywhere else it points at the
     /// release page, since the copy came from a package manager.
@@ -946,6 +958,19 @@ pub enum ImportSource {
     /// device list; the name is for people.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Device { id: u64, name: String },
+}
+
+/// A boundary in degrees: what the import map's rectangle means, and
+/// what the EXIF-position filter tests. Defined here rather than in the
+/// (desktop-only) gallery so the modal enum can carry one on every
+/// target; its methods live with the map in `library_geo`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub struct GeoBounds {
+    pub south: f64,
+    pub west: f64,
+    pub north: f64,
+    pub east: f64,
 }
 
 /// What fills the bottom layer of a document made by File ▸ New.

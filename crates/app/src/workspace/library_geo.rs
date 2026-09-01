@@ -13,14 +13,10 @@ use super::library;
 use super::*;
 use std::io::Read as _;
 
-/// A boundary in degrees. What the user draws, what the filter tests.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GeoBounds {
-    pub south: f64,
-    pub west: f64,
-    pub north: f64,
-    pub east: f64,
-}
+// The boundary type itself lives in the workspace module so the modal
+// enum can carry it on every target; everything that *does* geometry
+// with it is here.
+pub use super::GeoBounds;
 
 impl GeoBounds {
     pub fn contains(&self, lat: f64, lon: f64) -> bool {

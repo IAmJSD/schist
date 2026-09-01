@@ -775,6 +775,15 @@ impl Workspace {
             }
             None => format!("Importing from {label}\u{2026}").into(),
         };
+        // The destination joins the gallery now, not when the import
+        // finishes: with the gallery open and a rescan ticking below,
+        // photos appear in the grid as they land.
+        if !self.library.folders.contains(&dest) {
+            self.library.folders.push(dest.clone());
+            self.library.folders.sort();
+            self.library.save();
+        }
+        self.library.open = true;
         cx.notify();
         match source {
             ImportSource::Volume(volume) => self.import_volume(volume, dest, area, cx),
@@ -787,6 +796,26 @@ impl Workspace {
                 self.library.importing = false;
                 self.status = "Direct device import is a macOS feature".into();
             }
+        }
+        // While the import runs, keep rescanning the watched folders so
+        // each arriving photo shows up within a moment of landing.
+        if self.library.importing {
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1500))
+                    .await;
+                let live = this.update(cx, |ws, cx| {
+                    if !ws.library.importing {
+                        return false;
+                    }
+                    ws.library_rescan(cx);
+                    true
+                });
+                if !live.unwrap_or(false) {
+                    break;
+                }
+            })
+            .detach();
         }
     }
 
@@ -848,8 +877,7 @@ impl Workspace {
         });
         if let Err(err) = library_icc::begin_import(id, dest.clone(), keep) {
             self.library.importing = false;
-            self.status = format!("Import failed: {err}").into();
-            cx.notify();
+            self.report_device_failure(id, name, area, err, cx);
             return;
         }
         cx.spawn(async move |this, cx| loop {
@@ -876,8 +904,7 @@ impl Workspace {
                             );
                         }
                         Err(err) => {
-                            log::error!("camera import failed: {err}");
-                            ws.status = format!("Import failed: {err}").into();
+                            ws.report_device_failure(id, name.clone(), area.clone(), err, cx);
                         }
                     }
                     cx.notify();
@@ -903,6 +930,30 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// A device import that could not finish gets a dialog, not a line
+    /// of tray text — "Please unlock the iPhone" read as furniture down
+    /// there — and the dialog can retry with the same boundary.
+    #[cfg(target_os = "macos")]
+    fn report_device_failure(
+        &mut self,
+        id: u64,
+        name: String,
+        area: Option<(library_geo::GeoBounds, String)>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        log::error!("camera import failed: {message}");
+        self.status = format!("Import from {name} failed").into();
+        self.open_modal(
+            Modal::CameraImportFailed {
+                source: ImportSource::Device { id, name },
+                area,
+                message,
+            },
+            cx,
+        );
     }
 
     /// Shared tail of every camera import: watch the destination, tell

@@ -168,6 +168,15 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         #[cfg(target_arch = "wasm32")]
         Modal::CameraImportOptions { .. } => return None,
         #[cfg(not(target_arch = "wasm32"))]
+        Modal::CameraImportFailed {
+            source,
+            area,
+            message,
+        } => crate::workspace::camera_import_failed_dialog(source, area, message, cx)
+            .into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::CameraImportFailed { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::UpdateAvailable { update } => update_available(ws, update, cx).into_any_element(),
         #[cfg(target_arch = "wasm32")]
         Modal::UpdateAvailable { .. } => return None,
