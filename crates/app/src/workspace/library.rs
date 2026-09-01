@@ -106,9 +106,9 @@ pub struct Library {
     /// Original image path per open document that came from the gallery,
     /// so a save can refresh that image's thumbnail.
     edit_backings: FxHashMap<schist_core::DocumentId, PathBuf>,
-    /// OpenStreetMap previews for the import dialog's place filter,
-    /// keyed by place index into [`library_geo::PLACES`].
-    pub(super) map_previews: FxHashMap<usize, library_geo::MapPreview>,
+    /// The import dialog's navigable map: view, tiles, and the drawn
+    /// boundary (kept here so it survives closing the dialog).
+    pub map: library_geo::MapState,
 }
 
 impl Library {
@@ -133,7 +133,7 @@ impl Library {
             ticker: false,
             pending_backing: None,
             edit_backings: FxHashMap::default(),
-            map_previews: FxHashMap::default(),
+            map: library_geo::MapState::default(),
         }
     }
 
@@ -401,6 +401,27 @@ pub(super) fn volume_label(root: &Path) -> String {
     }
 }
 
+/// A human name as a folder name: path separators and control
+/// characters out, and never empty.
+fn sanitize_folder_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' || c.is_control() {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "Selected Area".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// What to call an import source in dialogs and status lines.
 pub(super) fn source_label(source: &ImportSource) -> String {
     match source {
@@ -477,16 +498,16 @@ fn photo_gps(path: &Path) -> Option<(f64, f64)> {
 }
 
 /// Copy every image under the volume's DCIM into `dest`, skipping files
-/// that already arrived (same name, same size). With a place filter,
-/// only photos whose EXIF position falls inside its box are taken —
-/// "taken in New York", by the camera's own record — and photos without
-/// a position are left behind rather than guessed about. Blocking;
-/// returns (copied, left behind by the filter).
+/// that already arrived (same name, same size). With a boundary, only
+/// photos whose EXIF position falls inside it are taken — "taken in New
+/// York", by the camera's own record — and photos without a position
+/// are left behind rather than guessed about. Blocking; returns
+/// (copied, left behind by the boundary).
 fn copy_dcim(
     source: &Path,
     dest: &Path,
     exts: &[String],
-    place: Option<&'static library_geo::Place>,
+    area: Option<library_geo::GeoBounds>,
 ) -> anyhow::Result<(usize, usize)> {
     let dcim = dcim_dir(source)
         .ok_or_else(|| anyhow::anyhow!("no DCIM folder on {}", source.display()))?;
@@ -515,9 +536,8 @@ fn copy_dcim(
             if !known {
                 continue;
             }
-            if let Some(place) = place {
-                let inside = photo_gps(&path)
-                    .is_some_and(|(lat, lon)| library_geo::place_contains(place, lat, lon));
+            if let Some(area) = area {
+                let inside = photo_gps(&path).is_some_and(|(lat, lon)| area.contains(lat, lon));
                 if !inside {
                     filtered += 1;
                     continue;
@@ -714,7 +734,6 @@ impl Workspace {
             self.open_modal(
                 Modal::CameraImportOptions {
                     source: sources.remove(0),
-                    place: None,
                 },
                 cx,
             );
@@ -724,38 +743,43 @@ impl Workspace {
     }
 
     /// Copy a camera volume's DCIM into ~/Pictures and watch the result.
+    /// Import from a camera, optionally bounded: `area` is the drawn
+    /// (or preset) box and its human name, and only photos whose EXIF
+    /// position falls inside it come over.
     pub fn import_camera(
         &mut self,
         source: ImportSource,
-        place: Option<usize>,
+        area: Option<(library_geo::GeoBounds, String)>,
         cx: &mut Context<Self>,
     ) {
         if self.library.importing {
             return;
         }
         let label = source_label(&source);
-        let place = place.and_then(|i| library_geo::PLACES.get(i));
         let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
             self.status = "Import needs a home directory to copy into".into();
             return;
         };
-        // A place filter is a sorting instruction, so it names the
+        // A boundary is a sorting instruction, so it names the
         // destination: photos taken in New York land in a New York
         // folder, whatever camera they came off.
-        let dest_name = place
-            .map(|p| p.name.to_string())
+        let dest_name = area
+            .as_ref()
+            .map(|(_, name)| sanitize_folder_name(name))
             .unwrap_or_else(|| label.clone());
         let dest = home.join("Pictures/Schist Imports").join(&dest_name);
         self.library.importing = true;
-        self.status = match place {
-            Some(p) => format!("Importing photos taken in {} from {label}\u{2026}", p.name).into(),
+        self.status = match &area {
+            Some((_, name)) => {
+                format!("Importing photos taken in {name} from {label}\u{2026}").into()
+            }
             None => format!("Importing from {label}\u{2026}").into(),
         };
         cx.notify();
         match source {
-            ImportSource::Volume(volume) => self.import_volume(volume, dest, place, cx),
+            ImportSource::Volume(volume) => self.import_volume(volume, dest, area, cx),
             #[cfg(target_os = "macos")]
-            ImportSource::Device { id, name } => self.import_device(id, name, dest, place, cx),
+            ImportSource::Device { id, name } => self.import_device(id, name, dest, area, cx),
             #[cfg(not(target_os = "macos"))]
             ImportSource::Device { .. } => {
                 // Never constructed off macOS; the arm exists for the
@@ -771,21 +795,22 @@ impl Workspace {
         &mut self,
         source: PathBuf,
         dest: PathBuf,
-        place: Option<&'static library_geo::Place>,
+        area: Option<(library_geo::GeoBounds, String)>,
         cx: &mut Context<Self>,
     ) {
         let exts = self.codec_extensions();
         let copy_dest = dest.clone();
+        let bounds = area.as_ref().map(|(b, _)| *b);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { copy_dcim(&source, &copy_dest, &exts, place) })
+                .spawn(async move { copy_dcim(&source, &copy_dest, &exts, bounds) })
                 .await;
             this.update(cx, |ws, cx| {
                 ws.library.importing = false;
                 match result {
                     Ok((copied, filtered)) => {
-                        ws.finish_camera_import(dest, copied, filtered, 0, place, cx)
+                        ws.finish_camera_import(dest, copied, filtered, 0, area, cx)
                     }
                     Err(err) => {
                         log::error!("camera import failed: {err:#}");
@@ -808,16 +833,17 @@ impl Workspace {
         id: u64,
         name: String,
         dest: PathBuf,
-        place: Option<&'static library_geo::Place>,
+        area: Option<(library_geo::GeoBounds, String)>,
         cx: &mut Context<Self>,
     ) {
         use super::library_icc;
         // The filter runs per downloaded file, on the file itself: a
         // device gives no way to read EXIF without downloading, so a
         // declined photo is downloaded, inspected and removed.
-        let keep = place.map(|p| {
+        let keep = area.as_ref().map(|(bounds, _)| {
+            let bounds = *bounds;
             Box::new(move |path: &Path| {
-                photo_gps(path).is_some_and(|(lat, lon)| library_geo::place_contains(p, lat, lon))
+                photo_gps(path).is_some_and(|(lat, lon)| bounds.contains(lat, lon))
             }) as library_icc::KeepFilter
         });
         if let Err(err) = library_icc::begin_import(id, dest.clone(), keep) {
@@ -845,7 +871,7 @@ impl Workspace {
                                 copied,
                                 filtered,
                                 failed,
-                                place,
+                                area.clone(),
                                 cx,
                             );
                         }
@@ -887,7 +913,7 @@ impl Workspace {
         copied: usize,
         filtered: usize,
         failed: usize,
-        place: Option<&'static library_geo::Place>,
+        area: Option<(library_geo::GeoBounds, String)>,
         cx: &mut Context<Self>,
     ) {
         if !self.library.folders.contains(&dest) {
@@ -895,11 +921,10 @@ impl Workspace {
             self.library.folders.sort();
             self.library.save();
         }
-        let mut message = match place {
-            Some(p) => format!(
-                "Imported {copied} photos taken in {} to {} \
+        let mut message = match area {
+            Some((_, name)) => format!(
+                "Imported {copied} photos taken in {name} to {} \
                  ({filtered} elsewhere or without a position left on the camera)",
-                p.name,
                 dest.display()
             ),
             None => format!("Imported {copied} photos to {}", dest.display()),
@@ -1139,6 +1164,6 @@ mod tests {
         // And that position sorts into the New York box, which is the
         // whole of "import photos taken in NYC".
         let nyc = &library_geo::PLACES[0];
-        assert!(library_geo::place_contains(nyc, lat, lon));
+        assert!(nyc.bounds.contains(lat, lon));
     }
 }

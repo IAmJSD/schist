@@ -876,14 +876,11 @@ pub enum Modal {
     HeifSupport { path: PathBuf },
     /// More than one camera is reachable: ask which to import from.
     CameraImport { sources: Vec<ImportSource> },
-    /// Import options for one camera: an optional place filter (only
-    /// photos whose EXIF position falls inside it import), shown on an
-    /// OpenStreetMap preview.
-    CameraImportOptions {
-        source: ImportSource,
-        /// Index into `library_geo::PLACES`; `None` imports everything.
-        place: Option<usize>,
-    },
+    /// Import options for one camera: the navigable OpenStreetMap view
+    /// where a boundary can be drawn (only photos whose EXIF position
+    /// falls inside it import). The map's own state lives on the
+    /// library, not here — it changes every pointer move.
+    CameraImportOptions { source: ImportSource },
     /// A release newer than this build. On macOS and Windows it offers
     /// to install itself and restart; everywhere else it points at the
     /// release page, since the copy came from a package manager.

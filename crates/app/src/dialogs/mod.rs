@@ -162,8 +162,8 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         #[cfg(target_arch = "wasm32")]
         Modal::CameraImport { .. } => return None,
         #[cfg(not(target_arch = "wasm32"))]
-        Modal::CameraImportOptions { source, place } => {
-            crate::workspace::camera_import_options_dialog(ws, source, place, cx).into_any_element()
+        Modal::CameraImportOptions { source } => {
+            crate::workspace::camera_import_options_dialog(ws, source, cx).into_any_element()
         }
         #[cfg(target_arch = "wasm32")]
         Modal::CameraImportOptions { .. } => return None,

@@ -68,15 +68,20 @@ downloading.
 
 Picking a source opens the import options:
 
-* **Place filter.** "Anywhere", or a named place ("taken in New York").
-  With a place chosen, only photos whose EXIF GPS position falls inside
-  its bounding box import; photos without a recorded position stay on
-  the camera. The dialog shows the box on a real OpenStreetMap
-  rendering — standard raster tiles from tile.openstreetmap.org
-  (fetched with an identifying User-Agent per the tile policy, cached
-  under the state directory, attributed in the dialog) with the bounds
-  drawn over them.
-* **Destination.** `~/Pictures/Schist Imports/<place>` when filtered,
+* **The map.** A navigable OpenStreetMap view, driven like any web map:
+  drag to pan, scroll to zoom about the pointer, ± buttons for steps.
+  Shift-drag (or the Draw area button) draws a rectangle on it — the
+  boundary — and preset chips ("New York City", "Tokyo", …) jump there
+  and set their box, which can then be panned away from or redrawn.
+  Tiles are standard rasters from tile.openstreetmap.org, fetched on
+  demand with an identifying User-Agent per the tile policy, cached
+  under the state directory, attributed in the dialog.
+* **The filter.** With a boundary set, only photos whose EXIF GPS
+  position falls inside it import; photos without a recorded position
+  stay on the camera. No boundary imports everything. The boundary
+  survives closing the dialog, so a re-run imports the same place.
+* **Destination.** `~/Pictures/Schist Imports/<boundary name>` when
+  filtered (the preset's name, or "Selected Area" for a drawn box),
   `…/<volume>` otherwise. Already-imported files (same name and size)
   are skipped, so re-running an interrupted import is safe.
 
