@@ -61,6 +61,11 @@ chip. Applying with nothing drawn turns it off; the boundary is shared
 with the import dialog, so what you import by is one Apply from what
 you browse by.
 
+The grid drives from the keyboard too: arrow keys move the selection —
+left/right by one photo, up/down by a visual row, worked out from the
+grid's real width — Enter opens it in the editor, and the grid scrolls
+to keep the selection on screen. Escape still belongs to the search.
+
 Folders are watched in place, never copied. Scanning is recursive
 (skipping dot-directories), capped at 5000 files, and re-runs every time
 the gallery opens. Thumbnails render lazily — a cell coming on screen is

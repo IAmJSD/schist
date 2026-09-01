@@ -111,7 +111,7 @@ impl Workspace {
             // dispatch, exactly as the canvas and start screen keep it.
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, _w, cx| {
-                if ws.gallery_search_key(ev, cx) {
+                if ws.gallery_search_key(ev, cx) || ws.gallery_nav_key(ev, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -123,6 +123,7 @@ impl Workspace {
         // decodes have been failing for want of HEIC support, offer it.
         self.kick_thumb_loader(cx);
         self.maybe_offer_heif(cx);
+        self.gallery_reveal_tick(cx);
         root
     }
 }
@@ -629,7 +630,7 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             let entries: Vec<super::library::Entry> = results
                 .iter()
                 .filter_map(|(path, _)| by_path.get(path).map(|e| (*e).clone()))
-                .filter(|e| ws.library.passes_map(e))
+                .filter(|e| ws.library.passes_map(&e.path))
                 .collect();
             let title = match &ws.library.search_place {
                 Some(place) => format!("Search results · near {place}"),
@@ -645,6 +646,7 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     }
     sections.retain(|(_, _, entries)| !entries.is_empty());
     let scanning = ws.library.scanning;
+    let grid_entity = cx.entity();
     let mut column = div()
         .id("gallery-grid")
         .flex()
@@ -652,8 +654,21 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .flex_grow()
         .min_h(px(0.0))
         .overflow_y_scroll()
+        .track_scroll(&ws.library.grid_scroll)
         .bg(gpui::rgb(pal().grid_bg))
-        .p_2();
+        .p_2()
+        // Record the viewport rectangle, so keyboard navigation can
+        // work out columns per row and keep the selection on screen.
+        .child(
+            canvas(
+                move |bounds, _window, cx| {
+                    grid_entity.update(cx, |ws, _| ws.library.grid_bounds = bounds);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
     if sections.is_empty() {
         // Say why the grid is bare, rather than showing a void: a scan
         // may be running, or the watched folders may hold nothing
@@ -759,6 +774,19 @@ fn cell_element(
                 cx.notify();
             }),
         )
+        .children(is_selected.then(|| {
+            // The selected cell reports where it landed, for the
+            // keyboard's scroll-into-view.
+            let cell_entity = cx.entity();
+            canvas(
+                move |bounds, _window, cx| {
+                    cell_entity.update(cx, |ws, _| ws.library.selected_bounds = Some(bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        }))
         .children(thumb.map(|t| img(t).max_w(px(inner)).max_h(px(inner))))
         .children(ws.library.thumb_failed(&entry.path).then(|| {
             div()

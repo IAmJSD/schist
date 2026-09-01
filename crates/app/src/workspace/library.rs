@@ -166,6 +166,15 @@ pub struct Library {
     pub search_place: Option<String>,
     /// Bumped per query so a slow embedding cannot land on a newer one.
     search_seq: u64,
+    /// The grid's scroll handle, plus the viewport and selected-cell
+    /// rectangles recorded each paint — what keyboard navigation needs
+    /// to keep the selection on screen in a wrap layout that has no
+    /// notion of rows to ask about.
+    pub grid_scroll: gpui::ScrollHandle,
+    pub grid_bounds: Bounds<Pixels>,
+    pub selected_bounds: Option<Bounds<Pixels>>,
+    /// The keyboard moved the selection; scroll until it is visible.
+    reveal_selection: bool,
     /// A thumbnail failed for want of the HEIC support download; the
     /// gallery offers it once.
     heif_needed: Option<PathBuf>,
@@ -263,6 +272,10 @@ impl Library {
             search_results: None,
             search_place: None,
             search_seq: 0,
+            grid_scroll: gpui::ScrollHandle::new(),
+            grid_bounds: Bounds::default(),
+            selected_bounds: None,
+            reveal_selection: false,
             heif_needed: None,
             heif_prompted: false,
         }
@@ -357,7 +370,7 @@ impl Library {
     pub fn flagged_count(&self) -> usize {
         self.visible_sections()
             .flat_map(|s| s.entries.iter())
-            .filter(|e| self.passes_map(e) && self.is_flagged(&e.path))
+            .filter(|e| self.passes_map(&e.path) && self.is_flagged(&e.path))
             .count()
     }
 
@@ -382,19 +395,19 @@ impl Library {
     pub fn photo_count(&self) -> usize {
         self.visible_sections()
             .flat_map(|s| s.entries.iter())
-            .filter(|e| self.passes_map(e))
+            .filter(|e| self.passes_map(&e.path))
             .count()
     }
 
     /// Whether the map filter lets a photo through: no filter passes
     /// everything, a filter passes only photos whose EXIF position
     /// falls inside it — the point of asking for a place.
-    pub fn passes_map(&self, entry: &Entry) -> bool {
+    pub fn passes_map(&self, path: &Path) -> bool {
         let Some(bounds) = self.map_filter else {
             return true;
         };
         matches!(
-            self.positions.get(&entry.path),
+            self.positions.get(path),
             Some(Some((lat, lon))) if bounds.contains(*lat, *lon)
         )
     }
@@ -433,7 +446,7 @@ impl Library {
                     let entries = s
                         .entries
                         .iter()
-                        .filter(|e| self.passes_map(e))
+                        .filter(|e| self.passes_map(&e.path))
                         .cloned()
                         .collect();
                     (title, s.dir.display().to_string(), entries)
@@ -446,7 +459,7 @@ impl Library {
                 for entry in self
                     .visible_sections()
                     .flat_map(|s| s.entries.iter())
-                    .filter(|e| self.passes_map(e))
+                    .filter(|e| self.passes_map(&e.path))
                 {
                     let taken = self.taken_of(entry);
                     let key = taken.get(..7).unwrap_or("0000-00").to_string();
@@ -477,7 +490,7 @@ impl Library {
                 for entry in self
                     .visible_sections()
                     .flat_map(|s| s.entries.iter())
-                    .filter(|e| self.passes_map(e))
+                    .filter(|e| self.passes_map(&e.path))
                 {
                     let key = match self.places.get(&entry.path) {
                         Some(Some(city)) => city.clone(),
@@ -1390,6 +1403,98 @@ impl Workspace {
             }
         }
         true
+    }
+
+    /// An arrow key while the gallery has the keyboard: move the
+    /// selection through the photos in display order — left/right by
+    /// one, up/down by a visual row, worked out from the grid's real
+    /// width since a wrap layout has no rows to ask about.
+    pub(super) fn gallery_nav_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.library.search_active {
+            return false;
+        }
+        let columns = {
+            let width = f32::from(self.library.grid_bounds.size.width);
+            let cell = self.library.thumb_px;
+            // p_2 padding both sides, gap_2 between cells.
+            (((width - 16.0 + 8.0) / (cell + 8.0)).floor() as isize).max(1)
+        };
+        let step: isize = match ev.keystroke.key.as_str() {
+            "left" => -1,
+            "right" => 1,
+            "up" => -columns,
+            "down" => columns,
+            _ => return false,
+        };
+        let hide = self.view.gallery_hide_nsfw;
+        let flat: Vec<PathBuf> = if let Some(results) = &self.library.search_results {
+            results
+                .iter()
+                .map(|(path, _)| path.clone())
+                .filter(|p| self.library.passes_map(p))
+                .filter(|p| !(hide && self.library.is_flagged(p)))
+                .collect()
+        } else {
+            self.library
+                .grouped()
+                .into_iter()
+                .flat_map(|(_, _, entries)| entries)
+                .map(|e| e.path)
+                .filter(|p| !(hide && self.library.is_flagged(p)))
+                .collect()
+        };
+        if flat.is_empty() {
+            return false;
+        }
+        let next = match self
+            .library
+            .selected
+            .as_ref()
+            .and_then(|sel| flat.iter().position(|p| p == sel))
+        {
+            Some(at) => (at as isize + step).clamp(0, flat.len() as isize - 1) as usize,
+            // Nothing selected yet: any arrow lands on the first photo.
+            None => 0,
+        };
+        self.library.selected = Some(flat[next].clone());
+        self.library.reveal_selection = true;
+        cx.notify();
+        true
+    }
+
+    /// Nudge the grid until the keyboard-moved selection is on screen.
+    /// Runs per render off the bounds the previous paint recorded, so
+    /// it converges a frame after the selection moves.
+    pub(super) fn gallery_reveal_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.library.reveal_selection {
+            return;
+        }
+        let (Some(cell), view) = (self.library.selected_bounds, self.library.grid_bounds) else {
+            return;
+        };
+        if view.size.height <= px(0.0) {
+            return;
+        }
+        let top = f32::from(cell.origin.y);
+        let bottom = top + f32::from(cell.size.height);
+        let view_top = f32::from(view.origin.y);
+        let view_bottom = view_top + f32::from(view.size.height);
+        let mut offset = self.library.grid_scroll.offset();
+        if bottom > view_bottom {
+            // Scrolling down means a more negative offset in gpui.
+            offset.y -= px(bottom - view_bottom + 8.0);
+        } else if top < view_top {
+            offset.y += px(view_top - top + 8.0);
+        } else {
+            self.library.reveal_selection = false;
+            return;
+        }
+        self.library.grid_scroll.set_offset(offset);
+        cx.notify();
     }
 
     /// Leave the search: clear the box and show the folders again.

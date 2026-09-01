@@ -710,6 +710,16 @@ impl Render for Workspace {
                 ws.cancel_gesture(cx);
             }))
             .on_action(cx.listener(|ws, _: &CommitGesture, _w, cx| {
+                // Enter in the gallery opens the selected photo — the
+                // binding takes the keystroke before any key listener
+                // could, so the branch lives here.
+                #[cfg(not(target_arch = "wasm32"))]
+                if ws.gallery_open() && !ws.library.search_active {
+                    if let Some(path) = ws.library.selected.clone() {
+                        ws.open_from_gallery(path, cx);
+                    }
+                    return;
+                }
                 ws.commit_gesture(cx);
             }))
             .on_action(cx.listener(|ws, _: &ShowImageSize, _w, cx| {
