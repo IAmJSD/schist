@@ -308,19 +308,17 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
     let active = ws.library.search_active;
     let text = ws.library.search.clone();
     let (indexed, total) = ws.library.index_progress();
-    let shown: SharedString = if text.is_empty() && !active {
-        if !ready {
-            // Places work off EXIF alone; content search needs the two
-            // Search models (Gallery ▸ Manage Models…).
-            "Search places… (models add content search)".into()
-        } else if indexed < total {
-            format!("Search ({indexed}/{total} indexed)").into()
-        } else {
-            "Search photos…".into()
-        }
+    let placeholder: SharedString = if !ready {
+        // Places work off EXIF alone; content search needs the two
+        // Search models (Gallery ▸ Manage Models…).
+        "Search places… (models add content search)".into()
+    } else if indexed < total {
+        format!("Search ({indexed}/{total} indexed)").into()
     } else {
-        format!("{text}{}", if active { "\u{258f}" } else { "" }).into()
+        "Search photos…".into()
     };
+    let cursor = ws.library.search_cursor.min(text.len());
+    let caret_on = ws.caret_on();
     div()
         .flex()
         .flex_row()
@@ -350,6 +348,8 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                 ws.library.search_active = true;
                 // A click lands a caret, not a selection.
                 ws.library.search_selected = false;
+                ws.library.search_cursor = ws.library.search.len();
+                ws.reset_caret_phase();
                 // Focusing the box is the signal to start loading the
                 // towers, so the first query answers quickly without
                 // every gallery open paying their ~300 MB up front.
@@ -358,7 +358,9 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
             }),
         )
         .child(div().flex_grow().truncate().child(
-            // ⌘A's selection, drawn the way every field draws one.
+            // ⌘A's selection, drawn the way every field draws one; a
+            // focused box otherwise shows a blinking caret the arrows
+            // move, with the placeholder ghosted while it is empty.
             if ws.library.search_selected && !text.is_empty() {
                 div()
                     .rounded_sm()
@@ -367,8 +369,29 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
                     .text_color(gpui::rgb(0xFFFFFF))
                     .child(SharedString::from(text.clone()))
                     .into_any_element()
+            } else if active {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(crate::ui::caret_run(
+                        text[..cursor].to_string(),
+                        text[cursor..].to_string(),
+                        caret_on,
+                        pal().text,
+                    ))
+                    .children(text.is_empty().then(|| {
+                        div()
+                            .text_color(gpui::rgb(pal().text_dim))
+                            .child(placeholder.clone())
+                    }))
+                    .into_any_element()
+            } else if text.is_empty() {
+                div().child(placeholder.clone()).into_any_element()
             } else {
-                div().child(shown).into_any_element()
+                div()
+                    .child(SharedString::from(text.clone()))
+                    .into_any_element()
             },
         ))
         .children((!text.is_empty()).then(|| {
@@ -1970,12 +1993,20 @@ fn bucket_field(
     // "Bucket 1|" in full text colour read as an already-filled field.
     // While the field is empty the caret sits alone at the start, the
     // placeholder ghosted behind it, the way every real input does it.
+    // It blinks, and the arrow keys move it.
     let caret_and_text = div()
         .text_color(gpui::rgb(crate::ui::palette().text))
         .child(if focused {
-            format!("{typed}|")
+            let (before, after) = if ws.field_buffer.is_empty() {
+                (typed.clone(), String::new())
+            } else {
+                let at = ws.field_cursor.min(typed.len());
+                (typed[..at].to_string(), typed[at..].to_string())
+            };
+            crate::ui::caret_run(before, after, ws.caret_on(), crate::ui::palette().text)
+                .into_any_element()
         } else {
-            typed.clone()
+            div().child(typed.clone()).into_any_element()
         });
     let mut field = div()
         .w(px(360.0))

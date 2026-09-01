@@ -64,6 +64,10 @@ struct DialogState {
     open_popup: Option<Popup>,
     focused_field: Option<&'static str>,
     field_buffer: String,
+    /// The caret's place in `field_buffer`, and whether this instant
+    /// of the blink shows it.
+    field_cursor: usize,
+    caret_on: bool,
     /// Shares the workspace's dropdown scroll state (it clones as a
     /// handle), so dialog dropdowns open at their current value too.
     dropdown_scroll: ui::DropdownScroll,
@@ -78,6 +82,8 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         open_popup: ws.open_popup,
         focused_field: ws.focused_field,
         field_buffer: ws.field_buffer.clone(),
+        field_cursor: ws.field_cursor,
+        caret_on: ws.caret_on(),
         dropdown_scroll: ws.dropdown_scroll.clone(),
     };
     // Each dialog's primary button registers itself as the default

@@ -157,7 +157,63 @@ impl Workspace {
     pub fn focus_field(&mut self, id: &'static str, current: impl Into<String>) {
         self.focused_field = Some(id);
         self.field_buffer = current.into();
+        self.field_cursor = self.field_buffer.len();
         self.field_fresh = true;
+        self.reset_caret_phase();
+    }
+
+    /// Whether carets are on this instant of the blink. Solid right
+    /// after every keystroke, then 530 ms beats.
+    pub fn caret_on(&self) -> bool {
+        self.caret_phase
+            .is_none_or(|phase| (phase.elapsed().as_millis() / 530) % 2 == 0)
+    }
+
+    /// A keystroke or a focus: the caret shows solid from here.
+    pub(crate) fn reset_caret_phase(&mut self) {
+        // `Instant::now` panics on the web target; its carets simply
+        // stay solid.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.caret_phase = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Keep a repaint arriving at each caret blink beat while any text
+    /// field has the keyboard. One task at a time; it retires itself
+    /// when the last field lets go.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn ensure_caret_blinker(&mut self, cx: &mut Context<Self>) {
+        if self.caret_blinker {
+            return;
+        }
+        self.caret_blinker = true;
+        cx.spawn(async move |this, cx| loop {
+            let wait = match this.update(cx, |ws, _| {
+                let active = ws.focused_field.is_some() || ws.gallery_search_active();
+                if !active {
+                    ws.caret_blinker = false;
+                }
+                active.then(|| {
+                    let into = ws
+                        .caret_phase
+                        .map_or(0, |phase| phase.elapsed().as_millis() as u64 % 530);
+                    // A hair past the beat, so the repaint lands on the
+                    // caret's other state rather than a boundary tie.
+                    530 - into + 5
+                })
+            }) {
+                Ok(Some(ms)) => ms,
+                _ => return,
+            };
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(wait))
+                .await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                return;
+            }
+        })
+        .detach();
     }
 
     /// Fire the open dialog's primary button, as Enter should.
@@ -191,8 +247,48 @@ impl Workspace {
             || id == "bucket-name"
             || id == "bucket-query";
         let hex = id == "cp-hex";
+        // The caret belongs to the textual fields; keep it on the rails
+        // in case the buffer changed underneath it.
+        self.field_cursor = self.field_cursor.min(self.field_buffer.len());
         match key {
-            "space" if textual => self.field_buffer.push(' '),
+            "left" if textual => {
+                self.field_cursor = crate::ui::caret_left(&self.field_buffer, self.field_cursor);
+                self.reset_caret_phase();
+                return true;
+            }
+            "right" if textual => {
+                self.field_cursor = crate::ui::caret_right(&self.field_buffer, self.field_cursor)
+                    .min(self.field_buffer.len());
+                self.reset_caret_phase();
+                return true;
+            }
+            "home" | "up" if textual => {
+                self.field_cursor = 0;
+                self.reset_caret_phase();
+                return true;
+            }
+            "end" | "down" if textual => {
+                self.field_cursor = self.field_buffer.len();
+                self.reset_caret_phase();
+                return true;
+            }
+            "space" if textual => {
+                self.field_buffer.insert(self.field_cursor, ' ');
+                self.field_cursor += 1;
+            }
+            "backspace" if textual => {
+                if self.field_cursor > 0 {
+                    let from = crate::ui::caret_left(&self.field_buffer, self.field_cursor);
+                    self.field_buffer.replace_range(from..self.field_cursor, "");
+                    self.field_cursor = from;
+                }
+            }
+            "delete" if textual => {
+                if self.field_cursor < self.field_buffer.len() {
+                    let to = crate::ui::caret_right(&self.field_buffer, self.field_cursor);
+                    self.field_buffer.replace_range(self.field_cursor..to, "");
+                }
+            }
             "backspace" => {
                 self.field_buffer.pop();
             }
@@ -204,6 +300,7 @@ impl Workspace {
             "escape" => {
                 self.focused_field = None;
                 self.field_buffer.clear();
+                self.field_cursor = 0;
                 return true;
             }
             "enter" | "tab" => {
@@ -215,16 +312,21 @@ impl Workspace {
                 None => return false,
             },
             _ => match text {
+                Some(t) if !t.is_empty() && !t.chars().any(char::is_control) && textual => {
+                    self.field_buffer.insert_str(self.field_cursor, t);
+                    self.field_cursor += t.len();
+                }
                 Some(t)
                     if !t.is_empty()
                         && !t.chars().any(char::is_control)
-                        && (textual || numeric_accepts(&self.field_buffer, t)) =>
+                        && numeric_accepts(&self.field_buffer, t) =>
                 {
                     self.field_buffer.push_str(t)
                 }
                 _ => return false,
             },
         }
+        self.reset_caret_phase();
         // Apply as you type so the dialog stays live.
         self.commit_field_value(id);
         true
@@ -234,6 +336,7 @@ impl Workspace {
         self.commit_field_value(id);
         self.focused_field = None;
         self.field_buffer.clear();
+        self.field_cursor = 0;
     }
 
     pub(super) fn commit_field_value(&mut self, id: &'static str) {

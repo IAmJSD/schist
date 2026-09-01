@@ -290,6 +290,9 @@ pub struct Library {
     /// the current query's ranked results (`None` = not searching).
     pub search: String,
     pub search_active: bool,
+    /// The caret's byte position in `search`, always on a char
+    /// boundary — arrows move it, typing inserts at it.
+    pub search_cursor: usize,
     /// ⌘A selected the whole query: the next keystroke replaces it,
     /// backspace clears it, ⌘C/⌘X take it — the minimal selection a
     /// one-line box owes the keyboard.
@@ -456,6 +459,7 @@ impl Library {
             map_filter_name: None,
             search: String::new(),
             search_active: false,
+            search_cursor: 0,
             search_selected: false,
             search_results: None,
             search_place: None,
@@ -2346,9 +2350,12 @@ impl Workspace {
             return false;
         }
         let primary = ev.keystroke.modifiers.platform || ev.keystroke.modifiers.control;
+        // Keep the caret on the rails whatever changed the text.
+        self.library.search_cursor = self.library.search_cursor.min(self.library.search.len());
         match ev.keystroke.key.as_str() {
             "a" if primary => {
                 self.library.search_selected = !self.library.search.is_empty();
+                self.library.search_cursor = self.library.search.len();
                 cx.notify();
             }
             "c" if primary && self.library.search_selected => {
@@ -2357,6 +2364,7 @@ impl Workspace {
             "x" if primary && self.library.search_selected => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.library.search.clone()));
                 self.library.search.clear();
+                self.library.search_cursor = 0;
                 self.library.search_selected = false;
                 self.gallery_search_changed(cx);
             }
@@ -2372,17 +2380,79 @@ impl Workspace {
                     .collect();
                 if self.library.search_selected {
                     self.library.search.clear();
+                    self.library.search_cursor = 0;
                     self.library.search_selected = false;
                 }
-                self.library.search.push_str(&pasted);
+                let at = self.library.search_cursor;
+                self.library.search.insert_str(at, &pasted);
+                self.library.search_cursor = at + pasted.len();
                 self.gallery_search_changed(cx);
             }
-            "backspace" | "delete" => {
+            "left" | "right" if primary => {
+                // ⌘←/⌘→: the ends of the line.
+                self.library.search_selected = false;
+                self.library.search_cursor = if ev.keystroke.key == "left" {
+                    0
+                } else {
+                    self.library.search.len()
+                };
+                cx.notify();
+            }
+            "left" => {
+                self.library.search_cursor = if self.library.search_selected {
+                    0
+                } else {
+                    crate::ui::caret_left(&self.library.search, self.library.search_cursor)
+                };
+                self.library.search_selected = false;
+                cx.notify();
+            }
+            "right" => {
+                self.library.search_cursor = if self.library.search_selected {
+                    self.library.search.len()
+                } else {
+                    crate::ui::caret_right(&self.library.search, self.library.search_cursor)
+                        .min(self.library.search.len())
+                };
+                self.library.search_selected = false;
+                cx.notify();
+            }
+            "home" | "up" => {
+                self.library.search_cursor = 0;
+                self.library.search_selected = false;
+                cx.notify();
+            }
+            "end" | "down" => {
+                self.library.search_cursor = self.library.search.len();
+                self.library.search_selected = false;
+                cx.notify();
+            }
+            "backspace" => {
                 if self.library.search_selected {
                     self.library.search.clear();
+                    self.library.search_cursor = 0;
                     self.library.search_selected = false;
-                } else {
-                    self.library.search.pop();
+                } else if self.library.search_cursor > 0 {
+                    let from =
+                        crate::ui::caret_left(&self.library.search, self.library.search_cursor);
+                    self.library
+                        .search
+                        .replace_range(from..self.library.search_cursor, "");
+                    self.library.search_cursor = from;
+                }
+                self.gallery_search_changed(cx);
+            }
+            "delete" => {
+                if self.library.search_selected {
+                    self.library.search.clear();
+                    self.library.search_cursor = 0;
+                    self.library.search_selected = false;
+                } else if self.library.search_cursor < self.library.search.len() {
+                    let to =
+                        crate::ui::caret_right(&self.library.search, self.library.search_cursor);
+                    self.library
+                        .search
+                        .replace_range(self.library.search_cursor..to, "");
                 }
                 self.gallery_search_changed(cx);
             }
@@ -2403,12 +2473,17 @@ impl Workspace {
                 // Typing over a selection replaces it, as anywhere.
                 if self.library.search_selected {
                     self.library.search.clear();
+                    self.library.search_cursor = 0;
                     self.library.search_selected = false;
                 }
-                self.library.search.push_str(text);
+                let at = self.library.search_cursor;
+                self.library.search.insert_str(at, text);
+                self.library.search_cursor = at + text.len();
                 self.gallery_search_changed(cx);
             }
         }
+        // A key landed in the box: show the caret solid from here.
+        self.reset_caret_phase();
         true
     }
 
@@ -2563,6 +2638,7 @@ impl Workspace {
             return false;
         }
         self.library.search.clear();
+        self.library.search_cursor = 0;
         self.library.search_active = false;
         self.library.search_selected = false;
         self.library.search_results = None;

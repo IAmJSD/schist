@@ -556,6 +556,12 @@ impl Render for Workspace {
         } else {
             "Workspace editable"
         };
+        // A caret somewhere needs the blink timer running; it retires
+        // itself once every field lets go of the keyboard.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.focused_field.is_some() || self.gallery_search_active() {
+            self.ensure_caret_blinker(cx);
+        }
         let chrome = self.screen_mode == ScreenMode::Standard;
         // On macOS the menus live in the system bar, not in the window.
         crate::native_menu::sync(self, cx);

@@ -302,6 +302,16 @@ pub struct Workspace {
     /// Numeric field currently accepting digits, and its edit buffer.
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
+    /// The caret's byte position in `field_buffer` (always on a char
+    /// boundary). Only the textual fields move it; numeric fields stay
+    /// append-only, matching their caret-less rendering.
+    pub field_cursor: usize,
+    /// When the caret last moved or typed: carets show during the even
+    /// 530 ms beats since then, so one is always solid right after a
+    /// keystroke. `None` (the web build, which has no blink timer)
+    /// means always visible.
+    caret_phase: Option<std::time::Instant>,
+    caret_blinker: bool,
     /// True until the first keystroke after a field takes focus, so that
     /// one can replace the seeded value rather than append to it.
     field_fresh: bool,
@@ -1179,6 +1189,9 @@ impl Workspace {
             modal_stack: Vec::new(),
             focused_field: None,
             field_buffer: String::new(),
+            field_cursor: 0,
+            caret_phase: None,
+            caret_blinker: false,
             field_fresh: false,
             default_action: None,
             #[cfg(not(target_arch = "wasm32"))]

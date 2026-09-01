@@ -202,11 +202,19 @@ pub(super) fn new_document_dialog(
                         cx.notify();
                     }),
                 )
-                // A caret makes it obvious the field takes typing.
+                // A caret makes it obvious the field takes typing; it
+                // blinks, and the arrows move it.
                 .child(if name_focused {
-                    format!("{shown_name}|")
+                    let (before, after) = if state.field_buffer.is_empty() {
+                        (shown_name.clone(), String::new())
+                    } else {
+                        let at = state.field_cursor.min(shown_name.len());
+                        (shown_name[..at].to_string(), shown_name[at..].to_string())
+                    };
+                    ui::caret_run(before, after, state.caret_on, ui::palette().text)
+                        .into_any_element()
                 } else {
-                    shown_name.clone()
+                    div().child(shown_name.clone()).into_any_element()
                 }),
         ))
         .child(ui::field_row(
