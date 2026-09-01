@@ -207,7 +207,7 @@ pub(crate) fn run_app_item(
         AppItem::GalleryRefresh => ws.library_rescan(cx),
         #[cfg(not(target_arch = "wasm32"))]
         AppItem::GalleryEditSelected => {
-            if let Some(path) = ws.library.selected.clone() {
+            if let Some(path) = ws.library.lead_selected().cloned() {
                 ws.open_from_gallery(path, cx);
             } else {
                 ws.status = "Select a photo to edit".into();

@@ -82,6 +82,26 @@ struct ThumbJob {
     for_index: bool,
 }
 
+/// A named basket of photos, dragged in and acted on as a group.
+#[derive(Clone)]
+pub struct Bucket {
+    pub name: String,
+    pub photos: Vec<PathBuf>,
+}
+
+/// What the gallery's right-click menu was opened on.
+#[derive(Clone)]
+pub enum GalleryContext {
+    Photo(PathBuf),
+    Bucket(usize),
+}
+
+/// A drag of gallery photos, headed for a folder or a bucket.
+#[derive(Clone)]
+pub struct GalleryDrag {
+    pub paths: Vec<PathBuf>,
+}
+
 /// A query the engine already answered: its text embedding and the
 /// place it named, so retyping — every prefix, every backspace — costs
 /// a lookup instead of a model run.
@@ -110,6 +130,8 @@ struct LibraryFile {
     thumb_px: Option<f32>,
     #[serde(default)]
     group_by: Option<String>,
+    #[serde(default)]
+    buckets: Vec<(String, Vec<PathBuf>)>,
 }
 
 pub struct Library {
@@ -123,8 +145,18 @@ pub struct Library {
     pub sections: Vec<Section>,
     /// Sidebar filter: show only sections under this root. `None` = all.
     pub folder_filter: Option<PathBuf>,
-    /// The clicked image, if any.
-    pub selected: Option<PathBuf>,
+    /// The selected photos, in the order they were picked; the last is
+    /// the lead — what arrows move and Enter opens.
+    pub selected: Vec<PathBuf>,
+    /// Where a Shift-click range extends from.
+    select_anchor: Option<PathBuf>,
+    /// The buckets: named baskets photos are dragged into, acted on as
+    /// a group (ZIP them, upscale them). Persisted.
+    pub buckets: Vec<Bucket>,
+    /// Showing one bucket's contents instead of the folders.
+    pub bucket_filter: Option<usize>,
+    /// The gallery's own right-click menu: where, and on what.
+    pub context: Option<(Point<Pixels>, GalleryContext)>,
     /// Thumbnail cell edge in pixels, the tray slider's value.
     pub thumb_px: f32,
     pub scanning: bool,
@@ -270,7 +302,15 @@ impl Library {
             recents: file.recents,
             sections: Vec::new(),
             folder_filter: None,
-            selected: None,
+            selected: Vec::new(),
+            select_anchor: None,
+            buckets: file
+                .buckets
+                .into_iter()
+                .map(|(name, photos)| Bucket { name, photos })
+                .collect(),
+            bucket_filter: None,
+            context: None,
             thumb_px: file.thumb_px.unwrap_or(144.0).clamp(80.0, 240.0),
             scanning: false,
             importing: false,
@@ -321,6 +361,11 @@ impl Library {
             recents: self.recents.clone(),
             thumb_px: Some(self.thumb_px),
             group_by: Some(self.group_by.key().to_string()),
+            buckets: self
+                .buckets
+                .iter()
+                .map(|b| (b.name.clone(), b.photos.clone()))
+                .collect(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&file) {
             let _ = std::fs::write(path, json);
@@ -464,6 +509,23 @@ impl Library {
     /// The visible photos grouped the way `group_by` asks:
     /// (title, subtitle, entries) per group.
     pub fn grouped(&self) -> Vec<(String, String, Vec<Entry>)> {
+        // A bucket on show replaces the grouping: its photos, in the
+        // order they were dropped in.
+        if let Some(bucket) = self.bucket_filter.and_then(|i| self.buckets.get(i)) {
+            let entries: Vec<Entry> = bucket
+                .photos
+                .iter()
+                .filter_map(|path| {
+                    self.sections
+                        .iter()
+                        .flat_map(|s| s.entries.iter())
+                        .find(|e| &e.path == path)
+                        .cloned()
+                })
+                .filter(|e| self.passes_map(&e.path))
+                .collect();
+            return vec![(format!("Bucket · {}", bucket.name), String::new(), entries)];
+        }
         match self.group_by {
             GroupBy::Folder => self
                 .visible_sections()
@@ -546,6 +608,58 @@ impl Library {
         }
     }
 
+    /// A fresh, unimaginatively named bucket; returns its index.
+    pub fn add_bucket(&mut self) -> usize {
+        let n = self.buckets.len() + 1;
+        self.buckets.push(Bucket {
+            name: format!("Bucket {n}"),
+            photos: Vec::new(),
+        });
+        self.save();
+        self.buckets.len() - 1
+    }
+
+    /// Drop photos into a bucket, keeping each once.
+    pub fn add_to_bucket(&mut self, index: usize, paths: &[PathBuf]) {
+        let Some(bucket) = self.buckets.get_mut(index) else {
+            return;
+        };
+        for path in paths {
+            if !bucket.photos.contains(path) {
+                bucket.photos.push(path.clone());
+            }
+        }
+        self.save();
+    }
+
+    pub fn remove_from_bucket(&mut self, index: usize, path: &Path) {
+        if let Some(bucket) = self.buckets.get_mut(index) {
+            bucket.photos.retain(|p| p != path);
+            self.save();
+        }
+    }
+
+    pub fn clear_bucket(&mut self, index: usize) {
+        if let Some(bucket) = self.buckets.get_mut(index) {
+            bucket.photos.clear();
+            self.save();
+        }
+    }
+
+    pub fn delete_bucket(&mut self, index: usize) {
+        if index < self.buckets.len() {
+            self.buckets.remove(index);
+            if self.bucket_filter == Some(index) {
+                self.bucket_filter = None;
+            } else if let Some(f) = self.bucket_filter {
+                if f > index {
+                    self.bucket_filter = Some(f - 1);
+                }
+            }
+            self.save();
+        }
+    }
+
     /// The index as the ranking task sees it, rebuilt only when the
     /// index actually changed.
     fn search_snapshot(&mut self) -> SearchSnapshot {
@@ -572,13 +686,39 @@ impl Library {
         snapshot
     }
 
-    /// The selected entry, if it still exists in a section.
+    /// The lead of the selection — what arrows move and Enter opens.
+    pub fn lead_selected(&self) -> Option<&PathBuf> {
+        self.selected.last()
+    }
+
+    /// Whether a photo is in the selection.
+    pub fn is_selected(&self, path: &Path) -> bool {
+        self.selected.iter().any(|p| p == path)
+    }
+
+    /// The lead selection's entry, if it still exists in a section.
     pub fn selected_entry(&self) -> Option<&Entry> {
-        let sel = self.selected.as_ref()?;
+        let lead = self.lead_selected()?;
         self.sections
             .iter()
             .flat_map(|s| s.entries.iter())
-            .find(|e| &e.path == sel)
+            .find(|e| &e.path == lead)
+    }
+
+    /// A plain click: this photo alone, and the range anchor moves.
+    pub fn select_single(&mut self, path: PathBuf) {
+        self.select_anchor = Some(path.clone());
+        self.selected = vec![path];
+    }
+
+    /// ⌘-click: in or out of the selection, keeping the rest.
+    pub fn toggle_selected(&mut self, path: PathBuf) {
+        if let Some(at) = self.selected.iter().position(|p| p == &path) {
+            self.selected.remove(at);
+        } else {
+            self.select_anchor.get_or_insert_with(|| path.clone());
+            self.selected.push(path);
+        }
     }
 }
 
@@ -1488,8 +1628,50 @@ impl Workspace {
             "down" => columns,
             _ => return false,
         };
+        let flat = self.gallery_flat_order();
+        if flat.is_empty() {
+            return false;
+        }
+        let next = match self
+            .library
+            .lead_selected()
+            .and_then(|lead| flat.iter().position(|p| p == lead))
+        {
+            Some(at) => (at as isize + step).clamp(0, flat.len() as isize - 1) as usize,
+            // Nothing selected yet: any arrow lands on the first photo.
+            None => 0,
+        };
+        let lead = flat[next].clone();
+        if ev.keystroke.modifiers.shift {
+            // Shift+arrow: the range from the anchor to wherever the
+            // lead moved, in display order.
+            let anchor = self
+                .library
+                .select_anchor
+                .clone()
+                .unwrap_or_else(|| lead.clone());
+            let a = flat.iter().position(|p| p == &anchor).unwrap_or(next);
+            let (lo, hi) = (a.min(next), a.max(next));
+            let mut range: Vec<PathBuf> = flat[lo..=hi].to_vec();
+            if a > next {
+                // The lead must stay last, so arrows keep moving it.
+                range.reverse();
+            }
+            self.library.select_anchor = Some(anchor);
+            self.library.selected = range;
+        } else {
+            self.library.select_single(lead);
+        }
+        self.library.reveal_selection = true;
+        cx.notify();
+        true
+    }
+
+    /// Every photo the grid is currently showing, in display order —
+    /// what arrows walk and Shift-clicks span.
+    pub(super) fn gallery_flat_order(&self) -> Vec<PathBuf> {
         let hide = self.view.gallery_hide_nsfw;
-        let flat: Vec<PathBuf> = if let Some(results) = &self.library.search_results {
+        if let Some(results) = &self.library.search_results {
             results
                 .iter()
                 .map(|(path, _)| path.clone())
@@ -1504,24 +1686,32 @@ impl Workspace {
                 .map(|e| e.path)
                 .filter(|p| !(hide && self.library.is_flagged(p)))
                 .collect()
-        };
-        if flat.is_empty() {
-            return false;
         }
-        let next = match self
+    }
+
+    /// Shift-click: select the display-order range from the anchor to
+    /// this photo, which becomes the lead.
+    pub(super) fn gallery_select_range_to(&mut self, path: PathBuf) {
+        let flat = self.gallery_flat_order();
+        let anchor = self
             .library
-            .selected
-            .as_ref()
-            .and_then(|sel| flat.iter().position(|p| p == sel))
-        {
-            Some(at) => (at as isize + step).clamp(0, flat.len() as isize - 1) as usize,
-            // Nothing selected yet: any arrow lands on the first photo.
-            None => 0,
+            .select_anchor
+            .clone()
+            .unwrap_or_else(|| path.clone());
+        let (Some(a), Some(b)) = (
+            flat.iter().position(|p| p == &anchor),
+            flat.iter().position(|p| p == &path),
+        ) else {
+            self.library.select_single(path);
+            return;
         };
-        self.library.selected = Some(flat[next].clone());
-        self.library.reveal_selection = true;
-        cx.notify();
-        true
+        let (lo, hi) = (a.min(b), a.max(b));
+        let mut range: Vec<PathBuf> = flat[lo..=hi].to_vec();
+        if a > b {
+            range.reverse();
+        }
+        self.library.select_anchor = Some(anchor);
+        self.library.selected = range;
     }
 
     /// Nudge the grid until the keyboard-moved selection is on screen.

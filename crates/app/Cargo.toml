@@ -75,6 +75,9 @@ schist-preview.workspace = true
 # Reading the GPS position out of camera files for the gallery's
 # import-by-place filter. Pure Rust; parses JPEG, TIFF, HEIF and PNG.
 kamadak-exif = "0.6"
+# The gallery's "save bucket as ZIP" writes a stored (uncompressed)
+# archive by hand; this is its checksums.
+crc32fast.workspace = true
 
 # ImageCaptureCore for the gallery's iPhone/PTP-camera import: those
 # devices never mount as filesystems on macOS. Same objc2 idiom as the

@@ -60,6 +60,8 @@ mod library_geo;
 #[cfg(target_os = "macos")]
 mod library_icc;
 #[cfg(not(target_arch = "wasm32"))]
+mod library_ops;
+#[cfg(not(target_arch = "wasm32"))]
 mod library_view;
 mod modals;
 mod notes;

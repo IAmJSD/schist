@@ -6145,6 +6145,7 @@ dependencies = [
  "codex-codes",
  "console_error_panic_hook",
  "console_log",
+ "crc32fast",
  "env_logger",
  "futures",
  "gpui",

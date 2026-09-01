@@ -61,6 +61,20 @@ chip. Applying with nothing drawn turns it off; the boundary is shared
 with the import dialog, so what you import by is one Apply from what
 you browse by.
 
+Selection is plural: click selects one, ⌘-click toggles, Shift-click
+(and Shift+arrows) span a range, and the tray counts the take. A drag
+carries the selection — drop it on a sidebar **folder** to move the
+files (each photo's `.schist` sidecar and versions travel with it), or
+on a **bucket**. Buckets are Picasa's tray with names: persisted
+baskets photos are dragged into, viewed by clicking their sidebar row,
+and acted on as a group from their right-click menu — **Save all as
+ZIP…** (a stored archive, written by hand — photos don't recompress)
+and **Upscale all ×2** (the built-in waifu2x, `<name>@2x.png` beside
+each original, no download needed). "+ New bucket" is born holding the
+current selection. Photos have their own right-click menu too: Edit,
+Reveal in file manager, Add to bucket, Save as ZIP, Upscale — acting
+on the whole selection when the click lands in it.
+
 The grid drives from the keyboard too: arrow keys move the selection —
 left/right by one photo, up/down by a visual row, worked out from the
 grid's real width — Enter opens it in the editor, and the grid scrolls

@@ -10,7 +10,7 @@
 //! gallery from a dark editor is not a flashbang.
 
 use super::*;
-use gpui::{img, StatefulInteractiveElement as _};
+use gpui::{img, AppContext as _, StatefulInteractiveElement as _};
 
 /// The gallery's chrome colours for one theme.
 struct GalleryPalette {
@@ -99,6 +99,7 @@ impl Workspace {
                 .child(grid(self, cx))
                 .into_any_element()
         };
+        let context_menu = gallery_context_menu(self, cx);
         let root = div()
             .flex()
             .flex_col()
@@ -117,7 +118,8 @@ impl Workspace {
             }))
             .child(top_strip(self, cx))
             .child(body)
-            .child(tray(self, cx));
+            .child(tray(self, cx))
+            .children(context_menu);
         // Rendering cells is what queues their thumbnails; make sure a
         // loader is running for whatever this frame asked for — and if
         // decodes have been failing for want of HEIC support, offer it.
@@ -548,6 +550,113 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 )
                 .child("+ Add folder…"),
         )
+        .child(
+            div()
+                .px_2()
+                .pt_2()
+                .pb_1()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child("BUCKETS"),
+        )
+        .children({
+            let buckets: Vec<(usize, String, usize)> = ws
+                .library
+                .buckets
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (i, b.name.clone(), b.photos.len()))
+                .collect();
+            let viewing = ws.library.bucket_filter;
+            let mut rows: Vec<gpui::AnyElement> = Vec::new();
+            for (i, name, count) in buckets {
+                rows.push(bucket_row(i, name, count, viewing == Some(i), cx).into_any_element());
+            }
+            rows
+        })
+        .child(
+            div()
+                .px_2()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .text_size(px(12.0))
+                .text_color(gpui::rgb(pal().header))
+                .cursor_pointer()
+                .hover(|s| s.bg(gpui::rgb(pal().sidebar_selected)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|ws, _e: &MouseDownEvent, _w, cx| {
+                        // Born holding the selection, so "new bucket
+                        // from these" is one click.
+                        let selected = ws.library.selected.clone();
+                        let bucket = ws.library.add_bucket();
+                        if !selected.is_empty() {
+                            ws.library.add_to_bucket(bucket, &selected);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child("+ New bucket"),
+        )
+}
+
+/// One bucket in the sidebar: a drop target, a view of its contents on
+/// click, and its own right-click menu for the group actions.
+fn bucket_row(
+    index: usize,
+    name: String,
+    count: usize,
+    viewing: bool,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    use super::library::{GalleryContext, GalleryDrag};
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px_2()
+        .h(px(24.0))
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .bg(gpui::rgb(if viewing {
+            pal().sidebar_selected
+        } else {
+            pal().chrome_bg
+        }))
+        .hover(|s| s.bg(gpui::rgb(pal().sidebar_selected)))
+        .drag_over::<GalleryDrag>(|s, _, _, _| s.bg(gpui::rgb(pal().select_border)))
+        .on_drop(cx.listener(move |ws, drag: &GalleryDrag, _w, cx| {
+            ws.library.add_to_bucket(index, &drag.paths);
+            cx.notify();
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                ws.library.bucket_filter = if ws.library.bucket_filter == Some(index) {
+                    None
+                } else {
+                    Some(index)
+                };
+                ws.library.folder_filter = None;
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                ws.library.context = Some((ev.position, GalleryContext::Bucket(index)));
+                cx.notify();
+            }),
+        )
+        .child(div().flex_grow().truncate().child(SharedString::from(name)))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child(format!("{count}")),
+        )
 }
 
 fn sidebar_row(
@@ -577,6 +686,7 @@ fn sidebar_row(
             MouseButton::Left,
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
                 ws.library.folder_filter = filter.clone();
+                ws.library.bucket_filter = None;
                 cx.notify();
             }),
         )
@@ -587,6 +697,19 @@ fn sidebar_row(
                 .text_color(gpui::rgb(pal().text_dim))
                 .child(format!("{count}")),
         );
+    if let Some(drop_root) = root.clone() {
+        // Dragged photos land here as a move — files, sidecars,
+        // versions and all.
+        row = row
+            .drag_over::<super::library::GalleryDrag>(|s, _, _, _| {
+                s.bg(gpui::rgb(pal().select_border))
+            })
+            .on_drop(
+                cx.listener(move |ws, drag: &super::library::GalleryDrag, _w, cx| {
+                    ws.move_photos_to(drag.paths.clone(), drop_root.clone(), cx);
+                }),
+            );
+    }
     if let Some(root) = root {
         // The quiet way out, matching Picasa's "Remove from Picasa":
         // stop watching, never delete.
@@ -614,7 +737,7 @@ fn sidebar_row(
 /// The grid: folder headers with a rule, then wrapped thumbnails.
 fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let cell = ws.library.thumb_px;
-    let selected = ws.library.selected.clone();
+    let selected: Vec<PathBuf> = ws.library.selected.clone();
     let hide_flagged = ws.view.gallery_hide_nsfw;
     // Owned snapshot: the cells below borrow the workspace mutably to
     // fetch thumbnails, so they cannot also iterate `sections` in place.
@@ -729,14 +852,26 @@ fn cell_element(
     ws: &mut Workspace,
     entry: super::library::Entry,
     cell: f32,
-    selected: &Option<PathBuf>,
+    selected: &[PathBuf],
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    use super::library::{GalleryContext, GalleryDrag};
     let thumb = ws.library.thumb(&entry);
-    let is_selected = selected.as_deref() == Some(entry.path.as_path());
+    let is_selected = selected.iter().any(|p| p == &entry.path);
+    let is_lead = selected.last() == Some(&entry.path);
     let click_path = entry.path.clone();
+    let context_path = entry.path.clone();
+    let drag_path = entry.path.clone();
+    // Dragging carries the whole selection when the pressed cell is in
+    // it, and just the pressed cell otherwise.
+    let drag_paths: Vec<PathBuf> = if is_selected {
+        selected.to_vec()
+    } else {
+        vec![entry.path.clone()]
+    };
     let inner = cell - 10.0;
     div()
+        .id(SharedString::from(format!("cell-{}", entry.path.display())))
         .flex()
         .flex_col()
         .items_center()
@@ -765,18 +900,57 @@ fn cell_element(
                 s.border_color(gpui::rgb(pal().cell_hover))
             }
         })
+        .on_drag(
+            GalleryDrag { paths: drag_paths },
+            move |drag, _offset, _window, cx| {
+                let label = if drag.paths.len() == 1 {
+                    drag_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "1 photo".into())
+                } else {
+                    format!("{} photos", drag.paths.len())
+                };
+                cx.new(|_| DragGhost { label })
+            },
+        )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
-                ws.library.selected = Some(click_path.clone());
-                if ev.click_count >= 2 {
-                    ws.open_from_gallery(click_path.clone(), cx);
+                let path = click_path.clone();
+                if ev.modifiers.platform || ev.modifiers.control {
+                    // ⌘-click: in or out, keeping the rest.
+                    ws.library.toggle_selected(path);
+                } else if ev.modifiers.shift {
+                    ws.gallery_select_range_to(path);
+                } else if ev.click_count >= 2 {
+                    ws.library.select_single(path.clone());
+                    ws.open_from_gallery(path, cx);
+                } else if !ws.library.is_selected(&click_path) {
+                    // A plain press on an unselected photo selects it —
+                    // and on a selected one keeps the selection, so a
+                    // drag can carry the lot.
+                    ws.library.select_single(path);
                 }
+                ws.library.context = None;
                 cx.notify();
             }),
         )
-        .children(is_selected.then(|| {
-            // The selected cell reports where it landed, for the
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
+                // Right-click acts on the selection when it lands in
+                // it, on this photo alone otherwise.
+                if !ws.library.is_selected(&context_path) {
+                    ws.library.select_single(context_path.clone());
+                }
+                ws.library.context =
+                    Some((ev.position, GalleryContext::Photo(context_path.clone())));
+                cx.notify();
+            }),
+        )
+        .children(is_lead.then(|| {
+            // The lead cell reports where it landed, for the
             // keyboard's scroll-into-view.
             let cell_entity = cx.entity();
             canvas(
@@ -809,6 +983,24 @@ fn cell_element(
                 .text_color(gpui::rgb(0xFFFFFF))
                 .child("edited")
         }))
+}
+
+/// The little ghost that rides the pointer during a drag.
+struct DragGhost {
+    label: String,
+}
+
+impl gpui::Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(gpui::rgb(pal().select_border))
+            .text_color(gpui::rgb(0xFFFFFF))
+            .text_size(px(11.0))
+            .child(SharedString::from(self.label.clone()))
+    }
 }
 
 /// The bottom tray: selection details and the green Edit button on the
@@ -847,6 +1039,12 @@ fn tray(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .text_size(px(12.0))
                 .text_color(gpui::rgb(pal().text))
                 .child(name)
+        }))
+        .children((ws.library.selected.len() > 1).then(|| {
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child(format!("{} selected", ws.library.selected.len()))
         }))
         .children(selected.as_ref().is_some_and(|e| e.edited).then(|| {
             div()
@@ -1488,4 +1686,230 @@ pub(crate) fn map_filter_dialog(
             cx,
         ));
     crate::ui::modal_frame("Map Filter", 580.0, body, actions)
+}
+
+/// The gallery's right-click menu: on a photo it acts on the whole
+/// selection, on a bucket it acts on the bucket.
+fn gallery_context_menu(
+    ws: &mut Workspace,
+    cx: &mut Context<Workspace>,
+) -> Option<gpui::AnyElement> {
+    use super::library::GalleryContext;
+    let (position, target) = ws.library.context.clone()?;
+    /// What a menu row does when clicked.
+    type RowAction = std::rc::Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    let row = |label: String,
+               rows: &mut Vec<gpui::AnyElement>,
+               cx: &mut Context<Workspace>,
+               act: RowAction| {
+        rows.push(
+            div()
+                .px_2()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .hover(|s| {
+                    s.bg(gpui::rgb(crate::ui::palette().accent))
+                        .text_color(gpui::rgb(crate::ui::palette().accent_text))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, _e: &MouseDownEvent, window, cx| {
+                        ws.library.context = None;
+                        act(ws, window, cx);
+                        cx.notify();
+                    }),
+                )
+                .child(SharedString::from(label))
+                .into_any_element(),
+        );
+    };
+    let sep = |rows: &mut Vec<gpui::AnyElement>| {
+        rows.push(
+            div()
+                .h(px(1.0))
+                .my_1()
+                .bg(gpui::rgb(crate::ui::palette().edge))
+                .into_any_element(),
+        );
+    };
+    match target {
+        GalleryContext::Photo(path) => {
+            // The right-click handler put this photo in the selection,
+            // so the selection is what every action takes.
+            let acting = ws.library.selected.clone();
+            let n = acting.len();
+
+            {
+                let open = path.clone();
+                row(
+                    "Edit".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.open_from_gallery(open.clone(), cx);
+                    }),
+                );
+            }
+            {
+                let reveal = path.clone();
+                row(
+                    "Reveal in file manager".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |_ws, _w, _cx| {
+                        super::library_ops::reveal_in_file_manager(&reveal);
+                    }),
+                );
+            }
+            sep(&mut rows);
+            for (i, bucket) in ws.library.buckets.iter().enumerate() {
+                let add = acting.clone();
+                row(
+                    format!("Add to {}", bucket.name),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, _cx| {
+                        ws.library.add_to_bucket(i, &add);
+                    }),
+                );
+            }
+            {
+                let add = acting.clone();
+                row(
+                    "Add to new bucket".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, _cx| {
+                        let bucket = ws.library.add_bucket();
+                        ws.library.add_to_bucket(bucket, &add);
+                    }),
+                );
+            }
+            if let Some(bucket) = ws.library.bucket_filter {
+                let drop_path = path.clone();
+                row(
+                    "Remove from this bucket".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, _cx| {
+                        ws.library.remove_from_bucket(bucket, &drop_path);
+                    }),
+                );
+            }
+            sep(&mut rows);
+            {
+                let zip = acting.clone();
+                let label = if n > 1 {
+                    format!("Save {n} as ZIP…")
+                } else {
+                    "Save as ZIP…".to_string()
+                };
+                row(
+                    label,
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, window, cx| {
+                        ws.save_photos_zip(zip.clone(), "photos.zip".into(), window, cx);
+                    }),
+                );
+            }
+            {
+                let up = acting;
+                let label = if n > 1 {
+                    format!("Upscale {n} ×2")
+                } else {
+                    "Upscale ×2".to_string()
+                };
+                row(
+                    label,
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.upscale_photos(up.clone(), cx);
+                    }),
+                );
+            }
+        }
+        GalleryContext::Bucket(index) => {
+            let photos = ws
+                .library
+                .buckets
+                .get(index)
+                .map(|b| b.photos.clone())
+                .unwrap_or_default();
+            let name = ws
+                .library
+                .buckets
+                .get(index)
+                .map(|b| b.name.clone())
+                .unwrap_or_default();
+            {
+                let zip = photos.clone();
+                let suggested = format!("{}.zip", name.to_lowercase().replace(' ', "-"));
+                row(
+                    format!("Save all as ZIP… ({})", photos.len()),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, window, cx| {
+                        ws.save_photos_zip(zip.clone(), suggested.clone(), window, cx);
+                    }),
+                );
+            }
+            {
+                let up = photos;
+                row(
+                    "Upscale all ×2".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.upscale_photos(up.clone(), cx);
+                    }),
+                );
+            }
+            sep(&mut rows);
+            row(
+                "Clear bucket".into(),
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, _cx| {
+                    ws.library.clear_bucket(index);
+                }),
+            );
+            row(
+                "Delete bucket".into(),
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, _cx| {
+                    ws.library.delete_bucket(index);
+                }),
+            );
+        }
+    }
+    Some(
+        gpui::deferred(
+            div()
+                .absolute()
+                .left(position.x)
+                .top(position.y)
+                .w(px(220.0))
+                .py_1()
+                .bg(gpui::rgb(crate::ui::palette().popup_bg))
+                .text_color(gpui::rgb(crate::ui::palette().text))
+                .border_1()
+                .border_color(gpui::rgb(crate::ui::palette().edge))
+                .rounded_sm()
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|ws, _e, _w, cx| {
+                    ws.library.context = None;
+                    cx.notify();
+                }))
+                .children(rows),
+        )
+        .into_any_element(),
+    )
 }
