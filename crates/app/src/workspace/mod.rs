@@ -53,6 +53,8 @@ mod layers_panel;
 #[cfg(not(target_arch = "wasm32"))]
 mod library;
 #[cfg(not(target_arch = "wasm32"))]
+mod library_geo;
+#[cfg(not(target_arch = "wasm32"))]
 mod library_view;
 mod modals;
 mod notes;
@@ -66,7 +68,7 @@ mod view_options;
 mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use library_view::camera_import_dialog;
+pub(crate) use library_view::{camera_import_dialog, camera_import_options_dialog};
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
 
@@ -870,6 +872,14 @@ pub enum Modal {
     /// More than one mounted volume has a DCIM directory: ask which
     /// camera to import from.
     CameraImport { sources: Vec<PathBuf> },
+    /// Import options for one camera volume: an optional place filter
+    /// (only photos whose EXIF position falls inside it import), shown
+    /// on an OpenStreetMap preview.
+    CameraImportOptions {
+        source: PathBuf,
+        /// Index into `library_geo::PLACES`; `None` imports everything.
+        place: Option<usize>,
+    },
     /// A release newer than this build. On macOS and Windows it offers
     /// to install itself and restart; everywhere else it points at the
     /// release page, since the copy came from a package manager.

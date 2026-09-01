@@ -47,11 +47,31 @@ mtime and size, so the second launch is instant.
 
 ## Cameras
 
-Import… looks for mounted volumes with a `DCIM` directory (`/Volumes`,
-`/media`, `/run/media/$USER`, `/mnt`), copies their images into
-`~/Pictures/Schist Imports/<volume>/` — skipping files that already
-arrived, so re-running an interrupted import is safe — and watches the
-result. Several candidate volumes open a picker.
+Import… looks for mounted volumes with a `DCIM` directory — at the root
+or one storage-folder down, the way MTP phones nest it. The roots
+scanned are `/Volumes`, `/media`, `/run/media/$USER`, `/mnt`, and the
+GVFS mount directory (`$XDG_RUNTIME_DIR/gvfs`), which is how an
+unlocked iPhone (`afc:`), a PTP camera (`gphoto2:`) or an Android phone
+(`mtp:`) appears as files on a Linux desktop. On macOS an iPhone never
+mounts as a filesystem (that would need ImageCaptureCore); Image
+Capture or AirDrop into a watched folder is the path there, and the
+no-camera dialog says so.
+
+Picking a source opens the import options:
+
+* **Place filter.** "Anywhere", or a named place ("taken in New York").
+  With a place chosen, only photos whose EXIF GPS position falls inside
+  its bounding box import; photos without a recorded position stay on
+  the camera. The dialog shows the box on a real OpenStreetMap
+  rendering — standard raster tiles from tile.openstreetmap.org
+  (fetched with an identifying User-Agent per the tile policy, cached
+  under the state directory, attributed in the dialog) with the bounds
+  drawn over them.
+* **Destination.** `~/Pictures/Schist Imports/<place>` when filtered,
+  `…/<volume>` otherwise. Already-imported files (same name and size)
+  are skipped, so re-running an interrupted import is safe.
+
+The destination folder joins the watched list automatically.
 
 ## Editing and versions
 

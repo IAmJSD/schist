@@ -688,9 +688,12 @@ pub(crate) fn camera_import_dialog(
                     .text_size(px(11.0))
                     .text_color(gpui::rgb(crate::ui::palette().text_dim))
                     .child(
-                        "Cameras and memory cards that mount as a disk — anything with a DCIM \
-                         folder — appear here. A phone in PTP mode does not mount as a disk; \
-                         use a card reader or the camera's mass-storage mode.",
+                        "Anything with a DCIM folder counts: memory cards, cameras in \
+                         mass-storage mode, and — on Linux — iPhones and Android phones the \
+                         file manager has mounted (unlock the phone and tap Trust/Allow \
+                         first). On macOS an iPhone never mounts as a disk: copy with the \
+                         Image Capture app or AirDrop into a folder, then add that folder \
+                         to the gallery.",
                     ),
             );
         let actions = div()
@@ -721,10 +724,7 @@ pub(crate) fn camera_import_dialog(
     );
     for source in sources {
         let pick = source.clone();
-        let label = source
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| source.display().to_string());
+        let label = super::library::volume_label(source);
         body = body.child(
             div()
                 .flex()
@@ -740,7 +740,14 @@ pub(crate) fn camera_import_dialog(
                     MouseButton::Left,
                     cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
                         ws.close_modal(cx);
-                        ws.import_camera(pick.clone(), cx);
+                        // On to the options: place filter, destination.
+                        ws.open_modal(
+                            Modal::CameraImportOptions {
+                                source: pick.clone(),
+                                place: None,
+                            },
+                            cx,
+                        );
                     }),
                 )
                 .child(label)
@@ -759,4 +766,162 @@ pub(crate) fn camera_import_dialog(
         cx,
     ));
     crate::ui::modal_frame("Import from Camera", 420.0, body, actions)
+}
+
+/// Import options for one camera volume: an optional "taken in…" place
+/// filter drawn on an OpenStreetMap preview, and where the photos land.
+pub(crate) fn camera_import_options_dialog(
+    ws: &mut Workspace,
+    source: PathBuf,
+    place: Option<usize>,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    use super::library_geo::{MapPreview, PLACES};
+    if let Some(i) = place {
+        ws.ensure_map_preview(i, cx);
+    }
+    let label = super::library::volume_label(&source);
+
+    // The place list: Anywhere, then the named boxes.
+    let place_row = |name: String,
+                     value: Option<usize>,
+                     current: Option<usize>,
+                     cx: &mut Context<Workspace>| {
+        let selected = value == current;
+        div()
+            .px_2()
+            .h(px(22.0))
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .text_size(px(12.0))
+            .bg(gpui::rgb(if selected {
+                crate::ui::palette().selection_bg
+            } else {
+                crate::ui::palette().panel_bg
+            }))
+            .hover(move |s| {
+                if selected {
+                    s
+                } else {
+                    s.bg(gpui::rgb(crate::ui::palette().hover))
+                }
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                    ws.update_modal(|m| {
+                        if let Modal::CameraImportOptions { place, .. } = m {
+                            *place = value;
+                        }
+                    });
+                    if let Some(i) = value {
+                        ws.ensure_map_preview(i, cx);
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(name)
+    };
+    let mut places = div()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .w(px(150.0))
+        .flex_none()
+        .child(place_row("Anywhere".into(), None, place, cx));
+    for (i, spec) in PLACES.iter().enumerate() {
+        places = places.child(place_row(spec.name.to_string(), Some(i), place, cx));
+    }
+
+    // The map: the chosen box on real OpenStreetMap tiles.
+    let map_panel: gpui::AnyElement = match place {
+        None => div()
+            .w(px(340.0))
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(crate::ui::palette().text_dim))
+            .child(
+                "Everything on the camera imports. Choose a place to import only the \
+                 photos whose EXIF position says they were taken there — photos without \
+                 a recorded position stay on the camera.",
+            )
+            .into_any_element(),
+        Some(i) => {
+            let inner: gpui::AnyElement = match ws.library.map_previews.get(&i) {
+                Some(MapPreview::Ready(map)) => gpui::img(map.clone())
+                    .max_w(px(340.0))
+                    .max_h(px(250.0))
+                    .into_any_element(),
+                Some(MapPreview::Failed) => div()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                    .child("Map unavailable — offline? The filter still applies.")
+                    .into_any_element(),
+                _ => div()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                    .child("Loading map\u{2026}")
+                    .into_any_element(),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w(px(340.0))
+                .child(inner)
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(gpui::rgb(crate::ui::palette().text_faint))
+                        .child("Map data \u{a9} OpenStreetMap contributors"),
+                )
+                .into_any_element()
+        }
+    };
+
+    let dest_name = place
+        .and_then(|i| PLACES.get(i))
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| label.clone());
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(places)
+                .child(map_panel),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(format!(
+                    "Into ~/Pictures/Schist Imports/{dest_name} — already-imported files \
+                     are skipped, so re-running is safe."
+                )),
+        );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(crate::ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(crate::ui::button(
+            "Import",
+            true,
+            move |ws, _w, cx| {
+                ws.close_modal(cx);
+                ws.import_camera(source.clone(), place, cx);
+            },
+            cx,
+        ));
+    crate::ui::modal_frame(format!("Import from {label}"), 560.0, body, actions)
 }

@@ -11,6 +11,7 @@
 //! folders to watch and no cameras to mount, so the whole module is
 //! compiled out of the web build.
 
+use super::library_geo;
 use super::*;
 use std::collections::BTreeMap;
 use std::hash::{Hash as _, Hasher as _};
@@ -105,6 +106,9 @@ pub struct Library {
     /// Original image path per open document that came from the gallery,
     /// so a save can refresh that image's thumbnail.
     edit_backings: FxHashMap<schist_core::DocumentId, PathBuf>,
+    /// OpenStreetMap previews for the import dialog's place filter,
+    /// keyed by place index into [`library_geo::PLACES`].
+    pub(super) map_previews: FxHashMap<usize, library_geo::MapPreview>,
 }
 
 impl Library {
@@ -129,6 +133,7 @@ impl Library {
             ticker: false,
             pending_backing: None,
             edit_backings: FxHashMap::default(),
+            map_previews: FxHashMap::default(),
         }
     }
 
@@ -321,7 +326,11 @@ fn thumb_cache_path(source: &Path, mtime: u64) -> Option<PathBuf> {
 }
 
 /// RGBA straight bytes as the BGRA frame `RenderImage` wants.
-fn rgba_to_render_image(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Arc<RenderImage>> {
+pub(super) fn rgba_to_render_image(
+    width: u32,
+    height: u32,
+    mut rgba: Vec<u8>,
+) -> Option<Arc<RenderImage>> {
     for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
@@ -356,9 +365,48 @@ fn load_thumb(job: &ThumbJob) -> Option<Arc<RenderImage>> {
     rgba_to_render_image(preview.width, preview.height, preview.rgba)
 }
 
+/// Where a volume keeps its photos: `DCIM` at the root (cards, cameras,
+/// iPhones over AFC), or one level down inside a storage directory, the
+/// way MTP phones present "Internal storage/DCIM".
+pub(super) fn dcim_dir(root: &Path) -> Option<PathBuf> {
+    let direct = root.join("DCIM");
+    if direct.is_dir() {
+        return Some(direct);
+    }
+    for child in std::fs::read_dir(root).ok()?.flatten() {
+        let nested = child.path().join("DCIM");
+        if nested.is_dir() {
+            return Some(nested);
+        }
+    }
+    None
+}
+
+/// What to call a camera volume. GVFS mounts are named by their URL
+/// (`afc:host=<udid>`), which says nothing to a person; say what kind of
+/// device it is instead.
+pub(super) fn volume_label(root: &Path) -> String {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string());
+    if name.starts_with("afc:") {
+        "iPhone or iPad".into()
+    } else if name.starts_with("gphoto2:") {
+        "Camera".into()
+    } else if name.starts_with("mtp:") {
+        "Phone".into()
+    } else {
+        name
+    }
+}
+
 /// Mounted volumes that look like cameras or cards: anything under the
 /// removable-media roots with a `DCIM` directory, which is what the
-/// design rule every camera follows requires them to create.
+/// design rule every camera follows requires them to create. GVFS
+/// mounts count too — that is how an unlocked iPhone (`afc:`), a PTP
+/// camera (`gphoto2:`) or an Android phone (`mtp:`) appears as files on
+/// a Linux desktop.
 pub(crate) fn camera_sources() -> Vec<PathBuf> {
     let mut roots = vec![
         PathBuf::from("/Volumes"),
@@ -369,6 +417,13 @@ pub(crate) fn camera_sources() -> Vec<PathBuf> {
         roots.push(PathBuf::from(format!("/media/{user}")));
         roots.push(PathBuf::from(format!("/run/media/{user}")));
     }
+    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        roots.push(PathBuf::from(runtime).join("gvfs"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        // Where GVFS mounted before it moved to the runtime dir.
+        roots.push(PathBuf::from(home).join(".gvfs"));
+    }
     let mut out = Vec::new();
     for root in roots {
         let Ok(read) = std::fs::read_dir(root) else {
@@ -376,7 +431,7 @@ pub(crate) fn camera_sources() -> Vec<PathBuf> {
         };
         for item in read.flatten() {
             let path = item.path();
-            if path.join("DCIM").is_dir() {
+            if dcim_dir(&path).is_some() {
                 out.push(path);
             }
         }
@@ -386,13 +441,51 @@ pub(crate) fn camera_sources() -> Vec<PathBuf> {
     out
 }
 
-/// Copy every image under `source/DCIM` into `dest`, skipping files that
-/// already arrived (same name, same size). Blocking; returns how many
-/// files were copied.
-fn copy_dcim(source: &Path, dest: &Path, exts: &[String]) -> anyhow::Result<usize> {
+/// The GPS position a camera wrote into a file, if any. Blocking.
+fn photo_gps(path: &Path) -> Option<(f64, f64)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let data = exif::Reader::new().read_from_container(&mut reader).ok()?;
+    // Degrees/minutes/seconds as three rationals, hemisphere in the
+    // companion Ref tag ("S"/"W" flip the sign).
+    let axis = |tag: exif::Tag, ref_tag: exif::Tag, negative: char| -> Option<f64> {
+        let field = data.get_field(tag, exif::In::PRIMARY)?;
+        let exif::Value::Rational(parts) = &field.value else {
+            return None;
+        };
+        if parts.is_empty() {
+            return None;
+        }
+        let part = |i: usize| parts.get(i).map(|r| r.to_f64()).unwrap_or(0.0);
+        let degrees = part(0) + part(1) / 60.0 + part(2) / 3600.0;
+        let flip = data
+            .get_field(ref_tag, exif::In::PRIMARY)
+            .is_some_and(|f| f.display_value().to_string().contains(negative));
+        Some(if flip { -degrees } else { degrees })
+    };
+    let lat = axis(exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef, 'S')?;
+    let lon = axis(exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef, 'W')?;
+    Some((lat, lon))
+}
+
+/// Copy every image under the volume's DCIM into `dest`, skipping files
+/// that already arrived (same name, same size). With a place filter,
+/// only photos whose EXIF position falls inside its box are taken —
+/// "taken in New York", by the camera's own record — and photos without
+/// a position are left behind rather than guessed about. Blocking;
+/// returns (copied, left behind by the filter).
+fn copy_dcim(
+    source: &Path,
+    dest: &Path,
+    exts: &[String],
+    place: Option<&'static library_geo::Place>,
+) -> anyhow::Result<(usize, usize)> {
+    let dcim = dcim_dir(source)
+        .ok_or_else(|| anyhow::anyhow!("no DCIM folder on {}", source.display()))?;
     std::fs::create_dir_all(dest)?;
     let mut copied = 0;
-    let mut stack = vec![source.join("DCIM")];
+    let mut filtered = 0;
+    let mut stack = vec![dcim];
     while let Some(dir) = stack.pop() {
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
@@ -414,6 +507,14 @@ fn copy_dcim(source: &Path, dest: &Path, exts: &[String]) -> anyhow::Result<usiz
             if !known {
                 continue;
             }
+            if let Some(place) = place {
+                let inside = photo_gps(&path)
+                    .is_some_and(|(lat, lon)| library_geo::place_contains(place, lat, lon));
+                if !inside {
+                    filtered += 1;
+                    continue;
+                }
+            }
             let target = dest.join(name);
             let same = match (std::fs::metadata(&path), std::fs::metadata(&target)) {
                 (Ok(a), Ok(b)) => a.len() == b.len(),
@@ -426,7 +527,7 @@ fn copy_dcim(source: &Path, dest: &Path, exts: &[String]) -> anyhow::Result<usiz
             copied += 1;
         }
     }
-    Ok(copied)
+    Ok((copied, filtered))
 }
 
 impl Workspace {
@@ -582,47 +683,72 @@ impl Workspace {
         }
         let mut sources = camera_sources();
         if sources.len() == 1 {
-            self.import_camera(sources.remove(0), cx);
+            // Straight to the options (place filter, destination) rather
+            // than importing on the spot: the filter is part of the ask.
+            self.open_modal(
+                Modal::CameraImportOptions {
+                    source: sources.remove(0),
+                    place: None,
+                },
+                cx,
+            );
         } else {
             self.open_modal(Modal::CameraImport { sources }, cx);
         }
     }
 
     /// Copy a camera volume's DCIM into ~/Pictures and watch the result.
-    pub fn import_camera(&mut self, source: PathBuf, cx: &mut Context<Self>) {
+    pub fn import_camera(&mut self, source: PathBuf, place: Option<usize>, cx: &mut Context<Self>) {
         if self.library.importing {
             return;
         }
-        let volume = source
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Camera".into());
+        let volume = volume_label(&source);
+        let place = place.and_then(|i| library_geo::PLACES.get(i));
         let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
             self.status = "Import needs a home directory to copy into".into();
             return;
         };
-        let dest = home.join("Pictures/Schist Imports").join(&volume);
+        // A place filter is a sorting instruction, so it names the
+        // destination: photos taken in New York land in a New York
+        // folder, whatever card they came off.
+        let dest_name = place
+            .map(|p| p.name.to_string())
+            .unwrap_or_else(|| volume.clone());
+        let dest = home.join("Pictures/Schist Imports").join(&dest_name);
         self.library.importing = true;
-        self.status = format!("Importing from {volume}\u{2026}").into();
+        self.status = match place {
+            Some(p) => format!("Importing photos taken in {} from {volume}\u{2026}", p.name).into(),
+            None => format!("Importing from {volume}\u{2026}").into(),
+        };
         cx.notify();
         let exts = self.codec_extensions();
         let copy_dest = dest.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { copy_dcim(&source, &copy_dest, &exts) })
+                .spawn(async move { copy_dcim(&source, &copy_dest, &exts, place) })
                 .await;
             this.update(cx, |ws, cx| {
                 ws.library.importing = false;
                 match result {
-                    Ok(copied) => {
+                    Ok((copied, filtered)) => {
                         if !ws.library.folders.contains(&dest) {
                             ws.library.folders.push(dest.clone());
                             ws.library.folders.sort();
                             ws.library.save();
                         }
-                        ws.status =
-                            format!("Imported {copied} photos to {}", dest.display()).into();
+                        ws.status = match place {
+                            Some(p) => format!(
+                                "Imported {copied} photos taken in {} to {} \
+                                 ({filtered} elsewhere or without a position left on the camera)",
+                                p.name,
+                                dest.display()
+                            )
+                            .into(),
+                            None => {
+                                format!("Imported {copied} photos to {}", dest.display()).into()
+                            }
+                        };
                         ws.library.open = true;
                         ws.library_rescan(cx);
                     }
