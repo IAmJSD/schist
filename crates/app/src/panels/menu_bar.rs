@@ -25,7 +25,7 @@ pub(crate) fn run_app_item(
     cx: &mut Context<Workspace>,
 ) {
     match item {
-        AppItem::New => ws.open_new_document_dialog(cx),
+        AppItem::New => ws.open_new_file_picker(cx),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),
         AppItem::Save => ws.save_current(window, cx),
@@ -213,12 +213,19 @@ pub(crate) fn run_app_item(
                 ws.status = "Select a photo to edit".into();
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::OpenRecent(i) => {
+            if let Some(path) = ws.library.recents.get(i).cloned() {
+                ws.load_file(path, cx);
+            }
+        }
         #[cfg(target_arch = "wasm32")]
         AppItem::OpenGallery
         | AppItem::GalleryAddFolder
         | AppItem::GalleryImportCamera
         | AppItem::GalleryRefresh
-        | AppItem::GalleryEditSelected => {}
+        | AppItem::GalleryEditSelected
+        | AppItem::OpenRecent(_) => {}
         AppItem::PathFill => ws.use_active_path(crate::workspace::PathOp::Fill, cx),
         AppItem::PathStroke => ws.use_active_path(crate::workspace::PathOp::Stroke, cx),
         AppItem::PathToSelection => ws.use_active_path(crate::workspace::PathOp::Select, cx),

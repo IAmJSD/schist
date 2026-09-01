@@ -557,11 +557,10 @@ impl Render for Workspace {
         let modal = crate::dialogs::render(self, cx);
         let context_menu = panels::context_menu(self, window.viewport_size(), cx);
         let tool_flyout = panels::tool_flyout(self, cx);
-        // Three bodies share the shell (menu bar, action handlers, modal
-        // overlay): the gallery when it is open, the start screen when
-        // nothing is, and otherwise the editor.
+        // Two bodies share the shell (menu bar, action handlers, modal
+        // overlay): the gallery when it is open, otherwise the editor.
         let gallery = self.gallery_open();
-        let editor_chrome = !gallery && self.doc.is_some() && chrome;
+        let editor_chrome = !gallery && chrome;
         let body: gpui::AnyElement = if gallery {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -571,8 +570,6 @@ impl Render for Workspace {
             {
                 unreachable!("the gallery is not compiled into the web build")
             }
-        } else if self.doc.is_none() {
-            panels::start_screen(self, cx).into_any_element()
         } else {
             div()
                 .flex()
@@ -651,7 +648,7 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &NewFile, _w, cx| {
-                ws.open_new_document_dialog(cx);
+                ws.open_new_file_picker(cx);
             }))
             .on_action(cx.listener(|ws, _: &OpenFile, window, cx| {
                 keymap::open_file_dialog(ws, window, cx);

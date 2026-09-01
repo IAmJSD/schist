@@ -8,18 +8,17 @@ menu entries with it.
 
 ## Boot
 
-A launch with nothing to open lands on one of two screens:
+A launch with nothing to open lands in the gallery, empty or not — as
+Picasa boots into its library. An empty one offers the ways in (add a
+folder, import from a camera), and the top strip always carries Open…
+and New File…. Opening a document from the shell (`schist file.psd`),
+from Finder, or recovering unsaved work from a crash all win over the
+gallery: the editor is where a document lives.
 
-* **No gallery yet** — the start screen: new-document presets (the same
-  rows as File ▸ New), an Open button, the recently opened files, and
-  the offer to set a gallery up by choosing a folder or importing from a
-  camera.
-* **A gallery exists** — the gallery itself, as Picasa boots into its
-  library.
-
-Opening a document from the shell (`schist file.psd`), from Finder, or
-recovering unsaved work from a crash all win over the gallery: the editor
-is where a document lives.
+File ▸ New (⌘N, anywhere) opens the preset picker — one card per common
+size, a click creates the document on the spot, Custom… opens the full
+dialog. Recently opened files live under File ▸ Open Recent, in both
+the editor's and the gallery's menus.
 
 ## The view
 

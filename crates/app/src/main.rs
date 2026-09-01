@@ -360,10 +360,10 @@ fn main() {
                             }
                             if let Some(path) = std::env::args().nth(1) {
                                 ws.load_file(path.into(), cx);
-                            } else if ws.tab_count() == 0 && !ws.library.folders.is_empty() {
+                            } else if ws.tab_count() == 0 {
                                 // Picasa boot: a launch with nothing to
-                                // open lands in the gallery when one
-                                // exists. Recovered tabs win — unsaved
+                                // open lands in the gallery, empty or
+                                // not. Recovered tabs win — unsaved
                                 // work is more urgent than browsing.
                                 // Through the toggle so the open does
                                 // everything an interactive open does

@@ -215,23 +215,23 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             },
             cx,
         ))
+        .child(gallery_button(
+            "Open…",
+            false,
+            crate::keymap::open_file_dialog,
+            cx,
+        ))
+        .child(gallery_button(
+            "New File…",
+            false,
+            |ws, _w, cx| ws.open_new_file_picker(cx),
+            cx,
+        ))
         .children(has_doc.then(|| {
             gallery_button(
                 "Back to Editing",
                 false,
                 |ws, _w, cx| ws.toggle_gallery(cx),
-                cx,
-            )
-        }))
-        .children((!has_doc).then(|| {
-            gallery_button(
-                "New File…",
-                false,
-                |ws, _w, cx| {
-                    ws.library.open = false;
-                    ws.open_new_document_dialog(cx);
-                    cx.notify();
-                },
                 cx,
             )
         }))

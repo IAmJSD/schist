@@ -952,8 +952,11 @@ pub enum Modal {
         params: schist_adjustments::Params,
         original: (Option<String>, Vec<u8>),
     },
-    /// File ▸ New: everything a fresh document needs, asked up front as
-    /// Photoshop does.
+    /// File ▸ New: the preset picker — one click for a common size,
+    /// Custom… for the full dialog below.
+    NewFilePicker,
+    /// The full new-document dialog: everything a fresh document needs,
+    /// asked up front as Photoshop does.
     NewDocument {
         name: String,
         width: u32,

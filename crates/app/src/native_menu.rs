@@ -52,6 +52,13 @@ fn signature(ws: &Workspace) -> String {
             out.push_str(&comp.name);
         }
     }
+    // The recents render as menu rows, so a change to them has to
+    // rebuild the bar.
+    #[cfg(not(target_arch = "wasm32"))]
+    for recent in &ws.library.recents {
+        out.push('\u{1f}');
+        out.push_str(&recent.to_string_lossy());
+    }
     out
 }
 

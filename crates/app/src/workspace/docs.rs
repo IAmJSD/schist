@@ -5,9 +5,15 @@ use super::*;
 impl Workspace {
     // ----- document lifecycle -----
 
-    /// File ▸ New. Photoshop asks for the settings before creating
-    /// anything, so this only opens the dialog; `create_document` runs on
-    /// Create.
+    /// File ▸ New: the preset picker. A preset creates on the spot;
+    /// Custom… goes on to the full dialog.
+    pub fn open_new_file_picker(&mut self, cx: &mut Context<Self>) {
+        self.open_modal(Modal::NewFilePicker, cx);
+    }
+
+    /// The full new-document dialog (the picker's Custom…). Photoshop
+    /// asks for the settings before creating anything, so this only
+    /// opens the dialog; `create_document` runs on Create.
     pub fn open_new_document_dialog(&mut self, cx: &mut Context<Self>) {
         self.open_modal(
             Modal::NewDocument {
