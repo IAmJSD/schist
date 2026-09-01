@@ -1749,13 +1749,23 @@ fn bucket_field(
         value
     };
     let empty = typed.is_empty();
-    let shown = if empty { placeholder } else { typed.clone() };
-    let display = if focused { format!("{shown}|") } else { shown };
-    div()
+    // The caret belongs to what was typed, never to the placeholder —
+    // "Bucket 1|" in full text colour read as an already-filled field.
+    // While the field is empty the caret sits alone at the start, the
+    // placeholder ghosted behind it, the way every real input does it.
+    let caret_and_text = div()
+        .text_color(gpui::rgb(crate::ui::palette().text))
+        .child(if focused {
+            format!("{typed}|")
+        } else {
+            typed.clone()
+        });
+    let mut field = div()
         .w(px(360.0))
         .h(px(22.0))
         .px_1()
         .flex()
+        .flex_row()
         .items_center()
         .rounded_sm()
         .bg(gpui::rgb(crate::ui::palette().field_bg))
@@ -1766,11 +1776,6 @@ fn bucket_field(
             crate::ui::palette().field_bg
         }))
         .text_size(px(12.0))
-        .text_color(gpui::rgb(if empty {
-            crate::ui::palette().text_dim
-        } else {
-            crate::ui::palette().text
-        }))
         .overflow_hidden()
         .on_mouse_down(
             MouseButton::Left,
@@ -1780,7 +1785,15 @@ fn bucket_field(
                 cx.notify();
             }),
         )
-        .child(display)
+        .child(caret_and_text);
+    if empty {
+        field = field.child(
+            div()
+                .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                .child(placeholder),
+        );
+    }
+    field
 }
 
 /// Create or edit a bucket: its name, and the optional smart rule —
