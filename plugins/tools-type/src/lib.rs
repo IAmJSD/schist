@@ -268,6 +268,27 @@ impl TypeTool {
         });
     }
 
+    /// Keep the session's fill on the foreground swatch.
+    ///
+    /// The eyedropper and the colour panel both write the foreground, and
+    /// text follows it the way a brush stroke would. Without this the
+    /// colour was read once when the layer was created and never again,
+    /// so picking a new colour and clicking back into the text changed
+    /// nothing. Returns true when the fill actually changed, so callers
+    /// know a re-render is due.
+    fn adopt_foreground(&mut self, state: &EditorState) -> bool {
+        let Some(session) = &mut self.editing else {
+            return false;
+        };
+        let fg = state.foreground.to_u8();
+        if session.stored.color == fg {
+            return false;
+        }
+        session.stored.color = fg;
+        session.dirty = true;
+        true
+    }
+
     /// Pick an existing text layer under the cursor, if any.
     fn text_layer_at(doc: &Document, x: f32, y: f32) -> Option<(LayerId, StoredText)> {
         let (px, py) = (x.round() as i32, y.round() as i32);
@@ -346,6 +367,11 @@ impl ToolPlugin for TypeTool {
                     caret: end,
                     anchor: end,
                 });
+                // A colour picked since this text was set applies to it now,
+                // so the eyedropper works on text like on anything else.
+                if self.adopt_foreground(ctx.state) {
+                    self.refresh(ctx.doc);
+                }
             }
             None => self.start_new(ctx, input.x, input.y),
         }
@@ -364,6 +390,9 @@ impl ToolPlugin for TypeTool {
         if self.editing.is_none() {
             return false;
         }
+        // The colour panel can be clicked mid-session; the next keystroke
+        // is where its choice reaches the text.
+        let recolored = self.adopt_foreground(ctx.state);
         let shift = modifiers.shift;
         let word = modifiers.ctrl_or_cmd;
         let mut changed = false;
@@ -461,7 +490,7 @@ impl ToolPlugin for TypeTool {
                 session.dirty = true;
             }
         }
-        if changed {
+        if changed || recolored {
             self.refresh(ctx.doc);
         }
         if !handled {
@@ -554,6 +583,7 @@ impl ToolPlugin for TypeTool {
             ..self.spec.clone()
         };
         session.dirty = true;
+        self.adopt_foreground(ctx.state);
         self.refresh(ctx.doc);
     }
 
@@ -1133,6 +1163,64 @@ mod tests {
 
         assert_eq!(doc.tree.layers.len(), layers_before, "no new layer");
         assert_eq!(read_stored(&doc.tree.layers[1]).unwrap().spec.text, "ABC");
+    }
+
+    #[test]
+    fn a_freshly_picked_colour_reaches_text_being_edited() {
+        // The eyedropper bug: it wrote the foreground swatch, but a text
+        // layer kept the colour it was created with forever, so picking a
+        // colour and clicking back into the text changed nothing.
+        let mut doc = doc();
+        let mut state = EditorState::default();
+        state.foreground = Rgba::from_u8(255, 255, 255, 255);
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            let mut tool = TypeTool::default();
+            tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+            type_text(&mut tool, &mut ctx, "AB");
+            tool.on_commit(&mut ctx);
+        }
+        assert_eq!(
+            read_stored(&doc.tree.layers[1]).unwrap().color,
+            [255, 255, 255, 255]
+        );
+
+        // Sample a new colour (what the eyedropper does), then click back
+        // into the text: it must adopt the pick.
+        state.foreground = Rgba::from_u8(255, 128, 0, 255);
+        let bounds = doc.tree.layers[1].tight_bounds();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(
+            &mut ctx,
+            input(bounds.left as f32 + 2.0, bounds.top as f32 + 2.0),
+        );
+        assert!(is_editing(&tool), "resumed editing the existing layer");
+        tool.on_commit(&mut ctx);
+
+        assert_eq!(
+            read_stored(&doc.tree.layers[1]).unwrap().color,
+            [255, 128, 0, 255],
+            "the text must take the picked colour"
+        );
+        // And the rendered pixels are the new colour, not the old one.
+        let raster = doc.tree.layers[1].as_raster().unwrap();
+        let inked = raster
+            .tiles
+            .iter()
+            .flat_map(|(_, buf)| (0..schist_core::TILE_PIXELS).map(|i| buf.get(i)))
+            .find(|p| p.a > 0.9)
+            .expect("the text still has ink");
+        assert!(
+            inked.g < 0.6 && inked.b < 0.1,
+            "pixels should be orange now, got {inked:?}"
+        );
     }
 
     #[test]
