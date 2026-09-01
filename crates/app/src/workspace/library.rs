@@ -935,4 +935,62 @@ mod tests {
         assert_ne!(a, touched);
         assert_ne!(a, other);
     }
+
+    /// A minimal JPEG whose EXIF says it was taken at Times Square:
+    /// 40°45'28.8"N, 73°59'6"W. Built by hand so the test exercises the
+    /// real parser rather than a mock of it.
+    fn times_square_jpeg() -> Vec<u8> {
+        let mut tiff: Vec<u8> = Vec::new();
+        let u16le = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
+        let u32le = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+        // Header: little-endian, IFD0 at offset 8.
+        tiff.extend_from_slice(b"II*\0");
+        u32le(&mut tiff, 8);
+        // IFD0: one entry, the GPS IFD pointer (tag 0x8825) to offset 26.
+        u16le(&mut tiff, 1);
+        u16le(&mut tiff, 0x8825);
+        u16le(&mut tiff, 4); // LONG
+        u32le(&mut tiff, 1);
+        u32le(&mut tiff, 26);
+        u32le(&mut tiff, 0); // no next IFD
+                             // GPS IFD at 26: Ref/Latitude/Ref/Longitude; rationals at 80/104.
+        u16le(&mut tiff, 4);
+        for (tag, kind, count, value) in [
+            (0x0001u16, 2u16, 2u32, u32::from_le_bytes(*b"N\0\0\0")),
+            (0x0002, 5, 3, 80),
+            (0x0003, 2, 2, u32::from_le_bytes(*b"W\0\0\0")),
+            (0x0004, 5, 3, 104),
+        ] {
+            u16le(&mut tiff, tag);
+            u16le(&mut tiff, kind);
+            u32le(&mut tiff, count);
+            u32le(&mut tiff, value);
+        }
+        u32le(&mut tiff, 0);
+        // 40° 45' 28.8"  then  73° 59' 6".
+        for (num, den) in [(40, 1), (45, 1), (288, 10), (73, 1), (59, 1), (6, 1)] {
+            u32le(&mut tiff, num);
+            u32le(&mut tiff, den);
+        }
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        jpeg.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(&tiff);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        jpeg
+    }
+
+    #[test]
+    fn the_place_filter_reads_the_cameras_own_position() {
+        let path = std::env::temp_dir().join(format!("schist-gps-test-{}.jpg", std::process::id()));
+        std::fs::write(&path, times_square_jpeg()).unwrap();
+        let (lat, lon) = photo_gps(&path).expect("the GPS IFD parses");
+        let _ = std::fs::remove_file(&path);
+        assert!((lat - 40.758).abs() < 1e-3, "latitude was {lat}");
+        assert!((lon + 73.985).abs() < 1e-3, "longitude was {lon}");
+        // And that position sorts into the New York box, which is the
+        // whole of "import photos taken in NYC".
+        let nyc = &library_geo::PLACES[0];
+        assert!(library_geo::place_contains(nyc, lat, lon));
+    }
 }
