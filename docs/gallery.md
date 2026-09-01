@@ -69,16 +69,27 @@ no sense of where you are.
 Selection is plural: click selects one, ⌘-click toggles, Shift-click
 (and Shift+arrows) span a range, and the tray counts the take. A drag
 carries the selection — as the picked-up photo's own thumbnail square
-riding the pointer, with a count badge when it carries several — drop it on a sidebar **folder** to move the
-files (each photo's `.schist` sidecar and versions travel with it), or
-on a **bucket**. Buckets are Picasa's tray with names: persisted
-baskets photos are dragged into, viewed by clicking their sidebar row,
-and acted on as a group from their right-click menu — **Save all as
-ZIP…** (a stored archive, written by hand — photos don't recompress)
-and **Upscale all ×2** (the built-in waifu2x, `<name>@2x.png` beside
-each original, no download needed). "+ New bucket" asks for a name (an
-empty one falls back to "Bucket N") and the bucket is born holding the
-current selection. Photos have their own right-click menu too: Edit,
+riding the pointer, with a count badge when it carries several — to a
+sidebar **folder**, which moves the files (each photo's `.schist`
+sidecar and versions travel with it), or to a **bucket**. Buckets are
+Picasa's tray with names: persisted baskets photos are dragged into,
+viewed by clicking their sidebar row, and acted on as a group from
+their right-click menu — **Save all as ZIP…** and **Upscale all ×2**
+(the built-in waifu2x, `<name>@2x.png` beside each original, no
+download needed).
+
+An archive holds what the gallery shows: an edited photo goes in as
+its edit, never the untouched original, and each entry keeps the
+photo's own format when that format is lossy — a JPEG stays a JPEG,
+byte-for-byte when it is unedited (re-encoding would only cost a
+generation) and at quality 92 when it is not. Everything else becomes
+a PNG, as does anything lossy nothing here can write back: an edited
+HEIC lands as a PNG. The writer is hand-rolled and store-only, and
+streams one photo at a time, so a whole bucket never has to fit in
+memory.
+
+"+ New bucket" asks for a name (an empty one falls back to "Bucket N")
+and the bucket is born holding the current selection. Photos have their own right-click menu too: Edit,
 Reveal in file manager, Add to bucket, Save as ZIP, Upscale — acting
 on the whole selection when the click lands in it.
 

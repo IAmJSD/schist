@@ -79,23 +79,76 @@ impl Workspace {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."));
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+        let codecs = self.registry.shared_codecs();
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(out))) = rx.await else { return };
-            let count = paths.len();
-            let result = cx
+            let total = paths.len();
+            // One photo at a time, rendered then written straight into
+            // the archive: a camera roll's worth of PNGs would not fit
+            // in memory at once, and rendering is slow enough that the
+            // tray owes the count.
+            let target = out.clone();
+            let opened = cx
                 .background_executor()
-                .spawn(async move { write_zip(&out, &paths).map(|()| out) })
+                .spawn(async move { ZipWriter::create(&target) })
                 .await;
-            this.update_in(cx, |ws, _window, cx| {
+            let mut writer = match opened {
+                Ok(writer) => writer,
+                Err(err) => {
+                    log::error!("zip failed: {err:#}");
+                    this.update(cx, |ws, cx| {
+                        ws.status = format!("ZIP failed: {err}").into();
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let mut written = 0usize;
+            for (done, path) in paths.into_iter().enumerate() {
+                let job_codecs = codecs.clone();
+                let job_path = path.clone();
+                let (returned, result) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut writer = writer;
+                        let result = zip_entry(&job_codecs, &job_path)
+                            .and_then(|(name, bytes)| writer.add(&name, &bytes));
+                        (writer, result)
+                    })
+                    .await;
+                writer = returned;
                 match result {
-                    Ok(out) => {
-                        ws.status = format!("Zipped {count} photos to {}", out.display()).into()
+                    Ok(()) => written += 1,
+                    Err(err) => log::warn!("zip: skipping {}: {err:#}", path.display()),
+                }
+                let keep = this.update(cx, |ws, cx| {
+                    ws.status = format!("Zipping {}/{total}\u{2026}", done + 1).into();
+                    cx.notify();
+                });
+                if keep.is_err() {
+                    return;
+                }
+            }
+            let finished = cx
+                .background_executor()
+                .spawn(async move { writer.finish() })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.status = match finished {
+                    Ok(()) if written == total => {
+                        format!("Zipped {written} photos to {}", out.display()).into()
                     }
+                    Ok(()) => format!(
+                        "Zipped {written} of {total} photos to {} \u{2014} the log has the rest",
+                        out.display()
+                    )
+                    .into(),
                     Err(err) => {
                         log::error!("zip failed: {err:#}");
-                        ws.status = format!("ZIP failed: {err}").into();
+                        format!("ZIP failed: {err}").into()
                     }
-                }
+                };
                 cx.notify();
             })
             .ok();
@@ -219,36 +272,154 @@ fn move_file(from: &Path, to: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A stored (uncompressed) ZIP of the given files. Photos are already
-/// compressed, so store beats deflate here — and a store-only writer is
-/// a hundred honest lines instead of a dependency.
-fn write_zip(out: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
-    let mut body: Vec<u8> = Vec::new();
-    let mut central: Vec<u8> = Vec::new();
-    let mut entries = 0u16;
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in paths {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                log::warn!("zip: skipping {}: {err}", path.display());
-                continue;
+/// Formats that already threw pixels away. An archive keeps a photo in
+/// one of these rather than turning it into a bigger PNG of exactly
+/// the same (already lossy) picture; anything else becomes a PNG.
+const LOSSY_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "heic", "heif", "avif", "webp"];
+
+/// The formats we can *write* back out of that list. An edited HEIC
+/// has to land as a PNG: nothing here encodes HEIC.
+const LOSSY_WRITABLE: &[&str] = &["jpg", "jpeg", "jpe", "jfif"];
+
+/// How a photo goes into an archive: which file it comes from, whether
+/// those bytes can go in untouched, and the extension the entry ends
+/// up with.
+#[derive(Debug, PartialEq)]
+struct ZipPlan {
+    source: PathBuf,
+    verbatim: bool,
+    ext: String,
+}
+
+/// Work out that plan. An edited photo contributes its edit — the
+/// point of the archive is the picture you see in the gallery — and
+/// the entry keeps a lossy photo's own format (re-encoded from the
+/// edit when there is one, byte-for-byte when there is not), while
+/// everything else becomes a PNG.
+fn zip_plan(path: &Path) -> ZipPlan {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let lossy = LOSSY_EXTS.contains(&ext.as_str());
+    match backing_psd(path).filter(|psd| psd.exists()) {
+        // Edited: the sidecar is the picture. Keep a lossy photo's
+        // format when we have an encoder for it, PNG otherwise.
+        Some(edit) => {
+            let keep = lossy && LOSSY_WRITABLE.contains(&ext.as_str());
+            ZipPlan {
+                source: edit,
+                verbatim: false,
+                ext: if keep { ext } else { "png".into() },
             }
-        };
+        }
+        // Unedited: a lossy photo (or a PNG) is already exactly what
+        // the archive wants, so its bytes go in as they are —
+        // re-encoding a JPEG would only lose a second generation.
+        None if lossy || ext == "png" => ZipPlan {
+            source: path.to_path_buf(),
+            verbatim: true,
+            ext,
+        },
+        None => ZipPlan {
+            source: path.to_path_buf(),
+            verbatim: false,
+            ext: "png".into(),
+        },
+    }
+}
+
+/// The name and bytes a photo contributes to an archive. Blocking:
+/// this decodes and re-encodes whole images.
+fn zip_entry(
+    codecs: &[Arc<dyn schist_plugin_api::CodecPlugin>],
+    path: &Path,
+) -> anyhow::Result<(String, Vec<u8>)> {
+    let plan = zip_plan(path);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "photo".into());
+    // Named for the photo, never for its sidecar: "holiday.jpg", not
+    // "holiday.jpg.psd".
+    let name = format!("{stem}.{}", plan.ext);
+    if plan.verbatim {
+        return Ok((name, std::fs::read(&plan.source)?));
+    }
+    let doc = super::decode_file(codecs, &plan.source)?;
+    let rect = doc.canvas_rect();
+    let (w, h) = (rect.width() as u32, rect.height() as u32);
+    let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
+    let mut out = std::io::Cursor::new(Vec::new());
+    if LOSSY_WRITABLE.contains(&plan.ext.as_str()) {
+        // JPEG has no alpha: lay the picture on white, as every
+        // "export as JPEG" does.
+        let mut rgb = Vec::with_capacity((w * h) as usize * 3);
+        for px in rgba.as_chunks::<4>().0 {
+            let a = px[3] as u32;
+            for c in &px[..3] {
+                rgb.push(((*c as u32 * a + 255 * (255 - a)) / 255) as u8);
+            }
+        }
+        let img: image::RgbImage = image::ImageBuffer::from_raw(w, h, rgb)
+            .ok_or_else(|| anyhow::anyhow!("composited buffer had the wrong size"))?;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, ZIP_JPEG_QUALITY)
+            .encode_image(&img)?;
+    } else {
+        let img: image::RgbaImage = image::ImageBuffer::from_raw(w, h, rgba)
+            .ok_or_else(|| anyhow::anyhow!("composited buffer had the wrong size"))?;
+        img.write_to(&mut out, image::ImageFormat::Png)?;
+    }
+    Ok((name, out.into_inner()))
+}
+
+/// What an edit re-encoded back to JPEG is saved at: high enough that
+/// the second generation is not what anyone notices.
+const ZIP_JPEG_QUALITY: u8 = 92;
+
+/// A stored (uncompressed) ZIP, written as its entries arrive. PNGs
+/// are already compressed, so store beats deflate here — and a
+/// store-only writer is a hundred honest lines instead of a
+/// dependency. Streaming rather than buffering because a whole
+/// gallery's worth of rendered PNGs does not fit in memory.
+struct ZipWriter {
+    file: std::io::BufWriter<std::fs::File>,
+    /// Where the archive is being built, and where it lands on
+    /// `finish` — a half-written ZIP never takes the real name.
+    tmp: PathBuf,
+    out: PathBuf,
+    offset: u32,
+    central: Vec<u8>,
+    entries: u16,
+    used: std::collections::HashSet<String>,
+}
+
+impl ZipWriter {
+    fn create(out: &Path) -> anyhow::Result<ZipWriter> {
+        let tmp = out.with_extension("schist-tmp");
+        Ok(ZipWriter {
+            file: std::io::BufWriter::new(std::fs::File::create(&tmp)?),
+            tmp,
+            out: out.to_path_buf(),
+            offset: 0,
+            central: Vec::new(),
+            entries: 0,
+            used: std::collections::HashSet::new(),
+        })
+    }
+
+    fn add(&mut self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        use std::io::Write as _;
         if bytes.len() as u64 > u32::MAX as u64 {
-            log::warn!("zip: skipping {} (zip64 not written)", path.display());
-            continue;
+            anyhow::bail!("too large for a zip without zip64");
         }
-        let mut name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("photo-{entries}"));
         // Two folders can hold the same file name; a ZIP cannot.
-        while !used.insert(name.clone()) {
-            name = format!("{entries}-{name}");
+        let mut name = name.to_string();
+        while !self.used.insert(name.clone()) {
+            name = format!("{}-{name}", self.entries);
         }
-        let crc = crc32fast::hash(&bytes);
-        let offset = body.len() as u32;
+        let crc = crc32fast::hash(bytes);
+        let offset = self.offset;
         let header = |v: &mut Vec<u8>, central_dir: bool| {
             if central_dir {
                 v.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
@@ -274,30 +445,40 @@ fn write_zip(out: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
             }
             v.extend_from_slice(name.as_bytes());
         };
-        header(&mut body, false);
-        body.extend_from_slice(&bytes);
-        header(&mut central, true);
-        entries += 1;
+        let mut local = Vec::with_capacity(30 + name.len());
+        header(&mut local, false);
+        self.file.write_all(&local)?;
+        self.file.write_all(bytes)?;
+        header(&mut self.central, true);
+        self.offset += (local.len() + bytes.len()) as u32;
+        self.entries += 1;
+        Ok(())
     }
-    if entries == 0 {
-        anyhow::bail!("nothing could be read to zip");
+
+    fn finish(mut self) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        if self.entries == 0 {
+            let _ = std::fs::remove_file(&self.tmp);
+            anyhow::bail!("nothing could be read to zip");
+        }
+        let central_offset = self.offset;
+        let central_len = self.central.len() as u32;
+        self.file.write_all(&self.central)?;
+        // End of central directory.
+        let mut eocd = Vec::with_capacity(22);
+        eocd.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        eocd.extend_from_slice(&0u16.to_le_bytes()); // this disk
+        eocd.extend_from_slice(&0u16.to_le_bytes()); // central dir disk
+        eocd.extend_from_slice(&self.entries.to_le_bytes());
+        eocd.extend_from_slice(&self.entries.to_le_bytes());
+        eocd.extend_from_slice(&central_len.to_le_bytes());
+        eocd.extend_from_slice(&central_offset.to_le_bytes());
+        eocd.extend_from_slice(&0u16.to_le_bytes()); // comment
+        self.file.write_all(&eocd)?;
+        self.file.into_inner()?.sync_all()?;
+        std::fs::rename(&self.tmp, &self.out)?;
+        Ok(())
     }
-    let central_offset = body.len() as u32;
-    let central_len = central.len() as u32;
-    body.extend_from_slice(&central);
-    // End of central directory.
-    body.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    body.extend_from_slice(&0u16.to_le_bytes()); // this disk
-    body.extend_from_slice(&0u16.to_le_bytes()); // central dir disk
-    body.extend_from_slice(&entries.to_le_bytes());
-    body.extend_from_slice(&entries.to_le_bytes());
-    body.extend_from_slice(&central_len.to_le_bytes());
-    body.extend_from_slice(&central_offset.to_le_bytes());
-    body.extend_from_slice(&0u16.to_le_bytes()); // comment
-    let tmp = out.with_extension("schist-tmp");
-    std::fs::write(&tmp, &body)?;
-    std::fs::rename(&tmp, out)?;
-    Ok(())
 }
 
 /// Decode a photo whole, run the built-in waifu2x over it, and write
@@ -350,25 +531,161 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("schist-zip-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.jpg"), b"first").unwrap();
-        std::fs::write(dir.join("b.jpg"), b"second!").unwrap();
         let out = dir.join("out.zip");
-        write_zip(&out, &[dir.join("a.jpg"), dir.join("b.jpg")]).unwrap();
+        let mut zip = ZipWriter::create(&out).unwrap();
+        zip.add("a.png", b"first").unwrap();
+        zip.add("b.png", b"second!").unwrap();
+        // The same name twice must not collide.
+        zip.add("a.png", b"third").unwrap();
+        zip.finish().unwrap();
         let zip = std::fs::read(&out).unwrap();
         // Local header, then the stored bytes right after the name.
         assert_eq!(&zip[0..4], &0x0403_4b50u32.to_le_bytes());
         let name_len = u16::from_le_bytes([zip[26], zip[27]]) as usize;
-        assert_eq!(&zip[30..30 + name_len], b"a.jpg");
+        assert_eq!(&zip[30..30 + name_len], b"a.png");
         assert_eq!(&zip[30 + name_len..30 + name_len + 5], b"first");
-        // End-of-central-directory says two entries.
+        // End-of-central-directory says three entries.
         let eocd = zip.len() - 22;
         assert_eq!(&zip[eocd..eocd + 4], &0x0605_4b50u32.to_le_bytes());
-        assert_eq!(u16::from_le_bytes([zip[eocd + 10], zip[eocd + 11]]), 2);
+        assert_eq!(u16::from_le_bytes([zip[eocd + 10], zip[eocd + 11]]), 3);
         // CRC of "first" as any table has it.
         assert_eq!(
             u32::from_le_bytes([zip[14], zip[15], zip[16], zip[17]]),
             crc32fast::hash(b"first")
         );
+        // The central directory starts where the header says, and its
+        // first entry points back at offset zero.
+        let central_offset =
+            u32::from_le_bytes(zip[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        assert_eq!(
+            &zip[central_offset..central_offset + 4],
+            &0x0201_4b50u32.to_le_bytes()
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                zip[central_offset + 42..central_offset + 46]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The archive's format rule: a lossy photo stays in its own
+    /// format, everything else becomes a PNG, and an edited photo
+    /// contributes its edit rather than the untouched original.
+    #[test]
+    fn archives_keep_lossy_photos_lossy_and_make_everything_else_png() {
+        let dir = std::env::temp_dir().join(format!("schist-zipsrc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".schist")).unwrap();
+        for name in [
+            "plain.jpg",
+            "plain.png",
+            "plain.tif",
+            "shot.HEIC",
+            "edited.jpg",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join(".schist/edited.jpg.psd"), b"edit").unwrap();
+        let plan = |name: &str| zip_plan(&dir.join(name));
+
+        // Unedited and lossy: its own bytes, its own format. Nothing is
+        // gained by re-encoding a JPEG, and a generation is lost.
+        assert_eq!(
+            plan("plain.jpg"),
+            ZipPlan {
+                source: dir.join("plain.jpg"),
+                verbatim: true,
+                ext: "jpg".into()
+            }
+        );
+        // Extensions are matched however they are spelled.
+        assert_eq!(
+            plan("shot.HEIC"),
+            ZipPlan {
+                source: dir.join("shot.HEIC"),
+                verbatim: true,
+                ext: "heic".into()
+            }
+        );
+        // A PNG is already what the archive wants.
+        assert_eq!(plan("plain.png").ext, "png");
+        assert!(plan("plain.png").verbatim);
+        // Lossless but not a PNG: re-encoded as one.
+        assert_eq!(
+            plan("plain.tif"),
+            ZipPlan {
+                source: dir.join("plain.tif"),
+                verbatim: false,
+                ext: "png".into()
+            }
+        );
+        // Edited: the sidecar's pixels, back in the photo's own lossy
+        // format — never the sidecar verbatim.
+        assert_eq!(
+            plan("edited.jpg"),
+            ZipPlan {
+                source: dir.join(".schist/edited.jpg.psd"),
+                verbatim: false,
+                ext: "jpg".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End to end on real bytes: an edited photo contributes its
+    /// edit's pixels under the photo's own name — as a JPEG when the
+    /// photo was one, as a PNG when its format cannot be written.
+    #[test]
+    fn an_edited_photo_zips_as_its_edit() {
+        use schist_color::Depth;
+        use schist_core::{Document, IntRect, Layer};
+        let dir = std::env::temp_dir().join(format!("schist-zippng-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".schist")).unwrap();
+        // The "originals" are never read here, and are not even
+        // decodable — proof that the edit is what got picked up.
+        std::fs::write(dir.join("photo.jpg"), b"not a jpeg at all").unwrap();
+        std::fs::write(dir.join("photo.heic"), b"not a heic at all").unwrap();
+        // The edit: 8x4 of solid magenta.
+        let (w, h) = (8u32, 4u32);
+        let mut doc = Document::new("edit", w, h, Depth::Eight);
+        let mut layer = Layer::new_raster("edit");
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 255, 255]).collect();
+        schist_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(w, h),
+            &rgba,
+        );
+        doc.push_layer(layer);
+        let psd = schist_codec_psd::write_psd(&doc).unwrap();
+        std::fs::write(dir.join(".schist/photo.jpg.psd"), &psd).unwrap();
+        std::fs::write(dir.join(".schist/photo.heic.psd"), &psd).unwrap();
+
+        let codecs: Vec<Arc<dyn schist_plugin_api::CodecPlugin>> = vec![Arc::new(crate::PsdCodec)];
+
+        // The JPEG keeps its extension, and decodes to the edit.
+        let (name, bytes) = zip_entry(&codecs, &dir.join("photo.jpg")).unwrap();
+        assert_eq!(name, "photo.jpg");
+        assert_eq!(&bytes[..3], b"\xff\xd8\xff");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (w, h));
+        // JPEG is lossy, so magenta comes back as nearly magenta.
+        assert!(decoded
+            .pixels()
+            .all(|p| { p.0[0] > 200 && p.0[1] < 60 && p.0[2] > 200 }));
+
+        // The HEIC has no encoder here, so it lands as a PNG — exactly.
+        let (name, bytes) = zip_entry(&codecs, &dir.join("photo.heic")).unwrap();
+        assert_eq!(name, "photo.png");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (w, h));
+        assert!(decoded.pixels().all(|p| p.0 == [255, 0, 255, 255]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
