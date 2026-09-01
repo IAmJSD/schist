@@ -619,6 +619,13 @@ pub struct ViewOptions {
     /// Colour new notes are given, 0xRRGGBB.
     #[serde(default = "default_note_color")]
     pub note_color: u32,
+    /// Hide photos the gallery's content filter flags as explicit.
+    /// Off by default, and honest about its needs: the judgement comes
+    /// from the "Content (NSFW Filter)" model, fetched like any other
+    /// under Filter ▸ Neural Filters ▸ Manage Models; without it,
+    /// nothing is flagged.
+    #[serde(default)]
+    pub gallery_hide_nsfw: bool,
     /// Show the AI sidebar. Off by default: it spawns an agent CLI the
     /// user may not have, and a chat column is not everyone's furniture.
     #[serde(default)]
@@ -676,6 +683,7 @@ impl Default for ViewOptions {
             notes: true,
             note_author: default_note_author(),
             note_color: default_note_color(),
+            gallery_hide_nsfw: false,
             ai_panel: false,
             ai_backend: default_ai_backend(),
             ai_model_claude: String::new(),

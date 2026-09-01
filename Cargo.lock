@@ -6404,6 +6404,7 @@ version = "0.9.1"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
+ "image",
  "log",
  "rayon",
  "sha2 0.10.9",

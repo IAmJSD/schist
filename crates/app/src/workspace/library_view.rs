@@ -110,8 +110,10 @@ impl Workspace {
             .child(body)
             .child(tray(self, cx));
         // Rendering cells is what queues their thumbnails; make sure a
-        // loader is running for whatever this frame asked for.
+        // loader is running for whatever this frame asked for — and if
+        // decodes have been failing for want of HEIC support, offer it.
         self.kick_thumb_loader(cx);
+        self.maybe_offer_heif(cx);
         root
     }
 }
@@ -397,12 +399,21 @@ fn sidebar_row(
 fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let cell = ws.library.thumb_px;
     let selected = ws.library.selected.clone();
+    let hide_flagged = ws.view.gallery_hide_nsfw;
     // Owned snapshot: the cells below borrow the workspace mutably to
     // fetch thumbnails, so they cannot also iterate `sections` in place.
     let sections: Vec<(PathBuf, Vec<super::library::Entry>)> = ws
         .library
         .visible_sections()
-        .map(|s| (s.dir.clone(), s.entries.clone()))
+        .map(|s| {
+            let entries = s
+                .entries
+                .iter()
+                .filter(|e| !(hide_flagged && ws.library.is_flagged(&e.path)))
+                .cloned()
+                .collect();
+            (s.dir.clone(), entries)
+        })
         .collect();
     let scanning = ws.library.scanning;
     let mut column = div()
@@ -584,6 +595,19 @@ fn tray(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .text_color(gpui::rgb(pal().text_dim))
                 .child("edited — versions kept beside the file")
         }))
+        .children({
+            let hidden = if ws.view.gallery_hide_nsfw {
+                ws.library.flagged_count()
+            } else {
+                0
+            };
+            (hidden > 0).then(|| {
+                div()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(pal().text_dim))
+                    .child(format!("{hidden} hidden by the content filter"))
+            })
+        })
         .child(div().flex_grow())
         // The editor's status bar is hidden here, so the tray carries the
         // status line — otherwise an import's outcome lands nowhere.

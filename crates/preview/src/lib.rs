@@ -102,6 +102,17 @@ pub fn render(bytes: &[u8], max_edge: u32) -> Result<Preview> {
     } else if schist_codecs_common::AffinityCodec.probe(bytes) {
         affinity_preview(bytes, max_edge)
     } else {
+        // HEIC before the generic decoder: the `image` crate does not
+        // read it, and an iPhone's camera roll is mostly HEIC — a
+        // gallery of "no preview" was how that surfaced. The error when
+        // libheif is absent is kept intact, so a caller can recognize
+        // it and offer the managed download.
+        #[cfg(not(target_arch = "wasm32"))]
+        if schist_codecs_common::HeifCodec.probe(bytes) {
+            use schist_plugin_api::CodecPlugin as _;
+            let doc = schist_codecs_common::HeifCodec.import(bytes)?;
+            return composite_preview(doc, max_edge);
+        }
         let img = image::load_from_memory(bytes)
             .context("no Schist codec and no image decoder recognized this file")?
             .into_rgba8();

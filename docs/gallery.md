@@ -43,7 +43,23 @@ the gallery opens. Thumbnails render lazily — a cell coming on screen is
 what queues its decode — through `schist-preview`, so a layered PSD costs
 its embedded composite rather than a full recomposite, and finished
 thumbnails are cached as PNGs under the state directory keyed by path,
-mtime and size, so the second launch is instant.
+mtime and size, so the second launch is instant. HEIC thumbnails need
+the same libheif the editor uses; when they start failing for want of
+it, the gallery raises the managed-download offer once, and retries the
+failed thumbnails after it installs.
+
+## The content filter
+
+Preferences ▸ Gallery ▸ "Hide photos the content filter flags as
+explicit" (off by default) keeps flagged photos out of the grid, with
+the tray saying how many are hidden. The judgement comes from the
+**Content (NSFW Filter)** model — the NSFWJS MobileNet (Infinite Red /
+GantMan, MIT), 17 MB, fetched like any other model under Filter ▸
+Neural Filters ▸ Manage Models and verified against a pinned hash.
+Each photo is scored once, on its thumbnail as it loads (the sum of the
+model's hentai/porn/sexy softmax classes against a 0.7 threshold), and
+the score is cached beside the thumbnail. Without the model nothing is
+flagged — the preference says so.
 
 ## Cameras
 

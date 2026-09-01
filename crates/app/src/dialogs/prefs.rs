@@ -101,6 +101,35 @@ pub(super) fn preferences(
                 cx,
             ),
         ))
+        .children(
+            // The gallery is compiled out of the web build, so a switch
+            // for it would be furniture there.
+            (!cfg!(target_arch = "wasm32")).then(|| {
+                ui::field_row(
+                    "Gallery",
+                    ui::checkbox(
+                        "Hide photos the content filter flags as explicit",
+                        view.gallery_hide_nsfw,
+                        |ws, _cx| {
+                            ws.view.gallery_hide_nsfw = !ws.view.gallery_hide_nsfw;
+                            ws.save_view_options();
+                        },
+                        cx,
+                    ),
+                )
+            }),
+        )
+        .children((!cfg!(target_arch = "wasm32")).then(|| {
+            div()
+                .pl(px(110.0))
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(ui::palette().text_faint))
+                .child(
+                    "Judged by the Content (NSFW Filter) model — fetch it under \
+                     Filter ▸ Neural Filters ▸ Manage Models. Without it, nothing \
+                     is flagged.",
+                )
+        }))
         .child(ui::field_row(
             "Rendering",
             ui::checkbox(

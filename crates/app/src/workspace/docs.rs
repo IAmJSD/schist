@@ -415,6 +415,14 @@ impl Workspace {
             this.update(cx, |ws, cx| {
                 ws.heif_download = false;
                 match installed {
+                    // From the gallery, the ask was thumbnails, not this
+                    // one file in the editor: retry the failed thumbs
+                    // and stay where the user is.
+                    Ok(()) if ws.library.open => {
+                        ws.library.retry_failed_thumbs();
+                        ws.status = "HEIC support installed".into();
+                        ws.library_rescan(cx);
+                    }
                     Ok(()) => ws.load_file(path, cx),
                     Err(err) => {
                         log::error!("HEIC support download failed: {err:#}");

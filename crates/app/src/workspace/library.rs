@@ -109,6 +109,13 @@ pub struct Library {
     /// The import dialog's navigable map: view, tiles, and the drawn
     /// boundary (kept here so it survives closing the dialog).
     pub map: library_geo::MapState,
+    /// Photos the content filter flagged as explicit, filled by the
+    /// thumbnail loader. Only consulted while the preference is on.
+    flagged: FxHashMap<PathBuf, bool>,
+    /// A thumbnail failed for want of the HEIC support download; the
+    /// gallery offers it once.
+    heif_needed: Option<PathBuf>,
+    heif_prompted: bool,
 }
 
 impl Library {
@@ -134,6 +141,9 @@ impl Library {
             pending_backing: None,
             edit_backings: FxHashMap::default(),
             map: library_geo::MapState::default(),
+            flagged: FxHashMap::default(),
+            heif_needed: None,
+            heif_prompted: false,
         }
     }
 
@@ -178,6 +188,26 @@ impl Library {
     /// Whether a thumbnail decode gave up, so the cell can say so.
     pub fn thumb_failed(&self, path: &Path) -> bool {
         matches!(self.thumbs.get(path), Some(Thumb::Failed))
+    }
+
+    /// Whether the content filter flagged a photo as explicit.
+    pub fn is_flagged(&self, path: &Path) -> bool {
+        self.flagged.get(path).copied().unwrap_or(false)
+    }
+
+    /// Flagged photos among the visible sections — what the filter is
+    /// currently keeping out of the grid.
+    pub fn flagged_count(&self) -> usize {
+        self.visible_sections()
+            .flat_map(|s| s.entries.iter())
+            .filter(|e| self.is_flagged(&e.path))
+            .count()
+    }
+
+    /// Forget failed thumbnails so they load again — what the HEIC
+    /// support download makes worth retrying.
+    pub fn retry_failed_thumbs(&mut self) {
+        self.thumbs.retain(|_, t| !matches!(t, Thumb::Failed));
     }
 
     /// Sections after the sidebar filter.
@@ -340,29 +370,99 @@ pub(super) fn rgba_to_render_image(
     )])))
 }
 
-/// Decode one thumbnail, through the disk cache when it can. Blocking.
-fn load_thumb(job: &ThumbJob) -> Option<Arc<RenderImage>> {
+/// What loading one thumbnail produced.
+struct ThumbOutcome {
+    img: Option<Arc<RenderImage>>,
+    /// The photo's explicit-content score, when the model is installed.
+    score: Option<f32>,
+    /// The decode failed for want of the HEIC support download.
+    needs_heif: bool,
+}
+
+/// Decode one thumbnail, through the disk cache when it can, and score
+/// it for the content filter on the way past. Blocking.
+fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
     let cache = thumb_cache_path(&job.source, job.mtime);
-    if let Some(cached) = cache.as_ref().and_then(|p| std::fs::read(p).ok()) {
-        if let Ok(img) = image::load_from_memory(&cached) {
-            let img = img.into_rgba8();
-            return rgba_to_render_image(img.width(), img.height(), img.into_raw());
-        }
-    }
-    let preview = match schist_preview::render_file(&job.source, THUMB_EDGE) {
-        Ok(p) => p,
-        Err(err) => {
-            log::warn!("thumbnail failed for {}: {err:#}", job.source.display());
-            return None;
+    let mut needs_heif = false;
+    let rgba: Option<(u32, u32, Vec<u8>)> = if let Some(cached) = cache
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| image::load_from_memory(&bytes).ok())
+    {
+        let img = cached.into_rgba8();
+        Some((img.width(), img.height(), img.into_raw()))
+    } else {
+        match schist_preview::render_file(&job.source, THUMB_EDGE) {
+            Ok(preview) => {
+                if let (Some(path), Ok(png)) = (&cache, preview.to_png()) {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(path, png);
+                }
+                Some((preview.width, preview.height, preview.rgba))
+            }
+            Err(err) => {
+                needs_heif = schist_codecs_common::heif::download_would_help(&err);
+                log::warn!("thumbnail failed for {}: {err:#}", job.source.display());
+                None
+            }
         }
     };
-    if let (Some(path), Ok(png)) = (&cache, preview.to_png()) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, png);
+    let score = rgba
+        .as_ref()
+        .and_then(|(w, h, rgba)| explicit_score(&cache, *w, *h, rgba));
+    ThumbOutcome {
+        img: rgba.and_then(|(w, h, rgba)| rgba_to_render_image(w, h, rgba)),
+        score,
+        needs_heif,
     }
-    rgba_to_render_image(preview.width, preview.height, preview.rgba)
+}
+
+/// How sure the model must be before a photo counts as explicit: the
+/// sum of its hentai/porn/sexy classes against this.
+const NSFW_THRESHOLD: f32 = 0.7;
+
+/// The chance a photo is explicit, by the "nsfw" model, with the answer
+/// cached beside the thumbnail so each photo is judged once. `None`
+/// when the model is not installed — nothing is flagged without it.
+fn explicit_score(cache: &Option<PathBuf>, width: u32, height: u32, rgba: &[u8]) -> Option<f32> {
+    let score_cache = cache.as_ref().map(|p| p.with_extension("score"));
+    if let Some(text) = score_cache
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+    {
+        if let Ok(score) = text.trim().parse::<f32>() {
+            return Some(score);
+        }
+    }
+    let model = schist_neural::get("nsfw")?;
+    let (mw, mh) = model.spec.input.dims();
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let img = image::imageops::resize(
+        &img,
+        mw as u32,
+        mh as u32,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut rgb = Vec::with_capacity(mw * mh * 3);
+    for px in img.pixels() {
+        rgb.extend([
+            px.0[0] as f32 / 255.0,
+            px.0[1] as f32 / 255.0,
+            px.0[2] as f32 / 255.0,
+        ]);
+    }
+    let scores = model.run_scores(&rgb).ok()?;
+    // The five softmax classes are drawing, hentai, neutral, porn, sexy.
+    if scores.len() != 5 {
+        return None;
+    }
+    let score = scores[1] + scores[3] + scores[4];
+    if let Some(path) = score_cache {
+        let _ = std::fs::write(path, format!("{score}"));
+    }
+    Some(score)
 }
 
 /// Where a volume keeps its photos: `DCIM` at the root (cards, cameras,
@@ -638,15 +738,23 @@ impl Workspace {
                     batch
                         .into_iter()
                         .map(|job| {
-                            let img = load_thumb(&job);
-                            (job.key, img)
+                            let outcome = load_thumb(&job);
+                            (job.key, outcome)
                         })
                         .collect::<Vec<_>>()
                 })
                 .await;
             let keep = this.update(cx, |ws, cx| {
-                for (key, img) in results {
-                    let state = match img {
+                for (key, outcome) in results {
+                    if let Some(score) = outcome.score {
+                        ws.library
+                            .flagged
+                            .insert(key.clone(), score >= NSFW_THRESHOLD);
+                    }
+                    if outcome.needs_heif && ws.library.heif_needed.is_none() {
+                        ws.library.heif_needed = Some(key.clone());
+                    }
+                    let state = match outcome.img {
                         Some(img) => Thumb::Ready(img),
                         None => Thumb::Failed,
                     };
@@ -659,6 +767,23 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// Offer the HEIC support download once, when thumbnails have been
+    /// failing for want of it. Called from the gallery render, where a
+    /// modal can be raised.
+    pub(super) fn maybe_offer_heif(&mut self, cx: &mut Context<Self>) {
+        if self.modal.is_some() || self.heif_download || self.library.heif_prompted {
+            return;
+        }
+        let Some(path) = self.library.heif_needed.take() else {
+            return;
+        };
+        if schist_codecs_common::heif::managed_library().is_none() {
+            return;
+        }
+        self.library.heif_prompted = true;
+        self.open_modal(Modal::HeifSupport { path }, cx);
     }
 
     /// Ask for folders and watch them. Multiple selection: adding a
