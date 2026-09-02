@@ -55,6 +55,7 @@ impl Workspace {
         if self.editor.active_tool == "zoom" {
             let factor = if ev.modifiers.alt { 1.0 / 1.5 } else { 1.5 };
             self.zoom_by(factor, Some(local));
+            self.view_gesture_event(cx);
             cx.notify();
             return;
         }

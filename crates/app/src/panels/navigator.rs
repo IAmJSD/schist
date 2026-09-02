@@ -42,10 +42,13 @@ pub fn navigator(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     "nav-zoom",
                     zoom_ratio,
                     150.0,
-                    |ws, r, _cx| {
+                    |ws, r, cx| {
                         // Log scale: 0.8% .. 3200%.
                         let zoom = 2f32.powf(r * 12.0 - 7.0);
                         ws.set_zoom(zoom);
+                        // The slider fires per mouse-move; damp the rebuilds
+                        // like wheel zoom.
+                        ws.view_gesture_event(cx);
                     },
                     cx,
                 ))

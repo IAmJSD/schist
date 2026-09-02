@@ -51,7 +51,7 @@ impl Workspace {
     /// a settle timer; the timer only ends the gesture if no further event
     /// has bumped the sequence, so a stream of wheel ticks costs one
     /// full-quality rebuild at the end rather than one per tick.
-    pub(super) fn view_gesture_event(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn view_gesture_event(&mut self, cx: &mut Context<Self>) {
         self.view_gesture_active = true;
         self.view_gesture_seq += 1;
         let seq = self.view_gesture_seq;
@@ -106,7 +106,7 @@ impl Workspace {
     /// Turn the view by `delta` radians.
     pub fn rotate_view(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.rotation = (self.rotation + delta).rem_euclid(std::f32::consts::TAU);
-        self.viewport_image = None;
+        self.invalidate_viewport_image();
         self.status = format!("Rotate View {:.0}\u{b0}", self.rotation.to_degrees()).into();
         cx.notify();
     }
@@ -114,7 +114,7 @@ impl Workspace {
     /// Put the view back upright.
     pub fn reset_view_rotation(&mut self, cx: &mut Context<Self>) {
         self.rotation = 0.0;
-        self.viewport_image = None;
+        self.invalidate_viewport_image();
         self.status = "View reset".into();
         cx.notify();
     }

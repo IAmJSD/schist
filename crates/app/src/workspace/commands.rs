@@ -34,7 +34,16 @@ impl Workspace {
                 for coord in TileCoord::covering(rect) {
                     self.display_tiles.remove(&coord);
                 }
-                self.preview.dirty.push(*rect);
+                // The preview only drains this list when it is the active
+                // render path (far zoom-out), so at working zooms a long
+                // stroke would grow it forever. Past a threshold, collapse
+                // to "rebuild everything on next refresh".
+                if self.preview.dirty.len() >= 256 {
+                    self.preview.dirty.clear();
+                    self.preview.valid = false;
+                } else {
+                    self.preview.dirty.push(*rect);
+                }
             }
         }
         cx.notify();

@@ -31,8 +31,14 @@ pub(crate) fn run_app_item(
         AppItem::Save => ws.save_current(window, cx),
         AppItem::SaveAs => crate::keymap::save_file_dialog(ws, window, cx),
         AppItem::Quit => ws.request_quit(cx),
-        AppItem::ZoomIn => ws.zoom_by(1.25, None),
-        AppItem::ZoomOut => ws.zoom_by(0.8, None),
+        AppItem::ZoomIn => {
+            ws.zoom_by(1.25, None);
+            ws.view_gesture_event(cx);
+        }
+        AppItem::ZoomOut => {
+            ws.zoom_by(0.8, None);
+            ws.view_gesture_event(cx);
+        }
         AppItem::ZoomFit => ws.fit_to_view(),
         AppItem::ZoomActual => {
             ws.zoom = 1.0;

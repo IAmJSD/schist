@@ -198,10 +198,15 @@ impl Workspace {
         self.cache.invalidate_all();
         self.display_tiles.clear();
         self.prefetch_queue.clear();
-        self.viewport_image = None;
+        self.invalidate_viewport_image();
+        if let Some(old) = self.preview.image.take() {
+            self.retired_images.push(old);
+        }
         self.preview = Preview::default();
         self.selection_outline = None;
-        self.nav_thumb = None;
+        if let Some((_, old)) = self.nav_thumb.take() {
+            self.retired_images.push(old);
+        }
         self.filter_preview = None;
         self.dragging_guide = None;
     }
