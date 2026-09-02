@@ -2032,6 +2032,9 @@ pub(crate) fn map_element(
             if ws.map_mut(slot).wheel(dy, pos) {
                 cx.notify();
             }
+            // The wheel over a map is zoom, as on every web map — not
+            // a scroll of whatever panel the map sits in.
+            cx.stop_propagation();
         }))
         .child(
             canvas(

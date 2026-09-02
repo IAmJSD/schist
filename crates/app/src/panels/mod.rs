@@ -114,11 +114,19 @@ fn keybind_hint(kb: Option<&str>) -> String {
 }
 
 pub fn side_panels(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    // Scrollable: the Info tab can be taller than a small window, and
+    // without this the panels below it were squeezed into each other —
+    // Layers over History, a stray border across the map. Short content
+    // still fills the column (the growing panels take the slack); tall
+    // content scrolls.
     div()
+        .id("side-panels")
         .flex()
         .flex_col()
         .w(px(260.0))
         .flex_none()
+        .min_h(px(0.0))
+        .overflow_y_scroll()
         .bg(gpui::rgb(palette().panel_bg))
         .border_l_1()
         .border_color(gpui::rgb(palette().panel_edge))
