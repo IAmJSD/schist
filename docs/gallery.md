@@ -233,7 +233,7 @@ software, and, when the photo has a position, where — the nearest
 gazetteer city with the coordinates and altitude, and the same
 navigable map the gallery uses opened on the spot at street scale
 with a red-and-white blip on it. The rows are their own scrolling
-region — bounded at about seven, with a thin thumb beside them when
+region — bounded at about three, with a thin thumb beside them when
 there is more — and the map sits fixed beneath at 16:9 across the
 panel. For a gallery edit the EXIF is read from the original photo
 (the sidecar is a PSD and has none). A file
