@@ -9,6 +9,7 @@ use schist_gallery::ExifSummary;
 const INFO_ROWS_MAX_H: f32 = 88.0;
 /// The side panel is 260 px wide with 8 px of padding each side; the
 /// map spans that.
+#[cfg(not(target_arch = "wasm32"))]
 const SIDE_PANEL_CONTENT_W: f32 = 260.0 - 16.0;
 
 /// The side panel's top slot: a tab row when the open file has EXIF —

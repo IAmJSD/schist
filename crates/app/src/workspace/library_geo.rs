@@ -111,6 +111,26 @@ fn tile_cache_path(zoom: i32, x: i64, y: i64) -> Option<PathBuf> {
     )
 }
 
+/// The border the gutter adds around a tile, in image pixels.
+pub(super) const TILE_GUTTER: u32 = 1;
+
+/// A tile with its edge pixels repeated once around it. gpui samples
+/// sprites bilinearly out of an unpadded atlas, so a tile magnified
+/// on a 2× display blends its outermost pixels with whatever sits
+/// beside it in the atlas — a dark hairline along every tile edge.
+/// With the gutter the filter reaches the tile's own colour instead;
+/// the painter draws the tile one pixel larger and clips the gutter
+/// away, so the map is pixel-for-pixel what it was.
+fn with_gutter(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let g = TILE_GUTTER;
+    image::RgbaImage::from_fn(w + 2 * g, h + 2 * g, |x, y| {
+        let sx = x.saturating_sub(g).min(w - 1);
+        let sy = y.saturating_sub(g).min(h - 1);
+        *img.get_pixel(sx, sy)
+    })
+}
+
 /// One tile, from the disk cache or the network. Blocking.
 fn fetch_tile(zoom: i32, x: i64, y: i64) -> Option<image::RgbaImage> {
     let n = 1i64 << zoom;
@@ -180,6 +200,9 @@ pub struct MapState {
     pub draw_mode: bool,
     /// Points marked on the map: the blip where a photo was taken.
     pub markers: Vec<(f64, f64)>,
+    /// The window's device scale at the last paint, so tile edges can
+    /// be snapped to whole device pixels (0 until first paint = 1).
+    pub scale: f32,
     pub drag: Option<MapDrag>,
     /// Accumulated wheel travel toward the next zoom step.
     scroll_debt: f32,
@@ -203,6 +226,7 @@ impl Default for MapState {
             selection_name: None,
             draw_mode: false,
             markers: Vec::new(),
+            scale: 1.0,
             drag: None,
             scroll_debt: 0.0,
             origin: (0.0, 0.0),
@@ -229,14 +253,29 @@ impl MapState {
         coords_to_lat_lon(gx / TILE, gy / TILE, self.zoom)
     }
 
+    /// Where global pixel (0, 0) lands in the window, snapped to whole
+    /// device pixels: tiles are placed at whole multiples of 256 from
+    /// here, so their shared edges never fall between device pixels —
+    /// a half-pixel edge at 2× draws as a hairline seam between tiles.
+    fn view_offset(&self) -> (f64, f64) {
+        let (cx, cy) = self.center_px();
+        let s = if self.scale > 0.0 {
+            self.scale as f64
+        } else {
+            1.0
+        };
+        let snap = |v: f64| (v * s).round() / s;
+        (
+            snap(self.size.0 as f64 / 2.0 - cx + self.origin.0 as f64),
+            snap(self.size.1 as f64 / 2.0 - cy + self.origin.1 as f64),
+        )
+    }
+
     /// A latitude/longitude as a window position.
     fn window_at(&self, lat: f64, lon: f64) -> (f32, f32) {
-        let (cx, cy) = self.center_px();
+        let (ox, oy) = self.view_offset();
         let (x, y) = tile_coords(lat, lon, self.zoom);
-        (
-            (x * TILE - cx + self.size.0 as f64 / 2.0) as f32 + self.origin.0,
-            (y * TILE - cy + self.size.1 as f64 / 2.0) as f32 + self.origin.1,
-        )
+        ((x * TILE + ox) as f32, (y * TILE + oy) as f32)
     }
 
     /// Start a drag: drawing when asked (Shift or draw mode), panning
@@ -385,8 +424,14 @@ impl Workspace {
         }
     }
 
-    pub(super) fn prepare_map_paint(&mut self, slot: MapSlot, bounds: Bounds<Pixels>) -> MapPaint {
+    pub(super) fn prepare_map_paint(
+        &mut self,
+        slot: MapSlot,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+    ) -> MapPaint {
         let map = self.map_mut(slot);
+        map.scale = scale;
         map.origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         map.size = (
             f32::from(bounds.size.width).max(1.0),
@@ -406,12 +451,13 @@ impl Workspace {
             markers: Vec::new(),
         };
         let zoom = map.zoom;
+        let (ox, oy) = map.view_offset();
         for ty in top.max(0)..=bottom.min(n - 1) {
             for tx in left.max(0)..=right.min(n - 1) {
                 let rect = Bounds {
                     origin: point(
-                        px((tx as f64 * TILE - cx + w / 2.0) as f32 + map.origin.0),
-                        px((ty as f64 * TILE - cy + h / 2.0) as f32 + map.origin.1),
+                        px((tx as f64 * TILE + ox) as f32),
+                        px((ty as f64 * TILE + oy) as f32),
                     ),
                     size: size(px(TILE as f32), px(TILE as f32)),
                 };
@@ -473,7 +519,7 @@ impl Workspace {
                     batch
                         .into_iter()
                         .map(|(z, x, y)| {
-                            let img = fetch_tile(z, x, y).and_then(|img| {
+                            let img = fetch_tile(z, x, y).map(with_gutter).and_then(|img| {
                                 library::rgba_to_render_image(
                                     img.width(),
                                     img.height(),

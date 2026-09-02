@@ -2038,9 +2038,10 @@ pub(crate) fn map_element(
         }))
         .child(
             canvas(
-                move |bounds, _window, cx| {
+                move |bounds, window, cx| {
+                    let scale = window.scale_factor();
                     entity.update(cx, |ws, cx| {
-                        let paint = ws.prepare_map_paint(slot, bounds);
+                        let paint = ws.prepare_map_paint(slot, bounds, scale);
                         // Whatever this frame queued starts fetching.
                         ws.kick_map_tiles(slot, cx);
                         paint
@@ -2052,8 +2053,30 @@ pub(crate) fn map_element(
                     for rect in paint.missing {
                         window.paint_quad(gpui::fill(rect, gpui::rgb(0xC9D4DC)));
                     }
+                    // Each tile image carries a one-pixel gutter: draw it
+                    // that much larger and clip to the true tile, so the
+                    // bilinear filter never reaches past the tile's edge.
+                    let gutter = px(super::library_geo::TILE_GUTTER as f32);
                     for (rect, img) in paint.tiles {
-                        let _ = window.paint_image(rect, gpui::Corners::default(), img, 0, false);
+                        let padded = gpui::Bounds {
+                            origin: gpui::point(rect.origin.x - gutter, rect.origin.y - gutter),
+                            size: gpui::size(
+                                rect.size.width + gutter * 2.0,
+                                rect.size.height + gutter * 2.0,
+                            ),
+                        };
+                        window.with_content_mask(
+                            Some(gpui::ContentMask { bounds: rect }),
+                            |window| {
+                                let _ = window.paint_image(
+                                    padded,
+                                    gpui::Corners::default(),
+                                    img,
+                                    0,
+                                    false,
+                                );
+                            },
+                        );
                     }
                     if let Some(sel) = paint.selection {
                         window.paint_quad(gpui::fill(sel, gpui::rgba(0x4A90D930)));
