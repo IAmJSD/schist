@@ -142,7 +142,10 @@ title, or one bucket by name, paged), `gallery_search` (the search
 box's own ranking, answered in the reply and shown in the box),
 `gallery_thumbnail` (the cached thumbnail as an image, so the agent
 can look), `gallery_select`, `gallery_bucket_create` (optionally with
-a smart query), `gallery_bucket_add`, `gallery_group_by`, and
+a smart query), `gallery_bucket_add`, `gallery_group_by`,
+`gallery_content_filter` (read or switch the content filter, with
+counts of flagged, clean and not-yet-scored photos; switching it on
+needs the model), `gallery_flagged` (photos by verdict, paged), and
 `gallery_open`, which takes a photo into the editor where the document
 tools then apply. Every tool does what a click would, in front of the
 user; photos are named by path throughout.

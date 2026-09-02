@@ -641,6 +641,7 @@ impl Library {
     /// position probe. Returns whether anything queued.
     fn refill_index_queue(&mut self) -> bool {
         let embeds = schist_neural::installed("embed-image");
+        let scores = nsfw_installed();
         let jobs: Vec<ThumbJob> = self
             .sections
             .iter()
@@ -648,6 +649,9 @@ impl Library {
             .filter(|e| {
                 (embeds && !self.embeddings.contains_key(&e.path))
                     || !self.positions.contains_key(&e.path)
+                    // A scorer installed after the position pass ran
+                    // still has every photo to see.
+                    || (scores && !self.flagged.contains_key(&e.path))
             })
             .take(THUMB_BATCH)
             .map(|e| ThumbJob {
@@ -687,7 +691,8 @@ impl Library {
         })
     }
 
-    /// Photos as JSON rows: path, when taken, where, whether edited.
+    /// Photos as JSON rows: path, when taken, where, whether edited,
+    /// and the content filter's verdict — `null` while unscored.
     pub(super) fn entry_json(&self, entry: &Entry) -> serde_json::Value {
         serde_json::json!({
             "path": entry.path.display().to_string(),
@@ -695,6 +700,50 @@ impl Library {
             "place": self.places.get(&entry.path).cloned().flatten(),
             "edited": entry.edited,
             "selected": self.is_selected(&entry.path),
+            "flagged": self.flagged.get(&entry.path).copied(),
+        })
+    }
+
+    /// The content filter's verdict on a photo, as a word: `flagged`,
+    /// `clean`, or `unscored` (not looked at yet, or no model to look
+    /// with).
+    pub(super) fn verdict(&self, path: &Path) -> &'static str {
+        match self.flagged.get(path) {
+            Some(true) => "flagged",
+            Some(false) => "clean",
+            None => "unscored",
+        }
+    }
+
+    /// Every photo the grid could show (folder and map filters
+    /// applied, the content filter *not* applied) with the given
+    /// verdict, in display order.
+    pub(super) fn entries_by_verdict(&self, verdict: &str) -> Vec<Entry> {
+        self.grouped()
+            .into_iter()
+            .flat_map(|(_, _, entries)| entries)
+            .filter(|e| self.verdict(&e.path) == verdict)
+            .collect()
+    }
+
+    /// The content filter's state, for the AI panel's tools and the
+    /// gallery's own reporting: model, switch, and how many photos
+    /// have been scored each way.
+    pub(super) fn content_filter_json(&self, enabled: bool) -> serde_json::Value {
+        let all: Vec<&Entry> = self
+            .sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .collect();
+        let count = |v: &str| all.iter().filter(|e| self.verdict(&e.path) == v).count();
+        serde_json::json!({
+            "enabled": enabled,
+            "model_installed": nsfw_installed(),
+            "photos": all.len(),
+            "flagged": count("flagged"),
+            "clean": count("clean"),
+            "unscored": count("unscored"),
+            "hidden_now": if enabled { self.flagged_count() } else { 0 },
         })
     }
 
@@ -3463,6 +3512,42 @@ mod tests {
         // A torn file is a miss, not a crash.
         assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
         assert!(parse_index_snapshot(b"not an index").is_none());
+    }
+
+    #[test]
+    fn verdicts_come_in_three_words_and_lists_follow_them() {
+        let mut lib = Library::load();
+        let mk = |n: &str| Entry {
+            path: PathBuf::from(format!("/p/{n}.jpg")),
+            mtime: 0,
+            edited: false,
+        };
+        lib.sections = vec![Section {
+            dir: PathBuf::from("/p"),
+            entries: vec![mk("a"), mk("b"), mk("c")],
+        }];
+        lib.flagged.insert(PathBuf::from("/p/a.jpg"), true);
+        lib.flagged.insert(PathBuf::from("/p/b.jpg"), false);
+        assert_eq!(lib.verdict(Path::new("/p/a.jpg")), "flagged");
+        assert_eq!(lib.verdict(Path::new("/p/b.jpg")), "clean");
+        assert_eq!(lib.verdict(Path::new("/p/c.jpg")), "unscored");
+        let names = |v: &str| -> Vec<String> {
+            lib.entries_by_verdict(v)
+                .iter()
+                .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names("flagged"), vec!["a.jpg"]);
+        assert_eq!(names("clean"), vec!["b.jpg"]);
+        assert_eq!(names("unscored"), vec!["c.jpg"]);
+        let state = lib.content_filter_json(true);
+        assert_eq!(state["flagged"], 1);
+        assert_eq!(state["clean"], 1);
+        assert_eq!(state["unscored"], 1);
+        assert_eq!(state["hidden_now"], 1);
+        // A row says its verdict too, null while unscored.
+        assert_eq!(lib.entry_json(&mk("a"))["flagged"], true);
+        assert!(lib.entry_json(&mk("c"))["flagged"].is_null());
     }
 
     #[test]

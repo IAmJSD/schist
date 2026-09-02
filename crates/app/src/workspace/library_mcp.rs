@@ -97,6 +97,30 @@ pub(super) fn tool_defs() -> Vec<Value> {
             &["by"],
         ),
         def(
+            "gallery_content_filter",
+            "The content (NSFW) filter: read its state, or switch it. On, photos the Content \
+             model flags as explicit are kept out of the grid; the reply says whether the model \
+             is installed and how many photos are flagged, clean or not yet scored. Switching it \
+             on needs the model, installed under Gallery \u{25b8} Manage Models\u{2026}. \
+             Scoring happens in the background as photos are indexed.",
+            json!({
+                "enabled": {"type": "boolean", "description": "Set the filter; omit to just read it."},
+            }),
+            &[],
+        ),
+        def(
+            "gallery_flagged",
+            "List photos by the content filter's verdict — flagged, clean, or unscored — in \
+             display order, whatever the filter switch is set to. Folder and map filters apply; \
+             a bucket may be given instead.",
+            json!({
+                "verdict": {"type": "string", "enum": ["flagged", "clean", "unscored"], "default": "flagged"},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+            }),
+            &[],
+        ),
+        def(
             "gallery_open",
             "Open a photo in the editor (its edit sidecar if it has one). The document tools \
              then apply to it; the gallery is Cmd/Ctrl+Shift+G away.",
@@ -285,6 +309,48 @@ impl Workspace {
                     .ok_or_else(|| anyhow::anyhow!("by must be date, folder or place"))?;
                 self.set_gallery_group(group, cx);
                 Ok(text(json!({"group_by": by})))
+            }
+            "gallery_content_filter" => {
+                if let Some(enabled) = args.get("enabled").and_then(|v| v.as_bool()) {
+                    if enabled && !schist_neural::installed("nsfw") {
+                        anyhow::bail!(
+                            "the Content (NSFW Filter) model is not installed; it is fetched \
+                             under Gallery \u{25b8} Manage Models\u{2026} (17 MB, MIT)"
+                        );
+                    }
+                    self.view.gallery_hide_nsfw = enabled;
+                    self.save_view_options();
+                    cx.notify();
+                }
+                let enabled = self.view.gallery_hide_nsfw;
+                Ok(text(self.library.content_filter_json(enabled)))
+            }
+            "gallery_flagged" => {
+                let verdict = str_arg(args, "verdict").unwrap_or("flagged");
+                if !["flagged", "clean", "unscored"].contains(&verdict) {
+                    anyhow::bail!("verdict must be flagged, clean or unscored");
+                }
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50)
+                    .clamp(1, 500) as usize;
+                let entries = lib.entries_by_verdict(verdict);
+                let rows: Vec<Value> = entries
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|e| lib.entry_json(e))
+                    .collect();
+                Ok(text(json!({
+                    "verdict": verdict,
+                    "total": entries.len(),
+                    "offset": offset,
+                    "filter_enabled": self.view.gallery_hide_nsfw,
+                    "model_installed": schist_neural::installed("nsfw"),
+                    "photos": rows,
+                })))
             }
             "gallery_open" => {
                 let path = PathBuf::from(
