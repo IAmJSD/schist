@@ -549,12 +549,14 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
             .text_color(gpui::rgb(pal().text_dim))
             .child(text)
     };
-    div()
+    // One column of a readable measure, centred on the screen, with
+    // everything inside it set flush left: centred ragged prose reads
+    // as a poster, and this is a page.
+    let column = div()
         .flex()
         .flex_col()
-        .flex_grow()
-        .items_center()
-        .justify_center()
+        .items_start()
+        .w(px(520.0))
         .gap_2()
         .child(
             div()
@@ -587,10 +589,10 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
         )
         .child(div().h(px(4.0)))
         .child(
-            // A hairline between the two ways in, as wide as the row
-            // above it rather than the whole window.
+            // A hairline between the two ways in, the width of the
+            // column rather than the whole window.
             div()
-                .w(px(360.0))
+                .w_full()
                 .h(px(1.0))
                 .my_2()
                 .bg(gpui::rgb(pal().cell_edge)),
@@ -619,7 +621,14 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
             "The gallery is always \u{2318}\u{21e7}G away, whatever you are editing."
         } else {
             "The gallery is always Ctrl+Shift+G away, whatever you are editing."
-        }))
+        }));
+    div()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .items_center()
+        .justify_center()
+        .child(column)
 }
 
 /// The folder list: Picasa's left column, minus the years.
