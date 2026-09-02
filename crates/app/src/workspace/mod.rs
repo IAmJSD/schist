@@ -13,7 +13,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use schist_color::{ColorMode, Depth, Rgba};
 use schist_compositor::TileCache;
 use schist_core::{blit_rgba8, Document, IntRect, Layer, TileCoord, TILE_SIZE};

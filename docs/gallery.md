@@ -374,6 +374,19 @@ understood ("Search results · near New York City"). Location search
 works even without the embedding models; with them, "dog in new york"
 blends both readings.
 
+A search made while viewing a bucket stays inside it: the bucket
+filters first — its hand-added photos and, for a smart bucket, its
+rule's current matches — and the query ranks what is left, under a
+"Bucket · <name> · Search results" header. The scoping happens before
+the two-hundred cut, so a bucket's matches are never crowded out by
+the rest of the library, and the search follows the bucket: click
+another bucket (or none) under a live query and it re-ranks there,
+a smart bucket refilling re-ranks too, and Escape clears the query to
+show the whole bucket again. Both `gallery_search` tools take an
+optional `bucket` — the in-app one views the bucket as it searches,
+so the user sees what the agent saw; the headless one sees only the
+hand-added photos, as its `gallery_list` does.
+
 ## What is persisted
 
 `~/.config/schist/library.json`: the watched folders, the recent-files

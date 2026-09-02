@@ -11,9 +11,9 @@ use crate::meta::taken_from_unix;
 use crate::paths::{thumb_cache_path, thumb_source};
 use crate::persist::{BucketFile, LibraryFile};
 use crate::scan::{scan_folders, Entry, Section};
-use crate::search::{rank, SEARCH_KEPT};
+use crate::search::{rank, Ranked, SEARCH_KEPT};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct Gallery {
@@ -134,8 +134,30 @@ impl Gallery {
     }
 
     /// The search box's ranking, from the snapshot's embeddings and
-    /// positions. Blocking on the text tower.
-    pub fn search(&self, query: &str) -> (Vec<(PathBuf, f32)>, Option<String>) {
+    /// positions. Blocking on the text tower. Given a bucket, the
+    /// bucket filters first and the query ranks what is left — its
+    /// hand-picked photos, which are all this side can see of it (a
+    /// smart rule's matches live in the app, recomputed per session).
+    /// An unknown bucket name is an error, not a library-wide search.
+    pub fn search(
+        &self,
+        query: &str,
+        bucket: Option<&str>,
+    ) -> anyhow::Result<(Ranked, Option<String>)> {
+        let scope: Option<HashSet<PathBuf>> = match bucket {
+            Some(name) => Some(
+                self.file
+                    .buckets
+                    .iter()
+                    .find(|b| b.name().eq_ignore_ascii_case(name))
+                    .ok_or_else(|| anyhow::anyhow!("no bucket named {name:?}"))?
+                    .photos()
+                    .iter()
+                    .cloned()
+                    .collect(),
+            ),
+            None => None,
+        };
         let text = schist_neural::embed::embed_text(query);
         let place = find_place(query);
         let vectors = self
@@ -146,9 +168,15 @@ impl Gallery {
             .index
             .values()
             .filter_map(|r| r.gps.flatten().map(|g| (&r.path, g)));
-        let mut ranked = rank(text.as_deref(), place.as_ref(), vectors, positions);
+        let mut ranked = rank(
+            text.as_deref(),
+            place.as_ref(),
+            scope.as_ref(),
+            vectors,
+            positions,
+        );
         ranked.truncate(SEARCH_KEPT);
-        (ranked, place.map(|p| p.name))
+        Ok((ranked, place.map(|p| p.name)))
     }
 
     /// The cached thumbnail PNG, when the app has rendered one.

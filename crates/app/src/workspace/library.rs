@@ -238,6 +238,11 @@ pub struct Library {
     /// The place the current query named, when it named one — shown on
     /// the results header.
     pub search_place: Option<String>,
+    /// The bucket the current results — or the query in flight — were
+    /// ranked within: a search made while viewing a bucket is scoped
+    /// to it. Compared against `bucket_filter` each frame, so the
+    /// search follows when the viewed bucket changes.
+    pub search_scoped: Option<usize>,
     /// Bumped per query so a slow embedding cannot land on a newer one.
     search_seq: u64,
     /// Answered queries, so the engine is only asked once per string.
@@ -401,6 +406,7 @@ impl Library {
             search_selected: false,
             search_results: None,
             search_place: None,
+            search_scoped: None,
             search_seq: 0,
             query_cache: FxHashMap::default(),
             index_gen: 0,
@@ -615,6 +621,10 @@ impl Library {
             })).collect::<Vec<_>>(),
             "search": (!self.search.is_empty()).then_some(&self.search),
             "search_results": self.search_results.as_ref().map(|r| r.len()),
+            "search_bucket": self
+                .search_scoped
+                .and_then(|i| self.buckets.get(i))
+                .map(|b| b.name.clone()),
             "map_filter": self.map_filter_label(),
             "index": {"embedded": indexed, "total": total,
                       "search_models_installed": schist_neural::embed::ready()},
@@ -1091,6 +1101,16 @@ impl Library {
             }
             self.save();
         }
+    }
+
+    /// What a search is confined to: the viewed bucket's contents
+    /// (hand-picked photos and the rule's matches), so the bucket
+    /// filters first and the query ranks what is left. `None` while
+    /// no bucket is on show — the whole index.
+    pub fn search_scope(&self) -> Option<FxHashSet<PathBuf>> {
+        self.bucket_filter
+            .and_then(|i| self.buckets.get(i))
+            .map(|b| b.contents().into_iter().collect())
     }
 
     /// The index as the ranking task sees it, rebuilt only when the
@@ -1908,6 +1928,7 @@ impl Workspace {
                 }
                 // The rules (or the bucket list) changed underneath
                 // the pass: throw it away, the next render re-runs it.
+                let mut viewed_refilled = false;
                 if ws.library.rule_rev == target.1 {
                     for (index, mut matched, by_score) in out {
                         if !by_score {
@@ -1920,12 +1941,20 @@ impl Workspace {
                             });
                         }
                         if let Some(bucket) = ws.library.buckets.get_mut(index) {
-                            bucket.matches = matched;
+                            if bucket.matches != matched {
+                                bucket.matches = matched;
+                                viewed_refilled |= ws.library.bucket_filter == Some(index);
+                            }
                         }
                     }
                     ws.library.smart_synced = Some(target);
                 }
                 ws.library.smart_running = false;
+                // A search scoped to this bucket was ranked over what
+                // it held before the pass; rank it over what it holds now.
+                if viewed_refilled && !ws.library.search.trim().is_empty() {
+                    ws.gallery_search_changed(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -2236,6 +2265,7 @@ impl Workspace {
         self.library.search_selected = false;
         self.library.search_results = None;
         self.library.search_place = None;
+        self.library.search_scoped = None;
         self.library.search_seq += 1;
         cx.notify();
         true
@@ -2244,11 +2274,14 @@ impl Workspace {
     /// Re-rank for the current query. The engine is consulted at most
     /// once per string — answered queries come from the cache — and the
     /// index rides into the task as a shared snapshot instead of a
-    /// per-keystroke copy of every path and vector.
+    /// per-keystroke copy of every path and vector. Made while viewing
+    /// a bucket, the search is scoped to it: the bucket filters, then
+    /// the query ranks what is left.
     pub(super) fn gallery_search_changed(&mut self, cx: &mut Context<Self>) {
         self.library.search_seq += 1;
         let seq = self.library.search_seq;
         let query = self.library.search.trim().to_string();
+        self.library.search_scoped = self.library.bucket_filter;
         if query.is_empty() {
             self.library.search_results = None;
             self.library.search_place = None;
@@ -2256,6 +2289,7 @@ impl Workspace {
             return;
         }
         let cached = self.library.query_cache.get(&query).cloned();
+        let scope = self.library.search_scope();
         let snapshot = self.library.search_snapshot();
         cx.spawn(async move |this, cx| {
             let ranked = cx
@@ -2278,16 +2312,25 @@ impl Workspace {
                         return None;
                     }
                     // Scores keyed by borrowed path; only what survives
-                    // the cut gets cloned.
+                    // the cut gets cloned. The scope applies before the
+                    // cut, so a bucket's matches are never crowded out
+                    // of the kept two hundred by the rest of the library.
+                    let in_scope = |path: &PathBuf| scope.as_ref().is_none_or(|s| s.contains(path));
                     let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
                     if let Some(text) = &answer.text {
                         for (path, v) in snapshot.vectors.iter() {
+                            if !in_scope(path) {
+                                continue;
+                            }
                             let s = v.iter().zip(text.iter()).map(|(a, b)| a * b).sum::<f32>();
                             scored.insert(path, s);
                         }
                     }
                     if let Some(place) = &answer.place {
                         for (path, (lat, lon)) in snapshot.positions.iter() {
+                            if !in_scope(path) {
+                                continue;
+                            }
                             let affinity = library_geo::geo_affinity(place, *lat, *lon);
                             if affinity > 0.0 {
                                 *scored.entry(path).or_insert(0.0) += GEO_BOOST * affinity;
@@ -2352,6 +2395,8 @@ impl Workspace {
         self.library.search = query.clone();
         self.library.search_cursor = query.len();
         self.library.search_seq += 1;
+        self.library.search_scoped = self.library.bucket_filter;
+        let scope = self.library.search_scope();
         let answer = match self.library.query_cache.get(&query) {
             Some(answer) => answer.clone(),
             None => {
@@ -2369,14 +2414,21 @@ impl Workspace {
             }
         };
         let snapshot = self.library.search_snapshot();
+        let in_scope = |path: &PathBuf| scope.as_ref().is_none_or(|s| s.contains(path));
         let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
         if let Some(text) = &answer.text {
             for (path, v) in snapshot.vectors.iter() {
+                if !in_scope(path) {
+                    continue;
+                }
                 scored.insert(path, v.iter().zip(text.iter()).map(|(a, b)| a * b).sum());
             }
         }
         if let Some(place) = &answer.place {
             for (path, (lat, lon)) in snapshot.positions.iter() {
+                if !in_scope(path) {
+                    continue;
+                }
                 let affinity = library_geo::geo_affinity(place, *lat, *lon);
                 if affinity > 0.0 {
                     *scored.entry(path).or_insert(0.0) += GEO_BOOST * affinity;
@@ -2399,6 +2451,21 @@ impl Workspace {
         self.library.search_results = Some(ranked.clone());
         cx.notify();
         ranked
+    }
+
+    /// Keep a live search scoped to the bucket on show: when the
+    /// viewed bucket changes under a query — a click in the sidebar,
+    /// a bucket deleted — re-rank within the new one (or the whole
+    /// library). Called from the gallery's render, like the smart
+    /// buckets' refresh, so nothing that moves `bucket_filter` has to
+    /// remember to.
+    pub(super) fn gallery_search_rescope(&mut self, cx: &mut Context<Self>) {
+        if self.library.search.trim().is_empty()
+            || self.library.search_scoped == self.library.bucket_filter
+        {
+            return;
+        }
+        self.gallery_search_changed(cx);
     }
 
     /// Load both towers off the UI thread before the first keystroke
@@ -3010,6 +3077,31 @@ mod tests {
         // A torn file is a miss, not a crash.
         assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
         assert!(parse_index_snapshot(b"not an index").is_none());
+    }
+
+    #[test]
+    fn a_search_is_scoped_to_the_bucket_on_show() {
+        let mut lib = Library::load();
+        lib.buckets.push(Bucket {
+            name: "Trip".into(),
+            photos: vec![PathBuf::from("/p/a.jpg")],
+            query: Some("beach".into()),
+            area: None,
+            matches: vec![PathBuf::from("/p/b.jpg"), PathBuf::from("/p/a.jpg")],
+        });
+        // No bucket on show: the whole index.
+        assert!(lib.search_scope().is_none());
+        // Viewing one: its hand-picked photos and its rule's matches,
+        // each once.
+        lib.bucket_filter = Some(lib.buckets.len() - 1);
+        let scope = lib.search_scope().expect("scoped");
+        assert_eq!(scope.len(), 2);
+        assert!(scope.contains(&PathBuf::from("/p/a.jpg")));
+        assert!(scope.contains(&PathBuf::from("/p/b.jpg")));
+        // A slot that no longer exists scopes to nothing in
+        // particular — the whole index again, not a crash.
+        lib.bucket_filter = Some(99);
+        assert!(lib.search_scope().is_none());
     }
 
     #[test]

@@ -53,9 +53,12 @@ mod gallery {
             def("gallery_search",
                 "Search photos by what is in them (\"dog on a beach\"), by where they were taken \
                  (\"taken in nyc\"), or both, ranked best first, over the embeddings the app has \
-                 indexed. Content search needs the Search models installed; places work from \
+                 indexed. With a bucket, the bucket filters first and the query ranks its \
+                 photos. Content search needs the Search models installed; places work from \
                  EXIF alone.",
                 json!({"query": {"type": "string"},
+                       "bucket": {"type": "string",
+                                  "description": "Search within this bucket (by name) only."},
                        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20}}),
                 &["query"]),
             def("gallery_thumbnail",
@@ -166,7 +169,8 @@ mod gallery {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(20)
                     .clamp(1, 200) as usize;
-                let (ranked, place) = gallery.search(query);
+                let bucket = args.get("bucket").and_then(|v| v.as_str());
+                let (ranked, place) = gallery.search(query, bucket)?;
                 let rows: Vec<Value> = ranked
                     .iter()
                     .take(limit)
@@ -176,9 +180,13 @@ mod gallery {
                         Some(row)
                     })
                     .collect();
-                text(
-                    json!({"query": query, "place": place, "matches": ranked.len(), "photos": rows}),
-                )
+                text(json!({
+                    "query": query,
+                    "bucket": bucket,
+                    "place": place,
+                    "matches": ranked.len(),
+                    "photos": rows,
+                }))
             }
             "gallery_thumbnail" => {
                 let path = PathBuf::from(str_arg(args, "path")?);

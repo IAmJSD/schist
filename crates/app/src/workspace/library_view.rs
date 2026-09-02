@@ -151,8 +151,10 @@ impl Workspace {
         self.library.begin_thumb_frame();
         self.kick_thumb_loader(cx);
         // Smart buckets re-score whenever the index moved, so they
-        // fill themselves as photos are indexed and imported.
+        // fill themselves as photos are indexed and imported — and a
+        // search follows the bucket on show.
         self.refresh_smart_buckets(cx);
+        self.gallery_search_rescope(cx);
         self.maybe_offer_heif(cx);
         self.gallery_reveal_tick(cx);
         root
@@ -987,7 +989,10 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     // fetch thumbnails, so they cannot also iterate `sections` in place.
     let mut sections: Vec<(String, String, Vec<super::library::Entry>)> =
         if let Some(results) = &ws.library.search_results {
-            // A search flattens the groups into one ranked strip.
+            // A search flattens the groups into one ranked strip. Made
+            // while viewing a bucket, it was ranked within the bucket;
+            // the strip also keeps to the bucket's current contents,
+            // so a photo removed by hand leaves at once.
             let by_path: FxHashMap<&PathBuf, &super::library::Entry> = ws
                 .library
                 .sections
@@ -995,15 +1000,25 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .flat_map(|s| s.entries.iter())
                 .map(|e| (&e.path, e))
                 .collect();
+            let bucket = ws
+                .library
+                .bucket_filter
+                .and_then(|i| ws.library.buckets.get(i));
+            let scope: Option<FxHashSet<&PathBuf>> =
+                bucket.map(|b| b.photos.iter().chain(b.matches.iter()).collect());
             let entries: Vec<super::library::Entry> = results
                 .iter()
+                .filter(|(path, _)| scope.as_ref().is_none_or(|s| s.contains(path)))
                 .filter_map(|(path, _)| by_path.get(path).map(|e| (*e).clone()))
                 .filter(|e| ws.library.passes_map(&e.path))
                 .collect();
-            let title = match &ws.library.search_place {
-                Some(place) => format!("Search results · near {place}"),
+            let mut title = match bucket {
+                Some(bucket) => format!("Bucket · {} · Search results", bucket.name),
                 None => "Search results".to_string(),
             };
+            if let Some(place) = &ws.library.search_place {
+                title.push_str(&format!(" · near {place}"));
+            }
             vec![(title, String::new(), entries)]
         } else {
             ws.library.grouped()
@@ -1092,6 +1107,13 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .bucket_filter
                         .and_then(|i| ws.library.buckets.get(i))
                     {
+                        Some(_) if ws.library.search_results.is_some() => {
+                            "Nothing in this bucket matches the search. Escape clears it \
+                         to show the whole bucket."
+                        }
+                        None if ws.library.search_results.is_some() => {
+                            "Nothing matches the search. Escape clears it."
+                        }
                         Some(bucket) if bucket.is_smart() => {
                             "Nothing matches this bucket's rule yet — matches appear as \
                          photos are indexed. Dragging photos in works too."
