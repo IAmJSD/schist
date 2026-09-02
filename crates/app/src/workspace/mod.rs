@@ -87,6 +87,7 @@ pub(crate) use library_view::{
 };
 
 /// The most tabs a dropped folder may open at once.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const DROP_OPEN_CAP: usize = 100;
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
@@ -335,6 +336,7 @@ pub struct Workspace {
     /// keystroke. `None` (the web build, which has no blink timer)
     /// means always visible.
     caret_phase: Option<std::time::Instant>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     caret_blinker: bool,
     /// True until the first keystroke after a field takes focus, so that
     /// one can replace the seeded value rather than append to it.
