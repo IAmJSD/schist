@@ -114,11 +114,17 @@ pub fn set_light(light: bool) {
 }
 
 pub fn palette() -> &'static Palette {
-    if LIGHT_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+    if is_light() {
         &LIGHT
     } else {
         &DARK
     }
+}
+
+/// Whether the light theme is active this frame, for chrome that keeps
+/// its own palette (the gallery) but still follows the theme choice.
+pub fn is_light() -> bool {
+    LIGHT_THEME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A labelled push button.
@@ -627,6 +633,41 @@ pub fn slider_track(
 }
 
 /// A labelled row inside a dialog.
+/// The previous char boundary in `s` before byte position `at` — what
+/// a left arrow moves a field's caret by.
+pub fn caret_left(s: &str, at: usize) -> usize {
+    s[..at.min(s.len())]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(i, _)| i)
+}
+
+/// The next char boundary in `s` after byte position `at`.
+pub fn caret_right(s: &str, at: usize) -> usize {
+    let at = at.min(s.len());
+    at + s[at..].chars().next().map_or(0, |c| c.len_utf8())
+}
+
+/// A focused field's inside: the text split around a caret bar that
+/// blinks. The bar keeps its one-pixel slot while off, so the text
+/// does not shuffle as it blinks; `color` is the field's text colour,
+/// since the gallery has its own palette.
+pub fn caret_run(before: String, after: String, on: bool, color: u32) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .max_w_full()
+        .overflow_hidden()
+        .children((!before.is_empty()).then(|| div().flex_none().child(SharedString::from(before))))
+        .child(div().flex_none().w(px(1.0)).h(px(13.0)).bg(if on {
+            gpui::rgba((color << 8) | 0xFF)
+        } else {
+            gpui::rgba(0x00000000)
+        }))
+        .children((!after.is_empty()).then(|| div().flex_none().child(SharedString::from(after))))
+}
+
 pub fn field_row(label: impl Into<SharedString>, control: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
@@ -702,3 +743,26 @@ pub fn modal_frame(
 }
 
 use gpui::prelude::FluentBuilder as _;
+
+#[cfg(test)]
+mod tests {
+    use super::{caret_left, caret_right};
+
+    #[test]
+    fn the_caret_moves_by_whole_characters_and_stays_in_bounds() {
+        // "aé🙂" — one, two and four byte characters.
+        let s = "a\u{e9}\u{1f642}";
+        assert_eq!(caret_right(s, 0), 1);
+        assert_eq!(caret_right(s, 1), 3);
+        assert_eq!(caret_right(s, 3), 7);
+        // At (or past) the end there is nowhere further to go.
+        assert_eq!(caret_right(s, 7), 7);
+        assert_eq!(caret_right(s, 99).min(s.len()), 7);
+        assert_eq!(caret_left(s, 7), 3);
+        assert_eq!(caret_left(s, 3), 1);
+        assert_eq!(caret_left(s, 1), 0);
+        assert_eq!(caret_left(s, 0), 0);
+        assert_eq!(caret_left(s, 99), 3);
+        assert_eq!(caret_left("", 0), 0);
+    }
+}

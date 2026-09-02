@@ -5,9 +5,15 @@ use super::*;
 impl Workspace {
     // ----- document lifecycle -----
 
-    /// File ▸ New. Photoshop asks for the settings before creating
-    /// anything, so this only opens the dialog; `create_document` runs on
-    /// Create.
+    /// File ▸ New: the preset picker. A preset creates on the spot;
+    /// Custom… goes on to the full dialog.
+    pub fn open_new_file_picker(&mut self, cx: &mut Context<Self>) {
+        self.open_modal(Modal::NewFilePicker, cx);
+    }
+
+    /// The full new-document dialog (the picker's Custom…). Photoshop
+    /// asks for the settings before creating anything, so this only
+    /// opens the dialog; `create_document` runs on Create.
     pub fn open_new_document_dialog(&mut self, cx: &mut Context<Self>) {
         self.open_modal(
             Modal::NewDocument {
@@ -94,6 +100,14 @@ impl Workspace {
     }
 
     pub(super) fn open_in_tab(&mut self, mut doc: Document, replace_pristine: bool) {
+        // A document arriving is what ends the gallery: whether it came
+        // from File ▸ New, a gallery double-click or a crash recovery,
+        // the editor is where it lives — and its memory goes with it.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.library.open {
+            self.library.open = false;
+            self.library.shed_memory();
+        }
         // Photoshop's History Brush paints back from the state the file
         // was opened in, so that is what gets snapshotted here.
         doc.snapshot_history_source();
@@ -110,7 +124,12 @@ impl Workspace {
         self.reset_per_document_caches();
         self.zoom = 1.0;
         self.offset = point(px(40.0), px(40.0));
+        // Fit now when the canvas has a size, and again on the first
+        // real paint regardless: opened from the gallery (or at boot)
+        // the canvas has never laid out, and fitting against zero — or
+        // stale — bounds left a 12-megapixel photo at 100%, top-left.
         self.fit_to_view();
+        self.pending_fit = true;
     }
 
     // ----- tabs -----
@@ -272,6 +291,8 @@ impl Workspace {
         if index == self.active_tab {
             if let Some(doc) = self.doc.take() {
                 self.remove_recovery_for(doc.id);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.forget_backing(doc.id);
             }
             if self.background_tabs.is_empty() {
                 self.active_tab = 0;
@@ -291,11 +312,20 @@ impl Workspace {
             };
             let tab = self.background_tabs.remove(parked);
             self.remove_recovery_for(tab.doc.id);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.forget_backing(tab.doc.id);
             if index < self.active_tab {
                 self.active_tab -= 1;
             }
         } else {
             return;
+        }
+        // The last tab closing empties the editor; the gallery is home,
+        // and it comes back exactly as it was left — search, selection,
+        // filters and all live for the session on the library.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.doc.is_none() && self.background_tabs.is_empty() && !self.library.open {
+            self.toggle_gallery(cx);
         }
         cx.notify();
     }
@@ -338,6 +368,10 @@ impl Workspace {
                     None => format!("Opened {}", doc.title).into(),
                 };
                 self.install_document(doc);
+                // Adopt a gallery edit's sidecar arrangement, or record
+                // an ordinary open in the recents.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.finish_load_bookkeeping(&path);
                 self.offer_missing_fonts(cx);
             }
             // A HEIC on a machine with no libheif — or a libheif with
@@ -400,6 +434,14 @@ impl Workspace {
             this.update(cx, |ws, cx| {
                 ws.heif_download = false;
                 match installed {
+                    // From the gallery, the ask was thumbnails, not this
+                    // one file in the editor: retry the failed thumbs
+                    // and stay where the user is.
+                    Ok(()) if ws.library.open => {
+                        ws.library.retry_failed_thumbs();
+                        ws.status = "HEIC support installed".into();
+                        ws.library_rescan(cx);
+                    }
                     Ok(()) => ws.load_file(path, cx),
                     Err(err) => {
                         log::error!("HEIC support download failed: {err:#}");
@@ -420,6 +462,26 @@ impl Workspace {
     /// so that case asks; with several files, or nothing to place into,
     /// everything just opens.
     pub fn handle_dropped_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        // Folders are a question, not a file: open what is inside, or
+        // watch them in the gallery? Loose files dropped alongside open
+        // as they always did.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+                paths.into_iter().partition(|p| p.is_dir());
+            if !dirs.is_empty() {
+                let images = schist_gallery::scan_folders(&dirs, &self.codec_extensions())
+                    .iter()
+                    .map(|s| s.entries.len())
+                    .sum();
+                self.open_modal(Modal::DropFolders { dirs, images }, cx);
+            }
+            for path in files {
+                self.load_file(path, cx);
+            }
+            return;
+        }
+        #[allow(unreachable_code)]
         if let [path] = paths.as_slice() {
             if self.doc.is_some() && self.is_flat_image(path) {
                 self.open_modal(Modal::DropImage { path: path.clone() }, cx);
@@ -429,6 +491,54 @@ impl Workspace {
         for path in paths {
             self.load_file(path, cx);
         }
+    }
+
+    /// Read the open document's EXIF once per document, and reset the
+    /// side panel's tab choice with it. The file is the original photo
+    /// for a gallery edit (the sidecar is a PSD, which carries none)
+    /// and the document's own file otherwise; an untitled document has
+    /// nothing to read.
+    pub fn refresh_exif(&mut self) {
+        let Some(doc) = self.doc.as_ref() else {
+            if self.exif.is_some() {
+                self.exif = None;
+                self.side_tab = None;
+            }
+            return;
+        };
+        if self.exif.as_ref().is_some_and(|(id, _)| *id == doc.id) {
+            return;
+        }
+        let id = doc.id;
+        #[cfg(not(target_arch = "wasm32"))]
+        let source = self
+            .library
+            .edit_backings
+            .get(&id)
+            .cloned()
+            .or_else(|| doc.path.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let summary = source.as_deref().and_then(schist_gallery::exif_summary);
+        // The web build has no file system: its opened files live in
+        // memory under invented paths, so read the bytes back from there.
+        #[cfg(target_arch = "wasm32")]
+        let summary = doc
+            .path
+            .as_deref()
+            .and_then(|path| crate::web::read_file(path).ok())
+            .and_then(|bytes| schist_gallery::exif_summary_bytes(&bytes));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The info map opens on the spot, at street scale.
+            let map = &mut self.info_map;
+            map.markers.clear();
+            if let Some((lat, lon)) = summary.as_ref().and_then(|s| s.gps) {
+                map.markers.push((lat, lon));
+                map.look_at(lat, lon, 15);
+            }
+        }
+        self.exif = Some((id, summary));
+        self.side_tab = None;
     }
 
     /// True when the extension belongs to a single-layer image format.
@@ -525,6 +635,10 @@ impl Workspace {
 
     /// Serialize the document to `path`, choosing the codec by extension.
     pub fn save_file_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // A save landing on a gallery sidecar keeps the previous state as
+        // a version first — that is the gallery's automatic versioning.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pre_save_backing(&path);
         match self.write_document_to(&path) {
             Ok(()) => {
                 if let Some(doc) = &mut self.doc {
@@ -535,6 +649,13 @@ impl Workspace {
                     }
                 }
                 self.clear_recovery();
+                // A sidecar save refreshes its photo's thumbnail instead
+                // of joining the recents; anything else is a real file
+                // the user may want back quickly.
+                #[cfg(not(target_arch = "wasm32"))]
+                if !self.post_save_backing(&path) {
+                    self.note_recent(&path);
+                }
                 self.status = format!("Saved {}", path.display()).into();
                 // Only if this is the document the close was asked for.
                 // The Save As portal does not block the window on Linux,

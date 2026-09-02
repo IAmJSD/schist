@@ -26,6 +26,7 @@ members = [
     "crates/quicklook",
     "crates/colormgmt",
     "crates/mcp",
+    "crates/gallery",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
@@ -88,6 +89,7 @@ schist-tools-type = { path = "plugins/tools-type" }
 schist-filters-core = { path = "plugins/filters-core" }
 schist-commands-core = { path = "plugins/commands-core" }
 schist-mcp = { path = "crates/mcp" }
+schist-gallery = { path = "crates/gallery" }
 
 # external
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch and stylus pressure on the
@@ -96,7 +98,7 @@ schist-mcp = { path = "crates/mcp" }
 # carries images to the Linux clipboards, which upstream writes as an
 # empty string.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "75e6ffb88c81200d38e68e3d17e5f075b5ecbf96" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "73c9da683944ce7f4f2fdde767cded8aaf783276" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -179,5 +181,5 @@ strip = "debuginfo"
 # the fork's two patch entries are restated here; on native targets the
 # vendored crates are byte-identical to the registry sources.
 [patch.crates-io]
-gpui_util = { git = "https://github.com/IAmJSD/gpui", rev = "75e6ffb88c81200d38e68e3d17e5f075b5ecbf96" }
-gpui_http_client = { git = "https://github.com/IAmJSD/gpui", rev = "75e6ffb88c81200d38e68e3d17e5f075b5ecbf96" }
+gpui_util = { git = "https://github.com/IAmJSD/gpui", rev = "73c9da683944ce7f4f2fdde767cded8aaf783276" }
+gpui_http_client = { git = "https://github.com/IAmJSD/gpui", rev = "73c9da683944ce7f4f2fdde767cded8aaf783276" }

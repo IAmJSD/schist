@@ -1,0 +1,15 @@
+[package]
+name = "schist-gallery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The photo gallery's on-disk model: watched folders, buckets, the index snapshot and the caches beside the thumbnails — shared by the app and the headless MCP server"
+
+[dependencies]
+schist-neural.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Reading the GPS position and capture time out of camera files. Pure
+# Rust; parses JPEG, TIFF, HEIF and PNG.
+kamadak-exif = "0.6"

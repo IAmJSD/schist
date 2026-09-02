@@ -23,12 +23,21 @@ pub(crate) enum MenuEntry {
 pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;
-    let menus = vec![
+    // The gallery is a different room with different furniture: while it
+    // is showing, the bar holds its menus instead of the editor's.
+    #[cfg(not(target_arch = "wasm32"))]
+    if ws.gallery_open() {
+        return gallery_menus(ws);
+    }
+    // `mut` for the desktop-only recents insertion below.
+    #[allow(unused_mut)]
+    let mut menus = vec![
         (
             "File",
             vec![
                 App("New", New, Some("cmd-n")),
                 App("Open…", Open, Some("cmd-o")),
+                App("Browse Gallery…", OpenGallery, Some("cmd-shift-g")),
                 App("Close", Close, Some("cmd-w")),
                 App("Save", Save, Some("cmd-s")),
                 App("Save As…", SaveAs, Some("cmd-shift-s")),
@@ -234,6 +243,15 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
             ],
         ),
     ];
+    // Open Recent, after Open…. Desktop only: browser paths are invented
+    // per session, so a recents list would be a list of nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let recents = recent_entries(ws);
+        if !recents.is_empty() {
+            menus[0].1.insert(2, Sub("Open Recent", recents));
+        }
+    }
     // Items whose whole subsystem is compiled out on the web: plug-in
     // hosts (no subprocesses or JITs in a tab), the self-updater (a web
     // deployment updates by serving newer files), and the AI panel
@@ -243,12 +261,88 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     let menus = {
         let mut menus = menus;
         for (_, entries) in &mut menus {
-            entries
-                .retain(|e| !matches!(e, App(_, Plugins | CheckForUpdates | ToggleAi | Quit, _)));
+            entries.retain(|e| {
+                !matches!(
+                    e,
+                    App(
+                        _,
+                        Plugins | CheckForUpdates | ToggleAi | Quit | OpenGallery,
+                        _
+                    )
+                )
+            });
         }
         menus
     };
     menus
+}
+
+/// The n-th recent files as menu rows.
+#[cfg(not(target_arch = "wasm32"))]
+fn recent_entries(ws: &Workspace) -> Vec<MenuEntry> {
+    ws.library
+        .recents
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let label = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            MenuEntry::Dynamic(label, AppItem::OpenRecent(i))
+        })
+        .collect()
+}
+
+/// The menu bar while the gallery is showing. Small on purpose: the
+/// gallery browses and hands photos to the editor, it does not edit.
+#[cfg(not(target_arch = "wasm32"))]
+fn gallery_menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
+    use AppItem::*;
+    use MenuEntry::*;
+    let mut file = vec![
+        App("New", New, Some("cmd-n")),
+        App("Open…", Open, Some("cmd-o")),
+    ];
+    let recents = recent_entries(ws);
+    if !recents.is_empty() {
+        file.push(Sub("Open Recent", recents));
+    }
+    file.extend([
+        Sep,
+        App("Add Folder to Gallery…", GalleryAddFolder, None),
+        App("Import from Camera…", GalleryImportCamera, None),
+        Sep,
+        App("Quit", Quit, Some("cmd-q")),
+    ]);
+    vec![
+        ("File", file),
+        (
+            "Gallery",
+            vec![
+                App("Edit Selected", GalleryEditSelected, None),
+                App("Refresh", GalleryRefresh, None),
+                App("Map Filter…", GalleryMapFilter, None),
+                Sep,
+                // The content filter's model downloads live here too, so
+                // turning the filter on never requires leaving the room.
+                App("Manage Models…", ManageModels, None),
+                Sep,
+                App("Back to Editor", OpenGallery, Some("cmd-shift-g")),
+            ],
+        ),
+        // On macOS Preferences sits in the application menu instead and
+        // this menu converts to nothing; the native bar drops menus that
+        // end up empty.
+        (
+            "View",
+            vec![
+                App("AI Panel", ToggleAi, Some("cmd-shift-a")),
+                Sep,
+                App("Preferences…", Preferences, Some("cmd-k")),
+            ],
+        ),
+    ]
 }
 
 /// Filters grouped by category, in registration order.

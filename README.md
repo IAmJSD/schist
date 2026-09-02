@@ -346,6 +346,7 @@ already logged into. See [docs/ai-panel.md](docs/ai-panel.md).
 ## Documentation
 
 * [docs/architecture.md](docs/architecture.md) — how the pieces fit
+* [docs/gallery.md](docs/gallery.md) — the Picasa-style photo gallery
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
 * [docs/mcp.md](docs/mcp.md) — the MCP server
 * [docs/ai-panel.md](docs/ai-panel.md) — the in-app AI sidebar

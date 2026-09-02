@@ -122,3 +122,89 @@ pub(super) fn heif_support(
             )),
     )
 }
+
+/// Folders dropped on the window: every image in them as tabs, or the
+/// folders watched in the gallery. The gallery is the answer for
+/// anything bigger than a handful — which is why it is the primary
+/// button — and the tab count is capped so a camera roll cannot open
+/// five thousand tabs by accident.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn drop_folders(
+    dirs: Vec<std::path::PathBuf>,
+    images: usize,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let what = if dirs.len() == 1 {
+        format!(
+            "\u{201C}{}\u{201D}",
+            dirs[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| dirs[0].display().to_string())
+        )
+    } else {
+        format!("{} folders", dirs.len())
+    };
+    let cap = crate::workspace::DROP_OPEN_CAP;
+    let open_label = if images == 0 {
+        "Open in Tabs".to_string()
+    } else if images > cap {
+        format!("Open First {cap} in Tabs")
+    } else if images == 1 {
+        "Open 1 in a Tab".to_string()
+    } else {
+        format!("Open {images} in Tabs")
+    };
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_size(px(12.0)).child(format!(
+            "{what} holds {images} image{} Schist can open (sub-folders included).",
+            if images == 1 { "" } else { "s" }
+        )))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child(
+                    "Add to Gallery watches the folders in place — nothing is copied, \
+                     and edits are versioned beside each photo. Opening in tabs loads \
+                     every image into the editor now.",
+                ),
+        );
+    let open_dirs = dirs.clone();
+    ui::modal_frame(
+        "Dropped Folders",
+        420.0,
+        body,
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(ui::button(
+                "Cancel",
+                false,
+                |ws, _window, cx| ws.close_modal(cx),
+                cx,
+            ))
+            .child(ui::button(
+                open_label,
+                false,
+                move |ws, _window, cx| {
+                    ws.close_modal(cx);
+                    ws.open_folder_images(open_dirs.clone(), cx);
+                },
+                cx,
+            ))
+            .child(ui::button(
+                "Add to Gallery",
+                true,
+                move |ws, _window, cx| {
+                    ws.close_modal(cx);
+                    ws.add_gallery_folders(dirs.clone(), cx);
+                },
+                cx,
+            )),
+    )
+}

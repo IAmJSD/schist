@@ -14,6 +14,11 @@ mod color_picker;
 mod crash;
 mod curve_editor;
 mod dialogs;
+// Dragging photos out of the window onto the desktop's file manager.
+// Native-only: it is the platforms' own drag protocols, and a browser
+// tab has no file manager to drop on.
+#[cfg(not(target_arch = "wasm32"))]
+mod drag_out;
 mod fonts;
 mod gallery;
 mod keymap;
@@ -360,6 +365,15 @@ fn main() {
                             }
                             if let Some(path) = std::env::args().nth(1) {
                                 ws.load_file(path.into(), cx);
+                            } else if ws.tab_count() == 0 {
+                                // Picasa boot: a launch with nothing to
+                                // open lands in the gallery, empty or
+                                // not. Recovered tabs win — unsaved
+                                // work is more urgent than browsing.
+                                // Through the toggle so the open does
+                                // everything an interactive open does
+                                // (rescan, camera discovery on macOS).
+                                ws.toggle_gallery(cx);
                             }
                         }
                         ws

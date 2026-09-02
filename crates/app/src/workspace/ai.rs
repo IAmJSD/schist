@@ -19,8 +19,19 @@ const AI_TICK_MS: u64 = 33;
 
 impl Workspace {
     pub fn toggle_ai_panel(&mut self, cx: &mut Context<Self>) {
-        self.view.ai_panel = !self.view.ai_panel;
-        self.status = if self.view.ai_panel {
+        // One switch per room, both remembered: the gallery keeps its
+        // own answer to "is the panel up", since a chat column beside a
+        // grid of photos is a different piece of furniture from one
+        // beside a canvas. Everything else — harness, model, the
+        // conversation itself — is shared.
+        let shown = if self.gallery_open() {
+            self.view.ai_panel_gallery = !self.view.ai_panel_gallery;
+            self.view.ai_panel_gallery
+        } else {
+            self.view.ai_panel = !self.view.ai_panel;
+            self.view.ai_panel
+        };
+        self.status = if shown {
             "AI panel shown".into()
         } else {
             // The panel's own close button lands here too; say how to
@@ -35,11 +46,20 @@ impl Workspace {
             )
             .into()
         };
-        if self.view.ai_panel {
+        if shown {
             self.ensure_ai_models(cx);
         }
         self.save_view_options();
         cx.notify();
+    }
+
+    /// Whether the AI panel is up in the room the user is in.
+    pub fn ai_panel_shown(&self) -> bool {
+        if self.gallery_open() {
+            self.view.ai_panel_gallery
+        } else {
+            self.view.ai_panel
+        }
     }
 
     /// Kick off the model-catalog probes for whichever CLIs are
@@ -301,11 +321,31 @@ impl Workspace {
                 schist_mcp::Scope::Active,
             ));
         }
+        // The prompt follows the room. A conversation begun in the other
+        // one is shut down and resumed under this room's prompt: the
+        // transcript stays, the harness keeps its thread, and the agent
+        // learns where it now is.
+        let gallery = self.gallery_open();
+        if self.ai.conversation.is_some() && self.ai.conversation_gallery != Some(gallery) {
+            if let Some(conversation) = self.ai.conversation.take() {
+                conversation.cmds.send(ConvCmd::Shutdown);
+            }
+            self.ai.transcript.push(AiEntry {
+                kind: AiEntryKind::Info,
+                text: if gallery {
+                    "Now in the gallery.".into()
+                } else {
+                    "Now in the editor.".into()
+                },
+            });
+        }
         if self.ai.conversation.is_none() {
             let resume = self.ai.session.clone();
             let shared = self.ai.shared.clone();
+            let system_prompt = ai::system_prompt(gallery).to_string();
+            self.ai.conversation_gallery = Some(gallery);
             let conversation = match backend {
-                Backend::Claude => ai::claude::start(shared, resume),
+                Backend::Claude => ai::claude::start(shared, resume, system_prompt),
                 Backend::Codex => {
                     if self.ai.endpoint.is_none() {
                         match ai::endpoint::Endpoint::start(self.ai.shared.clone()) {
@@ -326,6 +366,7 @@ impl Workspace {
                         endpoint.addr.clone(),
                         endpoint.token.clone(),
                         resume,
+                        system_prompt,
                     )
                 }
             };
@@ -536,16 +577,35 @@ impl Workspace {
                         schist_mcp::Scope::Active,
                     ));
                 }
-                envelope(
-                    id,
-                    json!({"tools": self.ai.catalog.as_ref().unwrap().defs()}),
-                )
+                // The document tools from the registry, plus the
+                // gallery's own — always published, since the gallery
+                // is one keystroke away whichever room the user is in.
+                let mut tools: Vec<Value> = self.ai.catalog.as_ref().unwrap().defs().to_vec();
+                #[cfg(not(target_arch = "wasm32"))]
+                tools.extend(super::library_mcp::tool_defs());
+                envelope(id, json!({"tools": tools}))
             }
             "tools/call" => {
                 let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
                     return rpc_error(id, -32602, "missing tool name".into());
                 };
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                #[cfg(not(target_arch = "wasm32"))]
+                if name.starts_with("gallery_") {
+                    let outcome = self.gallery_tool(name, &args, cx);
+                    self.status = format!("AI: {name}").into();
+                    cx.notify();
+                    return match outcome {
+                        Ok(content) => envelope(id, json!({"content": content})),
+                        Err(e) => envelope(
+                            id,
+                            json!({
+                                "content": [{"type": "text", "text": format!("{e:#}")}],
+                                "isError": true,
+                            }),
+                        ),
+                    };
+                }
                 let action = self
                     .ai
                     .catalog

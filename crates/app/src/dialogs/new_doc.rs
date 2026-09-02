@@ -13,7 +13,92 @@ pub(super) const NEW_DOC_PRESETS: &[(&str, u32, u32, f32)] = &[
     ("US Letter, 300 ppi", 2550, 3300, 300.0),
 ];
 
-/// File ▸ New, asked before anything is created, as Photoshop does.
+/// File ▸ New: the preset picker. One card per common size — a click
+/// creates the document on the spot — and Custom… opens the full
+/// dialog below for everything else.
+pub(super) fn new_file_picker(cx: &mut Context<Workspace>) -> impl IntoElement {
+    let mut cards = div().flex().flex_row().flex_wrap().gap_2();
+    for &(label, width, height, ppi) in NEW_DOC_PRESETS {
+        cards = cards.child(preset_card(label, width, height, ppi, cx));
+    }
+    cards = cards.child(
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(150.0))
+            .h(px(56.0))
+            .rounded_md()
+            .border_1()
+            .border_color(gpui::rgb(ui::palette().edge))
+            .text_size(px(12.0))
+            .text_color(gpui::rgb(ui::palette().text_dim))
+            .cursor_pointer()
+            .hover(|s| s.border_color(gpui::rgb(ui::palette().accent)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|ws, _e, _w, cx| {
+                    ws.open_new_document_dialog(cx);
+                }),
+            )
+            .child("Custom…"),
+    );
+    let actions = div().flex().flex_row().gap_2().child(ui::button(
+        "Cancel",
+        false,
+        |ws, _w, cx| ws.close_modal(cx),
+        cx,
+    ));
+    ui::modal_frame("New File", 520.0, cards, actions)
+}
+
+/// A preset card: click it and the document exists.
+fn preset_card(
+    label: &'static str,
+    width: u32,
+    height: u32,
+    ppi: f32,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .w(px(150.0))
+        .h(px(56.0))
+        .px_3()
+        .rounded_md()
+        .bg(gpui::rgb(ui::palette().control_bg))
+        .border_1()
+        .border_color(gpui::rgb(ui::palette().edge))
+        .cursor_pointer()
+        .hover(|s| s.border_color(gpui::rgb(ui::palette().accent)))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |ws, _e, _w, cx| {
+                ws.close_modal(cx);
+                ws.create_document(
+                    "",
+                    width,
+                    height,
+                    ppi,
+                    ColorMode::Rgb,
+                    Depth::Eight,
+                    crate::workspace::NewDocBackground::White,
+                );
+                cx.notify();
+            }),
+        )
+        .child(div().text_size(px(12.0)).child(label))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(ui::palette().text_dim))
+                .child(format!("{width} × {height} px")),
+        )
+}
+
+/// The full dialog, asked before anything is created, as Photoshop does.
 pub(super) fn new_document_dialog(
     state: &DialogState,
     modal: Modal,
@@ -117,11 +202,19 @@ pub(super) fn new_document_dialog(
                         cx.notify();
                     }),
                 )
-                // A caret makes it obvious the field takes typing.
+                // A caret makes it obvious the field takes typing; it
+                // blinks, and the arrows move it.
                 .child(if name_focused {
-                    format!("{shown_name}|")
+                    let (before, after) = if state.field_buffer.is_empty() {
+                        (shown_name.clone(), String::new())
+                    } else {
+                        let at = state.field_cursor.min(shown_name.len());
+                        (shown_name[..at].to_string(), shown_name[at..].to_string())
+                    };
+                    ui::caret_run(before, after, state.caret_on, ui::palette().text)
+                        .into_any_element()
                 } else {
-                    shown_name.clone()
+                    div().child(shown_name.clone()).into_any_element()
                 }),
         ))
         .child(ui::field_row(

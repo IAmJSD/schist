@@ -2823,7 +2823,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75e6ffb88c81200d38e68e3d17e5f075b5ecbf96#75e6ffb88c81200d38e68e3d17e5f075b5ecbf96"
+source = "git+https://github.com/IAmJSD/gpui?rev=73c9da683944ce7f4f2fdde767cded8aaf783276#73c9da683944ce7f4f2fdde767cded8aaf783276"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -2959,7 +2959,7 @@ dependencies = [
 [[package]]
 name = "gpui_http_client"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75e6ffb88c81200d38e68e3d17e5f075b5ecbf96#75e6ffb88c81200d38e68e3d17e5f075b5ecbf96"
+source = "git+https://github.com/IAmJSD/gpui?rev=73c9da683944ce7f4f2fdde767cded8aaf783276#73c9da683944ce7f4f2fdde767cded8aaf783276"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3041,7 +3041,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75e6ffb88c81200d38e68e3d17e5f075b5ecbf96#75e6ffb88c81200d38e68e3d17e5f075b5ecbf96"
+source = "git+https://github.com/IAmJSD/gpui?rev=73c9da683944ce7f4f2fdde767cded8aaf783276#73c9da683944ce7f4f2fdde767cded8aaf783276"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -3748,6 +3748,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kamadak-exif"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1130d80c7374efad55a117d715a3af9368f0fa7a2c54573afc15a188cd984837"
+dependencies = [
+ "mutate_once",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4171,6 +4180,12 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
+
+[[package]]
+name = "mutate_once"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
 
 [[package]]
 name = "naga"
@@ -6130,12 +6145,17 @@ dependencies = [
  "codex-codes",
  "console_error_panic_hook",
  "console_log",
+ "crc32fast",
  "env_logger",
+ "flate2",
  "futures",
  "gpui",
  "image",
  "js-sys",
  "log",
+ "objc2",
+ "objc2-foundation",
+ "raw-window-handle",
  "rustc-hash 2.1.3",
  "schist-adjustments",
  "schist-codec-psd",
@@ -6148,12 +6168,14 @@ dependencies = [
  "schist-core",
  "schist-filters-core",
  "schist-fx",
+ "schist-gallery",
  "schist-layer-fx",
  "schist-mcp",
  "schist-neural",
  "schist-plugin-api",
  "schist-plugin-host-8bf",
  "schist-plugin-host-wasm",
+ "schist-preview",
  "schist-text-engine",
  "schist-tools-basic",
  "schist-tools-doc",
@@ -6175,6 +6197,9 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "windows 0.58.0",
+ "windows-core 0.58.0",
+ "x11rb",
 ]
 
 [[package]]
@@ -6338,6 +6363,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "schist-gallery"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "kamadak-exif",
+ "schist-neural",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "schist-layer-fx"
 version = "0.9.1"
 dependencies = [
@@ -6362,7 +6398,9 @@ dependencies = [
  "schist-compositor",
  "schist-core",
  "schist-filters-core",
+ "schist-gallery",
  "schist-layer-fx",
+ "schist-neural",
  "schist-plugin-api",
  "schist-plugin-host-8bf",
  "schist-plugin-host-wasm",
@@ -6385,6 +6423,7 @@ version = "0.9.1"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
+ "image",
  "log",
  "rayon",
  "sha2 0.10.9",

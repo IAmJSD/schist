@@ -10,7 +10,7 @@ pub(super) fn app_item_checked(ws: &Workspace, item: AppItem) -> Option<bool> {
         AppItem::ToggleGrid => ws.view.grid,
         AppItem::ToggleGuides => ws.view.guides,
         AppItem::ToggleNotes => ws.view.notes,
-        AppItem::ToggleAi => ws.view.ai_panel,
+        AppItem::ToggleAi => ws.ai_panel_shown(),
         AppItem::ToggleExtras => ws.view.extras,
         AppItem::ToggleSnap => ws.view.snap,
         AppItem::ProofColors => ws.color.proof.is_some(),
@@ -25,7 +25,7 @@ pub(crate) fn run_app_item(
     cx: &mut Context<Workspace>,
 ) {
     match item {
-        AppItem::New => ws.open_new_document_dialog(cx),
+        AppItem::New => ws.open_new_file_picker(cx),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),
         AppItem::Save => ws.save_current(window, cx),
@@ -194,6 +194,41 @@ pub(crate) fn run_app_item(
                 ws.activate_tool("transform.selection", cx);
             }
         }
+        // Gallery items. Unreachable on the web — the entries are
+        // filtered out of the menus and the view never opens — but the
+        // match must still cover the variants.
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::OpenGallery => ws.toggle_gallery(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryAddFolder => ws.gallery_add_folder(window, cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryImportCamera => ws.gallery_import_camera(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryRefresh => ws.library_rescan(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryEditSelected => {
+            if let Some(path) = ws.library.lead_selected().cloned() {
+                ws.open_from_gallery(path, cx);
+            } else {
+                ws.status = "Select a photo to edit".into();
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::GalleryMapFilter => ws.open_map_filter(cx),
+        #[cfg(not(target_arch = "wasm32"))]
+        AppItem::OpenRecent(i) => {
+            if let Some(path) = ws.library.recents.get(i).cloned() {
+                ws.load_file(path, cx);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        AppItem::OpenGallery
+        | AppItem::GalleryAddFolder
+        | AppItem::GalleryImportCamera
+        | AppItem::GalleryRefresh
+        | AppItem::GalleryEditSelected
+        | AppItem::GalleryMapFilter
+        | AppItem::OpenRecent(_) => {}
         AppItem::PathFill => ws.use_active_path(crate::workspace::PathOp::Fill, cx),
         AppItem::PathStroke => ws.use_active_path(crate::workspace::PathOp::Stroke, cx),
         AppItem::PathToSelection => ws.use_active_path(crate::workspace::PathOp::Select, cx),

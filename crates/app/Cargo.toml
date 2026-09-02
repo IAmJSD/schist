@@ -45,6 +45,8 @@ schist-commands-core.workspace = true
 schist-filters-core.workspace = true
 schist-adjustments.workspace = true
 schist-colormgmt.workspace = true
+# The gallery's on-disk model, shared with the headless MCP server.
+schist-gallery.workspace = true
 
 # Everything a browser tab cannot host: subprocesses and dlopen (the two
 # plug-in hosts, the agent CLIs behind the AI sidebar), blocking sockets
@@ -69,6 +71,44 @@ claude-agent-sdk-rs.workspace = true
 codex-codes.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+# Gallery thumbnails: one windowless image of a file. Native-only with the
+# rest of the gallery — a browser tab has no folders to browse.
+schist-preview.workspace = true
+# The gallery's "save bucket as ZIP" writes the archive by hand; these
+# are its checksums and its deflate. flate2 is already in the tree
+# behind the PNG codec, so this adds no download.
+crc32fast.workspace = true
+flate2 = "1"
+
+# ImageCaptureCore for the gallery's iPhone/PTP-camera import: those
+# devices never mount as filesystems on macOS. Same objc2 idiom as the
+# Quick Look extensions — the delegate class is built at runtime.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+# The window's NSView, for starting a native drag out of it.
+raw-window-handle = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+] }
+
+# Dragging photos out of the window onto Explorer: OLE drag-and-drop,
+# with the shell's own data object for the files.
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+# The `implement` macro expands to `windows_core::` paths, which
+# resolve as an extern crate rather than through the umbrella.
+windows-core = "0.58"
+windows = { version = "0.58", features = [
+    # `implement` generates the `_Impl` traits behind a drop source.
+    "implement",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # The browser build. wasm-bindgen is pinned exactly: the CLI that
 # post-processes the binary (see tools/web-build.sh) must match the crate
@@ -104,3 +144,7 @@ web-sys = { version = "0.3", features = [
 # tree -- only another user of one.
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = "0.38"
+# Dragging photos out of the window onto a file manager: XDND, from the
+# source side, on its own connection. Same version gpui's X11 backend
+# already links.
+x11rb = "0.13"

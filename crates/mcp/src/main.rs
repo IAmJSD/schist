@@ -21,6 +21,218 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
+mod gallery {
+    //! The gallery tools of the stdio server, over [`schist_gallery::headless::Gallery`].
+    use anyhow::{anyhow, bail, Result};
+    use schist_gallery::headless::Gallery;
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+
+    fn def(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+        json!({"name": name, "description": description,
+               "inputSchema": {"type": "object", "properties": properties, "required": required}})
+    }
+
+    pub fn tool_defs() -> Vec<Value> {
+        let paths = json!({"type": "array", "items": {"type": "string"}, "description": "Photo paths, as other gallery tools return them."});
+        vec![
+            def("gallery_state",
+                "Describe the photo gallery from its files on disk: watched folders, photo count, \
+                 buckets (with their rules), how much of the library the app has indexed, and the \
+                 content filter's counts. Selection and grouping belong to the app's window and are \
+                 not visible here.",
+                json!({}), &[]),
+            def("gallery_list",
+                "List photos — the whole library, one watched folder (by path prefix), or one \
+                 bucket (by name). Each row: path, when taken, place, whether it has an edit, and \
+                 the content filter's verdict (null while unscored).",
+                json!({"folder": {"type": "string"}, "bucket": {"type": "string"},
+                       "offset": {"type": "integer", "minimum": 0, "default": 0},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}}),
+                &[]),
+            def("gallery_search",
+                "Search photos by what is in them (\"dog on a beach\"), by where they were taken \
+                 (\"taken in nyc\"), or both, ranked best first, over the embeddings the app has \
+                 indexed. Content search needs the Search models installed; places work from \
+                 EXIF alone.",
+                json!({"query": {"type": "string"},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20}}),
+                &["query"]),
+            def("gallery_thumbnail",
+                "Look at one photo: its cached gallery thumbnail (up to 256 px) as an image, when \
+                 the app has rendered one.",
+                json!({"path": {"type": "string"}}), &["path"]),
+            def("gallery_flagged",
+                "List photos by the content filter's verdict — flagged, clean, or unscored.",
+                json!({"verdict": {"type": "string", "enum": ["flagged", "clean", "unscored"], "default": "flagged"},
+                       "offset": {"type": "integer", "minimum": 0, "default": 0},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}}),
+                &[]),
+            def("gallery_bucket_create",
+                "Create a bucket in the library file, optionally with a query the app keeps \
+                 matching once it runs. The app reads the file at launch.",
+                json!({"name": {"type": "string"}, "query": {"type": "string"}, "paths": paths}),
+                &["name"]),
+            def("gallery_bucket_add",
+                "Add photos to a bucket by name, in the library file.",
+                json!({"bucket": {"type": "string"}, "paths": paths}), &["bucket", "paths"]),
+            def("gallery_open",
+                "Open a photo as a new editing session — its edit sidecar when it has one — and \
+                 return the session's state; the session tools then apply.",
+                json!({"path": {"type": "string"}}), &["path"]),
+        ]
+    }
+
+    fn text(value: Value) -> Result<Value> {
+        Ok(json!([{"type": "text", "text": value.to_string()}]))
+    }
+
+    pub fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("{key} is required"))
+    }
+
+    fn paths_arg(args: &Value, key: &str) -> Vec<PathBuf> {
+        args.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn page(args: &Value) -> (usize, usize) {
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .clamp(1, 500) as usize;
+        (offset, limit)
+    }
+
+    fn base64(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+            out.push(TABLE[(n >> 18) as usize & 63] as char);
+            out.push(TABLE[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    pub fn call(gallery: &mut Gallery, name: &str, args: &Value) -> Result<Value> {
+        match name {
+            "gallery_state" => text(gallery.state_json()),
+            "gallery_list" => {
+                let (offset, limit) = page(args);
+                let folder = args.get("folder").and_then(|v| v.as_str());
+                let bucket = args.get("bucket").and_then(|v| v.as_str());
+                let entries = gallery.list(folder, bucket);
+                let rows: Vec<Value> = entries
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|e| gallery.entry_json(e))
+                    .collect();
+                text(json!({"total": entries.len(), "offset": offset, "photos": rows}))
+            }
+            "gallery_search" => {
+                let query = str_arg(args, "query")?;
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20)
+                    .clamp(1, 200) as usize;
+                let (ranked, place) = gallery.search(query);
+                let rows: Vec<Value> = ranked
+                    .iter()
+                    .take(limit)
+                    .filter_map(|(p, score)| {
+                        let mut row = gallery.entry_json(gallery.entry(p)?);
+                        row["score"] = json!((score * 1000.0).round() / 1000.0);
+                        Some(row)
+                    })
+                    .collect();
+                text(
+                    json!({"query": query, "place": place, "matches": ranked.len(), "photos": rows}),
+                )
+            }
+            "gallery_thumbnail" => {
+                let path = PathBuf::from(str_arg(args, "path")?);
+                let png = gallery.thumbnail_png(&path).ok_or_else(|| {
+                    anyhow!(
+                        "no thumbnail for {} — the app renders them as photos come on screen",
+                        path.display()
+                    )
+                })?;
+                Ok(json!([{"type": "image", "data": base64(&png), "mimeType": "image/png"}]))
+            }
+            "gallery_flagged" => {
+                let verdict = args
+                    .get("verdict")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("flagged");
+                if !["flagged", "clean", "unscored"].contains(&verdict) {
+                    bail!("verdict must be flagged, clean or unscored");
+                }
+                let (offset, limit) = page(args);
+                let entries: Vec<_> = gallery
+                    .entries()
+                    .filter(|e| gallery.verdict(&e.path) == verdict)
+                    .cloned()
+                    .collect();
+                let rows: Vec<Value> = entries
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|e| gallery.entry_json(e))
+                    .collect();
+                text(
+                    json!({"verdict": verdict, "total": entries.len(), "offset": offset, "photos": rows}),
+                )
+            }
+            "gallery_bucket_create" => {
+                let name = str_arg(args, "name")?;
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .filter(|q| !q.trim().is_empty());
+                let index = gallery.create_bucket(name, query, paths_arg(args, "paths"))?;
+                text(json!({"bucket": name, "index": index}))
+            }
+            "gallery_bucket_add" => {
+                let name = str_arg(args, "bucket")?;
+                let count = gallery.add_to_bucket(name, &paths_arg(args, "paths"))?;
+                text(json!({"bucket": name, "photos": count}))
+            }
+            other => bail!("unknown gallery tool {other:?}"),
+        }
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .target(env_logger::Target::Stderr)
@@ -111,14 +323,25 @@ impl Server {
                 }))
             }
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": self.catalog().defs()})),
+            "tools/list" => {
+                let mut tools: Vec<Value> = self.catalog().defs().to_vec();
+                tools.extend(gallery::tool_defs());
+                Ok(json!({"tools": tools}))
+            }
             "tools/call" => {
                 let name = params
                     .get("name")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| RpcError(-32602, "missing tool name".into()))?;
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                match self.call_tool(name, &args) {
+                // The gallery's tools are not in the registry's catalog
+                // (the gallery is not a plugin); they dispatch by prefix.
+                let result = if name.starts_with("gallery_") {
+                    self.gallery_tool(name, &args)
+                } else {
+                    self.call_tool(name, &args)
+                };
+                match result {
                     Ok(content) => Ok(json!({"content": content})),
                     Err(e) => Ok(json!({
                         "content": [{"type": "text", "text": format!("{e:#}")}],
@@ -162,6 +385,28 @@ impl Server {
                 out
             }
         }
+    }
+
+    /// One `gallery_*` tool, over the gallery's files on disk.
+    fn gallery_tool(&mut self, name: &str, args: &Value) -> Result<Value> {
+        let exts: Vec<String> = {
+            let (registry, _wasm, _photoshop) = schist_mcp::session::build_registry();
+            registry
+                .codecs()
+                .flat_map(|c| c.extensions().iter().map(|e| e.to_string()))
+                .collect()
+        };
+        let mut gallery = schist_gallery::headless::Gallery::open(&exts);
+        if name == "gallery_open" {
+            // Open in a new session: the edit sidecar when there is one,
+            // the way the app's double-click does.
+            let path = std::path::PathBuf::from(gallery::str_arg(args, "path")?);
+            let source = schist_gallery::backing_psd(&path)
+                .filter(|p| p.exists())
+                .unwrap_or(path);
+            return self.create_session(&json!({"path": source.display().to_string()}));
+        }
+        gallery::call(&mut gallery, name, args)
     }
 
     fn catalog(&mut self) -> &Catalog {

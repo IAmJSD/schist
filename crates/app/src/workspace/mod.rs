@@ -47,6 +47,24 @@ mod filters;
 mod image_ops;
 mod input;
 mod layers_panel;
+// The gallery: watched photo folders, thumbnails, camera import and the
+// PSD sidecars behind gallery edits. A browser tab has no folders to
+// watch, so the web build compiles the whole thing out.
+#[cfg(not(target_arch = "wasm32"))]
+mod library;
+#[cfg(not(target_arch = "wasm32"))]
+mod library_geo;
+// iPhones and PTP cameras never mount as filesystems on macOS;
+// ImageCaptureCore is the door Image Capture and Photos use, and this
+// module knocks on it the same way.
+#[cfg(target_os = "macos")]
+mod library_icc;
+#[cfg(not(target_arch = "wasm32"))]
+mod library_mcp;
+#[cfg(not(target_arch = "wasm32"))]
+mod library_ops;
+#[cfg(not(target_arch = "wasm32"))]
+mod library_view;
 mod modals;
 mod notes;
 mod recovery;
@@ -57,6 +75,20 @@ mod tiles;
 mod toolbar;
 mod view_options;
 mod viewport;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_geo::MapSlot;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_view::map_element;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_view::{
+    bucket_name_dialog, camera_import_dialog, camera_import_failed_dialog,
+    camera_import_options_dialog, map_filter_dialog, search_models_dialog,
+};
+
+/// The most tabs a dropped folder may open at once.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const DROP_OPEN_CAP: usize = 100;
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
 
@@ -278,8 +310,34 @@ pub struct Workspace {
     /// swatch, and closing it puts that dialog back exactly as it was.
     modal_stack: Vec<Modal>,
     /// Numeric field currently accepting digits, and its edit buffer.
+    /// The editor's info panel: which of its tabs is showing, `None`
+    /// until the user picks one — the default is Info when the open
+    /// file has EXIF, Color otherwise. Session state; it resets when
+    /// the document changes.
+    pub side_tab: Option<SideTab>,
+    /// The open document's EXIF, read once per document (the file is
+    /// the original photo for a gallery edit, the file itself
+    /// otherwise). `None` inside means the file has none.
+    pub exif: Option<(schist_core::DocumentId, Option<schist_gallery::ExifSummary>)>,
+    /// The info panel's map, showing where the photo was taken.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub info_map: library_geo::MapState,
+    /// The info panel's EXIF rows scroll on their own; the thumb
+    /// beside them reads this.
+    pub info_scroll: gpui::ScrollHandle,
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
+    /// The caret's byte position in `field_buffer` (always on a char
+    /// boundary). Only the textual fields move it; numeric fields stay
+    /// append-only, matching their caret-less rendering.
+    pub field_cursor: usize,
+    /// When the caret last moved or typed: carets show during the even
+    /// 530 ms beats since then, so one is always solid right after a
+    /// keystroke. `None` (the web build, which has no blink timer)
+    /// means always visible.
+    caret_phase: Option<std::time::Instant>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    caret_blinker: bool,
     /// True until the first keystroke after a field takes focus, so that
     /// one can replace the seeded value rather than append to it.
     field_fresh: bool,
@@ -344,6 +402,11 @@ pub struct Workspace {
     /// The canvas takes focus on the first frame so keyboard shortcuts work
     /// before the user clicks anything.
     focused_once: bool,
+    /// A freshly opened document still owes itself a Fit to Screen: the
+    /// open may have happened while the canvas had no size at all (from
+    /// the gallery, or at boot), so the fit is redone on the first paint
+    /// that knows the real bounds.
+    pending_fit: bool,
     /// Bumped whenever colour settings change, so cached pixels drawn with
     /// the old transform are rebuilt.
     color_epoch: u64,
@@ -353,6 +416,37 @@ pub struct Workspace {
     proof_transform: Option<Arc<schist_colormgmt::ColorTransform>>,
     /// The AI sidebar: transcript, conversation worker, MCP queues.
     pub ai: crate::ai::AiState,
+    /// The photo gallery: watched folders, thumbnails, edit sidecars.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub library: library::Library,
+}
+
+impl Workspace {
+    /// Whether the gallery view is showing instead of the editor. Always
+    /// false on the web, where the gallery does not exist.
+    pub fn gallery_open(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.library.open
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
+    /// Whether the gallery's search box is taking typing, for the key
+    /// context. Always false on the web, with the gallery itself.
+    pub fn gallery_typing(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.gallery_search_active()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
 }
 
 /// One filter in the Filter Gallery's stack.
@@ -582,10 +676,23 @@ pub struct ViewOptions {
     /// Colour new notes are given, 0xRRGGBB.
     #[serde(default = "default_note_color")]
     pub note_color: u32,
+    /// Hide photos the gallery's content filter flags as explicit.
+    /// Off by default, and honest about its needs: the judgement comes
+    /// from the "Content (NSFW Filter)" model, fetched like any other
+    /// under Filter ▸ Neural Filters ▸ Manage Models; without it,
+    /// nothing is flagged.
+    #[serde(default)]
+    pub gallery_hide_nsfw: bool,
     /// Show the AI sidebar. Off by default: it spawns an agent CLI the
     /// user may not have, and a chat column is not everyone's furniture.
     #[serde(default)]
     pub ai_panel: bool,
+    /// The same panel's switch for the gallery, remembered separately:
+    /// the harness, model and conversation are shared between the two
+    /// rooms, but whether a chat column sits beside the photos is its
+    /// own question.
+    #[serde(default)]
+    pub ai_panel_gallery: bool,
     /// Which agent harness the sidebar drives ("claude" or "codex").
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
@@ -639,7 +746,9 @@ impl Default for ViewOptions {
             notes: true,
             note_author: default_note_author(),
             note_color: default_note_color(),
+            gallery_hide_nsfw: false,
             ai_panel: false,
+            ai_panel_gallery: false,
             ai_backend: default_ai_backend(),
             ai_model_claude: String::new(),
             ai_model_codex: String::new(),
@@ -835,10 +944,31 @@ pub enum Modal {
     /// An image file dropped on the window while a document is open:
     /// open it in its own tab, or place it as a new layer?
     DropImage { path: PathBuf },
+    /// Folders dropped on the window: open every image inside as a tab,
+    /// or watch them in the gallery? `images` is what a scan found in
+    /// them, so the button can say how many tabs that would be.
+    DropFolders { dirs: Vec<PathBuf>, images: usize },
     /// A HEIC file needs the libheif decoder and this machine has none:
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
     HeifSupport { path: PathBuf },
+    /// More than one camera is reachable: ask which to import from.
+    CameraImport { sources: Vec<ImportSource> },
+    /// Import options for one camera: the navigable OpenStreetMap view
+    /// where a boundary can be drawn (only photos whose EXIF position
+    /// falls inside it import). The map's own state lives on the
+    /// library, not here — it changes every pointer move.
+    CameraImportOptions { source: ImportSource },
+    /// A device import failed (a locked iPhone, most often): say so in
+    /// a dialog with the way forward, and offer to try again with the
+    /// same source and boundary. Only ever constructed on macOS, where
+    /// device imports exist.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    CameraImportFailed {
+        source: ImportSource,
+        area: Option<(GeoBounds, String)>,
+        message: String,
+    },
     /// A release newer than this build. On macOS and Windows it offers
     /// to install itself and restart; everywhere else it points at the
     /// release page, since the copy came from a package manager.
@@ -877,8 +1007,40 @@ pub enum Modal {
         params: schist_adjustments::Params,
         original: (Option<String>, Vec<u8>),
     },
-    /// File ▸ New: everything a fresh document needs, asked up front as
-    /// Photoshop does.
+    /// File ▸ New: the preset picker — one click for a common size,
+    /// Custom… for the full dialog below.
+    NewFilePicker,
+    /// The gallery's map filter: the navigable map, a drawn boundary,
+    /// and Apply — the grid then shows only photos taken inside it.
+    MapFilter,
+    /// The gallery's offer to install the two Search models, with the
+    /// licences to agree to first. Desktop-only, like the gallery.
+    SearchModels,
+    /// Save one gallery photo as a flat image: format, quality where the
+    /// format takes one, and a scale to shrink it by. `size` is the
+    /// source's pixel size when it could be read up front, so the
+    /// dialog can say what the scale comes to.
+    SaveImageAs {
+        path: PathBuf,
+        codec: &'static str,
+        options: schist_plugin_api::ExportOptions,
+        scale: f32,
+        size: Option<(u32, u32)>,
+    },
+    /// Create or edit a gallery bucket: its name, and optionally a
+    /// smart rule — a search query and/or a map area (the drawn
+    /// boundary lives on the shared map state, not here) that keeps
+    /// the bucket filling itself. `editing` is the bucket being
+    /// reconfigured; `None` creates one, born holding `photos`. An
+    /// empty name falls back to "Bucket N" (create) or stays (edit).
+    BucketName {
+        name: String,
+        query: String,
+        photos: Vec<PathBuf>,
+        editing: Option<usize>,
+    },
+    /// The full new-document dialog: everything a fresh document needs,
+    /// asked up front as Photoshop does.
     NewDocument {
         name: String,
         width: u32,
@@ -890,6 +1052,35 @@ pub enum Modal {
         background: NewDocBackground,
     },
 }
+
+/// Where a camera import reads from.
+// Plain data on every target so the Modal enum stays portable; the
+// Device variant is only ever constructed on macOS.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum ImportSource {
+    /// A mounted volume with a DCIM directory.
+    Volume(PathBuf),
+    /// An ImageCaptureCore device (macOS): an iPhone or a PTP camera,
+    /// which never mounts as a filesystem. The id keys the connected-
+    /// device list; the name is for people.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Device { id: u64, name: String },
+}
+
+/// The editor's side panel has two things in its top slot; this is
+/// which one is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SideTab {
+    Info,
+    Color,
+}
+
+/// A boundary in degrees: what the import map's rectangle means, and
+/// what the EXIF-position filter tests. Lives in `schist-gallery` (its
+/// persistence and geometry are shared with the headless server) and is
+/// re-exported here so the modal enum can carry one on every target.
+pub use schist_gallery::GeoBounds;
 
 /// What fills the bottom layer of a document made by File ▸ New.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1047,8 +1238,16 @@ impl Workspace {
             modal: None,
             pending_quit: false,
             modal_stack: Vec::new(),
+            side_tab: None,
+            exif: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            info_map: library_geo::MapState::default(),
+            info_scroll: gpui::ScrollHandle::new(),
             focused_field: None,
             field_buffer: String::new(),
+            field_cursor: 0,
+            caret_phase: None,
+            caret_blinker: false,
             field_fresh: false,
             default_action: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1070,6 +1269,7 @@ impl Workspace {
             selection_outline: None,
             nav_thumb: None,
             focused_once: false,
+            pending_fit: false,
             color_epoch: 0,
             color: schist_colormgmt::ColorSettings::default(),
             display_transform: None,
@@ -1078,6 +1278,8 @@ impl Workspace {
             ai: crate::ai::AiState::new(crate::ai::Backend::Claude),
             #[cfg(target_arch = "wasm32")]
             ai: crate::ai::AiState::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            library: library::Library::load(),
         };
         #[cfg(not(target_arch = "wasm32"))]
         {

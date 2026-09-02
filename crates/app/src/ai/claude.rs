@@ -6,7 +6,7 @@
 //! requests to [`PanelServer`], which queues them for the UI thread and
 //! awaits the reply — no socket, no bridge, no second process.
 
-use super::{path, AgentEvent, AiShared, Backend, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
+use super::{path, AgentEvent, AiShared, Backend, CmdSender, ConvCmd, Conversation};
 use claude_agent_sdk_rs::types::mcp::McpSdkServerConfig;
 use claude_agent_sdk_rs::{
     ClaudeAgentOptions, ClaudeClient, ClaudeError, McpServerConfig, McpServers, Message,
@@ -46,7 +46,7 @@ impl SdkMcpServer for PanelServer {
 
 /// Start a Claude Code conversation worker. `resume` continues an earlier
 /// session by id, so a conversation survives the panel being closed.
-pub fn start(shared: AiShared, resume: Option<String>) -> Conversation {
+pub fn start(shared: AiShared, resume: Option<String>, system_prompt: String) -> Conversation {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let worker = shared.clone();
     let spawned = std::thread::Builder::new()
@@ -56,7 +56,7 @@ pub fn start(shared: AiShared, resume: Option<String>) -> Conversation {
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime.block_on(run(&worker, rx, resume)),
+                Ok(runtime) => runtime.block_on(run(&worker, rx, resume, system_prompt)),
                 Err(e) => worker.error(format!("starting the agent runtime failed: {e}")),
             }
             worker.push(AgentEvent::Closed);
@@ -71,7 +71,7 @@ pub fn start(shared: AiShared, resume: Option<String>) -> Conversation {
     }
 }
 
-fn options(shared: &AiShared, resume: Option<String>) -> ClaudeAgentOptions {
+fn options(shared: &AiShared, resume: Option<String>, system_prompt: String) -> ClaudeAgentOptions {
     let mut servers = HashMap::new();
     servers.insert(
         "schist".to_string(),
@@ -85,7 +85,7 @@ fn options(shared: &AiShared, resume: Option<String>) -> ClaudeAgentOptions {
     ClaudeAgentOptions {
         mcp_servers: McpServers::Dict(servers),
         allowed_tools: vec!["mcp__schist".to_string()],
-        system_prompt: Some(SystemPrompt::Text(SYSTEM_PROMPT.to_string())),
+        system_prompt: Some(SystemPrompt::Text(system_prompt)),
         permission_mode: Some(PermissionMode::Default),
         include_partial_messages: true,
         resume,
@@ -110,8 +110,9 @@ async fn run(
     shared: &AiShared,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<ConvCmd>,
     resume: Option<String>,
+    system_prompt: String,
 ) {
-    let mut client = ClaudeClient::new(options(shared, resume));
+    let mut client = ClaudeClient::new(options(shared, resume, system_prompt));
     if let Err(e) = client.connect().await {
         shared.error(format!("Claude Code did not start: {e}"));
         return;

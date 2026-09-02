@@ -6,6 +6,12 @@ impl Workspace {
     /// Everything the paint closure needs, computed with &mut self.
     pub(super) fn prepare_paint(&mut self, bounds: Bounds<Pixels>, scale_factor: f32) -> PaintJob {
         self.canvas_bounds = bounds;
+        // The fit a fresh document owes itself, now that the bounds are
+        // real rather than whatever the canvas last knew.
+        if self.pending_fit {
+            self.pending_fit = false;
+            self.fit_to_view();
+        }
         let mut job = PaintJob::default();
         let Some(doc) = self.doc.as_ref() else {
             return job;
@@ -544,11 +550,18 @@ impl Render for Workspace {
             || self.note_edit.is_some()
             || self.ai.input_active
             || self.ai.model_menu
+            || self.gallery_typing()
         {
             "Workspace text_entry"
         } else {
             "Workspace editable"
         };
+        // A caret somewhere needs the blink timer running; it retires
+        // itself once every field lets go of the keyboard.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.focused_field.is_some() || self.gallery_search_active() {
+            self.ensure_caret_blinker(cx);
+        }
         let chrome = self.screen_mode == ScreenMode::Standard;
         // On macOS the menus live in the system bar, not in the window.
         crate::native_menu::sync(self, cx);
@@ -556,6 +569,43 @@ impl Render for Workspace {
         let modal = crate::dialogs::render(self, cx);
         let context_menu = panels::context_menu(self, window.viewport_size(), cx);
         let tool_flyout = panels::tool_flyout(self, cx);
+        // Two bodies share the shell (menu bar, action handlers, modal
+        // overlay): the gallery when it is open, otherwise the editor.
+        let gallery = self.gallery_open();
+        let editor_chrome = !gallery && chrome;
+        let body: gpui::AnyElement = if gallery {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.render_gallery(cx).into_any_element()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                unreachable!("the gallery is not compiled into the web build")
+            }
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .flex_grow()
+                .min_h(px(0.0))
+                .children(chrome.then(|| panels::toolbar(self, cx)))
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_grow()
+                        .size_full()
+                        .child(self.render_canvas(cx))
+                        .children((chrome && self.view.rulers).then(|| panels::rulers(self, cx))),
+                )
+                .children(chrome.then(|| panels::side_panels(self, cx)))
+                .children(if chrome {
+                    panels::ai_sidebar(self, cx)
+                } else {
+                    None
+                })
+                .into_any_element()
+        };
         div()
             .size_full()
             .flex()
@@ -610,7 +660,7 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &NewFile, _w, cx| {
-                ws.open_new_document_dialog(cx);
+                ws.open_new_file_picker(cx);
             }))
             .on_action(cx.listener(|ws, _: &OpenFile, window, cx| {
                 keymap::open_file_dialog(ws, window, cx);
@@ -657,9 +707,25 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &CancelGesture, _w, cx| {
+                // Escape leaves the gallery's search before anything
+                // else — it is the innermost thing open.
+                #[cfg(not(target_arch = "wasm32"))]
+                if ws.gallery_open() && ws.gallery_search_clear(cx) {
+                    return;
+                }
                 ws.cancel_gesture(cx);
             }))
             .on_action(cx.listener(|ws, _: &CommitGesture, _w, cx| {
+                // Enter in the gallery opens the selected photo — the
+                // binding takes the keystroke before any key listener
+                // could, so the branch lives here.
+                #[cfg(not(target_arch = "wasm32"))]
+                if ws.gallery_open() && !ws.library.search_active {
+                    if let Some(path) = ws.library.lead_selected().cloned() {
+                        ws.open_from_gallery(path, cx);
+                    }
+                    return;
+                }
                 ws.commit_gesture(cx);
             }))
             .on_action(cx.listener(|ws, _: &ShowImageSize, _w, cx| {
@@ -689,6 +755,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &CycleScreenMode, _w, cx| ws.cycle_screen_mode(cx)))
             .on_action(cx.listener(|ws, _: &TogglePanels, _w, cx| ws.cycle_screen_mode(cx)))
             .on_action(cx.listener(|ws, _: &ToggleAiPanel, _w, cx| ws.toggle_ai_panel(cx)))
+            .on_action(cx.listener(|_ws, _: &ToggleGallery, _w, _cx| {
+                #[cfg(not(target_arch = "wasm32"))]
+                _ws.toggle_gallery(_cx);
+            }))
             .on_action(cx.listener(|ws, _: &ShowLayerStyle, _w, cx| {
                 if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
                     ws.show_layer_style(id, cx);
@@ -714,34 +784,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &NextTab, _w, cx| ws.cycle_tab(1, cx)))
             .on_action(cx.listener(|ws, _: &PrevTab, _w, cx| ws.cycle_tab(-1, cx)))
             .children(in_window_menus.then(|| panels::menu_bar(self, cx)))
-            .children(chrome.then(|| panels::tool_options_bar(self, cx)))
-            .children(chrome.then(|| panels::tab_bar(self, cx)))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_grow()
-                    .min_h(px(0.0))
-                    .children(chrome.then(|| panels::toolbar(self, cx)))
-                    .child(
-                        div()
-                            .relative()
-                            .flex()
-                            .flex_grow()
-                            .size_full()
-                            .child(self.render_canvas(cx))
-                            .children(
-                                (chrome && self.view.rulers).then(|| panels::rulers(self, cx)),
-                            ),
-                    )
-                    .children(chrome.then(|| panels::side_panels(self, cx)))
-                    .children(if chrome {
-                        panels::ai_sidebar(self, cx)
-                    } else {
-                        None
-                    }),
-            )
-            .children(chrome.then(|| panels::status_bar(self)))
+            .children(editor_chrome.then(|| panels::tool_options_bar(self, cx)))
+            .children(editor_chrome.then(|| panels::tab_bar(self, cx)))
+            .child(body)
+            .children(editor_chrome.then(|| panels::status_bar(self)))
             .children(tool_flyout)
             .children(context_menu)
             .children(modal)

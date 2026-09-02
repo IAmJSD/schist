@@ -168,7 +168,10 @@ pub(super) fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> i
         .flex()
         .flex_col()
         .flex_grow()
-        .min_h(px(0.0))
+        // A floor, not zero: the side column scrolls now, and a growing
+        // panel with no floor would collapse to nothing under a tall
+        // Info tab instead of pushing the column past the window.
+        .min_h(px(220.0))
         .p_2()
         .gap_1()
         .border_t_1()

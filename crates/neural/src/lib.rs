@@ -39,6 +39,10 @@ use tract_onnx::prelude::*;
 mod colour;
 mod compat;
 mod depth;
+// The gallery's search embeddings. Desktop only with the gallery — the
+// tokenizer tables it carries would be dead weight in the wasm module.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod embed;
 mod faces;
 mod framed;
 mod inpaint;
@@ -151,14 +155,18 @@ pub enum Input {
         height: usize,
         fit: Fit,
     },
+    /// A fixed run of token ids — no pixels at all. What the text half
+    /// of a dual-encoder wants; `context` is its sequence length.
+    Tokens { context: usize },
 }
 
 impl Input {
     /// The (width, height) the graph is fixed to.
-    fn dims(self) -> (usize, usize) {
+    pub fn dims(self) -> (usize, usize) {
         match self {
             Input::Tiles { size, .. } => (size, size),
             Input::Frame { width, height, .. } => (width, height),
+            Input::Tokens { context } => (context, 1),
         }
     }
 
@@ -166,7 +174,7 @@ impl Input {
     fn scale(self) -> usize {
         match self {
             Input::Tiles { scale, .. } => scale,
-            Input::Frame { .. } => 1,
+            Input::Frame { .. } | Input::Tokens { .. } => 1,
         }
     }
 }
@@ -408,6 +416,57 @@ pub const CATALOG: &[ModelSpec] = &[
         note: "Finds faces, so Skin Smoothing can work on skin that is on \
                one rather than on anything skin-coloured.",
     },
+    ModelSpec {
+        id: "nsfw",
+        name: "Content (NSFW Filter)",
+        file: "nsfw.onnx",
+        // Revision-pinned so the hash below stays true whatever happens
+        // to the repository's main branch.
+        url: Some("https://huggingface.co/Sunxyw/nsfwjs-onnx/resolve/38708a81164d44faab3e6fd4c9f2543db5ddf473/onnx/model_quantized.onnx"),
+        sha256: Some("547891d566e735260b312fd865c40228e0ea75a1d1dd913653555c94e2ad49fd"),
+        bytes: 17_320_391,
+        input: Input::Frame { width: 224, height: 224, fit: Fit::Stretch },
+        range: Range::Unit,
+        license: "NSFWJS model (Infinite Red / GantMan), MIT",
+        note: "Says how likely a photograph is to be explicit — five \
+               softmax classes (drawing, hentai, neutral, porn, sexy) — \
+               so the gallery can hide what the content-filter \
+               preference asks it to.",
+    },
+    // The two halves of the gallery's search: pictures and words mapped
+    // into the same 512 dimensions, so "dog on a beach" lands near the
+    // photographs of one. MobileCLIP-S0 because its image tower is
+    // convolutional — a ViT this size took forty times longer under
+    // tract — and the text tower's bulk is its embedding table, so a
+    // query costs milliseconds.
+    ModelSpec {
+        id: "embed-image",
+        name: "Search (Image Embeddings)",
+        file: "embed-image.onnx",
+        url: Some("https://huggingface.co/Xenova/mobileclip_s0/resolve/757d59c9c6870a76a4b0306f05f5061bca15c39f/onnx/vision_model.onnx"),
+        sha256: Some("17d3c037b1d488c10c50e09f6009ea5a198caef4e0e8f4ea5617b7cb2d067ac0"),
+        bytes: 45_543_630,
+        input: Input::Frame { width: 256, height: 256, fit: Fit::Stretch },
+        range: Range::Unit,
+        license: "MobileCLIP-S0 weights (Apple ML research licence); ONNX export by Xenova",
+        note: "Turns a photograph into the coordinates the gallery's \
+               search ranks against. Runs once per photo, on its \
+               thumbnail, in the background.",
+    },
+    ModelSpec {
+        id: "embed-text",
+        name: "Search (Text Embeddings)",
+        file: "embed-text.onnx",
+        url: Some("https://huggingface.co/Xenova/mobileclip_s0/resolve/757d59c9c6870a76a4b0306f05f5061bca15c39f/onnx/text_model.onnx"),
+        sha256: Some("f6e9bd5742bfc515889e901634d8a2ff2a57fab8564e4ad3760e800b1a51b77c"),
+        bytes: 169_807_789,
+        input: Input::Tokens { context: 77 },
+        range: Range::Unit,
+        license: "MobileCLIP-S0 weights (Apple ML research licence); ONNX export by Xenova",
+        note: "Turns a search query into the same coordinates the \
+               photographs live in. Most of its weight is the \
+               vocabulary table; a query runs in milliseconds.",
+    },
 ];
 
 pub fn spec(id: &str) -> Option<&'static ModelSpec> {
@@ -481,30 +540,52 @@ pub struct Model {
     /// Planes the graph's input takes, which is three for everything
     /// that sees only colour.
     channels: usize,
+    /// The graph wants channels-last input (NHWC), the TensorFlow way.
+    /// Models converted from TF keep that layout; everything trained
+    /// for Schist is channels-first.
+    nhwc: bool,
     pub spec: &'static ModelSpec,
+}
+
+/// The fixed dimensions an ONNX graph declares on its first input, in
+/// order, with anything symbolic or absent as `None`.
+fn declared_dims(proto: &tract_onnx::pb::ModelProto) -> Vec<Option<usize>> {
+    let Some(dim) = proto
+        .graph
+        .as_ref()
+        .and_then(|g| g.input.first())
+        .and_then(|i| i.r#type.as_ref())
+        .and_then(|t| t.value.as_ref())
+    else {
+        return Vec::new();
+    };
+    let tract_onnx::pb::type_proto::Value::TensorType(t) = dim;
+    let Some(shape) = t.shape.as_ref() else {
+        return Vec::new();
+    };
+    shape
+        .dim
+        .iter()
+        .map(|d| match d.value.as_ref() {
+            Some(tract_onnx::pb::tensor_shape_proto::dimension::Value::DimValue(v)) if *v > 0 => {
+                Some(*v as usize)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The channel count an ONNX graph declares on its first input, when it
 /// declares a fixed one.
 fn declared_channels(proto: &tract_onnx::pb::ModelProto) -> Option<usize> {
-    let dim = proto
-        .graph
-        .as_ref()?
-        .input
-        .first()?
-        .r#type
-        .as_ref()?
-        .value
-        .as_ref()?;
-    let tract_onnx::pb::type_proto::Value::TensorType(t) = dim;
-    let dims = &t.shape.as_ref()?.dim;
-    let d = dims.get(1)?.value.as_ref()?;
-    match d {
-        tract_onnx::pb::tensor_shape_proto::dimension::Value::DimValue(v) if *v > 0 => {
-            Some(*v as usize)
-        }
-        _ => None,
-    }
+    declared_dims(proto).get(1).copied().flatten()
+}
+
+/// Whether the first input is declared channels-last: rank four with
+/// three at the end and not at the channel-first position.
+fn declared_nhwc(proto: &tract_onnx::pb::ModelProto) -> bool {
+    let dims = declared_dims(proto);
+    dims.len() == 4 && dims[3] == Some(3) && dims[1] != Some(3)
 }
 
 impl Model {
@@ -520,23 +601,61 @@ impl Model {
         if compat::modernise(&mut proto) {
             log::debug!("{}: rewrote a pre-opset-10 graph", spec.id);
         }
+        // A text tower takes token ids, not pixels: one integer row.
+        if let Input::Tokens { context } = spec.input {
+            if let Some(graph) = proto.graph.as_mut() {
+                graph.value_info.clear();
+            }
+            let plan = onnx
+                .model_for_proto_model(&proto)
+                .context("not a model tract can parse")?
+                .with_input_fact(0, i64::fact([1, context]).into())
+                .context("model does not take a 1xN token input")?
+                .into_optimized()
+                .context("model uses an operator tract cannot run")?
+                .into_runnable()?;
+            return Ok(Model {
+                plan,
+                channels: 0,
+                nhwc: false,
+                spec,
+            });
+        }
         // Almost every vision model takes three planes of colour, but an
         // inpainting one takes four -- the fourth says which pixels are
         // missing, and it has to be a channel rather than a convention
         // because "black" and "gone" are otherwise the same pixel. Ask
-        // the graph rather than assuming.
-        let channels = declared_channels(&proto).unwrap_or(3);
+        // the graph rather than assuming. TensorFlow conversions keep
+        // channels-last instead; ask about that too.
+        let nhwc = declared_nhwc(&proto);
+        let channels = if nhwc {
+            3
+        } else {
+            declared_channels(&proto).unwrap_or(3)
+        };
+        // Exporters leave shape hints on intermediate values, often with
+        // symbolic batch/height/width; those fight the concrete input
+        // fact below, and tract re-infers everything anyway.
+        if let Some(graph) = proto.graph.as_mut() {
+            graph.value_info.clear();
+        }
+        let fact = if nhwc {
+            f32::fact([1, h, w, channels])
+        } else {
+            f32::fact([1, channels, h, w])
+        };
         let plan = onnx
             .model_for_proto_model(&proto)
             .context("not a model tract can parse")?
-            .with_input_fact(0, f32::fact([1, channels, h, w]).into())
-            .context("model does not take a 1xCxHxW float input")?
+            .with_input_fact(0, fact.into())
+            .context("model does not take the declared float input")?
             .into_optimized()
             .context("model uses an operator tract cannot run")?
             .into_runnable()?;
         Ok(Model {
             plan,
             channels,
+            nhwc,
             spec,
         })
     }
@@ -573,11 +692,41 @@ impl Model {
             bail!("expected {} floats, got {}", w * h * 3, rgb.len());
         }
         let range = self.spec.range;
-        // Interleaved RGB to the planar NCHW every ONNX vision model wants.
-        let input = tract_ndarray::Array4::<f32>::from_shape_fn((1, 3, h, w), |(_, c, y, x)| {
-            range.encode(rgb[(y * w + x) * 3 + c], c)
-        });
+        // Interleaved RGB to whichever layout the graph wants: planar
+        // NCHW for most ONNX vision models, channels-last for the ones
+        // that came from TensorFlow.
+        let input = if self.nhwc {
+            tract_ndarray::Array4::<f32>::from_shape_fn((1, h, w, 3), |(_, y, x, c)| {
+                range.encode(rgb[(y * w + x) * 3 + c], c)
+            })
+        } else {
+            tract_ndarray::Array4::<f32>::from_shape_fn((1, 3, h, w), |(_, c, y, x)| {
+                range.encode(rgb[(y * w + x) * 3 + c], c)
+            })
+        };
         self.plan.run(tvec!(input.into_tensor().into()))
+    }
+
+    /// Run a *classifier*: one frame of interleaved RGB in 0..=1, sized
+    /// as the spec says, and the first output flattened to plain floats
+    /// — softmax scores or logits, whatever the graph emits.
+    pub fn run_scores(&self, rgb: &[f32]) -> Result<Vec<f32>> {
+        let out = self.run(rgb)?;
+        let view = out[0].to_plain_array_view::<f32>()?;
+        Ok(view.iter().copied().collect())
+    }
+
+    /// Run a token-input model (a text encoder) over one padded row of
+    /// ids and hand back the first output flattened.
+    pub fn run_token_scores(&self, ids: &[i64]) -> Result<Vec<f32>> {
+        let (context, _) = self.spec.input.dims();
+        if ids.len() != context {
+            bail!("expected {context} token ids, got {}", ids.len());
+        }
+        let input = tract_ndarray::Array2::<i64>::from_shape_vec((1, context), ids.to_vec())?;
+        let out = self.plan.run(tvec!(input.into_tensor().into()))?;
+        let view = out[0].to_plain_array_view::<f32>()?;
+        Ok(view.iter().copied().collect())
     }
 
     /// Run one tile of an image-to-image model. `rgb` is
@@ -724,6 +873,17 @@ pub fn get(id: &str) -> Option<Arc<Model>> {
         c.insert(id.to_string(), loaded.clone());
     }
     loaded
+}
+
+/// Drop a loaded model from the cache; its memory comes back once any
+/// in-flight users let go of their `Arc`s. The next `get` reloads it
+/// from disk — callers use this when a model's whole feature has left
+/// the screen (the gallery's scorer and search towers are hundreds of
+/// resident megabytes between them).
+pub fn release(id: &str) {
+    if let Ok(mut c) = cache().write() {
+        c.remove(id);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -100,6 +100,7 @@ Compiled out entirely, with the reason:
 | Feature | Why |
 | --- | --- |
 | AI sidebar | drives locally installed `claude`/`codex` CLIs; a tab spawns no processes |
+| Photo gallery | watches folders and mounts cameras; a tab has neither, and the PSD sidecars it versions edits into need a real file system |
 | Photoshop `.8bf` plug-ins | helper subprocesses and dlopen |
 | Third-party wasm plug-ins | wasmtime is a JIT; a wasm module cannot host one |
 | HEIC import | libheif is dlopen'd |

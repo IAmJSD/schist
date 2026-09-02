@@ -40,11 +40,20 @@ pub(super) fn layer_properties(
                     cx.notify();
                 }),
             )
-            // A caret makes it obvious the field takes typing.
+            // A caret makes it obvious the field takes typing; it
+            // blinks, and the arrows move it.
             .child(if focused {
-                format!("{shown}|")
+                let (before, after) = if state.field_buffer.is_empty() {
+                    // Nothing typed yet: the committed name shows with
+                    // the caret at its end, as it always did.
+                    (shown.clone(), String::new())
+                } else {
+                    let at = state.field_cursor.min(shown.len());
+                    (shown[..at].to_string(), shown[at..].to_string())
+                };
+                ui::caret_run(before, after, state.caret_on, ui::palette().text).into_any_element()
             } else {
-                shown.clone()
+                div().child(shown.clone()).into_any_element()
             }),
     );
 

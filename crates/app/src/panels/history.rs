@@ -59,7 +59,8 @@ pub(super) fn history_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> 
                 .flex_col()
                 .overflow_y_scroll()
                 .flex_grow()
-                .min_h(px(0.0))
+                // A floor (see the layers panel): the column scrolls.
+                .min_h(px(120.0))
                 // The state the document opened in. The panel could walk
                 // back to "one edit applied" but never to "none": the
                 // topmost row still leaves the first edit in place, so

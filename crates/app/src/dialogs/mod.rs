@@ -27,6 +27,8 @@ mod open;
 mod plugins;
 mod prefs;
 mod profile;
+#[cfg(not(target_arch = "wasm32"))]
+mod save_image;
 mod size;
 #[cfg(not(target_arch = "wasm32"))]
 mod update;
@@ -45,6 +47,8 @@ use open::*;
 use plugins::*;
 use prefs::*;
 use profile::*;
+#[cfg(not(target_arch = "wasm32"))]
+use save_image::*;
 use size::*;
 #[cfg(not(target_arch = "wasm32"))]
 use update::*;
@@ -64,6 +68,10 @@ struct DialogState {
     open_popup: Option<Popup>,
     focused_field: Option<&'static str>,
     field_buffer: String,
+    /// The caret's place in `field_buffer`, and whether this instant
+    /// of the blink shows it.
+    field_cursor: usize,
+    caret_on: bool,
     /// Shares the workspace's dropdown scroll state (it clones as a
     /// handle), so dialog dropdowns open at their current value too.
     dropdown_scroll: ui::DropdownScroll,
@@ -78,6 +86,8 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         open_popup: ws.open_popup,
         focused_field: ws.focused_field,
         field_buffer: ws.field_buffer.clone(),
+        field_cursor: ws.field_cursor,
+        caret_on: ws.caret_on(),
         dropdown_scroll: ws.dropdown_scroll.clone(),
     };
     // Each dialog's primary button registers itself as the default
@@ -147,6 +157,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         } => crate::color_picker::render(ws, target, hsv, original, cx).into_any_element(),
         Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
         Modal::DropImage { path } => drop_image(path, cx).into_any_element(),
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::DropFolders { dirs, images } => drop_folders(dirs, images, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::DropFolders { .. } => return None,
         // Three desktop-only dialogs. Their modals are never opened on
         // the web (the flows that open them are compiled out), so these
         // arms only satisfy the exhaustiveness check there.
@@ -154,6 +168,27 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::HeifSupport { path } => heif_support(ws, path, cx).into_any_element(),
         #[cfg(target_arch = "wasm32")]
         Modal::HeifSupport { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::CameraImport { sources } => {
+            crate::workspace::camera_import_dialog(&sources, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::CameraImport { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::CameraImportOptions { source } => {
+            crate::workspace::camera_import_options_dialog(ws, source, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::CameraImportOptions { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::CameraImportFailed {
+            source,
+            area,
+            message,
+        } => crate::workspace::camera_import_failed_dialog(source, area, message, cx)
+            .into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::CameraImportFailed { .. } => return None,
         #[cfg(not(target_arch = "wasm32"))]
         Modal::UpdateAvailable { update } => update_available(ws, update, cx).into_any_element(),
         #[cfg(target_arch = "wasm32")]
@@ -174,6 +209,37 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::Profile { convert, selected } => {
             profile_dialog(&state, convert, selected, cx).into_any_element()
         }
+        Modal::NewFilePicker => new_file_picker(cx).into_any_element(),
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::MapFilter => crate::workspace::map_filter_dialog(ws, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::MapFilter => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::SearchModels => crate::workspace::search_models_dialog(cx).into_any_element(),
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::SaveImageAs {
+            path,
+            codec,
+            options,
+            scale,
+            size,
+        } => {
+            save_image_dialog(ws, &state, path, codec, options, scale, size, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::SaveImageAs { .. } => return None,
+        #[cfg(target_arch = "wasm32")]
+        Modal::SearchModels => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::BucketName {
+            name,
+            query,
+            photos,
+            editing,
+        } => crate::workspace::bucket_name_dialog(ws, name, query, photos.len(), editing, cx)
+            .into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::BucketName { .. } => return None,
         m @ Modal::NewDocument { .. } => new_document_dialog(&state, m, cx).into_any_element(),
     };
     ws.default_action = ui::take_default_action();

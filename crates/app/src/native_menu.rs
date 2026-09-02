@@ -36,13 +36,15 @@ pub fn sync(ws: &mut Workspace, cx: &mut Context<Workspace>) {
 fn signature(ws: &Workspace) -> String {
     let v = &ws.view;
     let mut out = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         v.rulers as u8,
         v.grid as u8,
         v.guides as u8,
         v.extras as u8,
         v.snap as u8,
         ws.color.proof.is_some() as u8,
+        // The gallery swaps the whole menu set out.
+        ws.gallery_open() as u8,
     );
     if let Some(doc) = ws.doc.as_ref() {
         for comp in &doc.layer_comps {
@@ -50,15 +52,30 @@ fn signature(ws: &Workspace) -> String {
             out.push_str(&comp.name);
         }
     }
+    // The recents render as menu rows, so a change to them has to
+    // rebuild the bar.
+    #[cfg(not(target_arch = "wasm32"))]
+    for recent in &ws.library.recents {
+        out.push('\u{1f}');
+        out.push_str(&recent.to_string_lossy());
+    }
     out
 }
 
 fn build(ws: &Workspace) -> Vec<Menu> {
     let mut menus = vec![app_menu()];
-    menus.extend(panels::menus(ws).into_iter().map(|(title, entries)| Menu {
-        name: title.into(),
-        items: items(ws, entries),
-    }));
+    menus.extend(
+        panels::menus(ws)
+            .into_iter()
+            .map(|(title, entries)| Menu {
+                name: title.into(),
+                items: items(ws, entries),
+            })
+            // A menu whose every item moved to the application menu —
+            // the gallery's View, which holds only Preferences — would
+            // open onto nothing; drop it instead.
+            .filter(|menu| !menu.items.is_empty()),
+    );
     menus
 }
 
@@ -170,6 +187,8 @@ fn action_for(item: AppItem) -> Option<Box<dyn Action>> {
         AppItem::FreeTransform => Box::new(ActivateTool {
             id: "transform".into(),
         }),
+        // Named so the keymap's cmd-shift-g shows beside the item.
+        AppItem::OpenGallery => Box::new(ToggleGallery),
         AppItem::ToggleRulers => Box::new(ToggleRulers),
         AppItem::ToggleGrid => Box::new(ToggleGrid),
         AppItem::ToggleGuides => Box::new(ToggleGuides),

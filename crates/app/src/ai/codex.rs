@@ -9,7 +9,7 @@
 //! process (the pid is shared with [`Conversation`]); the thread id
 //! survives and the next conversation resumes it.
 
-use super::{path, AgentEvent, AiShared, Backend, CmdSender, ConvCmd, Conversation, SYSTEM_PROMPT};
+use super::{path, AgentEvent, AiShared, Backend, CmdSender, ConvCmd, Conversation};
 use anyhow::{Context as _, Result};
 use codex_codes::cli::AppServerBuilder;
 use codex_codes::client_sync::SyncClient;
@@ -29,6 +29,7 @@ pub fn start(
     addr: String,
     token: String,
     resume: Option<String>,
+    system_prompt: String,
 ) -> Conversation {
     let (tx, rx) = std::sync::mpsc::channel();
     let pid: Arc<Mutex<Option<u32>>> = Default::default();
@@ -37,7 +38,15 @@ pub fn start(
     let spawned = std::thread::Builder::new()
         .name("ai-codex".into())
         .spawn(move || {
-            if let Err(e) = run(&worker, rx, &worker_pid, &addr, &token, resume) {
+            if let Err(e) = run(
+                &worker,
+                rx,
+                &worker_pid,
+                &addr,
+                &token,
+                resume,
+                &system_prompt,
+            ) {
                 worker.error(format!("{e:#}"));
             }
             worker.push(AgentEvent::Closed);
@@ -65,6 +74,7 @@ fn run(
     addr: &str,
     token: &str,
     resume: Option<String>,
+    system_prompt: &str,
 ) -> Result<()> {
     let exe = std::env::current_exe().context("locating the schist binary")?;
     // The CLI is located on the login shell's PATH, not launchd's — the
@@ -118,7 +128,7 @@ fn run(
                     thread_id: id.clone(),
                     cwd: home_dir(),
                     approval_policy: Some(AskForApproval::Never),
-                    developer_instructions: Some(SYSTEM_PROMPT.to_string()),
+                    developer_instructions: Some(system_prompt.to_string()),
                     ..Default::default()
                 })
                 .context("resuming codex thread")?;
@@ -130,7 +140,7 @@ fn run(
                     cwd: home_dir(),
                     approval_policy: Some(AskForApproval::Never),
                     sandbox: Some(SandboxMode::Read_only),
-                    developer_instructions: Some(SYSTEM_PROMPT.to_string()),
+                    developer_instructions: Some(system_prompt.to_string()),
                     ..Default::default()
                 })
                 .context("starting codex thread")?;
