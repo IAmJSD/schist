@@ -265,15 +265,6 @@ Remap anything in `~/.config/schist/keymap.json`:
 
 ## Not there yet
 
-- **Tablet pressure has never met a tablet.** The pipeline carries
-  pressure end to end and all four backends now feed it — macOS
-  (`NSEvent`), X11 (the XInput2 pressure valuator), Windows (pen pointer
-  messages) and Wayland (`zwp_tablet_v2`) — but every one of those paths
-  was written against the platform documentation rather than a physical
-  stylus. Wayland is the one to be most suspicious of: tablet input there
-  is a protocol of its own rather than an axis on the pointer, so binding
-  it means synthesising the whole mouse event stream from the tool, tip
-  and barrel buttons included. Reports from real hardware welcome.
 - **CMYK and Lab edit in RGB.** Files open, edit and save in their own
   mode, converting at the boundaries; the editing in between is RGB, so
   individual ink channels are not separately editable.
