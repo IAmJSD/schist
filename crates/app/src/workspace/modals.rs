@@ -471,6 +471,7 @@ impl Workspace {
             | Modal::NewFilePicker
             | Modal::MapFilter
             | Modal::SearchModels
+            | Modal::SaveImageAs { .. }
             // Handled above, before the numeric parse, like the other
             // text fields.
             | Modal::BucketName { .. }

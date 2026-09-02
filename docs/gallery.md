@@ -112,9 +112,40 @@ already compressed and usually stays as it is), and it streams one
 photo at a time, so a whole bucket never has to fit in memory.
 
 "+ New bucket" asks for a name (an empty one falls back to "Bucket N")
-and the bucket is born holding the current selection. Photos have their own right-click menu too: Edit,
-Reveal in file manager, Add to bucket, Save as ZIP, Upscale — acting
-on the whole selection when the click lands in it.
+and the bucket is born holding the current selection. Photos have
+their own right-click menu too: Edit, Reveal in file manager, Add to
+bucket, Upscale — acting on the whole selection when the click lands
+in it — and one of two ways out: several selected photos offer **Save
+N as ZIP…**, a single one offers **Save image as…**, a dialog with the
+format (every codec that exports), quality where the format takes
+one, and a scale slider from 10% to 100% that says what it comes to
+in pixels. It saves the photo's edit when it has one, flattened, and
+never touches the original.
+
+## The AI panel
+
+The editor's AI panel (View ▸ AI Panel, ⌘⇧A) is the gallery's too, on
+its own switch — a chat column beside a grid of photos is different
+furniture from one beside a canvas, so each room remembers whether it
+is up — while everything else is shared: the harness, the model, and
+the conversation itself. What changes is the prompt. A conversation
+started in the gallery runs under a prompt that describes the gallery
+and its tools; step into the editor and send again, and it is resumed
+under the editor's, so the transcript and the agent's memory carry
+over and the agent learns where it now is.
+
+The in-app MCP server publishes the gallery beside the document tools,
+as `gallery_*`: `gallery_state` (folders, counts, grouping and groups,
+selection, buckets and their rules, the current search, the map
+filter, the index's progress), `gallery_list` (the grid, one group by
+title, or one bucket by name, paged), `gallery_search` (the search
+box's own ranking, answered in the reply and shown in the box),
+`gallery_thumbnail` (the cached thumbnail as an image, so the agent
+can look), `gallery_select`, `gallery_bucket_create` (optionally with
+a smart query), `gallery_bucket_add`, `gallery_group_by`, and
+`gallery_open`, which takes a photo into the editor where the document
+tools then apply. Every tool does what a click would, in front of the
+user; photos are named by path throughout.
 
 A bucket can also fill itself. The New/Edit Bucket dialog (right-click
 ▸ Edit bucket…) takes an optional **rule**: a search query ("dog on a

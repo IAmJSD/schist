@@ -17,7 +17,7 @@ use gpui::AnyElement;
 const ERROR_TEXT: u32 = 0xC0605A;
 
 pub fn ai_sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
-    if !ws.view.ai_panel {
+    if !ws.ai_panel_shown() {
         return None;
     }
     let panel = div()
@@ -116,11 +116,15 @@ fn transcript(ws: &mut Workspace) -> impl IntoElement {
             div()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(palette().text_faint))
-                .child(
+                .child(if ws.gallery_open() {
+                    "Ask about your photos and watch it happen in the gallery: \
+                     the agent can search, look at thumbnails, select, sort \
+                     into buckets, and open a photo in the editor."
+                } else {
                     "Ask for an edit and watch it happen on the canvas. \
                      The agent drives the same tools, filters and commands \
-                     as the menus, one undo step each.",
-                )
+                     as the menus, one undo step each."
+                })
         }))
         .children(
             (running && ws.ai.transcript.last().map(|e| e.kind) != Some(AiEntryKind::Assistant))
@@ -192,7 +196,11 @@ fn prompt_box(ws: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let shown = if editing {
         format!("{}|", ws.ai.input)
     } else if empty {
-        "Ask about or edit this document".to_string()
+        if ws.gallery_open() {
+            "Ask about your photos".to_string()
+        } else {
+            "Ask about or edit this document".to_string()
+        }
     } else {
         ws.ai.input.clone()
     };

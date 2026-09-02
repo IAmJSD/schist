@@ -156,6 +156,92 @@ impl Workspace {
         .detach();
     }
 
+    /// Open the Save Image As dialog for one photo. PNG by default (the
+    /// one format every build exports), the photo's own pixel size
+    /// read up front so the scale slider can speak in pixels.
+    pub(super) fn open_save_image_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let codec = self
+            .registry
+            .codecs()
+            .find(|c| c.can_export() && c.extensions().contains(&"png"))
+            .or_else(|| self.registry.codecs().find(|c| c.can_export()))
+            .map(|c| c.id());
+        let Some(codec) = codec else {
+            self.status = "No format here can save an image".into();
+            cx.notify();
+            return;
+        };
+        // The original's size stands in for the edit's: an edit keeps
+        // its photo's canvas in all but the rarest cases, and reading
+        // a header beats decoding a sidecar just to label a slider.
+        let size = image::image_dimensions(&path).ok();
+        self.open_modal(
+            Modal::SaveImageAs {
+                path,
+                codec,
+                options: schist_plugin_api::ExportOptions::default(),
+                scale: 1.0,
+                size,
+            },
+            cx,
+        );
+    }
+
+    /// Save one photo — its edit when it has one — as a flat image in
+    /// the chosen format, shrunk by `scale`.
+    pub fn save_photo_as(
+        &mut self,
+        path: PathBuf,
+        codec_id: &'static str,
+        options: schist_plugin_api::ExportOptions,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let codecs = self.registry.shared_codecs();
+        let Some(codec) = codecs.iter().find(|c| c.id() == codec_id).cloned() else {
+            return;
+        };
+        let ext = codec.extensions().first().copied().unwrap_or("png");
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "photo".into());
+        let suggested = if scale < 0.999 {
+            format!("{stem}@{}%.{ext}", (scale * 100.0).round() as u32)
+        } else {
+            format!("{stem}.{ext}")
+        };
+        let dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(out))) = rx.await else { return };
+            let target = out.clone();
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        render_photo_as(&codecs, &codec, &path, &options, scale, &target)
+                    })
+                    .await;
+            this.update_in(cx, |ws, _window, cx| {
+                ws.status = match result {
+                    Ok((w, h)) => format!("Saved {} ({w} \u{d7} {h})", out.display()).into(),
+                    Err(err) => {
+                        log::error!("save image as failed: {err:#}");
+                        format!("Save failed: {err}").into()
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Double every photo with the built-in waifu2x, writing
     /// `<name>@2x.png` beside each original. The model ships in the
     /// binary, so this needs no download.
@@ -507,6 +593,50 @@ impl ZipWriter {
     }
 }
 
+/// Decode a photo (its edit when it has one), flatten it, shrink it by
+/// `scale`, and write it through `codec`. Returns the written size.
+fn render_photo_as(
+    codecs: &[Arc<dyn schist_plugin_api::CodecPlugin>],
+    codec: &Arc<dyn schist_plugin_api::CodecPlugin>,
+    path: &Path,
+    options: &schist_plugin_api::ExportOptions,
+    scale: f32,
+    out: &Path,
+) -> anyhow::Result<(u32, u32)> {
+    let source = zip_plan(path).source;
+    let doc = super::decode_file(codecs, &source)?;
+    let rect = doc.canvas_rect();
+    let (w, h) = (rect.width() as u32, rect.height() as u32);
+    let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
+    let img: image::RgbaImage = image::ImageBuffer::from_raw(w, h, rgba)
+        .ok_or_else(|| anyhow::anyhow!("composited buffer had the wrong size"))?;
+    let (img, w, h) = if scale < 0.999 {
+        let nw = ((w as f32 * scale).round() as u32).max(1);
+        let nh = ((h as f32 * scale).round() as u32).max(1);
+        (
+            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3),
+            nw,
+            nh,
+        )
+    } else {
+        (img, w, h)
+    };
+    // Codecs write documents, so the flat picture becomes a one-layer
+    // one — the same road the clipboard takes out of the app.
+    let mut flat = schist_core::Document::new("save", w, h, schist_color::Depth::Eight);
+    let mut layer = schist_core::Layer::new_raster("photo");
+    schist_core::blit_rgba8(
+        &mut layer.as_raster_mut().unwrap().tiles,
+        schist_color::Depth::Eight,
+        schist_core::IntRect::from_size(w, h),
+        &img.into_raw(),
+    );
+    flat.push_layer(layer);
+    let bytes = codec.export_with(&flat, options)?;
+    std::fs::write(out, bytes)?;
+    Ok((w, h))
+}
+
 /// Decode a photo whole, run the built-in waifu2x over it, and write
 /// the double-size PNG beside the original. Blocking and heavy.
 fn upscale_photo(
@@ -772,6 +902,59 @@ mod tests {
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (w, h));
         assert!(decoded.pixels().all(|p| p.0 == [255, 0, 255, 255]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Save Image As, end to end on real bytes: the edit is what gets
+    /// saved, scaled as asked, through whichever codec was chosen.
+    #[test]
+    fn save_image_as_renders_the_edit_at_the_asked_scale() {
+        use schist_color::Depth;
+        use schist_core::{Document, IntRect, Layer};
+        let dir = std::env::temp_dir().join(format!("schist-saveas-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".schist")).unwrap();
+        // An undecodable "original" with a real 8x4 magenta edit beside it.
+        std::fs::write(dir.join("photo.jpg"), b"not a jpeg").unwrap();
+        let (w, h) = (8u32, 4u32);
+        let mut doc = Document::new("edit", w, h, Depth::Eight);
+        let mut layer = Layer::new_raster("edit");
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 255, 255]).collect();
+        schist_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(w, h),
+            &rgba,
+        );
+        doc.push_layer(layer);
+        std::fs::write(
+            dir.join(".schist/photo.jpg.psd"),
+            schist_codec_psd::write_psd(&doc).unwrap(),
+        )
+        .unwrap();
+
+        let codecs: Vec<Arc<dyn schist_plugin_api::CodecPlugin>> = vec![Arc::new(crate::PsdCodec)];
+        let out = dir.join("out.psd");
+        let size = render_photo_as(
+            &codecs,
+            &codecs[0],
+            &dir.join("photo.jpg"),
+            &schist_plugin_api::ExportOptions::default(),
+            0.5,
+            &out,
+        )
+        .unwrap();
+        assert_eq!(size, (4, 2));
+        // Read it back through the codec: half the size, still magenta.
+        let back = schist_codec_psd::read_psd(&std::fs::read(&out).unwrap()).unwrap();
+        let rect = back.canvas_rect();
+        assert_eq!((rect.width(), rect.height()), (4, 2));
+        let pixels = schist_compositor::composite_region_rgba8(&back, rect);
+        assert!(pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[0] > 240 && p[1] < 16 && p[2] > 240));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

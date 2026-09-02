@@ -252,8 +252,8 @@ fn kill_process(pid: u32) {
         .status();
 }
 
-/// The system prompt both harnesses run under. They are coding agents by
-/// upbringing; this points them at the canvas instead.
+/// The system prompt both harnesses run under in the editor. They are
+/// coding agents by upbringing; this points them at the canvas instead.
 pub const SYSTEM_PROMPT: &str = "You are the AI assistant panel inside Schist, an image editor. \
     The `schist` MCP server operates directly on the document the user has open: every edit you \
     make appears on their canvas immediately and lands in the undo history, and there is no \
@@ -261,6 +261,31 @@ pub const SYSTEM_PROMPT: &str = "You are the AI assistant panel inside Schist, a
     the document, layers and selection; use render to look at the canvas. Prefer the editor's \
     own tools (cmd_*, tool_*, filter_*, adjust_*) over describing steps for the user to take. \
     Keep prose brief — you are in a narrow sidebar.";
+
+/// The prompt for the gallery: same panel, different room. The document
+/// tools are still published (the editor is one double-click away) but
+/// the `gallery_*` tools are what the user is looking at.
+pub const GALLERY_SYSTEM_PROMPT: &str = "You are the AI assistant panel inside Schist, an image \
+    editor, and the user is currently in its photo gallery — a browser of the folders they watch, \
+    with selection, buckets (named baskets of photos, optionally self-filling from a search \
+    query or a map area), grouping by date, folder or place, a content search over what is in \
+    the photos, and a map filter. The `schist` MCP server's `gallery_*` tools act on that gallery \
+    directly: gallery_state describes it (folders, counts, grouping, selection, buckets, the \
+    current search), gallery_list and gallery_search find photos, gallery_thumbnail shows one, \
+    gallery_select changes the selection, gallery_bucket_add and gallery_bucket_create manage \
+    buckets, and gallery_open takes a photo into the editor — after which the document tools \
+    (get_state, render, cmd_*, tool_*, filter_*, adjust_*) apply to it. Photos are files on the \
+    user's disk; refer to them by the paths the tools return. Originals are never overwritten: \
+    edits live in a sidecar beside each photo. Keep prose brief — you are in a narrow sidebar.";
+
+/// Which prompt a conversation starts under.
+pub fn system_prompt(gallery: bool) -> &'static str {
+    if gallery {
+        GALLERY_SYSTEM_PROMPT
+    } else {
+        SYSTEM_PROMPT
+    }
+}
 
 /// One entry in the transcript.
 pub struct AiEntry {
@@ -314,6 +339,11 @@ pub struct AiState {
     pub scroll: gpui::ScrollHandle,
     /// (claude, codex) CLIs found on PATH, probed once at startup.
     pub available: (bool, bool),
+    /// Whether the live conversation was started under the gallery's
+    /// prompt (`Some(true)`) or the editor's. A send from the other
+    /// room restarts the conversation under the right one — resumed,
+    /// so the transcript and the harness's memory carry over.
+    pub conversation_gallery: Option<bool>,
 }
 
 impl AiState {
@@ -339,6 +369,7 @@ impl AiState {
             endpoint: None,
             scroll: gpui::ScrollHandle::new(),
             available: (Backend::Claude.available(), Backend::Codex.available()),
+            conversation_gallery: None,
         }
     }
 }

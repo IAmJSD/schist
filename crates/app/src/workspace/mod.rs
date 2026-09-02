@@ -60,6 +60,8 @@ mod library_geo;
 #[cfg(target_os = "macos")]
 mod library_icc;
 #[cfg(not(target_arch = "wasm32"))]
+mod library_mcp;
+#[cfg(not(target_arch = "wasm32"))]
 mod library_ops;
 #[cfg(not(target_arch = "wasm32"))]
 mod library_view;
@@ -661,6 +663,12 @@ pub struct ViewOptions {
     /// user may not have, and a chat column is not everyone's furniture.
     #[serde(default)]
     pub ai_panel: bool,
+    /// The same panel's switch for the gallery, remembered separately:
+    /// the harness, model and conversation are shared between the two
+    /// rooms, but whether a chat column sits beside the photos is its
+    /// own question.
+    #[serde(default)]
+    pub ai_panel_gallery: bool,
     /// Which agent harness the sidebar drives ("claude" or "codex").
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
@@ -716,6 +724,7 @@ impl Default for ViewOptions {
             note_color: default_note_color(),
             gallery_hide_nsfw: false,
             ai_panel: false,
+            ai_panel_gallery: false,
             ai_backend: default_ai_backend(),
             ai_model_claude: String::new(),
             ai_model_codex: String::new(),
@@ -979,6 +988,17 @@ pub enum Modal {
     /// The gallery's offer to install the two Search models, with the
     /// licences to agree to first. Desktop-only, like the gallery.
     SearchModels,
+    /// Save one gallery photo as a flat image: format, quality where the
+    /// format takes one, and a scale to shrink it by. `size` is the
+    /// source's pixel size when it could be read up front, so the
+    /// dialog can say what the scale comes to.
+    SaveImageAs {
+        path: PathBuf,
+        codec: &'static str,
+        options: schist_plugin_api::ExportOptions,
+        scale: f32,
+        size: Option<(u32, u32)>,
+    },
     /// Create or edit a gallery bucket: its name, and optionally a
     /// smart rule — a search query and/or a map area (the drawn
     /// boundary lives on the shared map state, not here) that keeps

@@ -365,7 +365,7 @@ impl GroupBy {
         }
     }
 
-    fn key(self) -> &'static str {
+    pub(super) fn key(self) -> &'static str {
         match self {
             GroupBy::Date => "date",
             GroupBy::Folder => "folder",
@@ -373,7 +373,7 @@ impl GroupBy {
         }
     }
 
-    fn from_key(key: &str) -> Option<GroupBy> {
+    pub(super) fn from_key(key: &str) -> Option<GroupBy> {
         GroupBy::ALL.into_iter().find(|g| g.key() == key)
     }
 }
@@ -659,6 +659,83 @@ impl Library {
             .collect();
         self.queue.extend(jobs);
         !self.queue.is_empty()
+    }
+
+    /// The gallery as the AI panel's MCP tools describe it: what the
+    /// sidebar and tray show, as JSON.
+    pub(super) fn state_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let (indexed, total) = self.index_progress();
+        json!({
+            "folders": self.folders.iter().map(|f| f.display().to_string()).collect::<Vec<_>>(),
+            "photos": self.photo_count(),
+            "group_by": self.group_by.key(),
+            "groups": self.grouped().iter().map(|(title, subtitle, entries)| json!({
+                "title": title, "detail": subtitle, "photos": entries.len(),
+            })).collect::<Vec<_>>(),
+            "selected": self.selected.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "buckets": self.buckets.iter().enumerate().map(|(i, b)| json!({
+                "index": i, "name": b.name, "photos": b.contents().len(),
+                "rule": b.is_smart().then(|| b.rule_label()),
+                "viewing": self.bucket_filter == Some(i),
+            })).collect::<Vec<_>>(),
+            "search": (!self.search.is_empty()).then_some(&self.search),
+            "search_results": self.search_results.as_ref().map(|r| r.len()),
+            "map_filter": self.map_filter_label(),
+            "index": {"embedded": indexed, "total": total,
+                      "search_models_installed": schist_neural::embed::ready()},
+        })
+    }
+
+    /// Photos as JSON rows: path, when taken, where, whether edited.
+    pub(super) fn entry_json(&self, entry: &Entry) -> serde_json::Value {
+        serde_json::json!({
+            "path": entry.path.display().to_string(),
+            "taken": self.taken_of(entry),
+            "place": self.places.get(&entry.path).cloned().flatten(),
+            "edited": entry.edited,
+            "selected": self.is_selected(&entry.path),
+        })
+    }
+
+    /// The photos of one group (by title), one bucket (by name), or
+    /// the whole grid, in display order.
+    pub(super) fn list_entries(&self, group: Option<&str>, bucket: Option<&str>) -> Vec<Entry> {
+        if let Some(name) = bucket {
+            let Some(bucket) = self
+                .buckets
+                .iter()
+                .find(|b| b.name.eq_ignore_ascii_case(name))
+            else {
+                return Vec::new();
+            };
+            let all: Vec<&Entry> = self
+                .sections
+                .iter()
+                .flat_map(|s| s.entries.iter())
+                .collect();
+            return bucket
+                .contents()
+                .iter()
+                .filter_map(|p| all.iter().find(|e| &e.path == p).map(|e| (*e).clone()))
+                .collect();
+        }
+        self.grouped()
+            .into_iter()
+            .filter(|(title, _, _)| group.is_none_or(|g| title.eq_ignore_ascii_case(g)))
+            .flat_map(|(_, _, entries)| entries)
+            .collect()
+    }
+
+    /// The cached thumbnail PNG for a photo, if one has been rendered.
+    pub(super) fn thumb_png(&self, path: &Path) -> Option<Vec<u8>> {
+        let entry = self
+            .sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .find(|e| e.path == path)?;
+        let cache = thumb_cache_path(&thumb_source(&entry.path, entry.edited), entry.mtime)?;
+        std::fs::read(cache).ok()
     }
 
     /// How much of the gallery the search index covers: (embedded, all).
@@ -2746,6 +2823,71 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// The search box's ranking, answered on the spot: what the AI
+    /// panel's `gallery_search` tool needs, since a tool call is a
+    /// question that wants its answer in the reply. Sets the box and
+    /// its results too, so the user sees what the agent saw. Blocking
+    /// on the text tower — milliseconds once warm, a few seconds the
+    /// first time — which a tool call can afford and a keystroke
+    /// cannot.
+    pub(super) fn gallery_search_now(
+        &mut self,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<(PathBuf, f32)> {
+        let query = query.trim().to_string();
+        self.library.search = query.clone();
+        self.library.search_cursor = query.len();
+        self.library.search_seq += 1;
+        let answer = match self.library.query_cache.get(&query) {
+            Some(answer) => answer.clone(),
+            None => {
+                let answer = CachedQuery {
+                    text: schist_neural::embed::embed_text(&query).map(Arc::new),
+                    place: library_geo::find_place(&query),
+                };
+                if self.library.query_cache.len() > 512 {
+                    self.library.query_cache.clear();
+                }
+                self.library
+                    .query_cache
+                    .insert(query.clone(), answer.clone());
+                answer
+            }
+        };
+        let snapshot = self.library.search_snapshot();
+        let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
+        if let Some(text) = &answer.text {
+            for (path, v) in snapshot.vectors.iter() {
+                scored.insert(path, v.iter().zip(text.iter()).map(|(a, b)| a * b).sum());
+            }
+        }
+        if let Some(place) = &answer.place {
+            for (path, (lat, lon)) in snapshot.positions.iter() {
+                let affinity = library_geo::geo_affinity(place, *lat, *lon);
+                if affinity > 0.0 {
+                    *scored.entry(path).or_insert(0.0) += GEO_BOOST * affinity;
+                }
+            }
+        }
+        let floor = if answer.text.is_some() {
+            SEARCH_FLOOR
+        } else {
+            GEO_BOOST * 0.3
+        };
+        let mut ranked: Vec<(PathBuf, f32)> = scored
+            .into_iter()
+            .filter(|(_, s)| *s >= floor)
+            .map(|(p, s)| (p.clone(), s))
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        ranked.truncate(SEARCH_KEPT);
+        self.library.search_place = answer.place.as_ref().map(|p| p.name.clone());
+        self.library.search_results = Some(ranked.clone());
+        cx.notify();
+        ranked
     }
 
     /// Load both towers off the UI thread before the first keystroke

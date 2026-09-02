@@ -10,6 +10,9 @@ use gpui::Context;
 
 impl Workspace {
     pub fn toggle_ai_panel(&mut self, _cx: &mut Context<Self>) {}
+    pub fn ai_panel_shown(&self) -> bool {
+        false
+    }
     pub fn close_ai_model_menu(&mut self, _cx: &mut Context<Self>) {}
     pub fn ai_model_menu_key(&mut self, _ev: &gpui::KeyDownEvent, _cx: &mut Context<Self>) -> bool {
         false

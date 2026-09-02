@@ -336,7 +336,11 @@ fn gallery_menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
         // end up empty.
         (
             "View",
-            vec![App("Preferences…", Preferences, Some("cmd-k"))],
+            vec![
+                App("AI Panel", ToggleAi, Some("cmd-shift-a")),
+                Sep,
+                App("Preferences…", Preferences, Some("cmd-k")),
+            ],
         ),
     ]
 }

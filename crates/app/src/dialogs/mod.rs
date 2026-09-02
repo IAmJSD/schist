@@ -27,6 +27,8 @@ mod open;
 mod plugins;
 mod prefs;
 mod profile;
+#[cfg(not(target_arch = "wasm32"))]
+mod save_image;
 mod size;
 #[cfg(not(target_arch = "wasm32"))]
 mod update;
@@ -45,6 +47,8 @@ use open::*;
 use plugins::*;
 use prefs::*;
 use profile::*;
+#[cfg(not(target_arch = "wasm32"))]
+use save_image::*;
 use size::*;
 #[cfg(not(target_arch = "wasm32"))]
 use update::*;
@@ -208,6 +212,18 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         Modal::MapFilter => return None,
         #[cfg(not(target_arch = "wasm32"))]
         Modal::SearchModels => crate::workspace::search_models_dialog(cx).into_any_element(),
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::SaveImageAs {
+            path,
+            codec,
+            options,
+            scale,
+            size,
+        } => {
+            save_image_dialog(ws, &state, path, codec, options, scale, size, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::SaveImageAs { .. } => return None,
         #[cfg(target_arch = "wasm32")]
         Modal::SearchModels => return None,
         #[cfg(not(target_arch = "wasm32"))]

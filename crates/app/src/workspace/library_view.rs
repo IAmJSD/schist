@@ -97,6 +97,10 @@ impl Workspace {
                 .min_h(px(0.0))
                 .child(sidebar(self, cx))
                 .child(grid(self, cx))
+                // The same AI panel the editor has, on its own switch
+                // (View ▸ AI Panel here too): the conversation, harness
+                // and model carry over, the prompt says which room.
+                .children(crate::panels::ai_sidebar(self, cx))
                 .into_any_element()
         };
         let context_menu = gallery_context_menu(self, cx);
@@ -1215,6 +1219,13 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .flex_col()
         .flex_grow()
         .min_h(px(0.0))
+        // Shrinkable: a flex item's minimum width is its content's, and
+        // a row of cells is a fixed width, so without this the grid
+        // refuses to give up room to the AI panel beside it and pushes
+        // it off the right edge. The column count follows the width
+        // the next frame.
+        .min_w(px(0.0))
+        .overflow_hidden()
         .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, _w, cx| {
             if ws.library.scrollbar_grab.is_none() {
                 return;
@@ -2579,19 +2590,27 @@ fn gallery_context_menu(
                 );
             }
             sep(&mut rows);
-            {
+            if n > 1 {
+                // Several photos leave as an archive.
                 let zip = acting.clone();
-                let label = if n > 1 {
-                    format!("Save {n} as ZIP…")
-                } else {
-                    "Save as ZIP…".to_string()
-                };
                 row(
-                    label,
+                    format!("Save {n} as ZIP…"),
                     &mut rows,
                     cx,
                     std::rc::Rc::new(move |ws, window, cx| {
                         ws.save_photos_zip(zip.clone(), "photos.zip".into(), window, cx);
+                    }),
+                );
+            } else {
+                // One photo leaves as an image: its edit, in a chosen
+                // format, at a chosen size.
+                let one = path.clone();
+                row(
+                    "Save image as…".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.open_save_image_as(one.clone(), cx);
                     }),
                 );
             }

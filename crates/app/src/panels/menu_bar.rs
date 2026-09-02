@@ -10,7 +10,7 @@ pub(super) fn app_item_checked(ws: &Workspace, item: AppItem) -> Option<bool> {
         AppItem::ToggleGrid => ws.view.grid,
         AppItem::ToggleGuides => ws.view.guides,
         AppItem::ToggleNotes => ws.view.notes,
-        AppItem::ToggleAi => ws.view.ai_panel,
+        AppItem::ToggleAi => ws.ai_panel_shown(),
         AppItem::ToggleExtras => ws.view.extras,
         AppItem::ToggleSnap => ws.view.snap,
         AppItem::ProofColors => ws.color.proof.is_some(),
