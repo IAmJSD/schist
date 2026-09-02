@@ -80,7 +80,7 @@ unsafe fn shell_data_object(paths: &[PathBuf]) -> windows::core::Result<IDataObj
     let first = items
         .first()
         .and_then(|i| i.clone())
-        .ok_or_else(|| windows::core::Error::empty())?;
+        .ok_or_else(windows::core::Error::empty)?;
     let array: IShellItemArray = SHCreateShellItemArrayFromShellItem(&first)?;
     array.BindToHandler(None, &BHID_DataObject)
 }
