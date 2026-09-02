@@ -517,9 +517,16 @@ impl Workspace {
             .get(&id)
             .cloned()
             .or_else(|| doc.path.clone());
-        #[cfg(target_arch = "wasm32")]
-        let source = doc.path.clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let summary = source.as_deref().and_then(schist_gallery::exif_summary);
+        // The web build has no file system: its opened files live in
+        // memory under invented paths, so read the bytes back from there.
+        #[cfg(target_arch = "wasm32")]
+        let summary = doc
+            .path
+            .as_deref()
+            .and_then(|path| crate::web::read_file(path).ok())
+            .and_then(|bytes| schist_gallery::exif_summary_bytes(&bytes));
         #[cfg(not(target_arch = "wasm32"))]
         {
             // The info map opens on the spot, at street scale.

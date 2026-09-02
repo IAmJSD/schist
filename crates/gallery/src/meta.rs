@@ -140,6 +140,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_bytes_parser_agrees_with_the_path_parser() {
+        // A minimal JPEG carrying an APP1 EXIF segment with a Make tag.
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x010fu16.to_le_bytes()); // Make
+        tiff.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+        tiff.extend_from_slice(&6u32.to_le_bytes());
+        tiff.extend_from_slice(&26u32.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(b"Apple\0");
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff);
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+        jpeg.extend_from_slice(&app1);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        let dir = std::env::temp_dir().join(format!("schist-exif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("make.jpg");
+        std::fs::write(&path, &jpeg).unwrap();
+        let by_path = exif_summary(&path).expect("path parse");
+        let by_bytes = exif_summary_bytes(&jpeg).expect("bytes parse");
+        assert_eq!(by_path.make.as_deref(), Some("Apple"));
+        assert_eq!(by_path.make, by_bytes.make);
+        assert_eq!(by_path.gps, by_bytes.gps);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn unix_times_become_civil_dates() {
         // 2026-09-01 00:00:00 UTC, checked against `date -u`.
         assert_eq!(ymd_from_unix(1_788_220_800), (2026, 9, 1));
@@ -200,7 +230,17 @@ impl ExifSummary {
 
 /// Read the summary out of a file, `None` when it carries no EXIF.
 pub fn exif_summary(path: &Path) -> Option<ExifSummary> {
-    let data = exif_of(path)?;
+    summarize(exif_of(path)?)
+}
+
+/// The same from the file's bytes, for where there is no file system
+/// to read — the web build keeps its opened files in memory.
+pub fn exif_summary_bytes(bytes: &[u8]) -> Option<ExifSummary> {
+    let mut reader = std::io::Cursor::new(bytes);
+    summarize(exif::Reader::new().read_from_container(&mut reader).ok()?)
+}
+
+fn summarize(data: exif::Exif) -> Option<ExifSummary> {
     let text = |tag: exif::Tag| -> Option<String> {
         let field = data.get_field(tag, exif::In::PRIMARY)?;
         let s = field.display_value().with_unit(&data).to_string();

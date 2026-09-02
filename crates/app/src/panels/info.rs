@@ -194,7 +194,7 @@ fn info_panel(
     }
     // The rows are their own scrolling region, bounded so the map
     // beneath stays put whatever a camera wrote (some write a lot).
-    let mut panel = div()
+    let panel = div()
         .flex()
         .flex_col()
         .p_2()
@@ -217,18 +217,20 @@ fn info_panel(
                 .children(rows_thumb(&ws.info_scroll)),
         );
     #[cfg(not(target_arch = "wasm32"))]
-    if exif.gps.is_some() {
+    let panel = if exif.gps.is_some() {
         // The map, with the blip on it, at 16:9 across the panel's
         // content width. Wheel to zoom, drag to pan; it opens on the
         // spot at street scale.
         let map_h = (SIDE_PANEL_CONTENT_W * 9.0 / 16.0).round();
-        panel = panel.child(div().pt_1().child(crate::workspace::map_element(
+        panel.child(div().pt_1().child(crate::workspace::map_element(
             ws,
             crate::workspace::MapSlot::Info,
             map_h,
             cx,
-        )));
-    }
+        )))
+    } else {
+        panel
+    };
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (ws, cx);
