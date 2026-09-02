@@ -2650,11 +2650,17 @@ fn gallery_context_menu(
                 );
             }
             sep(&mut rows);
-            if n > 1 {
+            // With the content filter on, flagged photos stay out of the
+            // archive; the row counts what would actually go.
+            let (zip, _held) = ws
+                .library
+                .zip_candidates(acting.clone(), ws.view.gallery_hide_nsfw);
+            if n > 1 && zip.is_empty() {
+                // Every one of them is held back: no archive to offer.
+            } else if n > 1 {
                 // Several photos leave as an archive.
-                let zip = acting.clone();
                 row(
-                    format!("Save {n} as ZIP…"),
+                    format!("Save {} as ZIP…", zip.len()),
                     &mut rows,
                     cx,
                     std::rc::Rc::new(move |ws, window, cx| {
@@ -2709,11 +2715,13 @@ fn gallery_context_menu(
                 }),
             );
             sep(&mut rows);
-            {
-                let zip = photos.clone();
+            let (zip, _held) = ws
+                .library
+                .zip_candidates(photos.clone(), ws.view.gallery_hide_nsfw);
+            if !zip.is_empty() {
                 let suggested = format!("{}.zip", name.to_lowercase().replace(' ', "-"));
                 row(
-                    format!("Save all as ZIP… ({})", photos.len()),
+                    format!("Save all as ZIP… ({})", zip.len()),
                     &mut rows,
                     cx,
                     std::rc::Rc::new(move |ws, window, cx| {

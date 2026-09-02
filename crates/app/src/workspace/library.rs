@@ -817,6 +817,19 @@ impl Library {
         matches!(self.thumbs.get(path), Some((_, Thumb::Failed)))
     }
 
+    /// What may leave in an archive: with the content filter on, the
+    /// flagged photos stay behind whatever asked for them — a bucket,
+    /// a selection, an agent. Returns what may go and how many stayed.
+    pub(super) fn zip_candidates(&self, paths: Vec<PathBuf>, hide: bool) -> (Vec<PathBuf>, usize) {
+        if !hide {
+            return (paths, 0);
+        }
+        let before = paths.len();
+        let kept: Vec<PathBuf> = paths.into_iter().filter(|p| !self.is_flagged(p)).collect();
+        let held = before - kept.len();
+        (kept, held)
+    }
+
     /// Whether the content filter flagged a photo as explicit.
     pub fn is_flagged(&self, path: &Path) -> bool {
         self.flagged.get(path).copied().unwrap_or(false)
@@ -2988,6 +3001,29 @@ mod tests {
         // A torn file is a miss, not a crash.
         assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
         assert!(parse_index_snapshot(b"not an index").is_none());
+    }
+
+    #[test]
+    fn the_content_filter_keeps_flagged_photos_out_of_archives() {
+        let mut lib = Library::load();
+        lib.flagged.insert(PathBuf::from("/p/a.jpg"), true);
+        lib.flagged.insert(PathBuf::from("/p/b.jpg"), false);
+        let all = || {
+            vec![
+                PathBuf::from("/p/a.jpg"),
+                PathBuf::from("/p/b.jpg"),
+                PathBuf::from("/p/c.jpg"),
+            ]
+        };
+        // Filter off: everything goes, nothing is held back.
+        assert_eq!(lib.zip_candidates(all(), false), (all(), 0));
+        // Filter on: the flagged one stays; clean and unscored go.
+        let (kept, held) = lib.zip_candidates(all(), true);
+        assert_eq!(
+            kept,
+            vec![PathBuf::from("/p/b.jpg"), PathBuf::from("/p/c.jpg")]
+        );
+        assert_eq!(held, 1);
     }
 
     #[test]

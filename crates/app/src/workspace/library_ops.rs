@@ -72,7 +72,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The content filter holds at the door too: with it on, flagged
+        // photos never leave in an archive, whoever asked.
+        let (paths, held) = self
+            .library
+            .zip_candidates(paths, self.view.gallery_hide_nsfw);
         if paths.is_empty() {
+            if held > 0 {
+                self.status = format!(
+                    "Nothing to zip: the content filter keeps all {held} of those photos out"
+                )
+                .into();
+                cx.notify();
+            }
             return;
         }
         let dir = std::env::var("HOME")
@@ -135,12 +147,17 @@ impl Workspace {
                 .spawn(async move { writer.finish() })
                 .await;
             this.update(cx, |ws, cx| {
+                let held_note = match held {
+                    0 => String::new(),
+                    1 => " (1 left out by the content filter)".into(),
+                    n => format!(" ({n} left out by the content filter)"),
+                };
                 ws.status = match finished {
                     Ok(()) if written == total => {
-                        format!("Zipped {written} photos to {}", out.display()).into()
+                        format!("Zipped {written} photos to {}{held_note}", out.display()).into()
                     }
                     Ok(()) => format!(
-                        "Zipped {written} of {total} photos to {} \u{2014} the log has the rest",
+                        "Zipped {written} of {total} photos to {}{held_note} \u{2014} the log has the rest",
                         out.display()
                     )
                     .into(),

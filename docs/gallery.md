@@ -255,6 +255,11 @@ on bare shoulders and swimwear, so summing it in flagged most of a real
 camera roll. Without the model nothing is flagged — the preference says
 so, and its switch stays disabled until the model is installed.
 
+The filter holds at the door too: while it is on, flagged photos never
+leave in a ZIP — not from a selection, not from a bucket's "Save all",
+not when an agent asks — and the status line says how many stayed
+behind. The menu rows count only what would actually go.
+
 ## Cameras
 
 Import… looks for mounted volumes with a `DCIM` directory — at the root
