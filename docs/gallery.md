@@ -91,7 +91,10 @@ trigger is "over a foreign window" rather than "outside our
 rectangle", since a file-manager window sitting on top of the gallery
 is both. Wayland sessions do not get this — a client cannot begin a
 drag there without a serial the toolkit never hands out — so it is
-X11 and XWayland on Linux.
+X11 and XWayland on Linux, and under native Wayland the hand-off
+stays switched off entirely (a Wayland desktop still exports
+`DISPLAY` for XWayland, where none of our windows exist and every
+pixel would look foreign).
 
 An archive holds what the gallery shows: an edited photo goes in as
 its edit, never the untouched original, and each entry keeps the

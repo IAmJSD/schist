@@ -8,7 +8,11 @@
 //!
 //! Wayland sessions get nothing here — a client cannot start a drag
 //! without a data-device serial from the compositor, which gpui does
-//! not hand out — so this is X11 (and XWayland) only.
+//! not hand out — so this is X11 (and XWayland) only. And it must know
+//! when it is *not* the backend: a Wayland desktop still exports
+//! `DISPLAY` for XWayland, so these connections would succeed, find
+//! none of our windows there, and call every pixel foreign — ending
+//! the in-app drag the moment it started.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -27,7 +31,16 @@ const POLL: Duration = Duration::from_millis(8);
 /// and some targets never answer at all.
 const FINISH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Whether gpui is drawing through X11 at all. Its own guess, so the
+/// two never disagree.
+fn on_x11() -> bool {
+    gpui::guess_compositor() == "X11"
+}
+
 pub(super) fn start(paths: &[PathBuf], _window: &gpui::Window) -> bool {
+    if !on_x11() {
+        return false;
+    }
     let uris = super::uri_list(paths);
     if uris.is_empty() {
         return false;
@@ -49,6 +62,9 @@ pub(super) fn start(paths: &[PathBuf], _window: &gpui::Window) -> bool {
 /// the life of the process rather than opening one per mouse move; two
 /// round trips per move is nothing next to a repaint.
 pub(super) fn over_foreign_window(_window: &gpui::Window) -> bool {
+    if !on_x11() {
+        return false;
+    }
     thread_local! {
         static CONN: Option<(x11rb::rust_connection::RustConnection, u32)> = connect().ok();
     }
