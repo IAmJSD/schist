@@ -473,6 +473,7 @@ impl Workspace {
             | Modal::MapFilter
             | Modal::SearchModels
             | Modal::SaveImageAs { .. }
+            | Modal::BatchProcess { .. }
             // Handled above, before the numeric parse, like the other
             // text fields.
             | Modal::BucketName { .. }

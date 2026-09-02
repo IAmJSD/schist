@@ -2642,7 +2642,18 @@ fn gallery_context_menu(
             let acting = ws.library.selected.clone();
             let n = acting.len();
 
-            {
+            if n > 1 {
+                let open = acting.clone();
+                let opening = n.min(super::DROP_OPEN_CAP);
+                row(
+                    format!("Edit {opening} in tabs"),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.open_photos_in_tabs(open.clone(), cx);
+                    }),
+                );
+            } else {
                 let open = path.clone();
                 row(
                     "Edit".into(),
@@ -2738,18 +2749,57 @@ fn gallery_context_menu(
                 );
             }
             {
-                let up = acting;
+                // Turn, upscale, colour — one recipe over the lot.
+                let batch = acting.clone();
                 let label = if n > 1 {
-                    format!("Upscale {n} ×2")
+                    format!("Process {n} photos\u{2026}")
                 } else {
-                    "Upscale ×2".to_string()
+                    "Process\u{2026}".to_string()
                 };
                 row(
                     label,
                     &mut rows,
                     cx,
                     std::rc::Rc::new(move |ws, _w, cx| {
-                        ws.upscale_photos(up.clone(), cx);
+                        ws.open_batch_process(batch.clone(), cx);
+                    }),
+                );
+            }
+            sep(&mut rows);
+            {
+                let moving = acting.clone();
+                let label = if n > 1 {
+                    format!("Move {n} to folder\u{2026}")
+                } else {
+                    "Move to folder\u{2026}".to_string()
+                };
+                row(
+                    label,
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, window, cx| {
+                        ws.move_photos_prompt(moving.clone(), window, cx);
+                    }),
+                );
+            }
+            // Only an edited photo has an original to go back to.
+            let edited = acting
+                .iter()
+                .filter(|p| super::library::backing_psd(p).is_some_and(|s| s.exists()))
+                .count();
+            if edited > 0 {
+                let revert = acting;
+                let label = if edited > 1 {
+                    format!("Revert {edited} to originals")
+                } else {
+                    "Revert to original".to_string()
+                };
+                row(
+                    label,
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.revert_photos(revert.clone(), cx);
                     }),
                 );
             }
@@ -2771,6 +2821,21 @@ fn gallery_context_menu(
                     ws.gallery_edit_bucket(index, cx);
                 }),
             );
+            if !photos.is_empty() {
+                // Into the grid's selection, where the keyboard and
+                // the photo menu can take it from here.
+                let select = photos.clone();
+                row(
+                    format!("Select all ({})", photos.len()),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, _cx| {
+                        ws.library.bucket_filter = Some(index);
+                        ws.library.folder_filter = None;
+                        ws.library.selected = select.clone();
+                    }),
+                );
+            }
             sep(&mut rows);
             let (zip, _held) = ws
                 .library
@@ -2786,14 +2851,23 @@ fn gallery_context_menu(
                     }),
                 );
             }
-            {
-                let up = photos;
+            if !photos.is_empty() {
+                let batch = photos.clone();
                 row(
-                    "Upscale all ×2".into(),
+                    format!("Process all\u{2026} ({})", photos.len()),
                     &mut rows,
                     cx,
                     std::rc::Rc::new(move |ws, _w, cx| {
-                        ws.upscale_photos(up.clone(), cx);
+                        ws.open_batch_process(batch.clone(), cx);
+                    }),
+                );
+                let moving = photos;
+                row(
+                    "Move all to folder\u{2026}".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, window, cx| {
+                        ws.move_photos_prompt(moving.clone(), window, cx);
                     }),
                 );
             }

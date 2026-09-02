@@ -553,6 +553,71 @@ impl CanvasTransform {
     }
 }
 
+/// What the gallery's batch dialog does to each photo, in the order
+/// it happens: the canvas is turned, then enlarged, then the colour
+/// adjustments go on top as adjustment layers — so an edit keeps them
+/// live in the sidecar, the way a Layer ▸ New Adjustment would.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub struct BatchRecipe {
+    /// A quarter or half turn, if any.
+    pub rotate: Option<CanvasTransform>,
+    pub flip_h: bool,
+    pub flip_v: bool,
+    /// A neural ×2 upscaler from the catalogue, if any.
+    pub upscale: Option<&'static str>,
+    /// Adjustment layers, bottom to top.
+    pub adjustments: Vec<schist_adjustments::Params>,
+}
+
+impl BatchRecipe {
+    /// Whether the recipe does anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.rotate.is_none()
+            && !self.flip_h
+            && !self.flip_v
+            && self.upscale.is_none()
+            && self.adjustments.is_empty()
+    }
+
+    /// The canvas transforms, in the order they apply.
+    pub fn transforms(&self) -> Vec<CanvasTransform> {
+        let mut ops = Vec::new();
+        ops.extend(self.rotate);
+        if self.flip_h {
+            ops.push(CanvasTransform::FlipH);
+        }
+        if self.flip_v {
+            ops.push(CanvasTransform::FlipV);
+        }
+        ops
+    }
+}
+
+/// Where a batch run puts its results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum BatchTarget {
+    /// Into each photo's `.schist` sidecar, versioned like any save.
+    /// The originals stay untouched and the gallery shows the edits.
+    #[default]
+    Edit,
+    /// A flat copy beside each original, `<name>-edit.<ext>`.
+    Beside,
+    /// Flat copies in a folder chosen when the run starts.
+    Folder,
+}
+
+impl BatchTarget {
+    pub fn label(self) -> &'static str {
+        match self {
+            BatchTarget::Edit => "Gallery edits (versioned)",
+            BatchTarget::Beside => "Copies beside the originals",
+            BatchTarget::Folder => "Copies in a folder\u{2026}",
+        }
+    }
+}
+
 /// Which Select ▸ Modify operation a dialog is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModifyKind {
@@ -1026,6 +1091,15 @@ pub enum Modal {
         options: schist_plugin_api::ExportOptions,
         scale: f32,
         size: Option<(u32, u32)>,
+    },
+    /// The gallery's batch dialog: one recipe run over every photo in
+    /// `photos`, written as versioned edits or as flat copies.
+    BatchProcess {
+        photos: Vec<PathBuf>,
+        recipe: BatchRecipe,
+        target: BatchTarget,
+        codec: &'static str,
+        options: schist_plugin_api::ExportOptions,
     },
     /// Create or edit a gallery bucket: its name, and optionally a
     /// smart rule — a search query and/or a map area (the drawn

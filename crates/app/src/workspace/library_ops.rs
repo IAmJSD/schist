@@ -1,8 +1,9 @@
 //! Bulk actions on gallery photos: move them to a folder (sidecars in
 //! tow — the versioning invariant is that edits live beside their
-//! photo), pack them into a ZIP, upscale them with the built-in
-//! waifu2x. Everything here runs on the background executor with the
-//! tray narrating.
+//! photo), pack them into a ZIP, revert them to their originals, and
+//! run the batch dialog's recipe (turn, upscale, adjust) over them as
+//! versioned edits or flat copies. Everything here runs on the
+//! background executor with the tray narrating.
 
 use super::library::backing_psd;
 use super::*;
@@ -259,33 +260,232 @@ impl Workspace {
         .detach();
     }
 
-    /// Double every photo with the built-in waifu2x, writing
-    /// `<name>@2x.png` beside each original. The model ships in the
-    /// binary, so this needs no download.
-    pub(super) fn upscale_photos(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    /// Open several photos as editor tabs, each backed by its sidecar
+    /// like a double-click would, up to [`DROP_OPEN_CAP`].
+    pub(super) fn open_photos_in_tabs(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let total = paths.len();
+        let opening = total.min(DROP_OPEN_CAP);
+        for path in paths.into_iter().take(DROP_OPEN_CAP) {
+            self.open_from_gallery(path, cx);
+        }
+        if total > opening {
+            self.status = format!(
+                "Opening the first {opening} of {total} photos — the gallery holds the rest"
+            )
+            .into();
+            cx.notify();
+        }
+    }
+
+    /// Ask for a folder, then move the photos there — the menu's route
+    /// to what dragging onto a folder row does.
+    pub(super) fn move_photos_prompt(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
-        let total = paths.len();
-        self.status = format!("Upscaling {total} photos\u{2026}").into();
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Move Here".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut dirs))) = rx.await else {
+                return;
+            };
+            let Some(dest) = dirs.pop() else { return };
+            this.update_in(cx, |ws, _window, cx| ws.move_photos_to(paths, dest, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Put photos back to their originals: each edit sidecar goes into
+    /// `versions/` (nothing is lost — it is one more version) and the
+    /// gallery shows the untouched photo again.
+    pub(super) fn revert_photos(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut reverted = 0usize;
+        for path in &paths {
+            let Some(psd) = backing_psd(path).filter(|p| p.exists()) else {
+                continue;
+            };
+            keep_sidecar_version(&psd);
+            match std::fs::remove_file(&psd) {
+                Ok(()) => {
+                    reverted += 1;
+                    self.library.thumbs.remove(path);
+                }
+                Err(err) => log::error!("revert failed for {}: {err:#}", path.display()),
+            }
+        }
+        self.status = match reverted {
+            0 => "Nothing to revert: none of those photos has an edit".into(),
+            1 => "Reverted 1 photo to its original — the edit is kept under versions/".into(),
+            n => format!(
+                "Reverted {n} photos to their originals — the edits are kept under versions/"
+            )
+            .into(),
+        };
+        self.library_rescan(cx);
+        cx.notify();
+    }
+
+    /// Right-click ▸ Process…: the batch dialog over these photos.
+    pub(super) fn open_batch_process(&mut self, photos: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if photos.is_empty() {
+            return;
+        }
+        let codec = self
+            .registry
+            .codecs()
+            .find(|c| c.can_export() && c.extensions().contains(&"jpg"))
+            .or_else(|| {
+                self.registry
+                    .codecs()
+                    .find(|c| c.can_export() && c.extensions().contains(&"png"))
+            })
+            .or_else(|| self.registry.codecs().find(|c| c.can_export()))
+            .map(|c| c.id());
+        let Some(codec) = codec else {
+            self.status = "No format here can save an image".into();
+            cx.notify();
+            return;
+        };
+        self.open_modal(
+            Modal::BatchProcess {
+                photos,
+                recipe: BatchRecipe::default(),
+                target: BatchTarget::Edit,
+                codec,
+                options: schist_plugin_api::ExportOptions {
+                    quality: 92,
+                    ..Default::default()
+                },
+            },
+            cx,
+        );
+    }
+
+    /// The dialog's Run: settle where the results go, then start.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_batch(
+        &mut self,
+        photos: Vec<PathBuf>,
+        recipe: BatchRecipe,
+        target: BatchTarget,
+        codec_id: &'static str,
+        options: schist_plugin_api::ExportOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if recipe.is_empty() {
+            self.status = "Nothing to do: pick a turn, an upscale or an adjustment first".into();
+            cx.notify();
+            return;
+        }
+        let codecs = self.registry.shared_codecs();
+        let flat = codecs.iter().find(|c| c.id() == codec_id).cloned();
+        match target {
+            BatchTarget::Edit => self.batch_photos(photos, recipe, BatchSink::Edit, cx),
+            BatchTarget::Beside => {
+                let Some(codec) = flat else { return };
+                self.batch_photos(
+                    photos,
+                    recipe,
+                    BatchSink::Copies {
+                        dir: None,
+                        codec,
+                        options,
+                    },
+                    cx,
+                )
+            }
+            BatchTarget::Folder => {
+                let Some(codec) = flat else { return };
+                let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: Some("Save Copies Here".into()),
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let Ok(Ok(Some(mut dirs))) = rx.await else {
+                        return;
+                    };
+                    let Some(dir) = dirs.pop() else { return };
+                    this.update_in(cx, |ws, _window, cx| {
+                        ws.batch_photos(
+                            photos,
+                            recipe,
+                            BatchSink::Copies {
+                                dir: Some(dir),
+                                codec,
+                                options,
+                            },
+                            cx,
+                        )
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Run the recipe over every photo, one at a time on the background
+    /// executor — a neural upscale is seconds per megapixel, and a camera
+    /// roll's worth of documents would not fit in memory together.
+    fn batch_photos(
+        &mut self,
+        photos: Vec<PathBuf>,
+        recipe: BatchRecipe,
+        sink: BatchSink,
+        cx: &mut Context<Self>,
+    ) {
+        if photos.is_empty() {
+            return;
+        }
+        let total = photos.len();
+        self.status = format!("Processing {total} photos\u{2026}").into();
         cx.notify();
         let codecs = self.registry.shared_codecs();
+        let recipe = Arc::new(recipe);
+        let sink = Arc::new(sink);
         cx.spawn(async move |this, cx| {
-            for (done, path) in paths.into_iter().enumerate() {
+            let mut failed = 0usize;
+            for (done, path) in photos.into_iter().enumerate() {
                 let job_codecs = codecs.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { upscale_photo(&job_codecs, &path) })
-                    .await;
+                let job_recipe = recipe.clone();
+                let job_sink = sink.clone();
+                let job_path = path.clone();
+                let result =
+                    cx.background_executor()
+                        .spawn(async move {
+                            process_photo(&job_codecs, &job_path, &job_recipe, &job_sink)
+                        })
+                        .await;
                 let keep = this.update(cx, |ws, cx| {
                     match result {
                         Ok(out) => {
-                            ws.status =
-                                format!("Upscaled {}/{total} — {}", done + 1, out.display()).into()
+                            // The grid renders from the sidecar once it
+                            // exists; the cached thumbnail is the old one.
+                            ws.library.thumbs.remove(&path);
+                            ws.status = format!(
+                                "Processed {}/{total} \u{2014} {}",
+                                done + 1,
+                                out.display()
+                            )
+                            .into();
                         }
                         Err(err) => {
-                            log::error!("upscale failed: {err:#}");
-                            ws.status = format!("Upscale failed: {err}").into();
+                            failed += 1;
+                            log::error!("batch failed for {}: {err:#}", path.display());
+                            ws.status = format!("Processing failed: {err}").into();
                         }
                     }
                     cx.notify();
@@ -295,11 +495,164 @@ impl Workspace {
                 }
             }
             this.update(cx, |ws, cx| {
+                if failed == 0 {
+                    ws.status = format!("Processed {total} photos").into();
+                } else {
+                    ws.status = format!(
+                        "Processed {} of {total} photos \u{2014} the log has the rest",
+                        total - failed
+                    )
+                    .into();
+                }
                 ws.library_rescan(cx);
+                cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+}
+
+/// Where a batch run writes.
+enum BatchSink {
+    /// Each photo's sidecar, versioned.
+    Edit,
+    /// Flat copies: beside the originals when `dir` is None.
+    Copies {
+        dir: Option<PathBuf>,
+        codec: Arc<dyn schist_plugin_api::CodecPlugin>,
+        options: schist_plugin_api::ExportOptions,
+    },
+}
+
+/// Copy a sidecar into its `versions/` directory, stamped, before it
+/// is replaced — every save of an edit is a version, automatically.
+pub(super) fn keep_sidecar_version(path: &Path) {
+    let Some(dir) = path.parent() else { return };
+    let _ = std::fs::create_dir_all(dir);
+    if !path.exists() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "backing.psd".into());
+    let versions = dir.join("versions");
+    let _ = std::fs::create_dir_all(&versions);
+    if let Err(err) = std::fs::copy(path, versions.join(format!("{stamp}-{name}"))) {
+        log::warn!("could not keep a version of {}: {err}", path.display());
+    }
+}
+
+/// A path that nothing occupies yet: `name.ext`, else `name-2.ext`,
+/// `name-3.ext`… Batch output never overwrites a file it did not
+/// just write.
+fn unclaimed(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| dir.join(format!("{stem}-{n}.{ext}")))
+        .find(|p| !p.exists())
+        .expect("the counter is unbounded")
+}
+
+/// Run the recipe over one photo and write the result where the sink
+/// says. Blocking and, with an upscale in the recipe, heavy.
+fn process_photo(
+    codecs: &[Arc<dyn schist_plugin_api::CodecPlugin>],
+    path: &Path,
+    recipe: &BatchRecipe,
+    sink: &BatchSink,
+) -> anyhow::Result<PathBuf> {
+    // The edit is the picture the gallery shows, so a recipe applies on
+    // top of it; the original stands in when there is none.
+    let sidecar = backing_psd(path).ok_or_else(|| anyhow::anyhow!("no file name"))?;
+    let source = if sidecar.exists() {
+        sidecar.clone()
+    } else {
+        path.to_path_buf()
+    };
+    let mut doc = super::decode_file(codecs, &source)?;
+    for op in recipe.transforms() {
+        super::image_ops::transform_document(&mut doc, op);
+    }
+    if let Some(id) = recipe.upscale {
+        let (w, h) = (doc.width * 2, doc.height * 2);
+        match schist_tools_transform::plan_neural(&doc, w, h, id) {
+            schist_tools_transform::Plan::NoModel => {
+                anyhow::bail!(
+                    "the {} model would not load",
+                    schist_tools_transform::Resample::Neural(id).display_name()
+                )
+            }
+            schist_tools_transform::Plan::Classical => {
+                schist_tools_transform::resize_image(&mut doc, w, h, schist_core::Filter::Bicubic)
+            }
+            schist_tools_transform::Plan::Neural(plan) => {
+                let up = plan.run();
+                schist_tools_transform::apply_upscaled(&mut doc, up);
+            }
+        }
+    }
+    for params in &recipe.adjustments {
+        let kind = params.kind();
+        let mut layer = schist_core::Layer::new_raster(kind.display_name());
+        layer.kind = schist_core::LayerKind::Adjustment(schist_core::AdjustmentData {
+            kind,
+            raw: Vec::new(),
+            params_json: serde_json::to_string(params).ok(),
+        });
+        doc.push_layer(layer);
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "photo".into());
+    match sink {
+        BatchSink::Edit => {
+            let psd = codecs
+                .iter()
+                .find(|c| c.can_export() && c.extensions().contains(&"psd"))
+                .ok_or_else(|| anyhow::anyhow!("no PSD writer is loaded"))?;
+            if let Some(name) = path.file_name() {
+                doc.title = name.to_string_lossy().into_owned();
+            }
+            let bytes = psd.export(&doc)?;
+            keep_sidecar_version(&sidecar);
+            if let Some(dir) = sidecar.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            // A sibling temp file and a rename, so an interrupted run
+            // cannot leave a truncated edit behind.
+            let tmp = sidecar.with_extension("schist-tmp");
+            std::fs::write(&tmp, bytes)?;
+            std::fs::rename(&tmp, &sidecar)?;
+            Ok(sidecar)
+        }
+        BatchSink::Copies {
+            dir,
+            codec,
+            options,
+        } => {
+            let img = flatten(&doc)?;
+            let (bytes, _, _) = flat_export(img, codec, options, 1.0)?;
+            let ext = codec.extensions().first().copied().unwrap_or("png");
+            let out = match dir {
+                Some(dir) => unclaimed(dir, &stem, ext),
+                None => {
+                    let beside = path.parent().unwrap_or(Path::new("."));
+                    unclaimed(beside, &format!("{stem}-edit"), ext)
+                }
+            };
+            std::fs::write(&out, bytes)?;
+            Ok(out)
+        }
     }
 }
 
@@ -622,11 +975,30 @@ fn render_photo_as(
 ) -> anyhow::Result<(u32, u32)> {
     let source = zip_plan(path).source;
     let doc = super::decode_file(codecs, &source)?;
+    let img = flatten(&doc)?;
+    let (bytes, w, h) = flat_export(img, codec, options, scale)?;
+    std::fs::write(out, bytes)?;
+    Ok((w, h))
+}
+
+/// Flatten a document to 8-bit RGBA.
+fn flatten(doc: &schist_core::Document) -> anyhow::Result<image::RgbaImage> {
     let rect = doc.canvas_rect();
     let (w, h) = (rect.width() as u32, rect.height() as u32);
-    let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
-    let img: image::RgbaImage = image::ImageBuffer::from_raw(w, h, rgba)
-        .ok_or_else(|| anyhow::anyhow!("composited buffer had the wrong size"))?;
+    let rgba = schist_compositor::composite_region_rgba8(doc, rect);
+    image::ImageBuffer::from_raw(w, h, rgba)
+        .ok_or_else(|| anyhow::anyhow!("composited buffer had the wrong size"))
+}
+
+/// Shrink a flat picture by `scale` and encode it through `codec`.
+/// Returns the bytes and the size they hold.
+fn flat_export(
+    img: image::RgbaImage,
+    codec: &Arc<dyn schist_plugin_api::CodecPlugin>,
+    options: &schist_plugin_api::ExportOptions,
+    scale: f32,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let (w, h) = img.dimensions();
     let (img, w, h) = if scale < 0.999 {
         let nw = ((w as f32 * scale).round() as u32).max(1);
         let nh = ((h as f32 * scale).round() as u32).max(1);
@@ -650,46 +1022,7 @@ fn render_photo_as(
     );
     flat.push_layer(layer);
     let bytes = codec.export_with(&flat, options)?;
-    std::fs::write(out, bytes)?;
-    Ok((w, h))
-}
-
-/// Decode a photo whole, run the built-in waifu2x over it, and write
-/// the double-size PNG beside the original. Blocking and heavy.
-fn upscale_photo(
-    codecs: &[Arc<dyn schist_plugin_api::CodecPlugin>],
-    path: &Path,
-) -> anyhow::Result<PathBuf> {
-    let model = schist_neural::get("waifu2x-photo")
-        .ok_or_else(|| anyhow::anyhow!("the waifu2x model failed to load"))?;
-    let doc = super::decode_file(codecs, path)?;
-    let rect = doc.canvas_rect();
-    let (w, h) = (rect.width() as usize, rect.height() as usize);
-    let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
-    let mut rgb = Vec::with_capacity(w * h * 3);
-    for px in rgba.as_chunks::<4>().0 {
-        rgb.extend([
-            px[0] as f32 / 255.0,
-            px[1] as f32 / 255.0,
-            px[2] as f32 / 255.0,
-        ]);
-    }
-    let out = schist_neural::run_scaled(&model, &rgb, w, h)
-        .ok_or_else(|| anyhow::anyhow!("the model declined the image"))?;
-    let (ow, oh) = (w * 2, h * 2);
-    let mut pixels = Vec::with_capacity(ow * oh * 3);
-    for v in &out {
-        pixels.push((v.clamp(0.0, 1.0) * 255.0).round() as u8);
-    }
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "photo".into());
-    let target = path.with_file_name(format!("{stem}@2x.png"));
-    let img: image::RgbImage = image::ImageBuffer::from_raw(ow as u32, oh as u32, pixels)
-        .ok_or_else(|| anyhow::anyhow!("upscaled buffer had the wrong size"))?;
-    img.save(&target)?;
-    Ok(target)
+    Ok((bytes, w, h))
 }
 
 #[cfg(test)]
@@ -919,6 +1252,118 @@ mod tests {
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (w, h));
         assert!(decoded.pixels().all(|p| p.0 == [255, 0, 255, 255]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 6x2 document, magenta on the left half and black on the right,
+    /// as a PSD: the batch test's "photo" and, once written, its edit.
+    fn half_magenta(dir: &std::path::Path, name: &str) -> PathBuf {
+        use schist_color::Depth;
+        use schist_core::{Document, IntRect, Layer};
+        let (w, h) = (6u32, 2u32);
+        let mut doc = Document::new("photo", w, h, Depth::Eight);
+        let mut layer = Layer::new_raster("photo");
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if i % w < 3 {
+                    [255u8, 0, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        schist_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            IntRect::from_size(w, h),
+            &rgba,
+        );
+        doc.push_layer(layer);
+        let path = dir.join(name);
+        std::fs::write(&path, schist_codec_psd::write_psd(&doc).unwrap()).unwrap();
+        path
+    }
+
+    /// The batch run, end to end: a turn and an adjustment land in the
+    /// sidecar as a rotated canvas plus a live adjustment layer, the
+    /// original is untouched, a second run versions the first edit, and
+    /// the copies target writes a flat file beside the photo without
+    /// overwriting anything.
+    #[test]
+    fn batch_process_writes_versioned_edits_and_flat_copies() {
+        let dir = std::env::temp_dir().join(format!("schist-batch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = half_magenta(&dir, "photo.psd");
+        let original_bytes = std::fs::read(&photo).unwrap();
+        let codecs: Vec<Arc<dyn schist_plugin_api::CodecPlugin>> = vec![Arc::new(crate::PsdCodec)];
+
+        let recipe = BatchRecipe {
+            rotate: Some(CanvasTransform::Cw90),
+            adjustments: vec![schist_adjustments::Params::Invert],
+            ..Default::default()
+        };
+        let out = process_photo(&codecs, &photo, &recipe, &BatchSink::Edit).unwrap();
+        assert_eq!(out, dir.join(".schist/photo.psd.psd"));
+        assert_eq!(std::fs::read(&photo).unwrap(), original_bytes);
+        let edit = schist_codec_psd::read_psd(&std::fs::read(&out).unwrap()).unwrap();
+        let rect = edit.canvas_rect();
+        // Turned on its side, with the adjustment kept live on top.
+        assert_eq!((rect.width(), rect.height()), (2, 6));
+        assert!(edit.tree.iter().any(|l| matches!(
+            &l.kind,
+            schist_core::LayerKind::Adjustment(a) if a.kind == schist_core::AdjustmentKind::Invert
+        )));
+        // Clockwise, the magenta left half becomes the top half; inverted
+        // it is green, and the black bottom half is white.
+        let pixels = schist_compositor::composite_region_rgba8(&edit, rect);
+        let px = pixels.as_chunks::<4>().0;
+        assert!(px[..6].iter().all(|p| p[0] < 16 && p[1] > 240 && p[2] < 16));
+        assert!(px[6..]
+            .iter()
+            .all(|p| p[0] > 240 && p[1] > 240 && p[2] > 240));
+
+        // Running again works on the edit and keeps the first as a version.
+        let again = BatchRecipe {
+            flip_v: true,
+            ..Default::default()
+        };
+        process_photo(&codecs, &photo, &again, &BatchSink::Edit).unwrap();
+        let versions: Vec<_> = std::fs::read_dir(dir.join(".schist/versions"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(versions.len(), 1);
+        assert!(versions[0].ends_with("-photo.psd.psd"));
+        let edit = schist_codec_psd::read_psd(&std::fs::read(&out).unwrap()).unwrap();
+        let rect = edit.canvas_rect();
+        assert_eq!((rect.width(), rect.height()), (2, 6));
+        let pixels = schist_compositor::composite_region_rgba8(&edit, rect);
+        let px = pixels.as_chunks::<4>().0;
+        // Flipped: white on top now, green below.
+        assert!(px[..6]
+            .iter()
+            .all(|p| p[0] > 240 && p[1] > 240 && p[2] > 240));
+        assert!(px[6..].iter().all(|p| p[0] < 16 && p[1] > 240 && p[2] < 16));
+
+        // Copies go beside the photo, from the edit, and never overwrite.
+        let sink = BatchSink::Copies {
+            dir: None,
+            codec: codecs[0].clone(),
+            options: schist_plugin_api::ExportOptions::default(),
+        };
+        let first = process_photo(&codecs, &photo, &again, &sink).unwrap();
+        assert_eq!(first, dir.join("photo-edit.psd"));
+        let second = process_photo(&codecs, &photo, &again, &sink).unwrap();
+        assert_eq!(second, dir.join("photo-edit-2.psd"));
+        let flat = schist_codec_psd::read_psd(&std::fs::read(&first).unwrap()).unwrap();
+        assert_eq!(flat.tree.layers.len(), 1);
+        let rect = flat.canvas_rect();
+        let pixels = schist_compositor::composite_region_rgba8(&flat, rect);
+        let px = pixels.as_chunks::<4>().0;
+        // The edit was white-over-green; flipped once more it is green
+        // on top again.
+        assert!(px[..6].iter().all(|p| p[0] < 16 && p[1] > 240 && p[2] < 16));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

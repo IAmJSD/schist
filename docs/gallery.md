@@ -86,9 +86,9 @@ sidebar **folder**, which moves the files (each photo's `.schist`
 sidecar and versions travel with it), or to a **bucket**. Buckets are
 Picasa's tray with names: persisted baskets photos are dragged into,
 viewed by clicking their sidebar row, and acted on as a group from
-their right-click menu — **Save all as ZIP…** and **Upscale all ×2**
-(the built-in waifu2x, `<name>@2x.png` beside each original, no
-download needed).
+their right-click menu — **Select all**, **Save all as ZIP…**,
+**Process all…** (the batch dialog below) and **Move all to
+folder…**.
 
 A drag that leaves for another window leaves Schist altogether: the
 moment the pointer is over someone else's window, the internal drag is
@@ -123,14 +123,37 @@ photo at a time, so a whole bucket never has to fit in memory.
 
 "+ New bucket" asks for a name (an empty one falls back to "Bucket N")
 and the bucket is born holding the current selection. Photos have
-their own right-click menu too: Edit, Reveal in file manager, Add to
-bucket, Upscale — acting on the whole selection when the click lands
-in it — and one of two ways out: several selected photos offer **Save
+their own right-click menu too: Edit (several selected open as tabs,
+capped at a hundred), Reveal in file manager, Add to bucket, Process…,
+Move to folder…, and Revert to original for edited photos (the edit
+sidecar goes into `versions/` rather than being lost) — acting on the
+whole selection when the click lands in it — and one of two ways out: several selected photos offer **Save
 N as ZIP…**, a single one offers **Save image as…**, a dialog with the
 format (every codec that exports), quality where the format takes
 one, and a scale slider from 10% to 100% that says what it comes to
 in pixels. It saves the photo's edit when it has one, flattened, and
 never touches the original.
+
+**Process…** is the batch dialog, for a selection or a whole bucket:
+one recipe run over every photo. It has a turn (rotate by a quarter or
+half turn, flip either way), a size (the two built-in waifu2x ×2
+upscalers, no download needed), and a colour section where any number
+of adjustments stack up — Brightness/Contrast, Levels, Exposure,
+Vibrance, Hue/Saturation, Color Balance, Black & White, Photo Filter,
+Channel Mixer, Invert, Posterize, Threshold — each with the same
+sliders its adjustment layer has in the editor. The recipe applies in
+that order: turn, enlarge, then the adjustments go on top as
+adjustment layers. Where it lands is the last choice. **Gallery
+edits** writes each photo's `.schist` sidecar exactly as ⌘S would —
+the adjustments stay live layers you can retune in the editor, an
+existing edit is what the recipe applies to, and the previous sidecar
+is kept under `versions/` — so the originals are never touched and
+the grid shows the results. **Copies beside the originals** flattens
+each result to `<name>-edit.<ext>` in the photo's folder (never
+overwriting: a second run gets `-2`), and **Copies in a folder…** asks
+where; both take a format and, where it applies, a quality. Photos are
+processed one at a time on the background executor with the tray
+counting, since an upscale is seconds per megapixel.
 
 ## The AI panel
 
