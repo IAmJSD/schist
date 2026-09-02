@@ -562,23 +562,10 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
                 .text_color(gpui::rgb(pal().text))
                 .child("Welcome to Schist"),
         )
-        .child(
-            // Held to a readable measure: centred prose across a wide
-            // window is a headline, not a sentence.
-            div()
-                .max_w(px(520.0))
-                .text_center()
-                .text_size(px(12.0))
-                .text_color(gpui::rgb(pal().text_dim))
-                .child(
-                    "An image editor with a photo gallery attached. \
-                     Start with a library of photos, or go straight to a document.",
-                ),
-        )
         .child(div().h(px(12.0)))
         .child(caption(
             "Watch folders of photos, or import from a camera. Files stay \
-             where they are; edits are versioned beside them.",
+             where they are; edits are versioned beside them:",
         ))
         .child(
             div()
@@ -608,7 +595,7 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
                 .my_2()
                 .bg(gpui::rgb(pal().cell_edge)),
         )
-        .child(caption("Or open an image to edit, and come back later."))
+        .child(caption("Or open an image to edit:"))
         .child(
             div()
                 .flex()
