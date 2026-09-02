@@ -242,6 +242,14 @@ edited".
 
 ## Search
 
+Until the models are installed the box is not a box at all but a
+single button, **Enable photo search…**, since one model without the
+other searches nothing. It opens a dialog naming both, their sizes and
+their licences, with the plain fact that they run locally and no photo
+leaves the machine; agreeing starts the download, which reports itself
+as a progress bar in the top strip, and the search box takes its place
+the moment both have landed.
+
 The box in the gallery's top strip searches photos by what is *in*
 them: type "dog on a beach" and the grid becomes one strip ranked by
 similarity. It works on embeddings — every photo mapped into the same

@@ -77,7 +77,7 @@ mod viewport;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_view::{
     bucket_name_dialog, camera_import_dialog, camera_import_failed_dialog,
-    camera_import_options_dialog, map_filter_dialog,
+    camera_import_options_dialog, map_filter_dialog, search_models_dialog,
 };
 
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
@@ -976,6 +976,9 @@ pub enum Modal {
     /// The gallery's map filter: the navigable map, a drawn boundary,
     /// and Apply — the grid then shows only photos taken inside it.
     MapFilter,
+    /// The gallery's offer to install the two Search models, with the
+    /// licences to agree to first. Desktop-only, like the gallery.
+    SearchModels,
     /// Create or edit a gallery bucket: its name, and optionally a
     /// smart rule — a search query and/or a map area (the drawn
     /// boundary lives on the shared map state, not here) that keeps

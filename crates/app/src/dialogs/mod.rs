@@ -207,6 +207,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         #[cfg(target_arch = "wasm32")]
         Modal::MapFilter => return None,
         #[cfg(not(target_arch = "wasm32"))]
+        Modal::SearchModels => crate::workspace::search_models_dialog(cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::SearchModels => return None,
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::BucketName {
             name,
             query,

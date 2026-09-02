@@ -470,6 +470,7 @@ impl Workspace {
             | Modal::CameraImportFailed { .. }
             | Modal::NewFilePicker
             | Modal::MapFilter
+            | Modal::SearchModels
             // Handled above, before the numeric parse, like the other
             // text fields.
             | Modal::BucketName { .. }

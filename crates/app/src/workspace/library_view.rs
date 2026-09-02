@@ -296,7 +296,7 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
                         .child("\u{2715}"),
                 )
         }))
-        .child(search_box(ws, cx))
+        .child(search_slot(ws, cx))
         .child(div().flex_grow())
         .child(gallery_button(
             "Settings…",
@@ -333,19 +333,96 @@ fn top_strip(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
 /// keyboard while active (the key context flips to text entry, so
 /// letters stop being tool shortcuts). Without the two Search models it
 /// is a doorway to Manage Models instead of a lie.
+/// What sits in the middle of the top strip: the search box once photo
+/// search can run, and before that the offer to install it — a single
+/// button for both models, which becomes a progress bar while they
+/// download and gives way to the box when they land.
+fn search_slot(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::AnyElement {
+    if schist_neural::embed::ready() {
+        return search_box(ws, cx).into_any_element();
+    }
+    if search_models_downloading(ws) {
+        return search_download_progress(ws).into_any_element();
+    }
+    gallery_button(
+        "Enable photo search\u{2026}",
+        false,
+        |ws, _w, cx| ws.open_modal(Modal::SearchModels, cx),
+        cx,
+    )
+    .into_any_element()
+}
+
+/// The download of the two Search models, as a bar in the top strip.
+fn search_download_progress(ws: &Workspace) -> impl IntoElement {
+    let mut got = 0u64;
+    let mut total = 0u64;
+    for id in SEARCH_MODELS {
+        let Some(spec) = schist_neural::spec(id) else {
+            continue;
+        };
+        total += spec.bytes as u64;
+        // A model already installed is wholly got; one downloading has
+        // its counter; one not started yet has nothing.
+        got += if schist_neural::installed(id) {
+            spec.bytes as u64
+        } else {
+            ws.model_downloads
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.got.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0)
+        };
+    }
+    let mb = |bytes: u64| bytes as f64 / (1 << 20) as f64;
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        (got as f64 / total as f64).clamp(0.0, 1.0) as f32
+    };
+    div()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap_1()
+        .w(px(260.0))
+        .h(px(24.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child(SharedString::from(format!(
+                    "Downloading photo search\u{2026} {:.0} of {:.0} MB",
+                    mb(got),
+                    mb(total)
+                ))),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(4.0))
+                .rounded_sm()
+                .bg(gpui::rgb(pal().chrome_edge))
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(ratio))
+                        .rounded_sm()
+                        .bg(gpui::rgb(pal().select_border)),
+                ),
+        )
+}
+
+/// The box itself, which only exists once the models behind it do —
+/// `search_slot` is what decides that.
 fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let ready = schist_neural::embed::ready();
     let active = ws.library.search_active;
     let text = ws.library.search.clone();
     let (indexed, total) = ws.library.index_progress();
-    let placeholder: SharedString = if !ready {
-        // Places work off EXIF alone; content search needs the two
-        // Search models (Gallery ▸ Manage Models…).
-        "Search places… (models add content search)".into()
-    } else if indexed < total {
+    let placeholder: SharedString = if indexed < total {
         format!("Search ({indexed}/{total} indexed)").into()
     } else {
-        "Search photos…".into()
+        "Search photos\u{2026}".into()
     };
     let cursor = ws.library.search_cursor.min(text.len());
     let caret_on = ws.caret_on();
@@ -2062,6 +2139,97 @@ pub(crate) fn map_filter_dialog(
             cx,
         ));
     crate::ui::modal_frame("Map Filter", 580.0, body, actions)
+}
+
+/// The two models photo search runs on, offered together: neither is
+/// any use without the other, so the gallery asks once.
+pub(crate) const SEARCH_MODELS: [&str; 2] = ["embed-image", "embed-text"];
+
+/// Whether either Search model is being fetched right now.
+fn search_models_downloading(ws: &Workspace) -> bool {
+    ws.model_downloads
+        .iter()
+        .any(|d| SEARCH_MODELS.contains(&d.id))
+}
+
+/// The licences behind photo search, and the button that accepts them.
+/// One dialog for both models: they are downloaded as a pair.
+pub(crate) fn search_models_dialog(cx: &mut Context<Workspace>) -> impl IntoElement {
+    let specs: Vec<&'static schist_neural::ModelSpec> = SEARCH_MODELS
+        .iter()
+        .filter_map(|id| schist_neural::spec(id))
+        .collect();
+    let total: usize = specs.iter().map(|s| s.bytes).sum();
+    let mut body = div().flex().flex_col().gap_2().w(px(460.0)).child(
+        div()
+            .text_size(px(12.0))
+            .text_color(gpui::rgb(crate::ui::palette().text))
+            .child(
+                "Searching photos by what is in them needs two models, \
+                     downloaded once and kept on this machine. They run \
+                     locally: no photo ever leaves it.",
+            ),
+    );
+    for spec in &specs {
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(div().text_size(px(12.0)).child(SharedString::from(format!(
+                    "{} \u{b7} {:.0} MB",
+                    spec.name,
+                    spec.bytes as f64 / (1 << 20) as f64
+                ))))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                        .child(SharedString::from(spec.license)),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                        .child(SharedString::from(spec.note)),
+                ),
+        );
+    }
+    body = body.child(
+        div()
+            .pt_1()
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(crate::ui::palette().text_dim))
+            .child(SharedString::from(format!(
+                "Downloading installs both ({:.0} MB in all) and accepts their \
+                 licences. They can be removed again under Gallery \u{25b8} \
+                 Manage Models\u{2026}",
+                total as f64 / (1 << 20) as f64
+            ))),
+    );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .child(crate::ui::button(
+            "Cancel",
+            false,
+            |ws, _w, cx| ws.close_modal(cx),
+            cx,
+        ))
+        .child(crate::ui::button(
+            "Agree and Download",
+            true,
+            |ws, _w, cx| {
+                for id in SEARCH_MODELS {
+                    if !schist_neural::installed(id) {
+                        ws.download_model(id, cx);
+                    }
+                }
+                ws.close_modal(cx);
+            },
+            cx,
+        ));
+    crate::ui::modal_frame("Photo Search", 500.0, body, actions)
 }
 
 /// One text field of the bucket dialog: the layer-name pattern, with a
