@@ -1845,7 +1845,12 @@ fn boundary_editor(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl Into
         .flex_col()
         .gap_2()
         .child(chips)
-        .child(map_element(ws, cx))
+        .child(map_element(
+            ws,
+            super::library_geo::MapSlot::Gallery,
+            300.0,
+            cx,
+        ))
         .child(tools)
 }
 
@@ -1964,14 +1969,25 @@ fn map_tool_button(
 
 /// The navigable map itself: tiles painted like the document canvas —
 /// one quad each, laid out in prepaint — with the boundary over them.
-fn map_element(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+/// The map, for whichever slot: tiles, panning, zoom, the drawn
+/// boundary, and the markers. Shared by the gallery's import and map
+/// filter and the editor's info panel.
+pub(crate) fn map_element(
+    ws: &mut Workspace,
+    slot: super::library_geo::MapSlot,
+    height: f32,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
     let entity = cx.entity();
-    let draw_mode = ws.library.map.draw_mode;
+    let draw_mode = ws.map_mut(slot).draw_mode;
     div()
-        .id("gallery-map")
+        .id(match slot {
+            super::library_geo::MapSlot::Gallery => "gallery-map",
+            super::library_geo::MapSlot::Info => "info-map",
+        })
         .relative()
         .w_full()
-        .h(px(300.0))
+        .h(px(height))
         .flex_none()
         .overflow_hidden()
         .rounded_sm()
@@ -1986,33 +2002,34 @@ fn map_element(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             MouseButton::Left,
             cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
                 let pos = (f32::from(ev.position.x), f32::from(ev.position.y));
-                let drawing = ev.modifiers.shift || ws.library.map.draw_mode;
-                ws.library.map.begin_drag(pos, drawing);
+                let map = ws.map_mut(slot);
+                let drawing = ev.modifiers.shift || map.draw_mode;
+                map.begin_drag(pos, drawing);
                 cx.notify();
             }),
         )
-        .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _w, cx| {
+        .on_mouse_move(cx.listener(move |ws, ev: &MouseMoveEvent, _w, cx| {
             if ev.pressed_button == Some(MouseButton::Left) {
                 let pos = (f32::from(ev.position.x), f32::from(ev.position.y));
-                if ws.library.map.drag_to(pos) {
+                if ws.map_mut(slot).drag_to(pos) {
                     cx.notify();
                 }
             }
         }))
         .on_mouse_up(
             MouseButton::Left,
-            cx.listener(|ws, _ev: &MouseUpEvent, _w, cx| {
-                ws.library.map.end_drag();
+            cx.listener(move |ws, _ev: &MouseUpEvent, _w, cx| {
+                ws.map_mut(slot).end_drag();
                 cx.notify();
             }),
         )
-        .on_scroll_wheel(cx.listener(|ws, ev: &gpui::ScrollWheelEvent, _w, cx| {
+        .on_scroll_wheel(cx.listener(move |ws, ev: &gpui::ScrollWheelEvent, _w, cx| {
             let dy = match ev.delta {
                 gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
                 gpui::ScrollDelta::Lines(l) => l.y * 40.0,
             };
             let pos = (f32::from(ev.position.x), f32::from(ev.position.y));
-            if ws.library.map.wheel(dy, pos) {
+            if ws.map_mut(slot).wheel(dy, pos) {
                 cx.notify();
             }
         }))
@@ -2020,9 +2037,9 @@ fn map_element(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             canvas(
                 move |bounds, _window, cx| {
                     entity.update(cx, |ws, cx| {
-                        let paint = ws.prepare_map_paint(bounds);
+                        let paint = ws.prepare_map_paint(slot, bounds);
                         // Whatever this frame queued starts fetching.
-                        ws.kick_map_tiles(cx);
+                        ws.kick_map_tiles(slot, cx);
                         paint
                     })
                 },
@@ -2042,6 +2059,23 @@ fn map_element(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                             gpui::rgb(0x2A66B0),
                             gpui::BorderStyle::Solid,
                         ));
+                    }
+                    // The blip: a white-ringed red dot, the way every
+                    // map marks "you are here".
+                    for at in paint.markers {
+                        let dot = |r: f32, color: gpui::Rgba| {
+                            let mut quad = gpui::fill(
+                                gpui::Bounds {
+                                    origin: gpui::point(at.x - px(r), at.y - px(r)),
+                                    size: gpui::size(px(r * 2.0), px(r * 2.0)),
+                                },
+                                color,
+                            );
+                            quad.corner_radii = gpui::Corners::all(px(r));
+                            quad
+                        };
+                        window.paint_quad(dot(9.0, gpui::rgba(0xFFFFFFE0)));
+                        window.paint_quad(dot(6.5, gpui::rgb(0xE0362B)));
                     }
                 },
             )

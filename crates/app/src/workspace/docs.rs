@@ -493,6 +493,47 @@ impl Workspace {
         }
     }
 
+    /// Read the open document's EXIF once per document, and reset the
+    /// side panel's tab choice with it. The file is the original photo
+    /// for a gallery edit (the sidecar is a PSD, which carries none)
+    /// and the document's own file otherwise; an untitled document has
+    /// nothing to read.
+    pub fn refresh_exif(&mut self) {
+        let Some(doc) = self.doc.as_ref() else {
+            if self.exif.is_some() {
+                self.exif = None;
+                self.side_tab = None;
+            }
+            return;
+        };
+        if self.exif.as_ref().is_some_and(|(id, _)| *id == doc.id) {
+            return;
+        }
+        let id = doc.id;
+        #[cfg(not(target_arch = "wasm32"))]
+        let source = self
+            .library
+            .edit_backings
+            .get(&id)
+            .cloned()
+            .or_else(|| doc.path.clone());
+        #[cfg(target_arch = "wasm32")]
+        let source = doc.path.clone();
+        let summary = source.as_deref().and_then(schist_gallery::exif_summary);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The info map opens on the spot, at street scale.
+            let map = &mut self.info_map;
+            map.markers.clear();
+            if let Some((lat, lon)) = summary.as_ref().and_then(|s| s.gps) {
+                map.markers.push((lat, lon));
+                map.look_at(lat, lon, 15);
+            }
+        }
+        self.exif = Some((id, summary));
+        self.side_tab = None;
+    }
+
     /// True when the extension belongs to a single-layer image format.
     /// Layered formats never make sense as one new layer.
     pub(super) fn is_flat_image(&self, path: &std::path::Path) -> bool {

@@ -25,6 +25,7 @@ mod ai;
 mod color;
 mod context;
 mod history;
+mod info;
 mod layers;
 mod menu_bar;
 mod menus;
@@ -39,6 +40,7 @@ mod toolbar;
 #[cfg(not(target_arch = "wasm32"))]
 pub use ai::*;
 use color::*;
+use info::*;
 
 /// The sidebar renders nothing on the web, where the AI subsystem (which
 /// drives locally installed agent CLIs) is compiled out.
@@ -121,7 +123,7 @@ pub fn side_panels(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl Into
         .border_l_1()
         .border_color(gpui::rgb(palette().panel_edge))
         .child(navigator(ws, cx))
-        .child(color_panel(ws, cx))
+        .child(top_panel(ws, cx))
         .child(layers_panel(ws, cx))
         .children(notes_panel(ws, cx))
         .child(history_panel(ws, cx))

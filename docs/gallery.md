@@ -221,6 +221,22 @@ and embeddings persist in caches beside the thumbnails, so a fully
 indexed library never reloads the models at all — not for reopening,
 not for smart buckets, only for a photo or a query it has never seen.
 
+## The Info tab
+
+When the open file carries EXIF, the editor's side panel grows a tab
+row above the colour panel — **Info** first and selected by default,
+**Color** beside it — and Info shows what the camera wrote: make and
+model, the lens, the exposure on one line (shutter, aperture, ISO,
+focal length with its 35 mm equivalent), bias, flash and white balance
+and metering, when it was taken, the pixel size in megapixels, the
+software, and, when the photo has a position, where — the nearest
+gazetteer city with the coordinates and altitude, and the same
+navigable map the gallery uses opened on the spot at street scale
+with a red-and-white blip on it. For a gallery edit the EXIF is read
+from the original photo (the sidecar is a PSD and has none). A file
+with no EXIF gets the colour panel alone, exactly as before. The tab
+choice lasts until the document changes.
+
 ## The content filter
 
 Preferences ▸ Gallery ▸ "Hide photos the content filter flags as

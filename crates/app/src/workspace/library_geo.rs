@@ -178,6 +178,8 @@ pub struct MapState {
     pub selection_name: Option<String>,
     /// Clicking draws instead of panning (Shift-drag always draws).
     pub draw_mode: bool,
+    /// Points marked on the map: the blip where a photo was taken.
+    pub markers: Vec<(f64, f64)>,
     pub drag: Option<MapDrag>,
     /// Accumulated wheel travel toward the next zoom step.
     scroll_debt: f32,
@@ -200,6 +202,7 @@ impl Default for MapState {
             selection: None,
             selection_name: None,
             draw_mode: false,
+            markers: Vec::new(),
             drag: None,
             scroll_debt: 0.0,
             origin: (0.0, 0.0),
@@ -330,6 +333,14 @@ impl MapState {
     }
 
     /// Jump to a preset: frame its box and make it the boundary.
+    /// Centre on a point at a zoom: what the info panel does for the
+    /// spot a photo was taken. Street scale is 15; a city is 11.
+    pub fn look_at(&mut self, lat: f64, lon: f64, zoom: i32) {
+        self.center = (lat, lon);
+        self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.scroll_debt = 0.0;
+    }
+
     pub fn jump_to(&mut self, name: &str, bounds: GeoBounds) {
         self.center = bounds.center();
         self.zoom = zoom_for(&bounds);
@@ -350,14 +361,32 @@ pub struct MapPaint {
     pub missing: Vec<Bounds<Pixels>>,
     /// The boundary in window space, if one is set.
     pub selection: Option<Bounds<Pixels>>,
+    /// The markers in window space.
+    pub markers: Vec<Point<Pixels>>,
+}
+
+/// Which map a call is about: the gallery's (import and map filter)
+/// or the editor's info panel, which shows where a photo was taken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MapSlot {
+    Gallery,
+    Info,
 }
 
 impl Workspace {
     /// Lay the visible tiles out for painting, queueing fetches for the
     /// ones that are not here yet. Runs in the canvas prepaint, exactly
     /// as the document viewport does.
-    pub(super) fn prepare_map_paint(&mut self, bounds: Bounds<Pixels>) -> MapPaint {
-        let map = &mut self.library.map;
+    /// The map a slot names.
+    pub(super) fn map_mut(&mut self, slot: MapSlot) -> &mut MapState {
+        match slot {
+            MapSlot::Gallery => &mut self.library.map,
+            MapSlot::Info => &mut self.info_map,
+        }
+    }
+
+    pub(super) fn prepare_map_paint(&mut self, slot: MapSlot, bounds: Bounds<Pixels>) -> MapPaint {
+        let map = self.map_mut(slot);
         map.origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         map.size = (
             f32::from(bounds.size.width).max(1.0),
@@ -374,6 +403,7 @@ impl Workspace {
             tiles: Vec::new(),
             missing: Vec::new(),
             selection: None,
+            markers: Vec::new(),
         };
         let zoom = map.zoom;
         for ty in top.max(0)..=bottom.min(n - 1) {
@@ -404,12 +434,16 @@ impl Workspace {
                 size: size(px((x1 - x0).max(1.0)), px((y1 - y0).max(1.0))),
             });
         }
+        for &(lat, lon) in &map.markers {
+            let (x, y) = map.window_at(lat, lon);
+            paint.markers.push(point(px(x), px(y)));
+        }
         paint
     }
 
     /// Start the tile loader if fetches are queued and none is running.
-    pub(super) fn kick_map_tiles(&mut self, cx: &mut Context<Self>) {
-        let map = &mut self.library.map;
+    pub(super) fn kick_map_tiles(&mut self, slot: MapSlot, cx: &mut Context<Self>) {
+        let map = self.map_mut(slot);
         // The disk cache makes refetching cheap; dumping the lot beats
         // bookkeeping an LRU for a dialog.
         if map.tiles.len() > TILE_KEEP && map.drag.is_none() {
@@ -421,7 +455,7 @@ impl Workspace {
         map.ticker = true;
         cx.spawn(async move |this, cx| loop {
             let batch: Vec<(i32, i64, i64)> = match this.update(cx, |ws, _| {
-                let queue = &mut ws.library.map.queue;
+                let queue = &mut ws.map_mut(slot).queue;
                 let n = queue.len().min(TILE_BATCH);
                 queue.drain(..n).collect()
             }) {
@@ -429,7 +463,8 @@ impl Workspace {
                 Err(_) => return,
             };
             if batch.is_empty() {
-                this.update(cx, |ws, _| ws.library.map.ticker = false).ok();
+                this.update(cx, |ws, _| ws.map_mut(slot).ticker = false)
+                    .ok();
                 return;
             }
             let results = cx
@@ -456,7 +491,7 @@ impl Workspace {
                         Some(img) => MapTile::Ready(img),
                         None => MapTile::Failed,
                     };
-                    ws.library.map.tiles.insert(key, state);
+                    ws.map_mut(slot).tiles.insert(key, state);
                 }
                 cx.notify();
             });

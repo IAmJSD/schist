@@ -147,3 +147,122 @@ mod tests {
         assert_eq!(ymd_from_unix(0), (1970, 1, 1));
     }
 }
+
+/// What a photo's EXIF says that a person would want to read: the
+/// camera, the exposure, when and where. Every field optional — a PNG
+/// from a screenshot has none of it, a phone photo has all of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExifSummary {
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub lens: Option<String>,
+    pub software: Option<String>,
+    /// "1/250 s", "2 s".
+    pub exposure: Option<String>,
+    /// "f/1.8".
+    pub aperture: Option<String>,
+    pub iso: Option<u32>,
+    /// "26 mm", with the 35 mm equivalent when the file gives one.
+    pub focal_length: Option<String>,
+    /// Sortable "YYYY-MM-DD HH:MM:SS".
+    pub taken: Option<String>,
+    pub gps: Option<(f64, f64)>,
+    pub altitude_m: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub orientation: Option<u32>,
+    pub flash: Option<bool>,
+    pub white_balance: Option<String>,
+    pub exposure_bias: Option<String>,
+    pub metering: Option<String>,
+}
+
+impl ExifSummary {
+    /// Whether there is anything at all worth a panel.
+    pub fn is_empty(&self) -> bool {
+        *self == ExifSummary::default()
+    }
+
+    /// "Apple iPhone 15 Pro" — make and model, without the make said
+    /// twice when the model already starts with it.
+    pub fn camera(&self) -> Option<String> {
+        match (&self.make, &self.model) {
+            (Some(make), Some(model)) if model.to_lowercase().starts_with(&make.to_lowercase()) => {
+                Some(model.clone())
+            }
+            (Some(make), Some(model)) => Some(format!("{make} {model}")),
+            (None, Some(model)) => Some(model.clone()),
+            (Some(make), None) => Some(make.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Read the summary out of a file, `None` when it carries no EXIF.
+pub fn exif_summary(path: &Path) -> Option<ExifSummary> {
+    let data = exif_of(path)?;
+    let text = |tag: exif::Tag| -> Option<String> {
+        let field = data.get_field(tag, exif::In::PRIMARY)?;
+        let s = field.display_value().with_unit(&data).to_string();
+        let s = s.trim().trim_matches('"').trim().to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    let rational = |tag: exif::Tag| -> Option<f64> {
+        let field = data.get_field(tag, exif::In::PRIMARY)?;
+        match &field.value {
+            exif::Value::Rational(v) => v.first().map(|r| r.to_f64()),
+            exif::Value::SRational(v) => v.first().map(|r| r.to_f64()),
+            _ => None,
+        }
+    };
+    let uint = |tag: exif::Tag| -> Option<u32> {
+        data.get_field(tag, exif::In::PRIMARY)?.value.get_uint(0)
+    };
+    let exposure = rational(exif::Tag::ExposureTime).map(|t| {
+        if t > 0.0 && t < 1.0 {
+            format!("1/{} s", (1.0 / t).round() as u64)
+        } else {
+            format!("{t} s")
+        }
+    });
+    let aperture = rational(exif::Tag::FNumber).map(|f| format!("f/{f:.1}"));
+    let focal_length =
+        rational(exif::Tag::FocalLength).map(|mm| match uint(exif::Tag::FocalLengthIn35mmFilm) {
+            Some(eq) if (eq as f64 - mm).abs() > 0.5 => format!("{mm:.0} mm ({eq} mm equiv.)"),
+            _ => format!("{mm:.0} mm"),
+        });
+    let exposure_bias = rational(exif::Tag::ExposureBiasValue)
+        .filter(|b| b.abs() > 0.01)
+        .map(|b| format!("{b:+.1} EV"));
+    let flash = uint(exif::Tag::Flash).map(|f| f & 1 == 1);
+    let gps = gps_from(&data);
+    let altitude_m = rational(exif::Tag::GPSAltitude).map(|alt| {
+        // Ref 1 = below sea level.
+        if uint(exif::Tag::GPSAltitudeRef) == Some(1) {
+            -alt
+        } else {
+            alt
+        }
+    });
+    let summary = ExifSummary {
+        make: text(exif::Tag::Make),
+        model: text(exif::Tag::Model),
+        lens: text(exif::Tag::LensModel),
+        software: text(exif::Tag::Software),
+        exposure,
+        aperture,
+        iso: uint(exif::Tag::PhotographicSensitivity),
+        focal_length,
+        taken: datetime_from(&data),
+        gps,
+        altitude_m,
+        width: uint(exif::Tag::PixelXDimension).or_else(|| uint(exif::Tag::ImageWidth)),
+        height: uint(exif::Tag::PixelYDimension).or_else(|| uint(exif::Tag::ImageLength)),
+        orientation: uint(exif::Tag::Orientation),
+        flash,
+        white_balance: text(exif::Tag::WhiteBalance),
+        metering: text(exif::Tag::MeteringMode),
+        exposure_bias,
+    };
+    (!summary.is_empty()).then_some(summary)
+}

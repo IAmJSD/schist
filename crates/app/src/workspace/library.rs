@@ -196,7 +196,7 @@ pub struct Library {
     pub(super) pending_backing: Option<(PathBuf, PathBuf)>,
     /// Original image path per open document that came from the gallery,
     /// so a save can refresh that image's thumbnail.
-    edit_backings: FxHashMap<schist_core::DocumentId, PathBuf>,
+    pub(super) edit_backings: FxHashMap<schist_core::DocumentId, PathBuf>,
     /// The import dialog's navigable map: view, tiles, and the drawn
     /// boundary (kept here so it survives closing the dialog).
     pub map: library_geo::MapState,

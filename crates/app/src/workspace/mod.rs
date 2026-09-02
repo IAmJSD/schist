@@ -77,6 +77,10 @@ mod view_options;
 mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_geo::MapSlot;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_view::map_element;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_view::{
     bucket_name_dialog, camera_import_dialog, camera_import_failed_dialog,
     camera_import_options_dialog, map_filter_dialog, search_models_dialog,
@@ -305,6 +309,18 @@ pub struct Workspace {
     /// swatch, and closing it puts that dialog back exactly as it was.
     modal_stack: Vec<Modal>,
     /// Numeric field currently accepting digits, and its edit buffer.
+    /// The editor's info panel: which of its tabs is showing, `None`
+    /// until the user picks one — the default is Info when the open
+    /// file has EXIF, Color otherwise. Session state; it resets when
+    /// the document changes.
+    pub side_tab: Option<SideTab>,
+    /// The open document's EXIF, read once per document (the file is
+    /// the original photo for a gallery edit, the file itself
+    /// otherwise). `None` inside means the file has none.
+    pub exif: Option<(schist_core::DocumentId, Option<schist_gallery::ExifSummary>)>,
+    /// The info panel's map, showing where the photo was taken.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub info_map: library_geo::MapState,
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
     /// The caret's byte position in `field_buffer` (always on a char
@@ -1047,6 +1063,14 @@ pub enum ImportSource {
     Device { id: u64, name: String },
 }
 
+/// The editor's side panel has two things in its top slot; this is
+/// which one is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SideTab {
+    Info,
+    Color,
+}
+
 /// A boundary in degrees: what the import map's rectangle means, and
 /// what the EXIF-position filter tests. Lives in `schist-gallery` (its
 /// persistence and geometry are shared with the headless server) and is
@@ -1209,6 +1233,10 @@ impl Workspace {
             modal: None,
             pending_quit: false,
             modal_stack: Vec::new(),
+            side_tab: None,
+            exif: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            info_map: library_geo::MapState::default(),
             focused_field: None,
             field_buffer: String::new(),
             field_cursor: 0,
