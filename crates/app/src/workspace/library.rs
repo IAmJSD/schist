@@ -2944,6 +2944,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Grow or shrink the cells by a wheel's travel: a fifth of a
+    /// pixel of cell per pixel of wheel, so a mouse notch (three lines
+    /// on X11) is a visible 24 px step — seven notches span the range —
+    /// and a trackpad flick a smooth glide. Up is bigger, as on the map.
+    pub fn nudge_gallery_thumb_px(&mut self, wheel_dy: f32) {
+        let value = self.library.thumb_px + wheel_dy * 0.2;
+        self.set_gallery_thumb_px(value);
+    }
+
     /// Set the tray slider's cell size.
     pub fn set_gallery_thumb_px(&mut self, value: f32) {
         self.library.thumb_px = value.clamp(80.0, 240.0);

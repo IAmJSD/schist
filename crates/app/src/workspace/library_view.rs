@@ -1034,16 +1034,45 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         // every cell's own bounds are reported in.
         .child(
             canvas(
-                move |bounds, _window, cx| {
-                    grid_entity.update(cx, |ws, _| {
-                        let offset = ws.library.grid_scroll.offset();
-                        ws.library.grid_bounds = gpui::Bounds {
-                            origin: bounds.origin - offset,
-                            size: bounds.size,
-                        };
+                {
+                    let grid_entity = grid_entity.clone();
+                    move |bounds, _window, cx| {
+                        grid_entity.update(cx, |ws, _| {
+                            let offset = ws.library.grid_scroll.offset();
+                            ws.library.grid_bounds = gpui::Bounds {
+                                origin: bounds.origin - offset,
+                                size: bounds.size,
+                            };
+                        });
+                    }
+                },
+                move |_, _, window, _| {
+                    // ⌘-wheel (Ctrl elsewhere) over the grid resizes the
+                    // thumbnails, as ⌘-wheel zooms a canvas. It has to
+                    // win over the container's own scrolling, which runs
+                    // in the bubble phase — so take it in capture and
+                    // stop it there.
+                    let grid_entity = grid_entity.clone();
+                    window.on_mouse_event(move |ev: &gpui::ScrollWheelEvent, phase, _w, cx| {
+                        if phase != gpui::DispatchPhase::Capture
+                            || !(ev.modifiers.platform || ev.modifiers.control)
+                        {
+                            return;
+                        }
+                        let dy = wheel_pixels(ev);
+                        let took = grid_entity.update(cx, |ws, cx| {
+                            if !ws.library.grid_bounds.contains(&ev.position) {
+                                return false;
+                            }
+                            ws.nudge_gallery_thumb_px(dy);
+                            cx.notify();
+                            true
+                        });
+                        if took {
+                            cx.stop_propagation();
+                        }
                     });
                 },
-                |_, _, _, _| {},
             )
             .absolute()
             .size_full(),
@@ -1972,6 +2001,15 @@ fn map_tool_button(
 /// The map, for whichever slot: tiles, panning, zoom, the drawn
 /// boundary, and the markers. Shared by the gallery's import and map
 /// filter and the editor's info panel.
+/// A wheel event's vertical travel in pixels: a mouse wheel reports
+/// lines, a trackpad pixels, and both should mean the same thing.
+fn wheel_pixels(ev: &gpui::ScrollWheelEvent) -> f32 {
+    match ev.delta {
+        gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
+        gpui::ScrollDelta::Lines(l) => l.y * 40.0,
+    }
+}
+
 pub(crate) fn map_element(
     ws: &mut Workspace,
     slot: super::library_geo::MapSlot,
@@ -2024,10 +2062,7 @@ pub(crate) fn map_element(
             }),
         )
         .on_scroll_wheel(cx.listener(move |ws, ev: &gpui::ScrollWheelEvent, _w, cx| {
-            let dy = match ev.delta {
-                gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
-                gpui::ScrollDelta::Lines(l) => l.y * 40.0,
-            };
+            let dy = wheel_pixels(ev);
             let pos = (f32::from(ev.position.x), f32::from(ev.position.y));
             if ws.map_mut(slot).wheel(dy, pos) {
                 cx.notify();

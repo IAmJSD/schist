@@ -70,7 +70,10 @@ chip. Applying with nothing drawn turns it off; the boundary is shared
 with the import dialog, so what you import by is one Apply from what
 you browse by.
 
-The grid has a real scrollbar on its right edge — the thumb sized and
+⌘-wheel over the grid (Ctrl-wheel on Linux and Windows) resizes the
+thumbnails, up for bigger, the same gesture that zooms a canvas; the
+tray's slider shows where it landed. The grid has a real scrollbar on
+its right edge — the thumb sized and
 placed from the scroll extents, draggable, with track clicks jumping
 straight there — because a five-thousand-photo grid without one gives
 no sense of where you are.
