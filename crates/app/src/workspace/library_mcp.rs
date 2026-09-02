@@ -52,10 +52,13 @@ pub(super) fn tool_defs() -> Vec<Value> {
             "gallery_search",
             "Search photos by what is in them (\"dog on a beach\"), by where they were taken \
              (\"taken in nyc\"), or both, ranked best first. The gallery's own search box \
-             shows the same results. Content search needs the Search models installed; \
-             places work from EXIF alone.",
+             shows the same results. While a bucket is being viewed (or one is named here, \
+             which views it), the bucket filters first and the query ranks its photos. \
+             Content search needs the Search models installed; places work from EXIF alone.",
             json!({
                 "query": {"type": "string"},
+                "bucket": {"type": "string", "description": "Search within this bucket (by \
+                           name) only; the gallery switches to viewing it."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
             }),
             &["query"],
@@ -219,7 +222,22 @@ impl Workspace {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(20)
                     .clamp(1, 200) as usize;
+                if let Some(name) = str_arg(args, "bucket") {
+                    let index = self
+                        .library
+                        .buckets
+                        .iter()
+                        .position(|b| b.name.eq_ignore_ascii_case(name))
+                        .ok_or_else(|| anyhow::anyhow!("no bucket named {name:?}"))?;
+                    self.library.bucket_filter = Some(index);
+                    self.library.folder_filter = None;
+                }
                 let ranked = self.gallery_search_now(&query, cx);
+                let bucket = self
+                    .library
+                    .search_scoped
+                    .and_then(|i| self.library.buckets.get(i))
+                    .map(|b| b.name.clone());
                 let all: Vec<&Entry> = self
                     .library
                     .sections
@@ -238,6 +256,7 @@ impl Workspace {
                     .collect();
                 Ok(text(json!({
                     "query": query,
+                    "bucket": bucket,
                     "place": self.library.search_place,
                     "matches": ranked.len(),
                     "photos": rows,
