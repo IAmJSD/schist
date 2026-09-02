@@ -6,13 +6,11 @@
 //! threaded through gpui's event loop, and the button the user is
 //! still holding is the same one X reports in the pointer's mask.
 //!
-//! Wayland sessions get nothing here — a client cannot start a drag
-//! without a data-device serial from the compositor, which gpui does
-//! not hand out — so this is X11 (and XWayland) only. And it must know
-//! when it is *not* the backend: a Wayland desktop still exports
-//! `DISPLAY` for XWayland, so these connections would succeed, find
-//! none of our windows there, and call every pixel foreign — ending
-//! the in-app drag the moment it started.
+//! X11 (and XWayland) only; native Wayland has its own module. This
+//! one must know when it is *not* the backend: a Wayland desktop still
+//! exports `DISPLAY` for XWayland, so these connections would succeed,
+//! find none of our windows there, and call every pixel foreign —
+//! ending the in-app drag the moment it started.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

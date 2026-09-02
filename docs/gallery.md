@@ -83,18 +83,22 @@ download needed).
 A drag that leaves for another window leaves Schist altogether: the
 moment the pointer is over someone else's window, the internal drag is
 handed to the platform's own drag-and-drop — a pasteboard session on
-macOS, OLE on Windows, XDND on X11 — so dropping on Finder, Explorer
+macOS, OLE on Windows, XDND on X11, a data source on Wayland — so
+dropping on Finder, Explorer
 or a Linux file manager **copies** the photos there. Copy, always and
 only: the gallery watches folders in place, and a drag that quietly
 moved the originals out of a library would be a poor surprise. The
 trigger is "over a foreign window" rather than "outside our
 rectangle", since a file-manager window sitting on top of the gallery
-is both. Wayland sessions do not get this — a client cannot begin a
-drag there without a serial the toolkit never hands out — so it is
-X11 and XWayland on Linux, and under native Wayland the hand-off
-stays switched off entirely (a Wayland desktop still exports
-`DISPLAY` for XWayland, where none of our windows exist and every
-pixel would look foreign).
+is both — except on Wayland, where no client may ask whose window is
+under the pointer; there the trigger is the pointer leaving our own
+rectangle, which the held button keeps reporting past the edges, and
+a file-manager window laid *over* the gallery is the one case it
+cannot see. Wayland is also the one platform where the toolkit has to
+start the drag itself (only the client that saw the button press
+holds the serial a compositor demands), so that lives in our gpui
+fork: a `wl_data_source` offering `text/uri-list`, copy only, and the
+compositor delivers it wherever the pointer lands.
 
 An archive holds what the gallery shows: an edited photo goes in as
 its edit, never the untouched original, and each entry keeps the

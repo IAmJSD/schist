@@ -111,36 +111,6 @@ impl Workspace {
             // (⌘K preferences, ⌘⇧G back to the editor, ⌘O open) to
             // dispatch, exactly as the canvas and start screen keep it.
             .track_focus(&self.focus)
-            // A drag that leaves the window is a drag onto the desktop:
-            // hand it to the platform's own drag-and-drop, which is
-            // what Finder, Explorer and the Linux file managers listen
-            // to. gpui's drag is internal and would simply be lost out
-            // there, so it ends here.
-            .on_mouse_move(cx.listener(|ws, ev: &gpui::MouseMoveEvent, window, cx| {
-                let Some(paths) = ws.library.dragging.clone() else {
-                    return;
-                };
-                if ev.pressed_button != Some(MouseButton::Left) {
-                    // The button came up somewhere we never heard about.
-                    ws.library.dragging = None;
-                    return;
-                }
-                if !crate::drag_out::over_foreign_window(window) {
-                    return;
-                }
-                ws.library.dragging = None;
-                if crate::drag_out::start(&paths, window) {
-                    // The platform owns the drag now; two ghosts
-                    // following one pointer is one too many.
-                    cx.stop_active_drag(window);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|ws, _e: &gpui::MouseUpEvent, _w, _cx| {
-                    ws.library.dragging = None;
-                }),
-            )
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
                 // A dialog over the gallery owns the keyboard, exactly
                 // as the editor body arranges for its own dialogs:
@@ -167,7 +137,8 @@ impl Workspace {
             .child(top_strip(self, cx))
             .child(body)
             .child(tray(self, cx))
-            .children(context_menu);
+            .children(context_menu)
+            .child(drag_out_listener(cx));
         // Each cell's paint-time probe is what queues its thumbnail;
         // mark the frame so those probes stamp as "current" (the age
         // eviction refuses), and make sure a loader is running for
@@ -182,6 +153,56 @@ impl Workspace {
         self.gallery_reveal_tick(cx);
         root
     }
+}
+
+/// A drag that leaves for another window is a drag onto the desktop:
+/// hand it to the platform's own drag-and-drop, which is what Finder,
+/// Explorer and the file managers listen to. gpui's drag is internal
+/// and would simply be lost out there, so it ends here.
+///
+/// Registered on the window rather than on an element: element mouse
+/// listeners only fire while the pointer hovers their hitbox, and the
+/// whole point is the pointer having left — under a held button every
+/// platform keeps reporting its position past our edges, and this is
+/// the only kind of listener that still hears those reports.
+fn drag_out_listener(cx: &mut Context<Workspace>) -> impl IntoElement {
+    let entity = cx.entity();
+    canvas(
+        |_, _, _| {},
+        move |_bounds, _state, window, _cx| {
+            let moves = entity.clone();
+            window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Bubble {
+                    return;
+                }
+                let paths = moves.update(cx, |ws, _| {
+                    if ev.pressed_button != Some(MouseButton::Left) {
+                        // The button came up somewhere we never heard about.
+                        ws.library.dragging = None;
+                    }
+                    ws.library.dragging.clone()
+                });
+                let Some(paths) = paths else { return };
+                if !crate::drag_out::over_foreign_window(window) {
+                    return;
+                }
+                moves.update(cx, |ws, _| ws.library.dragging = None);
+                if crate::drag_out::start(&paths, window) {
+                    // The platform owns the drag now; two ghosts
+                    // following one pointer is one too many.
+                    cx.stop_active_drag(window);
+                }
+            });
+            let ups = entity.clone();
+            window.on_mouse_event(move |_ev: &gpui::MouseUpEvent, phase, _window, cx| {
+                if phase == gpui::DispatchPhase::Bubble {
+                    ups.update(cx, |ws, _| ws.library.dragging = None);
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 fn gallery_button(

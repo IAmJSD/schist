@@ -3,8 +3,9 @@
 //! gpui's drag-and-drop is internal: a drag that leaves the window has
 //! nowhere to go. Dropping a photo on Finder, Explorer or a Linux file
 //! manager is the platform's own protocol — a pasteboard session on
-//! macOS, OLE on Windows, XDND on X11 — so each gets its own small
-//! implementation here, behind one call.
+//! macOS, OLE on Windows, XDND on X11, a data source through our gpui
+//! fork on Wayland — so each gets its own small implementation here,
+//! behind one call.
 //!
 //! Every platform advertises *copy* and only copy: the gallery watches
 //! folders in place, and a drag that quietly moved someone's photos
@@ -14,6 +15,8 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
+mod wayland;
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
 mod win;
 #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
@@ -39,7 +42,13 @@ pub fn over_foreign_window(window: &gpui::Window) -> bool {
     }
     #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
     {
-        x11::over_foreign_window(window)
+        // gpui's own guess, so the two never disagree about which
+        // display server is drawing the window.
+        if gpui::guess_compositor() == "Wayland" {
+            wayland::over_foreign_window(window)
+        } else {
+            x11::over_foreign_window(window)
+        }
     }
     #[cfg(not(any(
         target_os = "macos",
@@ -74,7 +83,11 @@ pub fn start(paths: &[PathBuf], window: &gpui::Window) -> bool {
     }
     #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
     {
-        x11::start(&paths, window)
+        if gpui::guess_compositor() == "Wayland" {
+            wayland::start(&paths, window)
+        } else {
+            x11::start(&paths, window)
+        }
     }
     #[cfg(not(any(
         target_os = "macos",

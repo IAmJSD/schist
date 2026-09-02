@@ -2823,7 +2823,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75e6ffb88c81200d38e68e3d17e5f075b5ecbf96#75e6ffb88c81200d38e68e3d17e5f075b5ecbf96"
+source = "git+https://github.com/IAmJSD/gpui?rev=73c9da683944ce7f4f2fdde767cded8aaf783276#73c9da683944ce7f4f2fdde767cded8aaf783276"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -2959,7 +2959,7 @@ dependencies = [
 [[package]]
 name = "gpui_http_client"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75e6ffb88c81200d38e68e3d17e5f075b5ecbf96#75e6ffb88c81200d38e68e3d17e5f075b5ecbf96"
+source = "git+https://github.com/IAmJSD/gpui?rev=73c9da683944ce7f4f2fdde767cded8aaf783276#73c9da683944ce7f4f2fdde767cded8aaf783276"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3041,7 +3041,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.2.2"
-source = "git+https://github.com/IAmJSD/gpui?rev=75e6ffb88c81200d38e68e3d17e5f075b5ecbf96#75e6ffb88c81200d38e68e3d17e5f075b5ecbf96"
+source = "git+https://github.com/IAmJSD/gpui?rev=73c9da683944ce7f4f2fdde767cded8aaf783276#73c9da683944ce7f4f2fdde767cded8aaf783276"
 dependencies = [
  "anyhow",
  "async-fs",
