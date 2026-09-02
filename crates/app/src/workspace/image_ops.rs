@@ -260,46 +260,7 @@ impl Workspace {
     /// Image ▸ Image Rotation, and the flip entries under Edit ▸ Transform.
     pub fn transform_canvas(&mut self, op: CanvasTransform, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.as_mut() else { return };
-        let (w, h) = (doc.width, doc.height);
-        let swaps = matches!(op, CanvasTransform::Cw90 | CanvasTransform::Ccw90);
-        let (nw, nh) = if swaps { (h, w) } else { (w, h) };
-        // Read every layer's pixels first: the mapping reads from the old
-        // geometry while writing the new one.
-        let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
-        let sources: Vec<(schist_core::LayerId, schist_core::TileMap)> = ids
-            .iter()
-            .filter_map(|id| {
-                doc.tree
-                    .find(*id)
-                    .and_then(|l| l.as_raster())
-                    .map(|r| (*id, r.tiles.clone()))
-            })
-            .collect();
-        let mut edit = doc.begin_edit(op.title());
-        edit.set_canvas_size(nw, nh);
-        for (id, src) in &sources {
-            for coord in TileCoord::covering(&IntRect::from_size(nw, nh)) {
-                let trect = coord.rect();
-                let Some(tile) = edit.writable_tile(*id, coord) else {
-                    break;
-                };
-                for y in trect.top..trect.bottom {
-                    for x in trect.left..trect.right {
-                        // Where this destination pixel came from.
-                        let (sx, sy) = match op {
-                            CanvasTransform::Cw90 => (y, nw as i32 - 1 - x),
-                            CanvasTransform::Ccw90 => (nh as i32 - 1 - y, x),
-                            CanvasTransform::Rotate180 => (w as i32 - 1 - x, h as i32 - 1 - y),
-                            CanvasTransform::FlipH => (w as i32 - 1 - x, y),
-                            CanvasTransform::FlipV => (x, h as i32 - 1 - y),
-                        };
-                        let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
-                        tile.set(ix, src.pixel(sx, sy));
-                    }
-                }
-            }
-        }
-        edit.commit();
+        transform_document(doc, op);
         self.status = op.title().into();
         self.fit_to_view();
         self.after_change(cx);
@@ -400,4 +361,50 @@ impl Workspace {
         self.status = mode.display_name().into();
         self.after_change(cx);
     }
+}
+
+/// Turn or flip a whole document, every raster layer with it, as one
+/// history entry. The gallery's batch run uses this on documents that
+/// never reach the editor.
+pub(super) fn transform_document(doc: &mut Document, op: CanvasTransform) {
+    let (w, h) = (doc.width, doc.height);
+    let swaps = matches!(op, CanvasTransform::Cw90 | CanvasTransform::Ccw90);
+    let (nw, nh) = if swaps { (h, w) } else { (w, h) };
+    // Read every layer's pixels first: the mapping reads from the old
+    // geometry while writing the new one.
+    let ids: Vec<schist_core::LayerId> = doc.tree.iter().map(|l| l.id).collect();
+    let sources: Vec<(schist_core::LayerId, schist_core::TileMap)> = ids
+        .iter()
+        .filter_map(|id| {
+            doc.tree
+                .find(*id)
+                .and_then(|l| l.as_raster())
+                .map(|r| (*id, r.tiles.clone()))
+        })
+        .collect();
+    let mut edit = doc.begin_edit(op.title());
+    edit.set_canvas_size(nw, nh);
+    for (id, src) in &sources {
+        for coord in TileCoord::covering(&IntRect::from_size(nw, nh)) {
+            let trect = coord.rect();
+            let Some(tile) = edit.writable_tile(*id, coord) else {
+                break;
+            };
+            for y in trect.top..trect.bottom {
+                for x in trect.left..trect.right {
+                    // Where this destination pixel came from.
+                    let (sx, sy) = match op {
+                        CanvasTransform::Cw90 => (y, nw as i32 - 1 - x),
+                        CanvasTransform::Ccw90 => (nh as i32 - 1 - y, x),
+                        CanvasTransform::Rotate180 => (w as i32 - 1 - x, h as i32 - 1 - y),
+                        CanvasTransform::FlipH => (w as i32 - 1 - x, y),
+                        CanvasTransform::FlipV => (x, h as i32 - 1 - y),
+                    };
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    tile.set(ix, src.pixel(sx, sy));
+                }
+            }
+        }
+    }
+    edit.commit();
 }

@@ -14,6 +14,8 @@ use schist_core::Filter;
 use schist_tools_transform::Resample;
 
 mod adjust;
+#[cfg(not(target_arch = "wasm32"))]
+mod batch;
 mod close;
 mod edit;
 mod export;
@@ -34,6 +36,8 @@ mod size;
 mod update;
 
 use adjust::*;
+#[cfg(not(target_arch = "wasm32"))]
+use batch::*;
 use close::*;
 use edit::*;
 use export::*;
@@ -228,6 +232,18 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         }
         #[cfg(target_arch = "wasm32")]
         Modal::SaveImageAs { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::BatchProcess {
+            photos,
+            recipe,
+            target,
+            codec,
+            options,
+        } => {
+            batch_dialog(ws, &state, photos, recipe, target, codec, options, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::BatchProcess { .. } => return None,
         #[cfg(target_arch = "wasm32")]
         Modal::SearchModels => return None,
         #[cfg(not(target_arch = "wasm32"))]

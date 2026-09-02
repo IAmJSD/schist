@@ -180,7 +180,7 @@ pub struct Library {
     /// Thumbnail states, tagged with the mtime they were built from: a
     /// file that changed underneath — a photo still landing off a
     /// camera when its first decode ran, an edit — loads again.
-    thumbs: FxHashMap<PathBuf, (u64, Thumb)>,
+    pub(super) thumbs: FxHashMap<PathBuf, (u64, Thumb)>,
     /// The frame each thumbnail was last visible on — what decides who
     /// goes when the map is over budget. Cells near the viewport
     /// re-stamp every frame, and eviction refuses anything stamped
@@ -193,7 +193,7 @@ pub struct Library {
     ticker: bool,
     /// A gallery open waiting for its decode: (path being loaded, the
     /// original image it is an edit of). Consumed by `finish_load`.
-    pub(super) pending_backing: Option<(PathBuf, PathBuf)>,
+    pub(super) pending_backing: Vec<(PathBuf, PathBuf)>,
     /// Original image path per open document that came from the gallery,
     /// so a save can refresh that image's thumbnail.
     pub(super) edit_backings: FxHashMap<schist_core::DocumentId, PathBuf>,
@@ -380,7 +380,7 @@ impl Library {
             thumb_frame: 0,
             queue: Vec::new(),
             ticker: false,
-            pending_backing: None,
+            pending_backing: Vec::new(),
             edit_backings: FxHashMap::default(),
             map: library_geo::MapState::default(),
             flagged: FxHashMap::default(),
@@ -2802,25 +2802,26 @@ impl Workspace {
             return;
         };
         let target = if psd.exists() { psd } else { original.clone() };
-        self.library.pending_backing = Some((target.clone(), original));
+        self.library
+            .pending_backing
+            .push((target.clone(), original));
         self.load_file(target, cx);
     }
 
     /// Bookkeeping when a load finishes: adopt a gallery edit's backing
     /// arrangement, or record an ordinary open in the recents.
     pub(super) fn finish_load_bookkeeping(&mut self, loaded: &Path) {
+        // Loads finish in any order, so each claims its own entry.
         let claimed = self
             .library
             .pending_backing
-            .as_ref()
-            .is_some_and(|(target, _)| target == loaded);
-        if !claimed {
+            .iter()
+            .position(|(target, _)| target == loaded);
+        let Some(claimed) = claimed else {
             self.note_recent(loaded);
             return;
-        }
-        let Some((_, original)) = self.library.pending_backing.take() else {
-            return;
         };
+        let (_, original) = self.library.pending_backing.remove(claimed);
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
@@ -2846,24 +2847,7 @@ impl Workspace {
         if !backed {
             return;
         }
-        let Some(dir) = path.parent() else { return };
-        let _ = std::fs::create_dir_all(dir);
-        if !path.exists() {
-            return;
-        }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "backing.psd".into());
-        let versions = dir.join("versions");
-        let _ = std::fs::create_dir_all(&versions);
-        if let Err(err) = std::fs::copy(path, versions.join(format!("{stamp}-{name}"))) {
-            log::warn!("could not keep a version of {}: {err}", path.display());
-        }
+        super::library_ops::keep_sidecar_version(path);
     }
 
     /// After a save landed on a gallery sidecar: drop the photo's cached
