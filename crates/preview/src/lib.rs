@@ -18,7 +18,9 @@
 //!    result is scaled down in bands, so peak memory follows the
 //!    requested size rather than the document's.
 //!
-//! Everything else (PNG, JPEG, WebP, TIFF) decodes and scales directly.
+//! A camera raw is the same shape: the JPEG the camera embedded, else
+//! the developed sensor data. Everything else (PNG, JPEG, WebP, TIFF)
+//! decodes and scales directly.
 
 use anyhow::{bail, Context as _, Result};
 use image::RgbaImage;
@@ -113,6 +115,13 @@ pub fn render(bytes: &[u8], max_edge: u32) -> Result<Preview> {
             let doc = schist_codecs_common::HeifCodec.import(bytes)?;
             return composite_preview(doc, max_edge);
         }
+        // Camera raws likewise, and before the generic decoder for a
+        // second reason: most of them are TIFF containers, which it
+        // would open and hand back the thumbnail IFD of.
+        #[cfg(not(target_arch = "wasm32"))]
+        if schist_codecs_common::RawCodec.probe(bytes) {
+            return raw_preview(bytes, max_edge);
+        }
         let img = image::load_from_memory(bytes)
             .context("no Schist codec and no image decoder recognized this file")?
             .into_rgba8();
@@ -188,6 +197,44 @@ fn affinity_preview(bytes: &[u8], max_edge: u32) -> Result<Preview> {
         Err(e) => match embedded {
             Some(img) => {
                 log::info!("affinity: import failed ({e}); falling back to the embedded thumbnail");
+                Ok(Preview::from_image(fit(img, max_edge), Source::Embedded))
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Camera raw: the camera's own JPEG, else the developed sensor data.
+///
+/// The embedded preview is the camera's render of the same capture and
+/// is often full size, while developing the raw takes seconds, so the
+/// preview wins whenever it is big enough for the size asked for — and
+/// stands in when development fails, the way the PSD thumbnail does.
+/// A missing LibRaw is reported as it is, so a caller can tell it from
+/// a broken file.
+#[cfg(not(target_arch = "wasm32"))]
+fn raw_preview(bytes: &[u8], max_edge: u32) -> Result<Preview> {
+    let embedded = match schist_codecs_common::raw::embedded_preview(bytes) {
+        Ok(img) => img,
+        Err(e) if schist_codecs_common::raw::is_missing_library_error(&e) => return Err(e),
+        Err(e) => {
+            log::info!("raw: embedded preview did not decode: {e}");
+            None
+        }
+    };
+    if let Some(img) = &embedded {
+        if img.width().max(img.height()) >= max_edge {
+            return Ok(Preview::from_image(
+                fit(img.clone(), max_edge),
+                Source::Embedded,
+            ));
+        }
+    }
+    match schist_codecs_common::RawCodec.import(bytes) {
+        Ok(doc) => composite_preview(doc, max_edge),
+        Err(e) => match embedded {
+            Some(img) => {
+                log::info!("raw: developing failed ({e}); falling back to the embedded preview");
                 Ok(Preview::from_image(fit(img, max_edge), Source::Embedded))
             }
             None => Err(e),

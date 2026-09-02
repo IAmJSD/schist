@@ -33,7 +33,7 @@ plugins/                first-party features, each optional at compile time
 ├── tools-vector        shapes, pen
 ├── tools-type          text layers
 ├── filters-core        blur, sharpen, noise
-├── codecs-common       PNG/JPEG/WebP/TIFF/HEIC
+├── codecs-common       PNG/JPEG/WebP/TIFF/HEIC/camera raw
 └── commands-core       menu commands and their keybindings
 ```
 

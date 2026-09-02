@@ -1,14 +1,16 @@
 //! Common raster format codecs (PNG, JPEG, WebP, TIFF) via the `image`
-//! crate, HEIC/HEIF via the system's libheif, wrapped as
-//! `CodecPlugin`s, plus layered Affinity import/export. For the simple
-//! formats, import produces a single "Background" layer and export
-//! flattens through the compositor.
+//! crate, HEIC/HEIF via the system's libheif, camera raws via the
+//! system's LibRaw, wrapped as `CodecPlugin`s, plus layered Affinity
+//! import/export. For the simple formats, import produces a single
+//! "Background" layer and export flattens through the compositor.
 
 pub use affinity::AffinityCodec;
 use anyhow::Context as _;
 #[cfg(not(target_arch = "wasm32"))]
 pub use heif::HeifCodec;
 use image::ImageFormat;
+#[cfg(not(target_arch = "wasm32"))]
+pub use raw::RawCodec;
 use schist_color::Depth;
 use schist_core::{blit_rgba8, blit_rgba_f32, Document, IntRect, Layer};
 use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
@@ -16,6 +18,8 @@ use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegist
 mod affinity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod heif;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod raw;
 
 /// A single-"Background"-layer document from decoded RGBA8 pixels.
 fn flat_document(
@@ -148,7 +152,7 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
 }
 
 /// `flat_document` for a source that carries more than 8 bits a channel.
-fn deep_document(
+pub(crate) fn deep_document(
     title: &str,
     w: u32,
     h: u32,
@@ -395,6 +399,12 @@ impl PluginManifest for CommonCodecsPlugin {
         registry.register_codec(Box::new(PngCodec));
         registry.register_codec(Box::new(JpegCodec));
         registry.register_codec(Box::new(WebPCodec));
+        // Before TIFF: most raws (NEF, ARW, PEF, DNG...) are TIFF
+        // containers, and probing goes in registration order. The raw
+        // probe only claims files holding sensor data, so an ordinary
+        // TIFF still falls through to its own codec.
+        #[cfg(not(target_arch = "wasm32"))]
+        registry.register_codec(Box::new(RawCodec));
         registry.register_codec(Box::new(TiffCodec));
         #[cfg(not(target_arch = "wasm32"))]
         registry.register_codec(Box::new(HeifCodec));
@@ -572,6 +582,25 @@ mod tests {
             "codec.heif"
         );
         assert_eq!(reg.codec_for(b"", Some("heic")).unwrap().id(), "codec.heif");
+        // A raw in a TIFF container goes to the raw codec, not TIFF's;
+        // a plain TIFF header with nothing behind it still goes to TIFF.
+        assert_eq!(
+            reg.codec_for(&raw::tests::synthetic_dng(8, 8), None)
+                .unwrap()
+                .id(),
+            "codec.raw"
+        );
+        assert_eq!(
+            reg.codec_for(b"II*\x00\x08\x00\x00\x00", None)
+                .unwrap()
+                .id(),
+            "codec.tiff"
+        );
+        assert_eq!(
+            reg.codec_for(b"FUJIFILMCCD-RAW ", None).unwrap().id(),
+            "codec.raw"
+        );
+        assert_eq!(reg.codec_for(b"", Some("NEF")).unwrap().id(), "codec.raw");
         // AVIF shares the container but is not claimed.
         assert!(reg
             .codec_for(b"\x00\x00\x00\x18ftypavif....", None)

@@ -384,6 +384,14 @@ const LOSSY_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "heic", "heif", "avi
 /// has to land as a PNG: nothing here encodes HEIC.
 const LOSSY_WRITABLE: &[&str] = &["jpg", "jpeg", "jpe", "jfif"];
 
+/// A camera raw: the opposite case from lossy. The capture is worth
+/// more than any rendering of it and nothing here writes one, so an
+/// unedited raw is archived as it is, and only an edit becomes a PNG.
+fn is_raw(ext: &str) -> bool {
+    use schist_plugin_api::CodecPlugin as _;
+    schist_codecs_common::RawCodec.extensions().contains(&ext)
+}
+
 /// How a photo goes into an archive: which file it comes from, whether
 /// those bytes can go in untouched, and the extension the entry ends
 /// up with.
@@ -397,8 +405,8 @@ struct ZipPlan {
 /// Work out that plan. An edited photo contributes its edit — the
 /// point of the archive is the picture you see in the gallery — and
 /// the entry keeps a lossy photo's own format (re-encoded from the
-/// edit when there is one, byte-for-byte when there is not), while
-/// everything else becomes a PNG.
+/// edit when there is one, byte-for-byte when there is not), an
+/// unedited raw goes in untouched, and everything else becomes a PNG.
 fn zip_plan(path: &Path) -> ZipPlan {
     let ext = path
         .extension()
@@ -416,10 +424,11 @@ fn zip_plan(path: &Path) -> ZipPlan {
                 ext: if keep { ext } else { "png".into() },
             }
         }
-        // Unedited: a lossy photo (or a PNG) is already exactly what
-        // the archive wants, so its bytes go in as they are —
-        // re-encoding a JPEG would only lose a second generation.
-        None if lossy || ext == "png" => ZipPlan {
+        // Unedited: a lossy photo (or a PNG, or a raw) is already
+        // exactly what the archive wants, so its bytes go in as they
+        // are — re-encoding a JPEG would only lose a second generation,
+        // and a raw developed to PNG would lose the raw.
+        None if lossy || ext == "png" || is_raw(&ext) => ZipPlan {
             source: path.to_path_buf(),
             verbatim: true,
             ext,
@@ -819,10 +828,13 @@ mod tests {
             "plain.tif",
             "shot.HEIC",
             "edited.jpg",
+            "capture.NEF",
+            "developed.nef",
         ] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
         std::fs::write(dir.join(".schist/edited.jpg.psd"), b"edit").unwrap();
+        std::fs::write(dir.join(".schist/developed.nef.psd"), b"edit").unwrap();
         let plan = |name: &str| zip_plan(&dir.join(name));
 
         // Unedited and lossy: its own bytes, its own format. Nothing is
@@ -864,6 +876,25 @@ mod tests {
                 source: dir.join(".schist/edited.jpg.psd"),
                 verbatim: false,
                 ext: "jpg".into()
+            }
+        );
+        // A raw is the capture: untouched, it goes in as it is rather
+        // than as a development of itself; edited, the edit is a PNG,
+        // since nothing writes a raw.
+        assert_eq!(
+            plan("capture.NEF"),
+            ZipPlan {
+                source: dir.join("capture.NEF"),
+                verbatim: true,
+                ext: "nef".into()
+            }
+        );
+        assert_eq!(
+            plan("developed.nef"),
+            ZipPlan {
+                source: dir.join(".schist/developed.nef.psd"),
+                verbatim: false,
+                ext: "png".into()
             }
         );
         let _ = std::fs::remove_dir_all(&dir);

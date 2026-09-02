@@ -1103,7 +1103,8 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         None if scanning => "Scanning folders\u{2026}",
                         None => {
                             "No photos found in the watched folders. Images Schist can open \
-                         (PNG, JPEG, WebP, TIFF, HEIC, PSD, Affinity) appear here; \
+                         (PNG, JPEG, WebP, TIFF, HEIC, camera raws, PSD, Affinity) \
+                         appear here; \
                          sub-folders are scanned six levels deep."
                         }
                     },
