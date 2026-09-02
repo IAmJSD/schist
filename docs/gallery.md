@@ -25,6 +25,13 @@ size, a click creates the document on the spot, Custom… opens the full
 dialog. Recently opened files live under File ▸ Open Recent, in both
 the editor's and the gallery's menus.
 
+A folder dropped on the window is a question rather than a file:
+**Add to Gallery** (the default — the folders are watched in place,
+nothing copied) or open what is inside as tabs. The dialog says how
+many images a scan found, sub-folders included, and the tab route is
+capped at a hundred so a dropped camera roll cannot open five thousand
+tabs; loose image files dropped alongside open as they always did.
+
 ## The view
 
 `View ▸ Browse Gallery` (⌘⇧G / Ctrl+Shift+G, or File ▸ Browse Gallery…)

@@ -1578,7 +1578,7 @@ impl Workspace {
     }
 
     /// Every extension a registered codec can decode, lowercased.
-    fn codec_extensions(&self) -> Vec<String> {
+    pub(super) fn codec_extensions(&self) -> Vec<String> {
         self.registry
             .codecs()
             .flat_map(|c| c.extensions())
@@ -2437,26 +2437,53 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                this.update_in(cx, |ws, _window, cx| {
-                    let mut added = 0;
-                    for path in paths {
-                        if !ws.library.folders.contains(&path) {
-                            ws.library.folders.push(path);
-                            added += 1;
-                        }
-                    }
-                    if added > 0 {
-                        ws.library.folders.sort();
-                        ws.library.save();
-                    }
-                    ws.library.open = true;
-                    ws.library_rescan(cx);
-                    cx.notify();
-                })
-                .ok();
+                this.update_in(cx, |ws, _window, cx| ws.add_gallery_folders(paths, cx))
+                    .ok();
             }
         })
         .detach();
+    }
+
+    /// Watch these folders, and show the gallery with them in it. The
+    /// path both the picker and a folder dropped on the window take.
+    pub fn add_gallery_folders(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut added = 0;
+        for path in paths {
+            if !self.library.folders.contains(&path) {
+                self.library.folders.push(path);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.library.folders.sort();
+            self.library.save();
+        }
+        self.library.open = true;
+        self.library_rescan(cx);
+        cx.notify();
+    }
+
+    /// Open every image the folders hold as its own tab, up to
+    /// [`DROP_OPEN_CAP`] — a dropped camera roll must not become five
+    /// thousand tabs. The gallery is the other answer, and the dialog
+    /// that offers this offers that first.
+    pub fn open_folder_images(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let images: Vec<PathBuf> = scan_folders(&dirs, &self.codec_extensions())
+            .into_iter()
+            .flat_map(|s| s.entries.into_iter().map(|e| e.path))
+            .collect();
+        let total = images.len();
+        let opening = total.min(DROP_OPEN_CAP);
+        for path in images.into_iter().take(DROP_OPEN_CAP) {
+            self.load_file(path, cx);
+        }
+        self.status = if total > opening {
+            format!("Opened the first {opening} of {total} images — the gallery holds the rest")
+                .into()
+        } else {
+            format!("Opened {opening} images").into()
+        };
+        cx.notify();
     }
 
     /// Stop watching a folder. The photos and any `.schist` sidecars stay

@@ -464,6 +464,7 @@ impl Workspace {
             | Modal::Busy { .. }
             | Modal::ConfirmCloseTab
             | Modal::DropImage { .. }
+            | Modal::DropFolders { .. }
             | Modal::HeifSupport { .. }
             | Modal::CameraImport { .. }
             | Modal::CameraImportOptions { .. }

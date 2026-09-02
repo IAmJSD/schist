@@ -157,6 +157,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         } => crate::color_picker::render(ws, target, hsv, original, cx).into_any_element(),
         Modal::ConfirmCloseTab => confirm_close_tab(ws, cx).into_any_element(),
         Modal::DropImage { path } => drop_image(path, cx).into_any_element(),
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::DropFolders { dirs, images } => drop_folders(dirs, images, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::DropFolders { .. } => return None,
         // Three desktop-only dialogs. Their modals are never opened on
         // the web (the flows that open them are compiled out), so these
         // arms only satisfy the exhaustiveness check there.

@@ -82,6 +82,9 @@ pub(crate) use library_view::{
     camera_import_options_dialog, map_filter_dialog, search_models_dialog,
 };
 
+/// The most tabs a dropped folder may open at once.
+pub const DROP_OPEN_CAP: usize = 100;
+
 const PREVIEW_SHIFT: u32 = 3; // preview at 1/8 scale
 
 /// Zoom below which the canvas paints one downscaled preview image instead
@@ -920,6 +923,10 @@ pub enum Modal {
     /// An image file dropped on the window while a document is open:
     /// open it in its own tab, or place it as a new layer?
     DropImage { path: PathBuf },
+    /// Folders dropped on the window: open every image inside as a tab,
+    /// or watch them in the gallery? `images` is what a scan found in
+    /// them, so the button can say how many tabs that would be.
+    DropFolders { dirs: Vec<PathBuf>, images: usize },
     /// A HEIC file needs the libheif decoder and this machine has none:
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.

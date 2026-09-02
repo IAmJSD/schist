@@ -462,6 +462,26 @@ impl Workspace {
     /// so that case asks; with several files, or nothing to place into,
     /// everything just opens.
     pub fn handle_dropped_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        // Folders are a question, not a file: open what is inside, or
+        // watch them in the gallery? Loose files dropped alongside open
+        // as they always did.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+                paths.into_iter().partition(|p| p.is_dir());
+            if !dirs.is_empty() {
+                let images = schist_gallery::scan_folders(&dirs, &self.codec_extensions())
+                    .iter()
+                    .map(|s| s.entries.len())
+                    .sum();
+                self.open_modal(Modal::DropFolders { dirs, images }, cx);
+            }
+            for path in files {
+                self.load_file(path, cx);
+            }
+            return;
+        }
+        #[allow(unreachable_code)]
         if let [path] = paths.as_slice() {
             if self.doc.is_some() && self.is_flat_image(path) {
                 self.open_modal(Modal::DropImage { path: path.clone() }, cx);
