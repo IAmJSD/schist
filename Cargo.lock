@@ -6152,7 +6152,6 @@ dependencies = [
  "gpui",
  "image",
  "js-sys",
- "kamadak-exif",
  "log",
  "objc2",
  "objc2-foundation",
@@ -6169,6 +6168,7 @@ dependencies = [
  "schist-core",
  "schist-filters-core",
  "schist-fx",
+ "schist-gallery",
  "schist-layer-fx",
  "schist-mcp",
  "schist-neural",
@@ -6363,6 +6363,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "schist-gallery"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "kamadak-exif",
+ "schist-neural",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "schist-layer-fx"
 version = "0.9.1"
 dependencies = [
@@ -6387,7 +6398,9 @@ dependencies = [
  "schist-compositor",
  "schist-core",
  "schist-filters-core",
+ "schist-gallery",
  "schist-layer-fx",
+ "schist-neural",
  "schist-plugin-api",
  "schist-plugin-host-8bf",
  "schist-plugin-host-wasm",

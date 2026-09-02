@@ -45,6 +45,8 @@ schist-commands-core.workspace = true
 schist-filters-core.workspace = true
 schist-adjustments.workspace = true
 schist-colormgmt.workspace = true
+# The gallery's on-disk model, shared with the headless MCP server.
+schist-gallery.workspace = true
 
 # Everything a browser tab cannot host: subprocesses and dlopen (the two
 # plug-in hosts, the agent CLIs behind the AI sidebar), blocking sockets
@@ -72,9 +74,6 @@ async-trait.workspace = true
 # Gallery thumbnails: one windowless image of a file. Native-only with the
 # rest of the gallery — a browser tab has no folders to browse.
 schist-preview.workspace = true
-# Reading the GPS position out of camera files for the gallery's
-# import-by-place filter. Pure Rust; parses JPEG, TIFF, HEIF and PNG.
-kamadak-exif = "0.6"
 # The gallery's "save bucket as ZIP" writes the archive by hand; these
 # are its checksums and its deflate. flate2 is already in the tree
 # behind the PNG codec, so this adds no download.

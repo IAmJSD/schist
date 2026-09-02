@@ -147,7 +147,19 @@ a smart query), `gallery_bucket_add`, `gallery_group_by`,
 counts of flagged, clean and not-yet-scored photos; switching it on
 needs the model), `gallery_flagged` (photos by verdict, paged), and
 `gallery_open`, which takes a photo into the editor where the document
-tools then apply. Every tool does what a click would, in front of the
+tools then apply.
+
+The headless server has the gallery too. `schist-mcp`, the stdio
+server other agents drive, publishes the same `gallery_*` family over
+the gallery's files on disk — `library.json`, the scan of its folders,
+the index snapshot, the thumbnail and score caches — through the
+`schist-gallery` crate that now owns those formats for both. It reads
+what the app wrote, so it sees whatever the app has indexed and no
+more; `gallery_search` ranks the snapshot's embeddings, `gallery_open`
+opens the photo (its edit sidecar when there is one) as a new editing
+session, and the bucket tools write to the library file, which the app
+reads at launch. Selection and grouping belong to a window and are the
+one thing it cannot see. Every tool does what a click would, in front of the
 user; photos are named by path throughout.
 
 A bucket can also fill itself. The New/Edit Bucket dialog (right-click

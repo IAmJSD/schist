@@ -15,21 +15,9 @@ use std::path::PathBuf;
 
 /// Per-user state directory: XDG on Unix, local app data on Windows.
 pub fn state_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
-        std::env::var("LOCALAPPDATA")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()
-            .map(PathBuf::from)
-    } else {
-        std::env::var("XDG_STATE_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| PathBuf::from(h).join(".local/state"))
-            })
-    }
+    // One definition, in the gallery crate, so the headless server and
+    // the app agree on where the caches are.
+    schist_gallery::paths::state_dir()
 }
 
 /// Where crash reports are written.

@@ -13,13 +13,14 @@
 
 use super::library_geo;
 use super::*;
+// The on-disk model — folders, buckets, the index snapshot, the caches
+// beside the thumbnails — lives in `schist-gallery`, shared with the
+// headless MCP server. This file is what the window does with it.
+use schist_gallery::*;
+pub use schist_gallery::{backing_psd, Entry, Section};
 use std::collections::BTreeMap;
-use std::hash::{Hash as _, Hasher as _};
 use std::path::Path;
 
-/// Longest edge of a rendered thumbnail. Cells scale the image down from
-/// here, so one render serves every position of the size slider.
-const THUMB_EDGE: u32 = 256;
 /// Thumbnails decoded per background batch — in parallel, one task
 /// each, so a batch costs its slowest decode rather than their sum.
 /// Small enough that the first screenful streams in rather than
@@ -35,39 +36,8 @@ const THUMB_KEEP: usize = 1024;
 const THUMB_KEEP_PARKED: usize = 256;
 /// The grid scrollbar's breathing room at each end of its track.
 const SCROLLBAR_INSET: f32 = 4.0;
-/// Folder scanning stops here rather than following a loop of symlinks
-/// (or someone's home directory) forever.
-const SCAN_MAX_DEPTH: usize = 6;
-const SCAN_MAX_FILES: usize = 5000;
 /// How many recently opened files the start screen lists.
 const RECENTS_KEPT: usize = 10;
-/// The most results a search shows, and the similarity below which a
-/// result is the model shrugging rather than matching (cosines from the
-/// MobileCLIP pair sit around 0.2–0.3 for a real match).
-const SEARCH_KEPT: usize = 200;
-const SEARCH_FLOOR: f32 = 0.15;
-/// What being squarely *in* the named place adds to a photo's score —
-/// bigger than any cosine gap, so location dominates the ordering when
-/// the query names one, without exiling good semantic matches.
-const GEO_BOOST: f32 = 0.35;
-
-/// One scanned directory and the images in it, a section of the grid.
-pub struct Section {
-    pub dir: PathBuf,
-    pub entries: Vec<Entry>,
-}
-
-/// One image in the gallery.
-#[derive(Clone)]
-pub struct Entry {
-    pub path: PathBuf,
-    /// Modification seconds of whichever file the thumbnail renders from,
-    /// part of the disk-cache key.
-    pub mtime: u64,
-    /// A PSD sidecar exists: the thumbnail shows the edit, and the cell
-    /// wears a badge.
-    pub edited: bool,
-}
 
 /// A thumbnail's place in the pipeline.
 pub enum Thumb {
@@ -140,24 +110,6 @@ impl Bucket {
     }
 }
 
-/// A bucket as `library.json` holds it. Untagged so the shape saved
-/// before buckets had rules — a bare `[name, [photos]]` pair — still
-/// reads; writes always use the named form.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
-enum BucketFile {
-    Rich {
-        name: String,
-        #[serde(default)]
-        photos: Vec<PathBuf>,
-        #[serde(default)]
-        query: Option<String>,
-        #[serde(default)]
-        area: Option<(GeoBounds, String)>,
-    },
-    Plain(String, Vec<PathBuf>),
-}
-
 /// What the gallery's right-click menu was opened on.
 #[derive(Clone)]
 pub enum GalleryContext {
@@ -186,21 +138,6 @@ struct CachedQuery {
 struct SearchSnapshot {
     vectors: Arc<Vec<(PathBuf, Arc<Vec<f32>>)>>,
     positions: Arc<Vec<(PathBuf, (f64, f64))>>,
-}
-
-/// What `library.json` persists: the watched folders and the recents.
-/// Everything else — sections, thumbnails — is derived from the disk.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct LibraryFile {
-    folders: Vec<PathBuf>,
-    #[serde(default)]
-    recents: Vec<PathBuf>,
-    #[serde(default)]
-    thumb_px: Option<f32>,
-    #[serde(default)]
-    group_by: Option<String>,
-    #[serde(default)]
-    buckets: Vec<BucketFile>,
 }
 
 pub struct Library {
@@ -396,10 +333,7 @@ const MONTHS: [&str; 12] = [
 impl Library {
     /// Load the persisted folder list and recents.
     pub fn load() -> Library {
-        let file: LibraryFile = library_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+        let file = LibraryFile::load();
         Library {
             open: false,
             folders: file.folders,
@@ -487,10 +421,6 @@ impl Library {
     }
 
     fn save(&self) {
-        let Some(path) = library_path() else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         let file = LibraryFile {
             folders: self.folders.clone(),
             recents: self.recents.clone(),
@@ -507,8 +437,8 @@ impl Library {
                 })
                 .collect(),
         };
-        if let Ok(json) = serde_json::to_string_pretty(&file) {
-            let _ = std::fs::write(path, json);
+        if let Err(err) = file.save() {
+            log::warn!("gallery: library.json not saved: {err:#}");
         }
     }
 
@@ -1212,304 +1142,6 @@ impl Library {
     }
 }
 
-/// Where the folder list is persisted, beside the other config files.
-fn library_path() -> Option<PathBuf> {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".config"))
-        })?;
-    Some(base.join("schist/library.json"))
-}
-
-/// The PSD sidecar an edit of `original` saves into.
-pub(super) fn backing_psd(original: &Path) -> Option<PathBuf> {
-    let dir = original.parent()?;
-    let name = original.file_name()?.to_string_lossy();
-    Some(dir.join(".schist").join(format!("{name}.psd")))
-}
-
-/// What a thumbnail renders from: the sidecar once one exists, so the
-/// gallery shows the edit, as Picasa does.
-fn thumb_source(original: &Path, edited: bool) -> PathBuf {
-    if edited {
-        if let Some(psd) = backing_psd(original) {
-            return psd;
-        }
-    }
-    original.to_path_buf()
-}
-
-fn mtime_secs(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Walk the watched folders and group every decodable image by directory.
-/// Blocking, so it runs on a background thread.
-fn scan_folders(roots: &[PathBuf], exts: &[String]) -> Vec<Section> {
-    let mut by_dir: BTreeMap<PathBuf, Vec<Entry>> = BTreeMap::new();
-    let mut budget = SCAN_MAX_FILES;
-    for root in roots {
-        walk(root, 0, exts, &mut by_dir, &mut budget);
-    }
-    by_dir
-        .into_iter()
-        .map(|(dir, mut entries)| {
-            entries.sort_by(|a, b| a.path.cmp(&b.path));
-            Section { dir, entries }
-        })
-        .collect()
-}
-
-fn walk(
-    dir: &Path,
-    depth: usize,
-    exts: &[String],
-    out: &mut BTreeMap<PathBuf, Vec<Entry>>,
-    budget: &mut usize,
-) {
-    if depth > SCAN_MAX_DEPTH || *budget == 0 {
-        return;
-    }
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for item in read.flatten() {
-        if *budget == 0 {
-            return;
-        }
-        let path = item.path();
-        let hidden = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with('.'));
-        // Dot-directories include the `.schist` sidecars, which must not
-        // list as photos of their own.
-        if hidden {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, depth + 1, exts, out, budget);
-            continue;
-        }
-        let known = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .is_some_and(|e| exts.iter().any(|x| x == &e));
-        if !known {
-            continue;
-        }
-        let edited = backing_psd(&path).is_some_and(|p| p.exists());
-        let mtime = mtime_secs(&thumb_source(&path, edited));
-        *budget -= 1;
-        out.entry(dir.to_path_buf()).or_default().push(Entry {
-            path,
-            mtime,
-            edited,
-        });
-    }
-}
-
-/// One photo's index entry as the snapshot file stores it. The outer
-/// Option per field means "was this ever computed" — `gps: Some(None)`
-/// is a probed photo with no position, worth remembering so it is not
-/// probed again.
-struct IndexRow {
-    path: PathBuf,
-    mtime: u64,
-    embed: Option<Arc<Vec<f32>>>,
-    gps: Option<Option<(f64, f64)>>,
-    taken: Option<String>,
-    place: Option<Option<String>>,
-    flagged: Option<bool>,
-}
-
-/// Where the index snapshot lives between runs.
-fn index_snapshot_path() -> Option<PathBuf> {
-    Some(crate::crash::state_dir()?.join("schist/index.v1"))
-}
-
-const INDEX_MAGIC: &[u8; 8] = b"SCHIDX1\n";
-
-/// Serialize the index rows: magic, a count, then per row the path,
-/// mtime, a presence-flags byte and the present fields, all
-/// little-endian. Hand-rolled because 10 MB of f32s deserves neither
-/// JSON nor a new dependency. Non-UTF-8 paths are skipped — they
-/// cannot round-trip through this file, and re-indexing them is only
-/// what happens today.
-fn write_index_snapshot(rows: &[IndexRow]) -> anyhow::Result<()> {
-    let Some(path) = index_snapshot_path() else {
-        return Ok(());
-    };
-    write_index_snapshot_to(&path, rows)
-}
-
-fn write_index_snapshot_to(path: &Path, rows: &[IndexRow]) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(rows.len() * 2200 + 16);
-    out.extend_from_slice(INDEX_MAGIC);
-    let counted: Vec<&IndexRow> = rows.iter().filter(|r| r.path.to_str().is_some()).collect();
-    out.extend_from_slice(&(counted.len() as u32).to_le_bytes());
-    let put_str = |out: &mut Vec<u8>, s: &str| {
-        out.extend_from_slice(&(s.len() as u16).to_le_bytes());
-        out.extend_from_slice(s.as_bytes());
-    };
-    for row in counted {
-        put_str(&mut out, row.path.to_str().expect("filtered above"));
-        out.extend_from_slice(&row.mtime.to_le_bytes());
-        let mut flags = 0u8;
-        if row.embed.is_some() {
-            flags |= 1;
-        }
-        if let Some(gps) = row.gps {
-            flags |= 2;
-            if gps.is_some() {
-                flags |= 4;
-            }
-        }
-        if row.taken.is_some() {
-            flags |= 8;
-        }
-        if let Some(place) = &row.place {
-            flags |= 16;
-            if place.is_some() {
-                flags |= 32;
-            }
-        }
-        if let Some(flagged) = row.flagged {
-            flags |= 64;
-            if flagged {
-                flags |= 128;
-            }
-        }
-        out.push(flags);
-        if let Some(embed) = &row.embed {
-            out.extend_from_slice(&(embed.len() as u16).to_le_bytes());
-            for v in embed.iter() {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        if let Some(Some((lat, lon))) = row.gps {
-            out.extend_from_slice(&lat.to_le_bytes());
-            out.extend_from_slice(&lon.to_le_bytes());
-        }
-        if let Some(taken) = &row.taken {
-            put_str(&mut out, taken);
-        }
-        if let Some(Some(place)) = &row.place {
-            put_str(&mut out, place);
-        }
-    }
-    // Atomically: a crash mid-write must not leave a torn file.
-    let tmp = path.with_extension("v1.tmp");
-    std::fs::write(&tmp, &out)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-/// Read the snapshot back; `None` for a missing, foreign or torn file
-/// — every failure just means indexing from the per-photo caches, the
-/// way every launch worked before the snapshot existed.
-fn read_index_snapshot() -> Option<Vec<IndexRow>> {
-    let bytes = std::fs::read(index_snapshot_path()?).ok()?;
-    parse_index_snapshot(&bytes)
-}
-
-fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
-    let mut at = 0usize;
-    let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
-        let slice = bytes.get(*at..*at + n)?;
-        *at += n;
-        Some(slice)
-    };
-    if take(&mut at, 8)? != INDEX_MAGIC {
-        return None;
-    }
-    let count = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
-    let get_str = |at: &mut usize| -> Option<String> {
-        let len = u16::from_le_bytes(take(at, 2)?.try_into().ok()?) as usize;
-        String::from_utf8(take(at, len)?.to_vec()).ok()
-    };
-    let get_f64 =
-        |at: &mut usize| -> Option<f64> { Some(f64::from_le_bytes(take(at, 8)?.try_into().ok()?)) };
-    let mut rows = Vec::with_capacity(count.min(65536));
-    for _ in 0..count {
-        let path = PathBuf::from(get_str(&mut at)?);
-        let mtime = u64::from_le_bytes(take(&mut at, 8)?.try_into().ok()?);
-        let flags = take(&mut at, 1)?[0];
-        let embed = if flags & 1 != 0 {
-            let dim = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
-            let raw = take(&mut at, dim * 4)?;
-            Some(Arc::new(
-                raw.as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| f32::from_le_bytes(*c))
-                    .collect::<Vec<f32>>(),
-            ))
-        } else {
-            None
-        };
-        let gps = if flags & 2 != 0 {
-            Some(if flags & 4 != 0 {
-                Some((get_f64(&mut at)?, get_f64(&mut at)?))
-            } else {
-                None
-            })
-        } else {
-            None
-        };
-        let taken = if flags & 8 != 0 {
-            Some(get_str(&mut at)?)
-        } else {
-            None
-        };
-        let place = if flags & 16 != 0 {
-            Some(if flags & 32 != 0 {
-                Some(get_str(&mut at)?)
-            } else {
-                None
-            })
-        } else {
-            None
-        };
-        let flagged = (flags & 64 != 0).then_some(flags & 128 != 0);
-        rows.push(IndexRow {
-            path,
-            mtime,
-            embed,
-            gps,
-            taken,
-            place,
-            flagged,
-        });
-    }
-    Some(rows)
-}
-
-/// Where rendered thumbnails are cached between runs, keyed by source
-/// path, mtime and render size — a re-edited photo gets a fresh entry and
-/// the stale one ages out with the directory.
-fn thumb_cache_path(source: &Path, mtime: u64) -> Option<PathBuf> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hasher);
-    mtime.hash(&mut hasher);
-    THUMB_EDGE.hash(&mut hasher);
-    let dir = crate::crash::state_dir()?.join("schist/thumbs");
-    Some(dir.join(format!("{:016x}.png", hasher.finish())))
-}
-
 /// RGBA straight bytes as the BGRA frame `RenderImage` wants.
 pub(super) fn rgba_to_render_image(
     width: u32,
@@ -1538,22 +1170,6 @@ struct ThumbOutcome {
     meta: PhotoMeta,
     /// The decode failed for want of the HEIC support download.
     needs_heif: bool,
-}
-
-/// The two signals the flag rule reads out of the model's five softmax
-/// classes: porn+hentai together, and "sexy" alone.
-#[derive(Clone, Copy)]
-struct ExplicitScore {
-    explicit: f32,
-    sexy: f32,
-}
-
-/// Whether a photo counts as explicit. The nsfwjs guidance, learned
-/// again the hard way: flag on the porn and hentai classes, and only on
-/// a near-certain "sexy" — that class fires on bare shoulders and
-/// swimwear, and summing it in flagged most of a real camera roll.
-fn is_explicit(score: ExplicitScore) -> bool {
-    score.explicit >= 0.5 || score.sexy >= 0.9
 }
 
 /// Decode one thumbnail, through the disk cache when it can, scoring it
@@ -1627,142 +1243,6 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         meta: photo_meta(&cache, &job.key),
         needs_heif,
     }
-}
-
-/// A photo's EXIF-derived metadata — position, the city it groups
-/// under, and when it was taken — cached beside the thumbnail in one
-/// file, so a whole camera roll is parsed once, not per launch.
-struct PhotoMeta {
-    gps: Option<(f64, f64)>,
-    /// "YYYY-MM-DD HH:MM:SS": sortable as text, no calendar needed.
-    taken: Option<String>,
-    place: Option<String>,
-}
-
-fn photo_meta(cache: &Option<PathBuf>, original: &Path) -> PhotoMeta {
-    let meta_cache = cache.as_ref().map(|p| p.with_extension("meta"));
-    if let Some(text) = meta_cache
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-    {
-        let mut lines = text.lines();
-        let gps = lines.next().and_then(|l| {
-            let mut parts = l.split_whitespace().filter_map(|v| v.parse::<f64>().ok());
-            match (parts.next(), parts.next()) {
-                (Some(lat), Some(lon)) => Some((lat, lon)),
-                _ => None,
-            }
-        });
-        let field = |l: Option<&str>| {
-            l.filter(|l| *l != "none" && !l.is_empty())
-                .map(str::to_string)
-        };
-        return PhotoMeta {
-            gps,
-            taken: field(lines.next()),
-            place: field(lines.next()),
-        };
-    }
-    let data = exif_of(original);
-    let gps = data.as_ref().and_then(gps_from);
-    let taken = data.as_ref().and_then(datetime_from);
-    let place = gps.and_then(|(lat, lon)| library_geo::nearest_city(lat, lon));
-    if let Some(path) = meta_cache {
-        let line1 = match gps {
-            Some((lat, lon)) => format!("{lat} {lon}"),
-            None => "none".into(),
-        };
-        let text = format!(
-            "{line1}\n{}\n{}",
-            taken.as_deref().unwrap_or("none"),
-            place.as_deref().unwrap_or("none")
-        );
-        let _ = std::fs::write(path, text);
-    }
-    PhotoMeta { gps, taken, place }
-}
-
-/// The capture time as sortable text, from DateTimeOriginal (else
-/// DateTime): "YYYY:MM:DD HH:MM:SS" with the date's colons swapped out.
-fn datetime_from(data: &exif::Exif) -> Option<String> {
-    let field = data
-        .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
-        .or_else(|| data.get_field(exif::Tag::DateTime, exif::In::PRIMARY))?;
-    let raw = field.display_value().to_string();
-    let raw = raw.trim();
-    // "2026:08:14 17:03:22" — sanity before trusting it to sort.
-    if raw.len() < 10 || !raw.as_bytes()[..4].iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let mut normalized: Vec<u8> = raw.bytes().collect();
-    if normalized.get(4) == Some(&b':') {
-        normalized[4] = b'-';
-    }
-    if normalized.get(7) == Some(&b':') {
-        normalized[7] = b'-';
-    }
-    String::from_utf8(normalized).ok()
-}
-
-/// A unix time as the same sortable text, for photos whose EXIF says
-/// nothing — the file's own clock is better than no clock.
-fn taken_from_unix(secs: u64) -> String {
-    let (y, m, d) = ymd_from_unix(secs);
-    let rem = secs % 86_400;
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
-        rem / 3600,
-        (rem / 60) % 60,
-        rem % 60
-    )
-}
-
-/// Civil date from days-since-epoch (Howard Hinnant's algorithm).
-fn ymd_from_unix(secs: u64) -> (i64, u32, u32) {
-    let z = (secs / 86_400) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-fn nsfw_installed() -> bool {
-    schist_neural::installed("nsfw")
-}
-
-fn read_score_cache(cache: &Option<PathBuf>) -> Option<ExplicitScore> {
-    let text = cache
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p.with_extension("score2")).ok())?;
-    let mut parts = text
-        .split_whitespace()
-        .filter_map(|v| v.parse::<f32>().ok());
-    match (parts.next(), parts.next()) {
-        (Some(explicit), Some(sexy)) => Some(ExplicitScore { explicit, sexy }),
-        _ => None,
-    }
-}
-
-fn read_embed_cache(cache: &Option<PathBuf>) -> Option<Vec<f32>> {
-    let bytes = cache
-        .as_ref()
-        .and_then(|p| std::fs::read(p.with_extension("embed")).ok())?;
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
-        return None;
-    }
-    Some(
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect(),
-    )
 }
 
 /// The photo's search embedding, cached beside the thumbnail. `None`
@@ -1956,40 +1436,9 @@ pub(crate) fn camera_sources() -> Vec<PathBuf> {
     out
 }
 
-/// One EXIF parse of a file, shared by every reader below.
-fn exif_of(path: &Path) -> Option<exif::Exif> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    exif::Reader::new().read_from_container(&mut reader).ok()
-}
-
 /// The GPS position a camera wrote into a file, if any. Blocking.
 fn photo_gps(path: &Path) -> Option<(f64, f64)> {
     gps_from(&exif_of(path)?)
-}
-
-/// The GPS position out of a parsed EXIF block.
-fn gps_from(data: &exif::Exif) -> Option<(f64, f64)> {
-    // Degrees/minutes/seconds as three rationals, hemisphere in the
-    // companion Ref tag ("S"/"W" flip the sign).
-    let axis = |tag: exif::Tag, ref_tag: exif::Tag, negative: char| -> Option<f64> {
-        let field = data.get_field(tag, exif::In::PRIMARY)?;
-        let exif::Value::Rational(parts) = &field.value else {
-            return None;
-        };
-        if parts.is_empty() {
-            return None;
-        }
-        let part = |i: usize| parts.get(i).map(|r| r.to_f64()).unwrap_or(0.0);
-        let degrees = part(0) + part(1) / 60.0 + part(2) / 3600.0;
-        let flip = data
-            .get_field(ref_tag, exif::In::PRIMARY)
-            .is_some_and(|f| f.display_value().to_string().contains(negative));
-        Some(if flip { -degrees } else { degrees })
-    };
-    let lat = axis(exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef, 'S')?;
-    let lon = axis(exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef, 'W')?;
-    Some((lat, lon))
 }
 
 /// Copy every image under the volume's DCIM into `dest`, skipping files

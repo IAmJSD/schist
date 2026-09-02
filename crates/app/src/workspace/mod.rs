@@ -1041,18 +1041,10 @@ pub enum ImportSource {
 }
 
 /// A boundary in degrees: what the import map's rectangle means, and
-/// what the EXIF-position filter tests. Defined here rather than in the
-/// (desktop-only) gallery so the modal enum can carry one on every
-/// target; its methods live with the map in `library_geo`. Serde
-/// because a smart bucket's area persists in `library.json`.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub struct GeoBounds {
-    pub south: f64,
-    pub west: f64,
-    pub north: f64,
-    pub east: f64,
-}
+/// what the EXIF-position filter tests. Lives in `schist-gallery` (its
+/// persistence and geometry are shared with the headless server) and is
+/// re-exported here so the modal enum can carry one on every target.
+pub use schist_gallery::GeoBounds;
 
 /// What fills the bottom layer of a document made by File ▸ New.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

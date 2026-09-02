@@ -26,6 +26,7 @@ members = [
     "crates/quicklook",
     "crates/colormgmt",
     "crates/mcp",
+    "crates/gallery",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
@@ -88,6 +89,7 @@ schist-tools-type = { path = "plugins/tools-type" }
 schist-filters-core = { path = "plugins/filters-core" }
 schist-commands-core = { path = "plugins/commands-core" }
 schist-mcp = { path = "crates/mcp" }
+schist-gallery = { path = "crates/gallery" }
 
 # external
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch and stylus pressure on the
