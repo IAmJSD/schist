@@ -321,6 +321,9 @@ pub struct Workspace {
     /// The info panel's map, showing where the photo was taken.
     #[cfg(not(target_arch = "wasm32"))]
     pub info_map: library_geo::MapState,
+    /// The info panel's EXIF rows scroll on their own; the thumb
+    /// beside them reads this.
+    pub info_scroll: gpui::ScrollHandle,
     pub focused_field: Option<&'static str>,
     pub field_buffer: String,
     /// The caret's byte position in `field_buffer` (always on a char
@@ -1237,6 +1240,7 @@ impl Workspace {
             exif: None,
             #[cfg(not(target_arch = "wasm32"))]
             info_map: library_geo::MapState::default(),
+            info_scroll: gpui::ScrollHandle::new(),
             focused_field: None,
             field_buffer: String::new(),
             field_cursor: 0,

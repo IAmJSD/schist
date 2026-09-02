@@ -5,6 +5,12 @@ use super::*;
 use crate::workspace::SideTab;
 use schist_gallery::ExifSummary;
 
+/// The tallest the EXIF rows get before they scroll: about seven rows.
+const INFO_ROWS_MAX_H: f32 = 176.0;
+/// The side panel is 260 px wide with 8 px of padding each side; the
+/// map spans that.
+const SIDE_PANEL_CONTENT_W: f32 = 260.0 - 16.0;
+
 /// The side panel's top slot: a tab row when the open file has EXIF —
 /// Info first and by default, Color beside it — and the plain colour
 /// panel when it has none, exactly as before.
@@ -60,6 +66,33 @@ pub(super) fn top_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui
         .child(tabs)
         .child(body)
         .into_any_element()
+}
+
+/// The thumb beside the EXIF rows, so it shows there is more below the
+/// fold; it reads the scroll handle's own extents from the last frame
+/// and is absent while everything fits.
+fn rows_thumb(handle: &gpui::ScrollHandle) -> Option<gpui::AnyElement> {
+    let view_h = f32::from(handle.bounds().size.height);
+    let max_y = f32::from(handle.max_offset().height);
+    if view_h <= 0.0 || max_y <= 1.0 {
+        return None;
+    }
+    let thumb_h = (view_h * view_h / (view_h + max_y)).clamp(20.0, view_h);
+    let travel = (view_h - thumb_h).max(1.0);
+    let scroll_y = (-f32::from(handle.offset().y)).clamp(0.0, max_y);
+    let thumb_top = scroll_y / max_y * travel;
+    Some(
+        div()
+            .absolute()
+            .top(px(thumb_top))
+            .right_0()
+            .w(px(3.0))
+            .h(px(thumb_h))
+            .rounded_sm()
+            .bg(gpui::rgb(palette().text_dim))
+            .opacity(0.5)
+            .into_any_element(),
+    )
 }
 
 /// The camera, the exposure, when, and — on a map with a blip — where.
@@ -159,21 +192,40 @@ fn info_panel(
         }
         rows.push(row("Where", text).into_any_element());
     }
+    // The rows are their own scrolling region, bounded so the map
+    // beneath stays put whatever a camera wrote (some write a lot).
     let mut panel = div()
         .flex()
         .flex_col()
         .p_2()
         .gap_1()
         .child(panel_title("Info"))
-        .children(rows);
+        .child(
+            div()
+                .relative()
+                .child(
+                    div()
+                        .id("info-rows")
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .max_h(px(INFO_ROWS_MAX_H))
+                        .overflow_y_scroll()
+                        .track_scroll(&ws.info_scroll)
+                        .children(rows),
+                )
+                .children(rows_thumb(&ws.info_scroll)),
+        );
     #[cfg(not(target_arch = "wasm32"))]
     if exif.gps.is_some() {
-        // The map, with the blip on it. Wheel to zoom, drag to pan; it
-        // opens on the spot at street scale.
+        // The map, with the blip on it, at 16:9 across the panel's
+        // content width. Wheel to zoom, drag to pan; it opens on the
+        // spot at street scale.
+        let map_h = (SIDE_PANEL_CONTENT_W * 9.0 / 16.0).round();
         panel = panel.child(div().pt_1().child(crate::workspace::map_element(
             ws,
             crate::workspace::MapSlot::Info,
-            180.0,
+            map_h,
             cx,
         )));
     }
