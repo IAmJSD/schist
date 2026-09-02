@@ -377,11 +377,29 @@ fn zip_entry(
 /// the second generation is not what anyone notices.
 const ZIP_JPEG_QUALITY: u8 = 92;
 
-/// A stored (uncompressed) ZIP, written as its entries arrive. PNGs
-/// are already compressed, so store beats deflate here — and a
-/// store-only writer is a hundred honest lines instead of a
-/// dependency. Streaming rather than buffering because a whole
-/// gallery's worth of rendered PNGs does not fit in memory.
+/// A ZIP written as its entries arrive, each deflated — and stored
+/// instead when deflate would not have made it smaller, which is what
+/// an already-compressed JPEG or PNG usually comes to. The container
+/// is a hundred honest lines by hand; the compression is flate2's.
+/// Streaming rather than buffering because a whole gallery's worth of
+/// rendered images does not fit in memory.
+/// ZIP compression methods.
+const ZIP_METHOD_STORE: u16 = 0;
+const ZIP_METHOD_DEFLATE: u16 = 8;
+
+/// Raw deflate, as ZIP wants it (no zlib framing), at flate2's default
+/// level: a PNG's own filters have done the hard part already, and a
+/// slower level buys a few percent on the metadata-heavy cases only.
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    // Writing into a Vec cannot fail; the unwrap_or keeps the type
+    // honest about it rather than the caller.
+    encoder.write_all(bytes).ok();
+    encoder.finish().unwrap_or_default()
+}
+
 struct ZipWriter {
     file: std::io::BufWriter<std::fs::File>,
     /// Where the archive is being built, and where it lands on
@@ -420,6 +438,14 @@ impl ZipWriter {
         }
         let crc = crc32fast::hash(bytes);
         let offset = self.offset;
+        // Deflate, then keep whichever is smaller: a photo that is
+        // already compressed does not get bigger for having been tried.
+        let deflated = deflate(bytes);
+        let (method, payload): (u16, &[u8]) = if deflated.len() < bytes.len() {
+            (ZIP_METHOD_DEFLATE, &deflated)
+        } else {
+            (ZIP_METHOD_STORE, bytes)
+        };
         let header = |v: &mut Vec<u8>, central_dir: bool| {
             if central_dir {
                 v.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
@@ -429,10 +455,10 @@ impl ZipWriter {
             }
             v.extend_from_slice(&20u16.to_le_bytes()); // version needed
             v.extend_from_slice(&0u16.to_le_bytes()); // flags
-            v.extend_from_slice(&0u16.to_le_bytes()); // method: store
+            v.extend_from_slice(&method.to_le_bytes());
             v.extend_from_slice(&0u32.to_le_bytes()); // dos time/date
-            v.extend_from_slice(&crc.to_le_bytes());
-            v.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); // compressed
+            v.extend_from_slice(&crc.to_le_bytes()); // of the uncompressed bytes
+            v.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // compressed
             v.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); // uncompressed
             v.extend_from_slice(&(name.len() as u16).to_le_bytes());
             v.extend_from_slice(&0u16.to_le_bytes()); // extra len
@@ -448,9 +474,9 @@ impl ZipWriter {
         let mut local = Vec::with_capacity(30 + name.len());
         header(&mut local, false);
         self.file.write_all(&local)?;
-        self.file.write_all(bytes)?;
+        self.file.write_all(payload)?;
         header(&mut self.central, true);
-        self.offset += (local.len() + bytes.len()) as u32;
+        self.offset += (local.len() + payload.len()) as u32;
         self.entries += 1;
         Ok(())
     }
@@ -569,6 +595,66 @@ mod tests {
             ),
             0
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compressible bytes come out deflated — smaller, method 8, and
+    /// inflating back to the original — while bytes deflate cannot
+    /// shrink are stored as they are.
+    #[test]
+    fn the_zip_writer_deflates_what_it_can_and_stores_the_rest() {
+        use std::io::Read as _;
+        let dir = std::env::temp_dir().join(format!("schist-zipdef-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.zip");
+        let text: Vec<u8> = b"the same line over and over\n".repeat(200);
+        let mut zip = ZipWriter::create(&out).unwrap();
+        zip.add("text.txt", &text).unwrap();
+        // Five bytes: deflate can only make them longer.
+        zip.add("tiny.bin", b"first").unwrap();
+        zip.finish().unwrap();
+        let zip = std::fs::read(&out).unwrap();
+
+        // First local header: method 8, compressed well under the
+        // original, CRC of the *uncompressed* bytes.
+        assert_eq!(u16::from_le_bytes([zip[8], zip[9]]), ZIP_METHOD_DEFLATE);
+        let compressed = u32::from_le_bytes(zip[18..22].try_into().unwrap()) as usize;
+        let uncompressed = u32::from_le_bytes(zip[22..26].try_into().unwrap()) as usize;
+        assert_eq!(uncompressed, text.len());
+        assert!(
+            compressed < text.len() / 10,
+            "{compressed} vs {}",
+            text.len()
+        );
+        assert_eq!(
+            u32::from_le_bytes(zip[14..18].try_into().unwrap()),
+            crc32fast::hash(&text)
+        );
+        let name_len = u16::from_le_bytes([zip[26], zip[27]]) as usize;
+        let data = &zip[30 + name_len..30 + name_len + compressed];
+        let mut back = Vec::new();
+        flate2::read::DeflateDecoder::new(data)
+            .read_to_end(&mut back)
+            .unwrap();
+        assert_eq!(back, text);
+
+        // Second local header: stored, five bytes both ways.
+        let second = 30 + name_len + compressed;
+        assert_eq!(&zip[second..second + 4], &0x0403_4b50u32.to_le_bytes());
+        assert_eq!(
+            u16::from_le_bytes([zip[second + 8], zip[second + 9]]),
+            ZIP_METHOD_STORE
+        );
+        assert_eq!(
+            u32::from_le_bytes(zip[second + 18..second + 22].try_into().unwrap()),
+            5
+        );
+        // For checking the archive with a real unzip by hand:
+        // SCHIST_KEEP_ZIP=/some/path.zip cargo test ...
+        if let Ok(keep) = std::env::var("SCHIST_KEEP_ZIP") {
+            std::fs::copy(&out, keep).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

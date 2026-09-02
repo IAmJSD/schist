@@ -6147,6 +6147,7 @@ dependencies = [
  "console_log",
  "crc32fast",
  "env_logger",
+ "flate2",
  "futures",
  "gpui",
  "image",

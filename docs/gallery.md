@@ -106,9 +106,10 @@ photo's own format when that format is lossy — a JPEG stays a JPEG,
 byte-for-byte when it is unedited (re-encoding would only cost a
 generation) and at quality 92 when it is not. Everything else becomes
 a PNG, as does anything lossy nothing here can write back: an edited
-HEIC lands as a PNG. The writer is hand-rolled and store-only, and
-streams one photo at a time, so a whole bucket never has to fit in
-memory.
+HEIC lands as a PNG. The writer is hand-rolled: it deflates each
+entry and keeps the smaller of deflated and stored (a JPEG or PNG is
+already compressed and usually stays as it is), and it streams one
+photo at a time, so a whole bucket never has to fit in memory.
 
 "+ New bucket" asks for a name (an empty one falls back to "Bucket N")
 and the bucket is born holding the current selection. Photos have their own right-click menu too: Edit,
