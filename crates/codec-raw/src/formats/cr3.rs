@@ -51,16 +51,25 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
         .ok_or_else(|| Error::Corrupt("CR3 raw track has no sample in the file".into()))?;
     let data = crx::decode(&header, sample)?;
 
+    // The codec's four components are always red, the green on red's
+    // row, the green on blue's row and blue; the CMP1 layout nibble
+    // says which corner of the 2x2 cell each of them lands on, and so
+    // what the pattern at the frame origin is. It is 0 — RGGB — on
+    // every full-size raw track seen; the small "SD" track, which
+    // nothing here decodes, uses 1.
+    let cfa = match header.cfa_layout {
+        1 => Cfa::GRBG,
+        2 => Cfa::GBRG,
+        3 => Cfa::BGGR,
+        _ => Cfa::RGGB,
+    };
     let mut image = RawImage::new(
         Format::Cr3,
         header.width,
         header.height,
         1,
         RawData::U16(data),
-        // Every CR3 body is RGGB at the origin of the full frame, and
-        // the CMP1 layout nibble is 0 to say so on the full-size raw
-        // track. (The small SD track uses 1, but nothing decodes it.)
-        Cfa::RGGB,
+        cfa,
     );
     file.describe(&mut image);
     image.apply_camera_table();
@@ -613,7 +622,7 @@ mod tests {
         let mut p = vec![0u8; 52];
         p[0..2].copy_from_slice(&0xff00u16.to_be_bytes());
         p[2..4].copy_from_slice(&0x0030u16.to_be_bytes());
-        p[4..6].copy_from_slice(&1u16.to_be_bytes());
+        p[4..6].copy_from_slice(&0x0100u16.to_be_bytes());
         p[8..12].copy_from_slice(&width.to_be_bytes());
         p[12..16].copy_from_slice(&height.to_be_bytes());
         p[16..20].copy_from_slice(&width.to_be_bytes());
@@ -683,8 +692,12 @@ mod tests {
             let raw_trak = trak(sample_table(
                 craw_entry(
                     &[
-                        cmp1_box(64, 32, levels, mdat_header),
-                        cdi1_box(64, 32, [4, 2, 59, 29]),
+                        // A tile is half the frame across in each
+                        // direction and the codec will not transform
+                        // one smaller than 22 either way, so the
+                        // smallest legal frame here is 88x88.
+                        cmp1_box(96, 64, levels, mdat_header),
+                        cdi1_box(96, 64, [4, 2, 59, 29]),
                     ]
                     .concat(),
                 ),
@@ -838,22 +851,23 @@ mod tests {
         ))
     }
 
-    /// Files whose CRX variant this decoder knows it cannot do yet,
-    /// with why. Anything else that fails is a bug.
+    /// Files whose CRX variant this decoder knows it cannot do, with
+    /// why. Anything else that fails is a bug.
     ///
-    /// Every CR3 is on this list at the moment: the container, the
-    /// metadata, the preview and every layer of the CRX headers are
-    /// read, but the entropy-coded coefficients are not decoded, so
-    /// `decode` reports the codec as unsupported and only `preview`
-    /// and the metadata below are exercised against real files.
+    /// The list is empty: every CR3 in the corpus decodes, lossless
+    /// and lossy, both record dialects. What CRX still cannot do is
+    /// not represented here because no sample of it exists — the
+    /// signed and decorrelated-colour encodings, which `crx::decode`
+    /// reports as unsupported.
     fn unsupported_reason(_name: &str) -> Option<&'static str> {
-        Some("the CRX entropy coder is not implemented")
+        None
     }
 
     #[test]
     fn corpus_cr3_files_decode_and_match_the_oracle() {
         let Some(root) = corpus() else { return };
         let mut problems: Vec<String> = Vec::new();
+        let mut timings: Vec<(String, std::time::Duration, usize)> = Vec::new();
         let mut decoded = 0;
         let mut skipped = 0;
         for path in samples(&root) {
@@ -920,8 +934,12 @@ mod tests {
                 }
             }
 
+            let started = std::time::Instant::now();
             let image = match decode(&bytes) {
-                Ok(image) => image,
+                Ok(image) => {
+                    timings.push((name.clone(), started.elapsed(), image.width * image.height));
+                    image
+                }
                 Err(Error::Unsupported(why)) => {
                     match unsupported_reason(&name) {
                         Some(_) => skipped += 1,
@@ -995,6 +1013,13 @@ mod tests {
             problems.join("\n")
         );
         eprintln!("corpus: {decoded} CR3 files decoded, {skipped} unsupported variants skipped");
+        for (name, took, pixels) in &timings {
+            eprintln!(
+                "    {:>7.1} ms  {:>5.1} Mpx  {name}",
+                took.as_secs_f64() * 1e3,
+                *pixels as f64 / 1e6
+            );
+        }
     }
 
     /// Levels, white balance, crop, orientation and CFA against

@@ -27,10 +27,13 @@
 //!    little-endian words — the same reader Hasselblad's lossless
 //!    JPEG needs, which is no coincidence: the two formats share an
 //!    ancestor.
-//!  * **5** and **6** — "IIQ S", lossy. Neither is a
-//!    predictor-plus-residual code (the samples land on a coarse,
-//!    non-linear grid that no arrangement of the format-3 machinery
-//!    reproduces), and this module does not decode them.
+//!  * **5** — "IIQ S": format 3's bit stream exactly, carrying an
+//!    eight-bit companded signal that a square law expands back to
+//!    fourteen bits. See [`COMPANDING_DIVISOR`].
+//!  * **6** — the other "IIQ S", and a different codec altogether:
+//!    eight-pixel blocks, each with a per-parity range code and a
+//!    per-block precision, over two parity predictors. See
+//!    [`decode_row_format6`].
 //!
 //! The 14-bit formats are shifted up by two on the way out, so that
 //! every Phase One frame — 16-bit raster or compressed — shares one
@@ -68,6 +71,8 @@ mod p1 {
     /// One `u32` a row: where that row's bits start, counted from the
     /// beginning of the sensor data.
     pub const ROW_OFFSETS: u32 = 0x021C;
+    /// A global black offset. Only the white level is derived from it.
+    pub const T_BLACK: u32 = 0x021D;
     /// The back's name and firmware, ASCII.
     pub const MODEL_FIRMWARE: u32 = 0x0301;
 }
@@ -183,7 +188,7 @@ impl<'a> Directory<'a> {
 /// the difference length in force for each; both are per row, because
 /// every row starts at its own offset in the table and its own bit
 /// boundary.
-fn decode_row(bytes: &[u8], out: &mut [u16]) {
+fn decode_row(bytes: &[u8], out: &mut [u16], expand: Option<&[u16; 256]>) {
     let width = out.len();
     let mut pump = BitPumpMsb32::new(bytes);
     let mut pred = [0i32; 2];
@@ -219,14 +224,30 @@ fn decode_row(bytes: &[u8], out: &mut [u16]) {
             let value = pump.get(bits) as i32;
             pred[parity] += value + 1 - (1 << (bits - 1));
         }
+        let value = pred[parity].clamp(0, 0x3FFF);
+        // Format 5 rides on this stream but carries an eight-bit
+        // signal: everything below 256 is a companded code and comes
+        // back through the square law, and the handful of samples
+        // above it are highlights the predictor ran past.
+        let value = match expand {
+            Some(table) if value < 256 => table[value as usize] as i32,
+            _ => value,
+        };
         // 14-bit samples, shifted to share the 16-bit raster's scale.
-        *sample = (pred[parity].clamp(0, 0x3FFF) as u16) << 2;
+        *sample = (value as u16) << 2;
     }
 }
 
-/// IIQ L: one independent bit stream a row, found through the
-/// row-offset table.
-fn decompress(data: &[u8], offsets: &[u8], width: usize, height: usize) -> Result<Vec<u16>> {
+/// IIQ L and format 5: one independent bit stream a row, found
+/// through the row-offset table. `expand` is the format-5 companding
+/// table, or `None` for format 3.
+fn decompress(
+    data: &[u8],
+    offsets: &[u8],
+    width: usize,
+    height: usize,
+    expand: Option<&[u16; 256]>,
+) -> Result<Vec<u16>> {
     if offsets.len() < height * 4 {
         return Err(Error::Corrupt(format!(
             "Phase One row table holds {} bytes for {height} rows",
@@ -257,7 +278,219 @@ fn decompress(data: &[u8], offsets: &[u8], width: usize, height: usize) -> Resul
             // still worth having, and the bit reader would only see
             // zeros anyway.
             if let Some(bits) = data.get(start..) {
-                decode_row(bits, line);
+                decode_row(bits, line, expand);
+            }
+        });
+    Ok(out)
+}
+
+// ------------------------------------------------------------ format 5
+
+/// The divisor of format 5's square companding law.
+///
+/// A stored sample `v` under 256 stands for `round(v * v / 3.969)`.
+/// The constant is chosen so that `v` = 255 lands exactly on 16383:
+/// the whole eight-bit stored range maps onto the whole fourteen-bit
+/// sample range with fine steps in the shadows and coarse ones in the
+/// highlights. That is the entire lossy part of format 5 — the bit
+/// stream itself is format 3's, and lossless.
+const COMPANDING_DIVISOR: f32 = 3.969;
+
+/// The 256-entry expansion of [`COMPANDING_DIVISOR`], built in 32-bit
+/// float because that is the arithmetic the constant was fitted in.
+fn companding_table() -> [u16; 256] {
+    std::array::from_fn(|v| {
+        let v = v as f32;
+        (v * v / COMPANDING_DIVISOR + 0.5) as u16
+    })
+}
+
+// ------------------------------------------------------------ format 6
+
+/// Pixels to a block of format 6.
+const BLOCK6: usize = 8;
+/// The range code that means "every pixel of this parity in this block
+/// is a raw fourteen-bit absolute value".
+const ESCAPE6: i32 = 9;
+/// Bits of an absolute format-6 sample, and of the tail pixels.
+const ABSOLUTE6: u32 = 14;
+/// The reference's per-row read buffer, and so the most bytes of a row
+/// any decoder of this format will look at.
+fn max_row_bytes(width: usize) -> usize {
+    width * 3 + 2
+}
+
+/// Where each row's bytes are, derived from the row-offset table.
+///
+/// The table is not sorted. On a back that reads its two sensor halves
+/// out in opposite directions — the iXU180 rises to `split_row` and
+/// then falls — a decoder that took "the next entry minus this one" as
+/// the row's length would get negative numbers for half the frame.
+/// Sorting the offsets and taking the gap to the next one in *file*
+/// order is what actually bounds a row.
+fn row_extents(offsets: &[u8], data_len: usize, height: usize) -> Result<Vec<(usize, usize)>> {
+    if offsets.len() < height * 4 {
+        return Err(Error::Corrupt(format!(
+            "Phase One row table holds {} bytes for {height} rows",
+            offsets.len()
+        )));
+    }
+    let starts: Vec<usize> = offsets[..height * 4]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b) as usize)
+        .collect();
+    let mut order: Vec<usize> = (0..height).collect();
+    order.sort_by_key(|row| starts[*row]);
+    let mut out = vec![(0usize, 0usize); height];
+    for (i, row) in order.iter().enumerate() {
+        let start = starts[*row].min(data_len);
+        let next = order
+            .get(i + 1)
+            .map_or(data_len, |r| starts[*r])
+            .min(data_len);
+        out[*row] = (start, next.saturating_sub(start));
+    }
+    Ok(out)
+}
+
+/// The variable-length code that follows a `00` range prefix, giving
+/// the parity's range outright rather than a step. Four to five bits,
+/// and the values are in no useful order — it is a hand-built code,
+/// not a canonical one.
+fn absolute_range(pump: &mut impl BitPump) -> i32 {
+    let peek = pump.peek(5);
+    let (value, length) = if peek & 0b1_0000 != 0 {
+        // 10 -> 3, 11 -> 2
+        (if peek & 0b0_1000 != 0 { 2 } else { 3 }, 2)
+    } else if peek & 0b0_1000 != 0 {
+        // 010 -> 1, 011 -> 4
+        (if peek & 0b0_0100 != 0 { 4 } else { 1 }, 3)
+    } else if peek & 0b0_0100 != 0 {
+        // 0010 -> 6, 0011 -> 5
+        (if peek & 0b0_0010 != 0 { 5 } else { 6 }, 4)
+    } else {
+        // 00000 -> 9, 00001 -> 8, 00010 -> 0, 00011 -> 7
+        (
+            match peek & 0b11 {
+                0 => 9,
+                1 => 8,
+                2 => 0,
+                _ => 7,
+            },
+            5,
+        )
+    };
+    pump.consume(length);
+    value
+}
+
+/// One row of a format-6 stream.
+///
+/// A row opens with sixteen bits of header, of which only the low
+/// three are used: they give `init_bits`, the number of bits a
+/// difference is transmitted in before any per-block extension.
+///
+/// The row is then blocks of eight pixels. Each block carries a range
+/// code for each column parity — a two-bit step against the previous
+/// block's range, or an escape into an explicit value — and one
+/// precision extension shared by both parities. Together those say how
+/// many bits a difference is sent in (`take`), how many low bits of it
+/// were thrown away (`shift`, the lossy step) and what to subtract to
+/// re-centre it on zero (`bias`). A range of nine is the escape: every
+/// pixel of that parity is a plain fourteen-bit sample instead.
+///
+/// Whatever is left after the last whole block — four pixels on the
+/// iXU180 — is a run of plain fourteen-bit samples that update nothing.
+fn decode_row_format6(bytes: &[u8], out: &mut [u16]) {
+    let width = out.len();
+    if width < BLOCK6 {
+        return;
+    }
+    let mut pump = BitPumpMsb32::new(bytes);
+    let init_bits = (pump.get(16) & 7) as i32;
+    let blocks = ((width - BLOCK6) >> 3) + 1;
+    // Both predictors and both ranges run the length of the row and
+    // reset at its start.
+    let mut previous = [0i32; 2];
+    let mut range = [0i32; 2];
+    let store = |sample: &mut u16, value: i32| {
+        *sample = ((value as i64) << 2).clamp(0, u16::MAX as i64) as u16;
+    };
+    for block in 0..blocks {
+        for side in range.iter_mut() {
+            match pump.get(2) {
+                0b01 => *side -= 1,
+                0b10 => {}
+                0b11 => *side += 1,
+                _ => *side = absolute_range(&mut pump),
+            }
+        }
+        // The relative steps are unbounded — nothing stops a row from
+        // walking its range past 9 or below 0 — so only the
+        // arithmetic below is bounded, and a nonsensical range costs
+        // that row its samples rather than the frame.
+        let extra = if pump.get(1) == 1 {
+            0
+        } else {
+            1 + pump.get(2) as i32
+        };
+        // At most 7 + 4 bits: `init_bits` is three bits wide and the
+        // extension reaches four.
+        let take = (init_bits + extra) as u32;
+        // A range narrower than the precision extension asks for a
+        // negative quantiser, which cannot be meant. It happens on the
+        // IQ140 samples, always with a transmitted value of zero, so
+        // what it should do is unobservable; treating it as no shift
+        // at all is what those frames confirm.
+        let shift: [u32; 2] =
+            std::array::from_fn(|p| range[p].saturating_sub(extra).clamp(0, 24) as u32);
+        let bias: [i32; 2] =
+            std::array::from_fn(|p| (1i32 << (init_bits + range[p] - 1).clamp(0, 30)) - 1);
+        for i in 0..BLOCK6 {
+            let side = i & 1;
+            let value = if range[side] == ESCAPE6 {
+                pump.get(ABSOLUTE6) as i32
+            } else {
+                previous[side]
+                    .wrapping_add((pump.get(take) as i32) << shift[side])
+                    .wrapping_sub(bias[side])
+            };
+            // The predictor keeps the value unshifted and unclamped;
+            // only what goes into the frame is scaled and clipped.
+            previous[side] = value;
+            if let Some(sample) = out.get_mut(block * BLOCK6 + i) {
+                store(sample, value);
+            }
+        }
+    }
+    for sample in out[blocks * BLOCK6..].iter_mut() {
+        let value = pump.get(ABSOLUTE6) as i32;
+        store(sample, value);
+    }
+}
+
+/// Format 6: one independent bit stream a row, bounded by the sorted
+/// row-offset table.
+fn decompress_format6(
+    data: &[u8],
+    offsets: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u16>> {
+    let samples = crate::frame_samples(width, height, 1)?;
+    let extents = row_extents(offsets, data.len(), height)?;
+    let cap = max_row_bytes(width);
+    let mut out = vec![0u16; samples];
+    out.par_chunks_exact_mut(width)
+        .zip(extents.par_iter())
+        .for_each(|(line, (start, len))| {
+            // A row longer than the reference's own read buffer is
+            // read only as far as that buffer goes, which is what
+            // keeps a mis-sorted table from reading a whole frame.
+            if let Some(bits) = data.get(*start..*start + (*len).min(cap)) {
+                decode_row_format6(bits, line);
             }
         });
     Ok(out)
@@ -301,24 +534,39 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     let data = &data[..(raw.length as usize).min(data.len())];
 
     let format = dir.int(p1::FORMAT).unwrap_or(0);
+    // Every compressed format carries 14-bit samples shifted up by
+    // two, so the largest one a row can hold is 0xFFFC; tag 0x021D is
+    // a global offset already inside them. (The reference leaves
+    // format 6 at a flat 0xFFFF, which looks like an oversight rather
+    // than a difference between the codecs, and nothing in the
+    // unpacked frame depends on it.)
+    let compressed_white = 65532.0 - dir.int(p1::T_BLACK).unwrap_or(0) as f32;
     let (samples, white) = match format {
         0 => (unpack(data, width, height)?, 65535.0),
-        3 => {
-            let offsets = dir
-                .blob(p1::ROW_OFFSETS)
-                .ok_or_else(|| Error::Corrupt("IIQ L with no row-offset table".into()))?;
-            // 14 bits shifted up by two: the largest sample a row can
-            // carry is 0x3FFF, so saturation lands here.
-            (decompress(data, offsets, width, height)?, 65532.0)
-        }
-        5 | 6 => {
-            return Err(Error::Unsupported(
-                "Phase One IIQ S (compression 5 and 6): a lossy code this decoder cannot read"
-                    .into(),
-            ))
+        3 | 5 | 6 => {
+            let offsets = dir.blob(p1::ROW_OFFSETS).ok_or_else(|| {
+                Error::Corrupt(format!(
+                    "Phase One format {format} with no row-offset table"
+                ))
+            })?;
+            let samples = match format {
+                6 => decompress_format6(data, offsets, width, height)?,
+                5 => {
+                    let table = companding_table();
+                    decompress(data, offsets, width, height, Some(&table))?
+                }
+                _ => decompress(data, offsets, width, height, None)?,
+            };
+            (samples, compressed_white)
         }
         other => return Err(Error::Unsupported(format!("Phase One compression {other}"))),
     };
+    if white <= 0.0 {
+        return Err(Error::Corrupt(format!(
+            "Phase One black offset {} leaves no range",
+            dir.int(p1::T_BLACK).unwrap_or(0)
+        )));
+    }
 
     // The crop's top-left is where the sensor's active area begins,
     // and that area always reads RGGB; the masked border in front of
@@ -384,20 +632,8 @@ mod tests {
 
     /// Files whose compression this module knowingly declines, with
     /// the reason. Everything else in the corpus must decode.
-    const UNSUPPORTED: &[(&str, &str)] = &[
-        ("H_25-H25_Outdoor_.IIQ", "IIQ S, compression 5"),
-        ("P25+-CF028662.IIQ", "IIQ S, compression 5"),
-        ("P45-230215_3810.TIF", "IIQ S, compression 5"),
-        (
-            "IQ140-Phase_One_IQ140_sample_files_04_Diciembre_2017_005_IIQ_S.TIF",
-            "IIQ S, compression 6",
-        ),
-        (
-            "IQ140-Phase_One_IQ140_sample_files_04_Diciembre_2017_011_Sensor+_IIQ_S.TIF",
-            "IIQ S, compression 6",
-        ),
-        ("iXU180-cap_22908.IIQ", "IIQ S, compression 6"),
-    ];
+    /// Empty: every Phase One compression in the corpus decodes.
+    const UNSUPPORTED: &[(&str, &str)] = &[];
 
     /// A Phase One structure around one directory, for the tests that
     /// do not need a whole file.
@@ -501,7 +737,7 @@ mod tests {
         }
         let bytes = writer.finish();
         let mut out = vec![0u16; 8];
-        decode_row(&bytes, &mut out);
+        decode_row(&bytes, &mut out, None);
         assert_eq!(
             out,
             vec![
@@ -533,7 +769,7 @@ mod tests {
         }
         let bytes = writer.finish();
         let mut out = vec![0u16; 16];
-        decode_row(&bytes, &mut out);
+        decode_row(&bytes, &mut out, None);
         // Each parity climbs by one a step, right through the second
         // group's "keep" selectors.
         let want: Vec<u16> = (0..16).map(|i| ((i / 2 + 1) << 2) as u16).collect();
@@ -554,14 +790,14 @@ mod tests {
         writer.put(4001, 16);
         let bytes = writer.finish();
         let mut out = vec![0u16; 10];
-        decode_row(&bytes, &mut out);
+        decode_row(&bytes, &mut out, None);
         assert_eq!(&out[8..], &[4000 << 2, 4001 << 2]);
     }
 
     #[test]
     fn a_short_row_table_is_corrupt() {
         assert!(matches!(
-            decompress(&[0; 64], &[0; 4], 8, 4),
+            decompress(&[0; 64], &[0; 4], 8, 4, None),
             Err(Error::Corrupt(_))
         ));
     }
@@ -572,7 +808,7 @@ mod tests {
         let mut offsets = Vec::new();
         offsets.extend_from_slice(&0u32.to_le_bytes());
         offsets.extend_from_slice(&u32::MAX.to_le_bytes());
-        let out = decompress(&[0; 64], &offsets, 8, 2).unwrap();
+        let out = decompress(&[0; 64], &offsets, 8, 2, None).unwrap();
         assert_eq!(&out[8..], &[0; 8]);
     }
 
@@ -584,6 +820,269 @@ mod tests {
             let bytes = build(&[(p1::RAW_WIDTH, 4, 8), (p1::RAW_HEIGHT, 4, 8)], &[]);
             let _ = decode(&bytes[..cut.min(bytes.len())]);
         }
+    }
+
+    // ------------------------------------------------- formats 5 and 6
+
+    /// A corpus file by name.
+    fn sample(name: &str) -> Option<Vec<u8>> {
+        let path = corpus::files(&["iiq", "tif"])
+            .into_iter()
+            .find(|p| corpus::name(p) == name)?;
+        std::fs::read(path).ok()
+    }
+
+    /// The sensor data and the row-offset table of a corpus file.
+    fn sensor(bytes: &[u8]) -> (&[u8], &[u8], usize, usize) {
+        let dir = Directory::parse(bytes).expect("Phase One directory");
+        let raw = dir.entry(p1::RAW_DATA).expect("sensor data");
+        let start = raw.value as usize + BASE;
+        let data = &bytes[start..start + raw.length as usize];
+        let offsets = dir.blob(p1::ROW_OFFSETS).expect("row table");
+        let width = dir.int(p1::RAW_WIDTH).unwrap_or(0) as usize;
+        let height = dir.int(p1::RAW_HEIGHT).unwrap_or(0) as usize;
+        (data, offsets, width, height)
+    }
+
+    /// The square companding law, against the table it must produce.
+    ///
+    /// The divisor is an empirical constant whose only justification
+    /// is that it lands `expand[255]` exactly on 16383, so the table
+    /// is the specification and the formula only a way of writing it.
+    #[test]
+    fn the_companding_law_reproduces_its_table() {
+        const EXPAND: [u16; 256] = [
+            0, 0, 1, 2, 4, 6, 9, 12, 16, 20, 25, 30, 36, 43, 49, 57, 64, 73, 82, 91, 101, 111, 122,
+            133, 145, 157, 170, 184, 198, 212, 227, 242, 258, 274, 291, 309, 327, 345, 364, 383,
+            403, 424, 444, 466, 488, 510, 533, 557, 580, 605, 630, 655, 681, 708, 735, 762, 790,
+            819, 848, 877, 907, 938, 969, 1000, 1032, 1064, 1098, 1131, 1165, 1200, 1235, 1270,
+            1306, 1343, 1380, 1417, 1455, 1494, 1533, 1572, 1612, 1653, 1694, 1736, 1778, 1820,
+            1863, 1907, 1951, 1996, 2041, 2086, 2133, 2179, 2226, 2274, 2322, 2371, 2420, 2469,
+            2520, 2570, 2621, 2673, 2725, 2778, 2831, 2885, 2939, 2993, 3049, 3104, 3160, 3217,
+            3274, 3332, 3390, 3449, 3508, 3568, 3628, 3689, 3750, 3812, 3874, 3937, 4000, 4064,
+            4128, 4193, 4258, 4324, 4390, 4457, 4524, 4592, 4660, 4729, 4798, 4868, 4938, 5009,
+            5080, 5152, 5224, 5297, 5371, 5444, 5519, 5594, 5669, 5745, 5821, 5898, 5975, 6053,
+            6132, 6210, 6290, 6370, 6450, 6531, 6612, 6694, 6777, 6859, 6943, 7027, 7111, 7196,
+            7281, 7367, 7454, 7541, 7628, 7716, 7804, 7893, 7983, 8073, 8163, 8254, 8346, 8438,
+            8530, 8623, 8717, 8811, 8905, 9000, 9095, 9191, 9288, 9385, 9482, 9580, 9679, 9778,
+            9878, 9978, 10078, 10179, 10281, 10383, 10485, 10588, 10692, 10796, 10900, 11006,
+            11111, 11217, 11324, 11431, 11538, 11647, 11755, 11864, 11974, 12084, 12195, 12306,
+            12417, 12529, 12642, 12755, 12869, 12983, 13098, 13213, 13328, 13444, 13561, 13678,
+            13796, 13914, 14033, 14152, 14272, 14392, 14512, 14634, 14755, 14878, 15000, 15123,
+            15247, 15371, 15496, 15621, 15747, 15873, 16000, 16127, 16255, 16383,
+        ];
+        assert_eq!(companding_table(), EXPAND);
+        // The two ends are what fix the constant.
+        assert_eq!(EXPAND[0], 0);
+        assert_eq!(EXPAND[255], 16383);
+    }
+
+    /// Row lengths come from sorting the offsets, not from the row
+    /// order: a back that reads its two sensor halves out in opposite
+    /// directions writes a table that falls in the middle.
+    #[test]
+    fn row_lengths_come_from_the_sorted_offsets() {
+        // Four rows written 0, 300, 200, 100: rows 1..3 descend.
+        let mut table = Vec::new();
+        for offset in [0u32, 300, 200, 100] {
+            table.extend_from_slice(&offset.to_le_bytes());
+        }
+        let extents = row_extents(&table, 400, 4).unwrap();
+        assert_eq!(extents, vec![(0, 100), (300, 100), (200, 100), (100, 100)]);
+        // A table too short for the frame is corrupt.
+        assert!(row_extents(&table, 400, 5).is_err());
+    }
+
+    /// The absolute form of a format-6 range code: a hand-built
+    /// prefix code of four to five bits, in no useful order.
+    #[test]
+    fn the_absolute_range_code_decodes_its_ten_values() {
+        for (bits, want) in [
+            ("10", 3),
+            ("11", 2),
+            ("010", 1),
+            ("011", 4),
+            ("0010", 6),
+            ("0011", 5),
+            ("00000", 9),
+            ("00001", 8),
+            ("00010", 0),
+            ("00011", 7),
+        ] {
+            // The code, left-aligned in a 32-bit little-endian word,
+            // padded with ones so a decoder that consumed too few or
+            // too many bits would not accidentally agree.
+            let mut word = u32::from_str_radix(bits, 2).unwrap() << (32 - bits.len());
+            word |= u32::MAX >> bits.len();
+            let stream = word.to_le_bytes();
+            let mut pump = BitPumpMsb32::new(&stream);
+            assert_eq!(absolute_range(&mut pump), want, "code {bits}");
+            assert_eq!(pump.position(), bits.len(), "code {bits} length");
+        }
+    }
+
+    /// The iXU180: format 6, with a row table that reverses at
+    /// `split_row`, escape blocks, both parities carrying independent
+    /// ranges, and a four-pixel tail.
+    #[test]
+    fn the_ixu180_decodes_its_first_rows_sample_for_sample() {
+        let Some(bytes) = sample("iXU180-cap_22908.IIQ") else {
+            return;
+        };
+        let (data, offsets, width, height) = sensor(&bytes);
+        assert_eq!((width, height), (10380, 7816));
+        let extents = row_extents(offsets, data.len(), height).unwrap();
+        // The table's own order rises to row 3887 and then falls, and
+        // the two halves are *interleaved* in the file: sorted by
+        // offset the rows run 0, 7775, 1, 7774, 2, ... So a row's
+        // bytes end where the next offset in file order begins, not
+        // where the next row's offset does.
+        assert_eq!(
+            extents[..5]
+                .iter()
+                .map(|(start, _)| *start)
+                .collect::<Vec<_>>(),
+            vec![0, 9736, 19484, 29244, 38972]
+        );
+        assert_eq!(
+            extents[..5].iter().map(|(_, len)| *len).collect::<Vec<_>>(),
+            vec![4884, 4888, 4892, 4872, 4880]
+        );
+        let lengths: Vec<usize> = extents.iter().map(|(_, l)| *l).collect();
+        assert_eq!(lengths.iter().min(), Some(&4844));
+        assert_eq!(lengths.iter().max(), Some(&11800));
+        // Every row fits the reference's own read buffer, so nothing
+        // here is being silently truncated.
+        assert!(lengths.iter().all(|l| *l <= max_row_bytes(width)));
+        // Row 0 begins at the sensor data itself, and its header's
+        // low three bits are `init_bits`.
+        assert_eq!(extents[0].0, 0);
+        assert_eq!(&data[..4], &[0x01, 0x00, 0x03, 0x00]);
+
+        let mut row = vec![0u16; width];
+        decode_row_format6(&data[..extents[0].1], &mut row);
+        // Block 0: both ranges read the absolute form of 9, the
+        // escape, so all eight pixels are plain fourteen-bit values.
+        assert_eq!(
+            &row[..8],
+            &[1040, 1052, 1076, 1072, 33056, 33408, 33248, 33216]
+        );
+        // Block 1: both ranges 5, extra 2, so take 5, shift 3 and
+        // bias 127 for both parities.
+        let stored = |v: i32| (v << 2) as u16;
+        assert_eq!(
+            &row[8..16],
+            &[8281, 8273, 8306, 8378, 8219, 8275, 8300, 8212].map(stored)
+        );
+        // Block 2: the two parities' ranges differ (8 and 6), so they
+        // carry different shifts and biases over one shared `take`.
+        assert_eq!(
+            &row[16..24],
+            &[8333, 8149, 8174, 8358, 8687, 8127, 8144, 8224].map(stored)
+        );
+
+        // The *second* row in file order, at offset 4884. It is frame
+        // row 7775, not row 1: the second half of the sensor is
+        // written into the gaps between the first half's rows.
+        let (start, len) = extents[7775];
+        assert_eq!((start, len), (4884, 4852));
+        let mut row = vec![0u16; width];
+        decode_row_format6(&data[start..start + len], &mut row);
+        assert_eq!(
+            &row[..8],
+            &[268, 253, 275, 264, 8328, 8088, 8264, 8232].map(stored)
+        );
+        assert_eq!(
+            &row[8..16],
+            &[8265, 8297, 8218, 8202, 8243, 8155, 8124, 8180].map(stored)
+        );
+        assert_eq!(&row[16..18], &[8317, 8229].map(stored));
+        // And the tail: the last four columns of a 10380-wide row are
+        // outside the 1297 whole blocks and are plain 14-bit samples.
+        assert_eq!(((width - BLOCK6) >> 3) + 1, 1297);
+        assert!(row[width - 4..].iter().all(|s| s.is_multiple_of(4)));
+    }
+
+    /// The H 25: format 5, whose stream is format 3's exactly and
+    /// whose samples are eight-bit companded codes.
+    #[test]
+    fn the_h25_companded_row_matches_its_stored_codes() {
+        let Some(bytes) = sample("H_25-H25_Outdoor_.IIQ") else {
+            return;
+        };
+        let (data, offsets, width, height) = sensor(&bytes);
+        assert_eq!((width, height), (4134, 5488));
+        let extents = row_extents(offsets, data.len(), height).unwrap();
+        assert_eq!(extents[0].0, 0);
+        assert_eq!(extents[1].0, 2732);
+
+        // The same row read twice: once as format 3 would, giving the
+        // stored eight-bit codes, and once as format 5 does.
+        let mut stored = vec![0u16; width];
+        decode_row(&data[extents[0].0..], &mut stored, None);
+        assert_eq!(
+            stored[..16].iter().map(|s| s >> 2).collect::<Vec<_>>(),
+            vec![57, 57, 66, 57, 57, 57, 65, 64, 65, 65, 65, 64, 64, 64, 64, 64]
+        );
+        let table = companding_table();
+        let mut expanded = vec![0u16; width];
+        decode_row(&data[extents[0].0..], &mut expanded, Some(&table));
+        assert_eq!(
+            expanded[..16].iter().map(|s| s >> 2).collect::<Vec<_>>(),
+            vec![
+                819, 819, 1098, 819, 819, 819, 1064, 1032, 1064, 1064, 1064, 1032, 1032, 1032,
+                1032, 1032
+            ]
+        );
+        let mut second = vec![0u16; width];
+        decode_row(&data[extents[1].0..], &mut second, Some(&table));
+        assert_eq!(
+            second[..16].iter().map(|s| s >> 2).collect::<Vec<_>>(),
+            vec![819, 819, 877, 790, 819, 819, 848, 848, 848, 848, 848, 848, 848, 819, 819, 848]
+        );
+    }
+
+    /// The P25+ pair: the same back and the same geometry, one file
+    /// format 5 and one format 3, so the companding is the only
+    /// difference between them. The format-3 file's row 0 is well
+    /// above 256 and must come through untouched.
+    #[test]
+    fn the_p25_pair_differs_only_by_the_companding() {
+        let (Some(lossy), Some(lossless)) =
+            (sample("P25+-CF028662.IIQ"), sample("P25+-CF028663.IIQ"))
+        else {
+            return;
+        };
+        let table = companding_table();
+        let (data, offsets, width, height) = sensor(&lossy);
+        let extents = row_extents(offsets, data.len(), height).unwrap();
+        let mut stored = vec![0u16; width];
+        decode_row(&data[extents[0].0..], &mut stored, None);
+        assert_eq!(
+            stored[..16].iter().map(|s| s >> 2).collect::<Vec<_>>(),
+            vec![31, 31, 181, 181, 181, 181, 181, 181, 181, 181, 195, 197, 192, 196, 199, 196]
+        );
+        let mut row = vec![0u16; width];
+        decode_row(&data[extents[0].0..], &mut row, Some(&table));
+        assert_eq!(
+            row[..16].iter().map(|s| s >> 2).collect::<Vec<_>>(),
+            vec![
+                242, 242, 8254, 8254, 8254, 8254, 8254, 8254, 8254, 8254, 9580, 9778, 9288, 9679,
+                9978, 9679
+            ]
+        );
+
+        let (data, offsets, width, height) = sensor(&lossless);
+        let extents = row_extents(offsets, data.len(), height).unwrap();
+        let mut row = vec![0u16; width];
+        decode_row(&data[extents[0].0..], &mut row, None);
+        assert_eq!(
+            row[..16].iter().map(|s| s >> 2).collect::<Vec<_>>(),
+            vec![
+                256, 256, 8192, 8192, 8192, 8192, 8192, 8192, 8192, 8192, 10720, 10496, 10368,
+                10912, 10752, 10464
+            ]
+        );
     }
 
     #[test]

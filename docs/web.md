@@ -115,8 +115,8 @@ rather than left to fail.
 ## Known gaps
 
 Camera raws open through the pure-Rust `schist-codec-raw` decoder, the
-same one the desktop uses first. The few codecs it declines — Canon CR3
-pixels, Fuji's compressed RAF, a handful of odd ones — go to a runtime
+same one the desktop uses first. The few codecs it declines — Sigma's
+Foveon data, GoPro's VC-5, a handful of old odd ones — go to a runtime
 LibRaw on the desktop; a browser has no library to load, so those files
 are refused with a message saying so (their embedded previews still
 show).
