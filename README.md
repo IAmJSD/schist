@@ -79,7 +79,8 @@ sample against LibRaw across some 250 camera files), which covers most
 bodies; what it declines — Canon CR3 pixels, Fuji's compressed RAF, a
 few odd codecs, and cameras with no colour matrix in its table yet —
 falls back to the system's LibRaw, loaded at runtime (`brew install
-libraw`, or the distro's package). HEIC decodes through libheif the
+libraw`, or the distro's package); the browser build, which cannot load
+one, refuses those few files and opens everything else. HEIC decodes through libheif the
 same way: the system's copy if installed, otherwise Schist offers to
 download a hash-pinned, decode-only build (with its LGPL license texts)
 from [libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) —

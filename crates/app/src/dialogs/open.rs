@@ -123,6 +123,68 @@ pub(super) fn heif_support(
     )
 }
 
+/// A raw file Schist's own decoder declines needs LibRaw, and this
+/// machine has none. There is no download offer yet (no prebuilt to
+/// pin, unlike libheif), so this says where the library comes from
+/// and retries the open once it is there.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn libraw_support(
+    path: std::path::PathBuf,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let how = if cfg!(target_os = "macos") {
+        "Install it with Homebrew: brew install libraw".to_string()
+    } else if cfg!(target_os = "linux") {
+        "Install your distribution's LibRaw package (Debian/Ubuntu: libraw23t64 or \
+         libraw23; Fedora: LibRaw; Arch: libraw)."
+            .to_string()
+    } else {
+        format!(
+            "Put a LibRaw build (libraw.dll) in {}",
+            schist_codecs_common::raw::managed_dir().display()
+        )
+    };
+    ui::modal_frame(
+        "LibRaw Needed",
+        420.0,
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_size(px(12.0))
+            .child(format!(
+                "Schist\u{2019}s own raw decoder does not read \u{201C}{name}\u{201D} \
+                 yet (Canon CR3, Fuji compressed RAF and a few other codecs), and \
+                 the LibRaw library it falls back to for those is not installed."
+            ))
+            .child(how)
+            .child("Then choose Try Again."),
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(ui::button(
+                "Cancel",
+                false,
+                |ws, _window, cx| ws.close_modal(cx),
+                cx,
+            ))
+            .child(ui::button(
+                "Try Again",
+                true,
+                move |ws, _window, cx| {
+                    ws.close_modal(cx);
+                    ws.load_file(path.clone(), cx);
+                },
+                cx,
+            )),
+    )
+}
+
 /// Folders dropped on the window: every image in them as tabs, or the
 /// folders watched in the gallery. The gallery is the answer for
 /// anything bigger than a handful — which is why it is the primary
