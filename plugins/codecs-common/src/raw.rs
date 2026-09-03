@@ -17,8 +17,28 @@
 //! histogram until 1% of the pixels clip. The result lands near the
 //! camera's own JPEG in brightness with the highlights still there.
 
-use schist_core::Document;
+use schist_core::{Document, RawDevelopment, RawSettings};
 use schist_plugin_api::CodecPlugin;
+
+pub use schist_codec_raw::demosaic::Quality as RawQuality;
+
+/// A camera capture developed into straight-alpha, sRGB-encoded floats.
+/// Kept flat so the app can apply its remaining Camera Raw controls before
+/// turning the result into document tiles.
+#[derive(Debug)]
+pub struct DevelopedRaw {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<f32>,
+}
+
+/// File suffixes dispatched to the camera-raw codec. Shared with the app so
+/// a direct capture open can start in the development dialog, while a PSD
+/// containing a RAW-backed layer simply opens as a document.
+pub const RAW_EXTENSIONS: &[&str] = &[
+    "dng", "nef", "nrw", "arw", "srf", "sr2", "cr2", "cr3", "crw", "raf", "orf", "rw2", "rwl",
+    "pef", "srw", "erf", "kdc", "dcr", "mrw", "mos", "iiq", "3fr", "fff", "mef", "x3f", "raw",
+];
 /// Bring linear developed pixels up to display brightness and encode
 /// them as sRGB, in place.
 ///
@@ -31,7 +51,7 @@ use schist_plugin_api::CodecPlugin;
 /// darkening, so an exposed-to-the-right frame is left alone — and
 /// above the knee an exponential shoulder (the one HDR captures get)
 /// that compresses the top towards white instead of cutting it off.
-fn expose_and_encode(rgba: &mut [f32]) {
+fn expose_and_encode_with(rgba: &mut [f32], exposure: f32) {
     const KNEE: f32 = 0.85;
     const MAX_GAIN: f32 = 4.0;
     const BINS: usize = 4096;
@@ -55,11 +75,20 @@ fn expose_and_encode(rgba: &mut [f32]) {
             break;
         }
     }
-    let gain = if p99 > 0.0 {
+    let auto_gain = if p99 > 0.0 {
         (1.0 / p99).clamp(1.0, MAX_GAIN)
     } else {
         1.0
     };
+    // Exposure belongs in scene-linear light, before the shoulder and the
+    // sRGB transfer curve. Non-finite public input is neutral rather than a
+    // way to turn the entire frame into NaNs.
+    let exposure = if exposure.is_finite() {
+        exposure.clamp(-5.0, 5.0)
+    } else {
+        0.0
+    };
+    let gain = auto_gain * 2.0f32.powf(exposure);
 
     // The shoulder leaves everything in 0..=1, and the tiles hold 16
     // bits, so the curve is a table over that range rather than a
@@ -80,6 +109,11 @@ fn expose_and_encode(rgba: &mut [f32]) {
     }
 }
 
+#[cfg(test)]
+fn expose_and_encode(rgba: &mut [f32]) {
+    expose_and_encode_with(rgba, 0.0);
+}
+
 /// The sRGB transfer curve, linear light to signal.
 fn srgb_encode(v: f32) -> f32 {
     if v <= 0.003_130_8 {
@@ -97,6 +131,20 @@ pub fn embedded_preview(bytes: &[u8]) -> anyhow::Result<Option<image::RgbaImage>
     guarded(|| native::embedded_preview(bytes))
 }
 
+/// Re-develop an original capture with RAW-domain controls.
+///
+/// Temperature and tint alter the camera's white-balance multipliers before
+/// demosaic; exposure is applied in scene-linear light before the display
+/// curve. The remaining [`RawSettings`] controls operate on the developed
+/// image and are applied by the Camera Raw filter in the host.
+pub fn develop_rgba(
+    bytes: &[u8],
+    settings: RawSettings,
+    quality: RawQuality,
+) -> anyhow::Result<DevelopedRaw> {
+    guarded(|| native::develop_rgba(bytes, settings, quality))
+}
+
 /// Camera raw files, import only.
 pub struct RawCodec;
 
@@ -108,11 +156,7 @@ impl CodecPlugin for RawCodec {
         "Camera Raw"
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &[
-            "dng", "nef", "nrw", "arw", "srf", "sr2", "cr2", "cr3", "crw", "raf", "orf", "rw2",
-            "rwl", "pef", "srw", "erf", "kdc", "dcr", "mrw", "mos", "iiq", "3fr", "fff", "mef",
-            "x3f", "raw",
-        ]
+        RAW_EXTENSIONS
     }
     fn probe(&self, bytes: &[u8]) -> bool {
         // The native crate's probe knows every container, including
@@ -145,11 +189,12 @@ fn guarded<T>(f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
 
 /// The pure-Rust path.
 mod native {
-    use super::expose_and_encode;
+    use super::{expose_and_encode_with, DevelopedRaw, RawDevelopment, RawQuality, RawSettings};
     use anyhow::Context as _;
     use schist_codec_raw::{DevelopOptions, Orientation};
     use schist_color::Depth;
     use schist_core::Document;
+    use std::sync::Arc;
 
     /// Decode and develop through `schist-codec-raw`, then the
     /// exposure lift and encoding. A body the camera table has no
@@ -157,6 +202,31 @@ mod native {
     /// recognisable, not right — and says so in the log; adding its
     /// matrix to the table is the fix.
     pub(super) fn develop_document(bytes: &[u8]) -> anyhow::Result<Document> {
+        let developed = develop_rgba(bytes, RawSettings::default(), RawQuality::Best)?;
+        let mut doc = crate::deep_document(
+            "Raw",
+            developed.width as u32,
+            developed.height as u32,
+            &developed.rgba,
+            Depth::Sixteen,
+            None,
+        )
+        .context("assembling document")?;
+        if let Some(layer) = doc.tree.layers.first_mut() {
+            layer.raw = Some(Box::new(RawDevelopment {
+                source: Arc::from(bytes),
+                settings: RawSettings::default(),
+            }));
+        }
+        Ok(doc)
+    }
+
+    pub(super) fn develop_rgba(
+        bytes: &[u8],
+        settings: RawSettings,
+        quality: RawQuality,
+    ) -> anyhow::Result<DevelopedRaw> {
+        let settings = settings.sanitized();
         let raw = schist_codec_raw::decode(bytes).context("decoding")?;
         if raw.color_matrix.is_none() {
             log::warn!(
@@ -165,16 +235,38 @@ mod native {
                 raw.model
             );
         }
-        let developed =
-            schist_codec_raw::develop(&raw, &DevelopOptions::default()).context("developing")?;
-        let (w, h) = (developed.width as u32, developed.height as u32);
+        let options = DevelopOptions {
+            quality,
+            white_balance: Some(adjusted_white_balance(raw.wb_coeffs, settings)),
+            ..DevelopOptions::default()
+        };
+        let developed = schist_codec_raw::develop(&raw, &options).context("developing")?;
         let mut rgba = Vec::with_capacity(developed.rgb.len() / 3 * 4);
         for px in developed.rgb.as_chunks::<3>().0 {
             rgba.extend_from_slice(&[px[0], px[1], px[2], 1.0]);
         }
-        expose_and_encode(&mut rgba);
-        crate::deep_document("Raw", w, h, &rgba, Depth::Sixteen, None)
-            .context("assembling document")
+        expose_and_encode_with(&mut rgba, settings.exposure);
+        Ok(DevelopedRaw {
+            width: developed.width,
+            height: developed.height,
+            rgba,
+        })
+    }
+
+    fn adjusted_white_balance(mut wb: [f32; 4], settings: RawSettings) -> [f32; 4] {
+        let finite = |value: f32| if value.is_finite() { value } else { 0.0 };
+        let temperature = finite(settings.temperature).clamp(-100.0, 100.0) / 100.0;
+        let tint = finite(settings.tint).clamp(-100.0, 100.0) / 100.0;
+
+        // Work in stops so opposite slider directions are reciprocal. A
+        // warmer setting trades blue gain for red; positive tint trades
+        // green for equal red/blue (magenta). `develop` normalises green to
+        // one after validating all four coefficients.
+        wb[0] *= 2.0f32.powf(temperature * 0.5 + tint * 0.125);
+        wb[2] *= 2.0f32.powf(-temperature * 0.5 + tint * 0.125);
+        wb[1] *= 2.0f32.powf(-tint * 0.25);
+        wb[3] *= 2.0f32.powf(-tint * 0.25);
+        wb
     }
 
     /// The embedded JPEG, decoded and turned upright.
@@ -379,6 +471,12 @@ pub(crate) mod tests {
         assert_eq!((doc.width, doc.height), (64, 32));
         assert_eq!(doc.depth, schist_color::Depth::Sixteen, "raws keep 16 bits");
         assert!(doc.icc_profile.is_none(), "developed to sRGB, no profile");
+        let raw = doc.tree.layers[0]
+            .raw
+            .as_deref()
+            .expect("the original capture should stay attached");
+        assert_eq!(raw.source.as_ref(), synthetic_dng(64, 32));
+        assert_eq!(raw.settings, RawSettings::default());
         let tiles = &doc.tree.layers[0].as_raster().unwrap().tiles;
         // Grey in, grey out: the as-shot balance is neutral and the
         // matrix is sRGB's own.
@@ -403,6 +501,39 @@ pub(crate) mod tests {
             (red.r, red.g, red.b)
         );
         assert_eq!(tiles.pixel(12, 12).a, 1.0);
+    }
+
+    #[test]
+    fn raw_controls_run_before_display_encoding() {
+        let bytes = synthetic_dng(64, 32);
+        let neutral = develop_rgba(&bytes, RawSettings::default(), RawQuality::Best).unwrap();
+        let exposed = develop_rgba(
+            &bytes,
+            RawSettings {
+                exposure: 1.0,
+                ..RawSettings::default()
+            },
+            RawQuality::Best,
+        )
+        .unwrap();
+        let warm = develop_rgba(
+            &bytes,
+            RawSettings {
+                temperature: 100.0,
+                ..RawSettings::default()
+            },
+            RawQuality::Best,
+        )
+        .unwrap();
+        let at = (12 * 64 + 12) * 4;
+        assert!(
+            exposed.rgba[at + 1] > neutral.rgba[at + 1],
+            "positive EV should lift linear-light green before encoding"
+        );
+        assert!(
+            warm.rgba[at] > neutral.rgba[at] && warm.rgba[at + 2] < neutral.rgba[at + 2],
+            "warmer white balance should trade blue for red"
+        );
     }
 
     #[test]

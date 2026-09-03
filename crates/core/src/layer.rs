@@ -258,6 +258,10 @@ pub struct Layer {
     /// rendered pixels, but they are derived from here and are re-rendered
     /// from the source whenever the transform changes.
     pub smart: Option<Box<crate::smart::SmartObject>>,
+    /// Set when this raster is a development of an original camera capture.
+    /// The pixels are a render cache; Camera Raw can rebuild them from this
+    /// immutable source without compounding earlier adjustments.
+    pub raw: Option<Box<crate::raw::RawDevelopment>>,
     /// The layer's pixels with `style` rasterized around them, rebuilt by
     /// `schist-layer-fx` whenever the pixels or the style change. This
     /// is a derived cache: never saved, never compared, and dropped as
@@ -292,6 +296,7 @@ impl Layer {
             shape_key: 0,
             is_frame: false,
             smart: None,
+            raw: None,
             styled: None,
             render_offset: (0, 0),
         }

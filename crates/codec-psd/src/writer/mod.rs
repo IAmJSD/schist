@@ -65,6 +65,17 @@ pub fn write_psd_with(doc: &Document, psb: bool) -> Result<Vec<u8>, PsdError> {
             if psb { "PSB" } else { "PSD" }
         )));
     }
+    if let Some(raw) = doc
+        .tree
+        .iter()
+        .filter_map(|layer| layer.raw.as_deref())
+        .find(|raw| raw.source.is_empty() || raw.source.len() > crate::raw::MAX_SOURCE_BYTES)
+    {
+        return Err(PsdError::Unsupported(format!(
+            "camera-raw source of {} bytes cannot be embedded",
+            raw.source.len()
+        )));
+    }
 
     let mode = match doc.mode {
         ColorMode::Rgb => MODE_RGB,
@@ -481,6 +492,11 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
         if block.key == crate::smart::SMART_BLOCK_KEY {
             continue;
         }
+        // Regenerated from `Layer::raw` below. Keeping an old copy would
+        // resurrect stale settings after the layer was edited.
+        if block.key == crate::raw::RAW_BLOCK_KEY {
+            continue;
+        }
         // Fill opacity is regenerated from the layer below, so a
         // preserved copy is stale: echoing it back wrote the file's
         // original value over whatever the user set in Schist.
@@ -510,6 +526,11 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
     // readers that do not know it.
     if let Some(payload) = crate::smart::write_smart(layer) {
         out.push((crate::smart::SMART_BLOCK_KEY, payload));
+    }
+    // The immutable camera capture and its editable development settings.
+    // Other PSD readers ignore this private block and use the raster pixels.
+    if let Some(payload) = crate::raw::write_raw(layer) {
+        out.push((crate::raw::RAW_BLOCK_KEY, payload));
     }
     // 'iOpa' is one byte of fill opacity plus three of padding. Photoshop
     // omits the block at 100%, which is what a reader assumes when it is

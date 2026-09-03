@@ -368,6 +368,20 @@ impl Workspace {
         let _ = &path;
         match result {
             Ok(doc) => {
+                // A capture opens into its development workflow. A PSD/PSB
+                // that happens to contain a RAW-backed layer does not: it is
+                // already an edited document and should reopen undisturbed.
+                let raw_capture = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .is_some_and(|ext| {
+                        schist_codecs_common::raw::RAW_EXTENSIONS.contains(&ext.as_str())
+                    })
+                    && doc
+                        .active_layer
+                        .and_then(|id| doc.tree.find(id))
+                        .is_some_and(|layer| layer.raw.is_some());
                 self.status = match &doc.path {
                     Some(p) => format!("Opened {}", p.display()).into(),
                     None => format!("Opened {}", doc.title).into(),
@@ -378,6 +392,9 @@ impl Workspace {
                 #[cfg(not(target_arch = "wasm32"))]
                 self.finish_load_bookkeeping(&path);
                 self.offer_missing_fonts(cx);
+                if raw_capture {
+                    self.open_filter_dialog("filter.camera_raw", cx);
+                }
             }
             // A HEIC on a machine with no libheif — or a libheif with
             // no HEVC decoder, as stock Ubuntu ships: downloading the

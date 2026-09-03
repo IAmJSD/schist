@@ -16,6 +16,7 @@
 
 pub mod effects;
 pub mod error;
+mod raw;
 mod reader;
 mod smart;
 pub mod vector;

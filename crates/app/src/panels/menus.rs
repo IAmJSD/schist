@@ -20,6 +20,22 @@ pub(crate) enum MenuEntry {
     Sep,
 }
 
+/// A RAW-backed layer uses Camera Raw as a non-destructive development
+/// workflow; everywhere else it remains the ordinary destructive filter.
+/// Keep the menu label in step with the dialog title for both menu-bar
+/// implementations.
+pub(crate) fn filter_menu_label(ws: &Workspace, id: &str) -> String {
+    if ws.is_raw_redevelopment(id) {
+        "Camera Raw Development…".to_string()
+    } else {
+        ws.registry
+            .filters()
+            .find(|filter| filter.id() == id)
+            .map(|filter| format!("{}…", filter.name()))
+            .unwrap_or_else(|| id.to_string())
+    }
+}
+
 pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     use AppItem::*;
     use MenuEntry::*;

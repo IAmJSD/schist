@@ -111,6 +111,12 @@ pub enum EditOp {
         before: Vec<crate::layer::RawBlock>,
         after: Vec<crate::layer::RawBlock>,
     },
+    /// A layer's original camera capture or development settings changed.
+    RawDevelopmentSet {
+        layer: LayerId,
+        before: Option<Box<crate::raw::RawDevelopment>>,
+        after: Option<Box<crate::raw::RawDevelopment>>,
+    },
     /// A layer's effects changed.
     LayerStyleSet {
         layer: LayerId,

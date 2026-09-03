@@ -11,6 +11,7 @@ pub mod geom;
 pub mod history;
 pub mod layer;
 pub mod path;
+pub mod raw;
 pub mod resample;
 pub mod selection;
 pub mod smart;
@@ -32,6 +33,7 @@ pub use layer::{
     LayerTree, RasterLayer, RawBlock, StyledRaster,
 };
 pub use path::{Anchor, SubPath, VectorPath, VectorShape};
+pub use raw::{RawDevelopment, RawSettings};
 pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
 pub use smart::SmartObject;

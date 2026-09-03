@@ -72,7 +72,11 @@ byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
 than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos)
 and camera raw import: NEF, ARW, CR2, DNG, RAF, ORF, RW2, PEF, SRW and the
-rest, developed with the camera's white balance to 16-bit sRGB. Raws
+rest. A capture opens in Camera Raw with sensor-domain white balance and
+exposure, live fast-demosaic previews and a best-quality render on Apply;
+the original capture and all 15 development settings stay attached to the
+layer and survive PSD/PSB save and reopen, so adjustments never compound on
+the previously developed pixels. The rendered document remains 16-bit sRGB. Raws
 decode through Schist's own clean-room `schist-codec-raw` crate (pure
 Rust, written from the public specifications and verified sample for
 sample against LibRaw across some 250 camera files), covering every

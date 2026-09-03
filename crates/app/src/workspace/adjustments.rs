@@ -8,13 +8,19 @@ impl Workspace {
         let Some(filter) = self.registry.filters().find(|f| f.id() == id) else {
             return;
         };
-        let values = schist_plugin_api::FilterValues::defaults(&filter.params());
+        let mut values = schist_plugin_api::FilterValues::defaults(&filter.params());
+        self.seed_raw_filter_values(id, &mut values);
         // Filters with no parameters just run.
         if values.0.is_empty() {
             self.apply_filter(id, &values, cx);
             return;
         }
-        if !self.begin_filter_preview() {
+        let begun = if self.is_raw_redevelopment(id) {
+            self.begin_raw_filter_preview()
+        } else {
+            self.begin_filter_preview()
+        };
+        if !begun {
             cx.notify();
             return;
         }

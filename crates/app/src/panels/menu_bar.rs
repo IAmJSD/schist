@@ -508,12 +508,7 @@ pub(super) fn menu_entry_row(
         )
         .into_any_element(),
         MenuEntry::Filter(id) => {
-            let name = ws
-                .registry
-                .filters()
-                .find(|f| f.id() == id)
-                .map(|f| format!("{}…", f.name()))
-                .unwrap_or_else(|| id.to_string());
+            let name = filter_menu_label(ws, id);
             menu_row(
                 name,
                 String::new(),

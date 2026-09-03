@@ -36,7 +36,7 @@ pub fn sync(ws: &mut Workspace, cx: &mut Context<Workspace>) {
 fn signature(ws: &Workspace) -> String {
     let v = &ws.view;
     let mut out = format!(
-        "{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
         v.rulers as u8,
         v.grid as u8,
         v.guides as u8,
@@ -45,6 +45,9 @@ fn signature(ws: &Workspace) -> String {
         ws.color.proof.is_some() as u8,
         // The gallery swaps the whole menu set out.
         ws.gallery_open() as u8,
+        // Camera Raw changes its label when the active layer carries an
+        // original capture, so switching documents/layers must rebuild it.
+        ws.is_raw_redevelopment("filter.camera_raw") as u8,
     );
     if let Some(doc) = ws.doc.as_ref() {
         for comp in &doc.layer_comps {
@@ -133,12 +136,7 @@ fn item(ws: &Workspace, entry: MenuEntry) -> Option<MenuItem> {
             }),
         ),
         MenuEntry::Filter(id) => {
-            let name = ws
-                .registry
-                .filters()
-                .find(|f| f.id() == id)
-                .map(|f| format!("{}…", f.name()))
-                .unwrap_or_else(|| id.to_string());
+            let name = panels::filter_menu_label(ws, id);
             action_item(name, Box::new(OpenFilter { id: id.to_string() }))
         }
         MenuEntry::Dynamic(label, item) => action_item(label, Box::new(RunAppItem { item })),
