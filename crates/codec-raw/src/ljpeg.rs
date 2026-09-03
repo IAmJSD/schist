@@ -56,14 +56,41 @@ struct Header {
     tables: [Option<HuffTable>; 4],
     /// Which table each scan component reads its differences with.
     component_tables: [usize; 4],
+    /// Each frame component's sampling-factor byte: high nibble the
+    /// horizontal factor, low nibble the vertical. `0x11` on every
+    /// component is an ordinary frame, which is all that
+    /// [`decode`] and [`header`] accept; Canon's mRAW puts `0x22` and
+    /// its sRAW `0x21` on the luma component, and both are decoded by
+    /// [`decode_subsampled`].
+    sampling: [u8; 4],
     /// Offset of the first entropy-coded byte.
     scan_start: usize,
+}
+
+impl Header {
+    /// The first component whose sampling factors are not 1:1, if any.
+    fn subsampled(&self) -> Option<(usize, u8)> {
+        (0..self.components)
+            .map(|c| (c, self.sampling[c]))
+            .find(|(_, factor)| *factor != 0x11)
+    }
+
+    /// The error the 1:1 entry points answer a subsampled frame with.
+    fn refuse_subsampling(&self) -> Result<()> {
+        match self.subsampled() {
+            Some((c, factor)) => Err(Error::Unsupported(format!(
+                "lossless JPEG component {c} with sampling factors {factor:#04x} (Canon sRAW/mRAW)"
+            ))),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Decode a complete lossless JPEG stream (SOI through EOI; trailing
 /// bytes ignored).
 pub fn decode(bytes: &[u8]) -> Result<LjpegImage> {
     let header = parse(bytes, false)?;
+    header.refuse_subsampling()?;
     let samples = header
         .width
         .checked_mul(header.height)
@@ -130,6 +157,7 @@ pub fn decode(bytes: &[u8]) -> Result<LjpegImage> {
 /// callers that size their output before decoding. `data` is empty.
 pub fn header(bytes: &[u8]) -> Result<LjpegImage> {
     let header = parse(bytes, true)?;
+    header.refuse_subsampling()?;
     Ok(LjpegImage {
         width: header.width,
         height: header.height,
@@ -173,6 +201,7 @@ fn parse(bytes: &[u8], header_only: bool) -> Result<Header> {
     let mut height = 0usize;
     let mut components = 0usize;
     let mut ids = [0u8; 4];
+    let mut sampling = [0x11u8; 4];
     let mut restart_interval = 0usize;
     let mut tables: [Option<HuffTable>; 4] = [None, None, None, None];
 
@@ -260,19 +289,12 @@ fn parse(bytes: &[u8], header_only: bool) -> Result<Header> {
                     let spec = &payload[6 + c * 3..9 + c * 3];
                     ids[c] = spec[0];
                     // Subsampling has no meaning for a lossless frame
-                    // and nothing writes it, but a file that claims it
-                    // would decode to nonsense if it were ignored.
-                    if spec[1] != 0x11 {
-                        // Canon's sRAW and mRAW are the only raw
-                        // streams that do this: a subsampled YCbCr
-                        // lossless frame. Decoding it needs the MCU
-                        // interleave rules and a chroma upsampler,
-                        // neither of which belongs here yet.
-                        return Err(Error::Unsupported(format!(
-                            "lossless JPEG component {c} with sampling factors {:#04x} (Canon sRAW/mRAW)",
-                            spec[1]
-                        )));
-                    }
+                    // and only Canon's sRAW and mRAW write it. The
+                    // factors are recorded rather than refused here so
+                    // that [`decode_subsampled`] can read them; the
+                    // 1:1 entry points refuse them on the way out, so
+                    // nothing that used to decode changes.
+                    sampling[c] = spec[1];
                 }
             }
             // Any other SOFn is a different JPEG process entirely.
@@ -377,6 +399,7 @@ fn parse(bytes: &[u8], header_only: bool) -> Result<Header> {
                     restart_interval,
                     tables,
                     component_tables,
+                    sampling,
                     scan_start: next,
                 });
             }
@@ -553,6 +576,282 @@ fn find_restart(scan: &[u8], from: usize, expected: u8) -> Result<usize> {
     Err(Error::Corrupt(
         "the scan ends before its next restart marker".into(),
     ))
+}
+
+// ------------------------------------------------- Canon sRAW / mRAW
+
+/// A decoded Canon sRAW or mRAW frame, in the "widened component"
+/// layout its entropy coder uses.
+///
+/// The stream is not a textbook subsampled JPEG with a sampling map per
+/// component. Every minimum coded unit is instead a fixed run of
+/// [`SubsampledImage::components`] samples describing one *block* of
+/// output pixels that share a chroma pair: `components - 2` luma, then
+/// Cb, then Cr. A block is two pixels wide, and one or two rows tall
+/// depending on the vertical factor. Putting those blocks back where
+/// they belong needs the container's slice tag, so — as with the 1:1
+/// path — this module hands the samples back in stream order and lets
+/// the CR2 module place them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubsampledImage {
+    /// The luma width the frame header declares: the widest the
+    /// reassembled picture can be before the container's slices trim
+    /// it. Always even.
+    pub width: usize,
+    /// The luma height, which is the picture's height.
+    pub height: usize,
+    /// Canon's "sraw parameter": `1` when the luma is sampled 2x1 and
+    /// `3` when it is sampled 2x2. Components `0..=p` of an MCU are
+    /// luma and the last two are Cb and Cr, so `p` doubles as the
+    /// index of the last luma component.
+    pub p: usize,
+    /// Samples one MCU carries, `3 + p`.
+    pub components: usize,
+    /// Output rows one MCU covers: 1 for 2x1, 2 for 2x2.
+    pub block_rows: usize,
+    /// Samples one entropy row holds, `(width / 2) * components`.
+    pub row: usize,
+    /// Entropy rows in `data`, `height / block_rows`.
+    pub rows: usize,
+    pub precision: u32,
+    /// `rows * row` samples, MCU by MCU in stream order.
+    pub data: Vec<u16>,
+}
+
+/// The sampling-factor byte of a lossless JPEG's first component:
+/// `0x11` for every ordinary raw, `0x21` or `0x22` for Canon's sRAW and
+/// mRAW. Lets a container decide which decoder to call without having
+/// to catch an error from [`header`], which refuses subsampled frames.
+pub fn sampling(bytes: &[u8]) -> Result<u8> {
+    Ok(parse(bytes, true)?.sampling[0])
+}
+
+/// Decode a Canon sRAW or mRAW stream. Ordinary 1:1 frames are refused:
+/// they belong to [`decode`].
+pub fn decode_subsampled(bytes: &[u8]) -> Result<SubsampledImage> {
+    let header = parse(bytes, false)?;
+    // Three components (Y, Cb, Cr) is the only shape Canon writes, and
+    // the two chroma planes are never themselves subsampled.
+    if header.components != 3 {
+        return Err(Error::Unsupported(format!(
+            "a subsampled lossless JPEG with {} components; Canon sRAW has three",
+            header.components
+        )));
+    }
+    if header.sampling[1] != 0x11 || header.sampling[2] != 0x11 {
+        return Err(Error::Unsupported(
+            "a lossless JPEG that subsamples its chroma components as well as its luma".into(),
+        ));
+    }
+    if !matches!(header.sampling[0], 0x21 | 0x22) {
+        return Err(Error::Unsupported(format!(
+            "lossless JPEG luma sampling factors {:#04x}; Canon sRAW uses 0x21 or 0x22",
+            header.sampling[0]
+        )));
+    }
+    // Canon writes predictor 1 (plain left) on every subsampled frame,
+    // and the luma chain in `decode_subsampled_scan` *is* that rule.
+    // Any other selection value would need T.81's vertical terms mixed
+    // into the chain, which nothing has written and nothing has been
+    // measured against, so it is refused rather than guessed at.
+    if header.predictor != 1 {
+        return Err(Error::Unsupported(format!(
+            "a subsampled lossless JPEG with predictor {}; Canon sRAW uses 1",
+            header.predictor
+        )));
+    }
+    // No subsampled frame in the corpus carries a DRI. Honouring one
+    // would need a restart that falls mid-row to re-seed the predictors
+    // without disturbing the running row-head values — which double as
+    // the vertical predictor down the first column — and an interval
+    // that does not divide the MCUs per row would otherwise corrupt the
+    // MCU after every restart. Refusing the stream is the only
+    // implementation that cannot be silently wrong.
+    if header.restart_interval != 0 {
+        return Err(Error::Unsupported(format!(
+            "a subsampled lossless JPEG with a restart interval of {} MCUs; no Canon sRAW writes one",
+            header.restart_interval
+        )));
+    }
+    // P = (H*V - 1) & 3, so 2x1 gives 1 and 2x2 gives 3. Canon masks it
+    // to two bits and no other factor pair occurs.
+    let (h, v) = (
+        (header.sampling[0] >> 4) as usize,
+        (header.sampling[0] & 0x0F) as usize,
+    );
+    let p = (h * v - 1) & 3;
+    let components = 3 + p;
+    // 2x2 blocks are two rows tall, 2x1 blocks one.
+    let block_rows = p.div_ceil(2);
+    if header.width % 2 != 0 {
+        return Err(Error::Corrupt(format!(
+            "a subsampled lossless JPEG {} samples wide; blocks are two pixels wide",
+            header.width
+        )));
+    }
+    if !header.height.is_multiple_of(block_rows) {
+        return Err(Error::Corrupt(format!(
+            "a subsampled lossless JPEG {} rows tall, which {block_rows}-row blocks cannot tile",
+            header.height
+        )));
+    }
+    let blocks = header.width / 2;
+    let rows = header.height / block_rows;
+    // The same ceiling the rest of the crate sizes frames with, so a
+    // forged header cannot ask for an unbounded allocation.
+    let samples = crate::frame_samples(blocks, rows, components)?;
+    if samples > MAX_SAMPLES {
+        return Err(Error::Unsupported(format!(
+            "a subsampled lossless JPEG of {samples} samples is larger than this decoder allows"
+        )));
+    }
+    let row = blocks * components;
+
+    let scan = &bytes[header.scan_start..];
+    if (scan.len() as u64).saturating_mul(8) < samples as u64 {
+        return Err(Error::Corrupt(format!(
+            "subsampled lossless JPEG scan holds {} bytes for {samples} samples",
+            scan.len()
+        )));
+    }
+
+    // The scan lists three components; the MCU wants `components` of
+    // them. Canon gives the luma one table and both chroma the other,
+    // so the run is just those three stretched to the MCU's length.
+    let scan_tables = scan_tables(&header)?;
+    let tables: Vec<&HuffTable> = (0..components)
+        .map(|c| {
+            if c <= p {
+                scan_tables[0]
+            } else if c == components - 2 {
+                scan_tables[1]
+            } else {
+                scan_tables[2]
+            }
+        })
+        .collect();
+
+    let mut data = vec![0u16; samples];
+    decode_subsampled_scan(
+        scan,
+        &header,
+        &tables,
+        &Shape {
+            p,
+            components,
+            blocks,
+            rows,
+            row,
+        },
+        &mut data,
+    );
+    if header.point_transform > 0 {
+        for sample in &mut data {
+            *sample <<= header.point_transform;
+        }
+    }
+
+    Ok(SubsampledImage {
+        width: header.width,
+        height: header.height,
+        p,
+        components,
+        block_rows,
+        row,
+        rows,
+        precision: header.precision,
+        data,
+    })
+}
+
+/// The MCU geometry `decode_subsampled_scan` walks.
+struct Shape {
+    p: usize,
+    components: usize,
+    blocks: usize,
+    rows: usize,
+    row: usize,
+}
+
+/// The entropy decode.
+///
+/// Three prediction rules share the loop, and which one applies is what
+/// makes this different from the 1:1 scan:
+///
+/// * The luma samples of an MCU are a chain. Every one of them except
+///   the very first sample of an entropy row predicts from `last_luma`,
+///   the last luma reconstructed — so the `p + 1` luma of a block
+///   continue from the previous block's last luma and the whole row of
+///   luma is one left-to-right chain. The chroma samples never disturb
+///   it.
+/// * Chroma predicts from the same component of the previous MCU,
+///   `components` samples back.
+/// * At the first MCU of a row there is nothing to the left, so the
+///   first luma and both chroma predict from a running value of their
+///   own. Because it is only ever advanced at the first MCU of a row,
+///   it holds what that component held one entropy row above, which is
+///   exactly the vertical prediction T.81 asks for down the first
+///   column. Only those three samples ever read it: the other luma of
+///   the head MCU follow the chain like any other.
+///
+/// The scan's own predictor selection value is 1 (plain left) on every
+/// sRAW Canon has written, and that is what the chain above computes;
+/// [`decode_subsampled`] refuses any other value, and any restart
+/// interval, before this runs, so nothing here can fail.
+fn decode_subsampled_scan(
+    scan: &[u8],
+    header: &Header,
+    tables: &[&HuffTable],
+    shape: &Shape,
+    out: &mut [u16],
+) {
+    let bits = header.precision - header.point_transform;
+    // Samples are kept to `bits` bits, T.81's "modulo 2^P": the
+    // differences were taken that way.
+    let mask = ((1u32 << bits) - 1) as i32;
+    let initial = 1i32 << (bits - 1);
+    let Shape {
+        p,
+        components,
+        blocks,
+        rows,
+        row,
+    } = *shape;
+
+    // The running values the head of each row predicts from: the
+    // first luma, Cb and Cr, in that order.
+    let mut heads = [initial; 3];
+    let mut pump = BitPumpJpeg::new(scan);
+
+    for r in 0..rows {
+        let row_start = r * row;
+        let mut last_luma = 0i32;
+        for col in 0..blocks {
+            // The head of a row has no left neighbour.
+            let head = col == 0;
+            let at = row_start + col * components;
+            for c in 0..components {
+                let diff = tables[c].decode_diff(&mut pump);
+                let prediction = if c <= p && !(head && c == 0) {
+                    last_luma
+                } else if !head {
+                    out[at - components + c] as i32
+                } else {
+                    // Only the first luma (`c == 0`) and the two chroma
+                    // (`components - 2`, `components - 1`) get here.
+                    let slot = if c == 0 { 0 } else { c + 3 - components };
+                    let seed = heads[slot];
+                    heads[slot] = (seed + diff) & mask;
+                    seed
+                };
+                let value = (prediction + diff) & mask;
+                out[at + c] = value as u16;
+                if c <= p {
+                    last_luma = value;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -801,6 +1100,216 @@ mod tests {
         out.extend_from_slice(&w.out);
         out.extend_from_slice(&[0xFF, 0xD9]);
         out
+    }
+
+    /// Encode a Canon-shaped subsampled frame: three components, the
+    /// luma sampled 2x1 or 2x2, one Huffman table for the luma and
+    /// another for both chroma, and the MCU chain the decoder expects.
+    fn encode_subsampled(p: usize, width: usize, height: usize, samples: &[u16]) -> Vec<u8> {
+        let components = 3 + p;
+        let block_rows = p.div_ceil(2);
+        let (blocks, rows) = (width / 2, height / block_rows);
+        let row = blocks * components;
+        assert_eq!(samples.len(), rows * row, "sample count for the shape");
+        let precision = 15u32;
+        let counts: [u8; 16] = [0, 1, 2, 3, 4, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let symbols: Vec<u8> = (0..17u8).collect();
+        let codes = canonical(&counts, &symbols);
+
+        let mut out: Vec<u8> = vec![0xFF, 0xD8];
+        let mut dht = Vec::new();
+        for id in 0..2u8 {
+            dht.push(id);
+            dht.extend_from_slice(&counts);
+            dht.extend_from_slice(&symbols);
+        }
+        out.extend_from_slice(&[0xFF, 0xC4]);
+        out.extend_from_slice(&((dht.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&dht);
+
+        out.extend_from_slice(&[0xFF, 0xC3]);
+        out.extend_from_slice(&17u16.to_be_bytes());
+        out.push(precision as u8);
+        out.extend_from_slice(&(height as u16).to_be_bytes());
+        out.extend_from_slice(&(width as u16).to_be_bytes());
+        out.push(3);
+        let factor = if p == 3 { 0x22 } else { 0x21 };
+        out.extend_from_slice(&[1, factor, 0, 2, 0x11, 0, 3, 0x11, 0]);
+
+        out.extend_from_slice(&[0xFF, 0xDA]);
+        out.extend_from_slice(&12u16.to_be_bytes());
+        out.push(3);
+        out.extend_from_slice(&[1, 0x00, 2, 0x10, 3, 0x10]);
+        // Predictor 1 (plain left), no point transform: what Canon
+        // writes.
+        out.extend_from_slice(&[1, 0x00, 0x00]);
+
+        let mut vertical = [1i32 << (precision - 1); 6];
+        let mut w = BitWriter::new();
+        for r in 0..rows {
+            let mut last_luma = 0i32;
+            for col in 0..blocks {
+                let at = r * row + col * components;
+                for c in 0..components {
+                    let sample = samples[at + c];
+                    let head = col == 0;
+                    let prediction = if c <= p && !(head && c == 0) {
+                        last_luma
+                    } else if !head {
+                        samples[at - components + c] as i32
+                    } else {
+                        // The head of a row carries the vertical chain:
+                        // what this component held one row above.
+                        let seed = vertical[c];
+                        vertical[c] = sample as i32;
+                        seed
+                    };
+                    encode_diff(&mut w, &codes, sample, prediction);
+                    if c <= p {
+                        last_luma = sample as i32;
+                    }
+                }
+            }
+        }
+        w.pad();
+        out.extend_from_slice(&w.out);
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    #[test]
+    fn round_trip_subsampled_frames() {
+        let mut rng = Rng(0x51A7_0BAD_1234_9876);
+        // Both sampling factors, and the degenerate one-block shapes.
+        for (p, width, height) in [
+            (1usize, 8usize, 5usize),
+            (3, 8, 6),
+            (1, 2, 1),
+            (3, 2, 2),
+            (3, 12, 4),
+            (1, 16, 3),
+        ] {
+            let components = 3 + p;
+            let block_rows = p.div_ceil(2);
+            let len = (height / block_rows) * (width / 2) * components;
+            let samples = random_image(&mut rng, len, 15);
+            let stream = encode_subsampled(p, width, height, &samples);
+            let got = decode_subsampled(&stream).expect("decode subsampled");
+            assert_eq!(got.p, p);
+            assert_eq!(got.components, components);
+            assert_eq!(got.block_rows, block_rows);
+            assert_eq!((got.width, got.height), (width, height));
+            assert_eq!(got.rows, height / block_rows);
+            assert_eq!(got.row, (width / 2) * components);
+            assert_eq!(got.precision, 15);
+            assert_eq!(got.data, samples, "P {p}, {width}x{height}");
+
+            // The sampling byte is readable without decoding, and the
+            // 1:1 entry points still refuse the frame exactly as they
+            // did before this path existed.
+            assert_eq!(sampling(&stream).unwrap(), if p == 3 { 0x22 } else { 0x21 });
+            assert!(matches!(decode(&stream), Err(Error::Unsupported(_))));
+            assert!(matches!(header(&stream), Err(Error::Unsupported(_))));
+        }
+    }
+
+    #[test]
+    fn subsampled_rejects_what_it_is_not() {
+        // An ordinary 1:1 frame belongs to `decode`.
+        let spec = Encode::new(8, 8, 1, 12);
+        let plain = encode(&spec, &[7u16; 64]);
+        assert_eq!(sampling(&plain).unwrap(), 0x11);
+        assert!(matches!(
+            decode_subsampled(&plain),
+            Err(Error::Unsupported(_))
+        ));
+
+        let mut rng = Rng(0x0FF1_CE00_1111_2222);
+        let samples = random_image(&mut rng, 3 * 4 * 6, 15);
+        let stream = encode_subsampled(3, 8, 6, &samples);
+
+        // A sampling factor Canon never writes.
+        let sof = stream.windows(2).position(|w| w == [0xFF, 0xC3]).unwrap();
+        let mut odd = stream.clone();
+        odd[sof + 11] = 0x12;
+        assert!(matches!(
+            decode_subsampled(&odd),
+            Err(Error::Unsupported(_))
+        ));
+        // Subsampled chroma.
+        let mut both = stream.clone();
+        both[sof + 14] = 0x22;
+        assert!(matches!(
+            decode_subsampled(&both),
+            Err(Error::Unsupported(_))
+        ));
+        // An odd luma width cannot be tiled by two-pixel blocks.
+        let mut odd_width = stream.clone();
+        odd_width[sof + 8] = 7;
+        assert!(matches!(
+            decode_subsampled(&odd_width),
+            Err(Error::Corrupt(_))
+        ));
+        // A height 2x2 blocks cannot tile.
+        let mut odd_height = stream.clone();
+        odd_height[sof + 6] = 5;
+        assert!(matches!(
+            decode_subsampled(&odd_height),
+            Err(Error::Corrupt(_))
+        ));
+        // A frame far larger than its scan.
+        let mut huge = stream.clone();
+        huge[sof + 5] = 0xFF;
+        huge[sof + 7] = 0xFF;
+        assert!(decode_subsampled(&huge).is_err());
+
+        // A predictor other than plain left: the luma chain only
+        // computes rule 1, so anything else is refused, not decoded.
+        let sos = stream.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+        // SOS payload: length (2), Ns (1), 3 x (id, table) (6), then Ss.
+        let ss = sos + 2 + 2 + 1 + 6;
+        assert_eq!(stream[ss], 1, "the test encoder writes predictor 1");
+        for predictor in [2u8, 4, 7] {
+            let mut other = stream.clone();
+            other[ss] = predictor;
+            assert!(
+                matches!(decode_subsampled(&other), Err(Error::Unsupported(_))),
+                "predictor {predictor}"
+            );
+        }
+        // A restart interval, which no Canon sRAW carries and this
+        // path does not honour; spliced in ahead of the tables.
+        let mut restarts = stream[..2].to_vec();
+        restarts.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x04, 0x00, 0x10]);
+        restarts.extend_from_slice(&stream[2..]);
+        assert!(matches!(
+            decode_subsampled(&restarts),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn subsampled_truncation_never_panics() {
+        let mut rng = Rng(0x2468_ACE0_1357_9BDF);
+        for p in [1usize, 3] {
+            let block_rows = p.div_ceil(2);
+            let len = (6 / block_rows) * 5 * (3 + p);
+            let samples = random_image(&mut rng, len, 15);
+            let stream = encode_subsampled(p, 10, 6, &samples);
+            for cut in 0..stream.len() {
+                let _ = decode_subsampled(&stream[..cut]);
+                let _ = sampling(&stream[..cut]);
+            }
+            for seed in 0..48u64 {
+                let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let mut broken = stream.clone();
+                for _ in 0..8 {
+                    let at = rng.below(broken.len() as u64) as usize;
+                    broken[at] = rng.below(256) as u8;
+                }
+                let _ = decode_subsampled(&broken);
+            }
+        }
     }
 
     /// xorshift64*, so the tests are random but reproducible without a
