@@ -1020,6 +1020,10 @@ pub enum Modal {
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
     HeifSupport { path: PathBuf },
+    /// A raw file Schist's own decoder declines (Canon CR3, Fuji's
+    /// compressed RAF...) needs LibRaw, and this machine has none:
+    /// say how to install it, then retry opening `path`.
+    LibRawSupport { path: PathBuf },
     /// More than one camera is reachable: ask which to import from.
     CameraImport { sources: Vec<ImportSource> },
     /// Import options for one camera: the navigable OpenStreetMap view

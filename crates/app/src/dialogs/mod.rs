@@ -173,6 +173,10 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         #[cfg(target_arch = "wasm32")]
         Modal::HeifSupport { .. } => return None,
         #[cfg(not(target_arch = "wasm32"))]
+        Modal::LibRawSupport { path } => libraw_support(path, cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::LibRawSupport { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::CameraImport { sources } => {
             crate::workspace::camera_import_dialog(&sources, cx).into_any_element()
         }

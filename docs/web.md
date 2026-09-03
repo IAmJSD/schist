@@ -104,7 +104,6 @@ Compiled out entirely, with the reason:
 | Photoshop `.8bf` plug-ins | helper subprocesses and dlopen |
 | Third-party wasm plug-ins | wasmtime is a JIT; a wasm module cannot host one |
 | HEIC import | libheif is dlopen'd |
-| Camera raw import | the plugin wraps a dlopen'd LibRaw fallback; the pure-Rust `schist-codec-raw` decoder itself would build for wasm and is a candidate for a future web-only path |
 | Auto-update | a web deployment updates by serving newer files |
 | Crash reporting (Sentry) | blocking transport; panics go to the console instead |
 | Font downloads | the Google Fonts catalogue trick needs a spoofed legacy user agent to be served TTFs |
@@ -114,6 +113,13 @@ The menu entries for those features are filtered out of the web build
 rather than left to fail.
 
 ## Known gaps
+
+Camera raws open through the pure-Rust `schist-codec-raw` decoder, the
+same one the desktop uses first. The few codecs it declines — Canon CR3
+pixels, Fuji's compressed RAF, a handful of odd ones — go to a runtime
+LibRaw on the desktop; a browser has no library to load, so those files
+are refused with a message saying so (their embedded previews still
+show).
 
 - Text layers can only use the fonts the page ships (IBM Plex Sans
   Regular today — add more in `web/fonts/` and they are picked up by the
