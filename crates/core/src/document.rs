@@ -2,7 +2,7 @@
 
 use crate::geom::IntRect;
 use crate::history::{Edit, EditOp, History, LayerProps};
-use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree};
+use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree, RawBlock};
 use crate::selection::Selection;
 use crate::tile::{TileBuf, TileCoord, TileMap, TILE_PIXELS};
 use rustc_hash::FxHashMap;
@@ -403,6 +403,21 @@ impl Document {
                 }
                 self.structure_changed();
             }
+            EditOp::LayerExtrasSet {
+                layer,
+                before,
+                after,
+            } => {
+                let want = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    l.extras = want.clone();
+                }
+                self.structure_changed();
+            }
             EditOp::LayerStyleSet {
                 layer,
                 before,
@@ -763,6 +778,22 @@ impl<'a> EditBuilder<'a> {
         });
         let canvas = self.doc.canvas_rect();
         self.damage = self.damage.union(&canvas);
+    }
+
+    /// Replace a layer's preserved blocks, recording the change.
+    pub fn set_extras(&mut self, layer: LayerId, after: Vec<RawBlock>) {
+        let Some(l) = self.doc.tree.find_mut(layer) else {
+            return;
+        };
+        if l.extras == after {
+            return;
+        }
+        let before = std::mem::replace(&mut l.extras, after.clone());
+        self.ops.push(EditOp::LayerExtrasSet {
+            layer,
+            before,
+            after,
+        });
     }
 
     pub fn record_adjustment_params(

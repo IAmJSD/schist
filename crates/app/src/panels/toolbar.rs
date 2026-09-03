@@ -152,9 +152,9 @@ pub(super) fn tool_option_control(
             };
             // The font menu's rows are font names, so show each in itself.
             let control = if key == "type-family" {
-                ui::font_dropdown(&ws.dropdown_scroll, spec, on_select, cx).into_any_element()
+                ui::font_dropdown(&ws.dropdown, spec, on_select, cx).into_any_element()
             } else {
-                ui::dropdown(&ws.dropdown_scroll, spec, on_select, cx).into_any_element()
+                ui::dropdown(&ws.dropdown, spec, on_select, cx).into_any_element()
             };
             // Sliders carry their own label; a dropdown does not, and an
             // unlabelled one reading "Point Sample" does not say what it

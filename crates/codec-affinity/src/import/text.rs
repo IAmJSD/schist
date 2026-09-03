@@ -175,6 +175,7 @@ impl Walker<'_> {
             tracking: 0.0,
             // Frame text reflows to its box; artistic text never wraps.
             wrap_width: (frame_text && frame_width > 8).then_some(frame_width as f32),
+            runs: Vec::new(),
         };
         let mut raster = match schist_text_engine::rasterize(&spec) {
             Some(r) => r,

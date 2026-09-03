@@ -76,9 +76,10 @@ struct DialogState {
     /// of the blink shows it.
     field_cursor: usize,
     caret_on: bool,
-    /// Shares the workspace's dropdown scroll state (it clones as a
-    /// handle), so dialog dropdowns open at their current value too.
-    dropdown_scroll: ui::DropdownScroll,
+    /// Shares the workspace's dropdown state (it clones as a handle),
+    /// so dialog dropdowns open at their current value and follow the
+    /// keyboard too.
+    dropdown: ui::DropdownState,
 }
 
 /// Render whichever modal is open, if any.
@@ -92,7 +93,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         field_buffer: ws.field_buffer.clone(),
         field_cursor: ws.field_cursor,
         caret_on: ws.caret_on(),
-        dropdown_scroll: ws.dropdown_scroll.clone(),
+        dropdown: ws.dropdown.clone(),
     };
     // Each dialog's primary button registers itself as the default
     // action while it builds, so Enter can fire it.

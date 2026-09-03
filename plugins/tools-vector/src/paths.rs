@@ -565,6 +565,7 @@ pub struct CustomShapeTool {
     anchor: Option<(f32, f32)>,
     current: Option<(f32, f32)>,
     keep_ratio: bool,
+    preview: crate::DragPreview,
 }
 
 impl CustomShapeTool {
@@ -574,7 +575,45 @@ impl CustomShapeTool {
             anchor: None,
             current: None,
             keep_ratio: false,
+            preview: crate::DragPreview::default(),
         }
+    }
+
+    /// The layer this drag would commit, or `None` while it is still a
+    /// click.
+    fn build_layer(
+        &self,
+        doc: &Document,
+        from: (f32, f32),
+        to: (f32, f32),
+        colour: schist_color::Rgba,
+    ) -> Option<schist_core::Layer> {
+        if (to.0 - from.0).abs() < 2.0 && (to.1 - from.1).abs() < 2.0 {
+            return None;
+        }
+        let outline = self.outline(from, to);
+        let mut b = PathBuilder::new();
+        b.move_to(outline[0].0, outline[0].1);
+        for p in &outline[1..] {
+            b.line_to(p.0, p.1);
+        }
+        b.close();
+        crate::rasterized_layer(
+            doc,
+            &b.build(0.25),
+            colour,
+            schist_vector::FillRule::NonZero,
+            "Custom Shape",
+        )
+    }
+
+    /// Show the shape as it stands at `to`. See [`crate::DragPreview`].
+    fn update_preview(&mut self, ctx: &mut ToolCtx, to: (f32, f32)) {
+        let Some(from) = self.anchor else {
+            return;
+        };
+        let fresh = self.build_layer(ctx.doc, from, to, ctx.state.foreground);
+        self.preview.show(ctx.doc, fresh, true);
     }
 
     fn outline(&self, from: (f32, f32), to: (f32, f32)) -> Vec<(f32, f32)> {
@@ -634,47 +673,58 @@ impl ToolPlugin for CustomShapeTool {
         self.keep_ratio = input.modifiers.shift;
     }
 
-    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
-        if self.anchor.is_some() {
-            self.current = Some((input.x, input.y));
-            self.keep_ratio = input.modifiers.shift;
+    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        if self.anchor.is_none() {
+            return;
+        }
+        let to = (input.x, input.y);
+        let unchanged = self.current == Some(to) && self.keep_ratio == input.modifiers.shift;
+        self.current = Some(to);
+        self.keep_ratio = input.modifiers.shift;
+        if !unchanged || !self.preview.is_showing() {
+            self.update_preview(ctx, to);
         }
     }
 
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
-        let Some(from) = self.anchor.take() else {
-            return;
-        };
-        self.current = None;
-        let to = (input.x, input.y);
-        if (to.0 - from.0).abs() < 2.0 && (to.1 - from.1).abs() < 2.0 {
+        if self.anchor.is_none() {
             return;
         }
-        let outline = self.outline(from, to);
-        let mut b = PathBuilder::new();
-        b.move_to(outline[0].0, outline[0].1);
-        for p in &outline[1..] {
-            b.line_to(p.0, p.1);
-        }
-        b.close();
-        let color = ctx.state.foreground;
-        crate::commit_shape(
-            ctx.doc,
-            &b.build(0.25),
-            color,
-            schist_vector::FillRule::NonZero,
-            "Custom Shape",
-        );
-    }
-
-    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+        self.on_pointer_move(ctx, input);
         self.anchor = None;
         self.current = None;
+        self.preview.commit(ctx.doc, "Custom Shape");
+    }
+
+    fn on_cancel(&mut self, ctx: &mut ToolCtx) {
+        self.anchor = None;
+        self.current = None;
+        self.preview.discard(ctx.doc);
+    }
+
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        self.on_cancel(ctx);
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
+        // The shape itself is on the canvas while it is dragged; the
+        // overlay is the box it is being fitted into.
         match (self.anchor, self.current) {
-            (Some(a), Some(c)) => vec![Overlay::AntsPolygon(self.outline(a, c))],
+            (Some(a), Some(c)) => {
+                let (x0, y0) = (a.0.min(c.0), a.1.min(c.1));
+                let (mut w, mut h) = ((c.0 - a.0).abs(), (c.1 - a.1).abs());
+                if self.keep_ratio {
+                    let s = w.min(h);
+                    w = s;
+                    h = s;
+                }
+                vec![Overlay::Rect(IntRect::new(
+                    x0.round() as i32,
+                    y0.round() as i32,
+                    (x0 + w).round() as i32,
+                    (y0 + h).round() as i32,
+                ))]
+            }
             _ => Vec::new(),
         }
     }

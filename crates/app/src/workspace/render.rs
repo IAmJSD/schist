@@ -239,6 +239,12 @@ impl Workspace {
                         gpui::rgb(0x44AAFF).into(),
                     ));
                 }
+                Overlay::Highlight(r) => {
+                    job.highlights.push(Bounds {
+                        origin: to_screen(r.left as f32, r.top as f32),
+                        size: size(px(r.width() as f32 * zoom), px(r.height() as f32 * zoom)),
+                    });
+                }
                 Overlay::AntsRect(r) => {
                     let (l, t) = (r.left as f32, r.top as f32);
                     let (rt, b) = (r.right as f32, r.bottom as f32);
@@ -360,7 +366,10 @@ impl Workspace {
             .on_scroll_wheel(cx.listener(|ws, ev, w, cx| ws.on_scroll(ev, w, cx)))
             .on_pinch(cx.listener(|ws, ev, w, cx| ws.on_pinch(ev, w, cx)))
             .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
-                if ws.layer_rename_key(ev, cx)
+                // An open dropdown is the innermost thing there is: its
+                // keys go to it before a modal's fields or a tool.
+                if ws.dropdown_key(ev, cx)
+                    || ws.layer_rename_key(ev, cx)
                     || ws.note_edit_key(ev, cx)
                     || ws.ai_model_menu_key(ev, cx)
                     || ws.ai_input_key(ev, cx)
@@ -442,6 +451,9 @@ impl Workspace {
                         // below selection ants and tool overlays.
                         for (bounds, color) in job.lines {
                             window.paint_quad(gpui::fill(bounds, color));
+                        }
+                        for bounds in job.highlights {
+                            window.paint_quad(gpui::fill(bounds, gpui::rgba(0x3399FF66)));
                         }
                         for (bounds, color) in job.outlines {
                             window.paint_quad(gpui::outline(
@@ -532,6 +544,8 @@ impl Render for Workspace {
         // Every colour below comes from the palette, so the theme must be
         // selected before any child renders.
         crate::ui::set_light(self.view.theme == Theme::Light);
+        // Whichever dropdown renders open this frame registers itself.
+        crate::ui::reset_open_dropdown();
         if !self.focused_once {
             // The focus handle only exists in the dispatch tree once we've
             // rendered, so this can't happen at construction time.
@@ -549,6 +563,7 @@ impl Render for Workspace {
         let key_context = if self.modal.is_some() {
             "Workspace modal"
         } else if self.tool_captures_keys()
+            || self.dropdown_open()
             || self.layer_rename.is_some()
             || self.note_edit.is_some()
             || self.ai.input_active

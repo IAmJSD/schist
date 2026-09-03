@@ -446,7 +446,7 @@ pub fn render(
         settings = settings.child(ui::field_row(
             "Blend",
             ui::dropdown(
-                &ws.dropdown_scroll,
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("fx-blend"),
                     is_open: ws.open_popup == Some(Popup::Field("fx-blend")),
@@ -523,7 +523,7 @@ pub fn render(
             settings.child(ui::field_row(
                 "Position",
                 ui::dropdown(
-                    &ws.dropdown_scroll,
+                    &ws.dropdown,
                     ui::Dropdown {
                         popup: Popup::Field("fx-stroke-pos"),
                         is_open: ws.open_popup == Some(Popup::Field("fx-stroke-pos")),
@@ -558,7 +558,7 @@ pub fn render(
             settings.child(ui::field_row(
                 "Style",
                 ui::dropdown(
-                    &ws.dropdown_scroll,
+                    &ws.dropdown,
                     ui::Dropdown {
                         popup: Popup::Field("fx-bevel-style"),
                         is_open: ws.open_popup == Some(Popup::Field("fx-bevel-style")),
@@ -597,7 +597,7 @@ pub fn render(
                 .child(ui::field_row(
                     "Shape",
                     ui::dropdown(
-                        &ws.dropdown_scroll,
+                        &ws.dropdown,
                         ui::Dropdown {
                             popup: Popup::Field("fx-grad-shape"),
                             is_open: ws.open_popup == Some(Popup::Field("fx-grad-shape")),

@@ -14,16 +14,84 @@ impl Workspace {
             Some(popup)
         };
         // A dropdown that just opened gets one scroll to its selection.
-        self.dropdown_scroll.reset();
+        self.dropdown.reset();
         cx.notify();
     }
 
     pub fn close_popup(&mut self, cx: &mut Context<Self>) {
         self.open_submenu.clear();
-        self.dropdown_scroll.reset();
+        self.dropdown.reset();
         if self.open_popup.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// True while a dropdown list (as opposed to a menu) is open.
+    pub fn dropdown_open(&self) -> bool {
+        matches!(
+            self.open_popup,
+            Some(Popup::BlendModes) | Some(Popup::Field(_))
+        )
+    }
+
+    /// Keystrokes while a dropdown is open: typing jumps to the row that
+    /// starts with what was typed, the arrows walk the rows, Enter picks
+    /// the row the keyboard is on. Escape closes through `CancelGesture`,
+    /// which never reaches a key listener.
+    ///
+    /// Returns true when the keystroke was the dropdown's.
+    pub fn dropdown_key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.dropdown_open() {
+            return false;
+        }
+        let Some(menu) = crate::ui::open_dropdown() else {
+            return false;
+        };
+        let n = menu.labels.len();
+        if n == 0 {
+            return false;
+        }
+        let at = self.dropdown.highlight().or(menu.current);
+        let mods = &ev.keystroke.modifiers;
+        if mods.control || mods.alt || mods.platform || mods.function {
+            // A shortcut, not typing.
+            return false;
+        }
+        let target = match ev.keystroke.key.as_str() {
+            "down" => Some(at.map_or(0, |i| (i + 1).min(n - 1))),
+            "up" => Some(at.map_or(n - 1, |i| i.saturating_sub(1))),
+            "home" | "pageup" => Some(0),
+            "end" | "pagedown" => Some(n - 1),
+            "enter" => {
+                self.close_popup(cx);
+                if let Some(ix) = at {
+                    menu.select(self, ix, cx);
+                }
+                cx.notify();
+                return true;
+            }
+            "backspace" => {
+                self.dropdown.clear_typed();
+                return true;
+            }
+            "escape" => return false,
+            key => {
+                let text = match key {
+                    "space" => Some(" "),
+                    _ => ev.keystroke.key_char.as_deref(),
+                };
+                let Some(text) = text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+                else {
+                    return false;
+                };
+                self.dropdown.type_ahead(text, &menu.labels, at)
+            }
+        };
+        if let Some(ix) = target {
+            self.dropdown.set_highlight(ix);
+        }
+        cx.notify();
+        true
     }
 
     pub fn record_slider_bounds(&mut self, id: &'static str, bounds: Bounds<Pixels>) {

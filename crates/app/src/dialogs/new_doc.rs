@@ -220,7 +220,7 @@ pub(super) fn new_document_dialog(
         .child(ui::field_row(
             "Preset",
             ui::dropdown(
-                &state.dropdown_scroll,
+                &state.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("new-doc-preset"),
                     is_open: state.open_popup == Some(Popup::Field("new-doc-preset")),
@@ -314,7 +314,7 @@ pub(super) fn new_document_dialog(
         .child(ui::field_row(
             "Color Mode",
             ui::dropdown(
-                &state.dropdown_scroll,
+                &state.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("new-doc-mode"),
                     is_open: state.open_popup == Some(Popup::Field("new-doc-mode")),
@@ -336,7 +336,7 @@ pub(super) fn new_document_dialog(
         .child(ui::field_row(
             "Bit Depth",
             ui::dropdown(
-                &state.dropdown_scroll,
+                &state.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("new-doc-depth"),
                     is_open: state.open_popup == Some(Popup::Field("new-doc-depth")),
@@ -361,7 +361,7 @@ pub(super) fn new_document_dialog(
         .child(ui::field_row(
             "Background",
             ui::dropdown(
-                &state.dropdown_scroll,
+                &state.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("new-doc-bg"),
                     is_open: state.open_popup == Some(Popup::Field("new-doc-bg")),

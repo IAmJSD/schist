@@ -100,6 +100,17 @@ pub enum EditOp {
         before: Option<Box<crate::smart::SmartObject>>,
         after: Option<Box<crate::smart::SmartObject>>,
     },
+    /// A layer's preserved blocks changed.
+    ///
+    /// The type tool keeps a text layer's spec in one of them, and it
+    /// has to undo together with the pixels rendered from it: undoing
+    /// the pixels alone left the glyphs and the text they were set from
+    /// disagreeing.
+    LayerExtrasSet {
+        layer: LayerId,
+        before: Vec<crate::layer::RawBlock>,
+        after: Vec<crate::layer::RawBlock>,
+    },
     /// A layer's effects changed.
     LayerStyleSet {
         layer: LayerId,

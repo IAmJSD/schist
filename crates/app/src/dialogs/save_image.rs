@@ -53,7 +53,7 @@ pub(super) fn save_image_dialog(
         .child(ui::field_row(
             "Format",
             ui::dropdown(
-                &ws.dropdown_scroll,
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("save-image-format"),
                     is_open: state.open_popup == Some(Popup::Field("save-image-format")),

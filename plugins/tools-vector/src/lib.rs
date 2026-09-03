@@ -8,7 +8,7 @@
 pub mod paths;
 
 use schist_color::Rgba;
-use schist_core::{Document, IntRect, Layer, LayerPath, TileCoord, TILE_SIZE};
+use schist_core::{Document, IntRect, Layer, LayerId, LayerPath, TileCoord, TILE_SIZE};
 use schist_plugin_api::{
     EditorState, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput, ToolCtx,
     ToolOption, ToolPlugin,
@@ -97,41 +97,66 @@ fn rasterize_into(
     }
 }
 
-/// Insert a live shape layer. Its pixels are left empty: the app's
-/// re-rasterization pass fills them in from the shape on the next frame,
-/// and again whenever the shape changes.
-pub(crate) fn commit_shape_layer(doc: &mut Document, shape: schist_core::VectorShape, name: &str) {
+/// A live shape layer, rasterized straight away rather than waiting for
+/// the next frame's refresh, so the shape appears the moment it is drawn.
+pub(crate) fn shape_layer(doc: &Document, shape: schist_core::VectorShape, name: &str) -> Layer {
     let mut layer = Layer::new_raster(name);
-    // Rasterize straight away rather than waiting for the next frame's
-    // refresh, so the shape appears the moment it is drawn.
     let key = shape.key();
     if let Some(raster) = layer.as_raster_mut() {
         raster.tiles = render_shape(&shape, doc.depth, doc.canvas_rect());
     }
     layer.shape_key = key;
     layer.shape = Some(Box::new(shape));
+    layer
+}
+
+/// Where a new shape layer goes: at the top of the stack for a live shape
+/// (`above_active` false), or just above the active layer for pixels.
+fn insert_path(doc: &Document, above_active: bool) -> LayerPath {
+    let above = above_active
+        .then(|| doc.active_layer.and_then(|a| doc.tree.path_of(a)))
+        .flatten();
+    match above {
+        Some(mut p) => {
+            *p.0.last_mut().unwrap() += 1;
+            p
+        }
+        None => LayerPath(vec![doc.tree.layers.len()]),
+    }
+}
+
+/// Insert a finished layer as a single undoable edit and make it active.
+pub(crate) fn commit_layer(doc: &mut Document, layer: Layer, path: LayerPath, edit: &str) {
     let id = layer.id;
-    let path = schist_core::LayerPath(vec![doc.tree.layers.len()]);
-    let mut edit = doc.begin_edit(format!("{name} Layer"));
+    let mut edit = doc.begin_edit(edit.to_string());
     edit.insert_layer(path, layer);
     edit.commit();
     doc.active_layer = Some(id);
 }
 
-pub(crate) fn commit_shape(
-    doc: &mut Document,
+/// Insert a live shape layer.
+pub(crate) fn commit_shape_layer(doc: &mut Document, shape: schist_core::VectorShape, name: &str) {
+    let layer = shape_layer(doc, shape, name);
+    let path = insert_path(doc, false);
+    commit_layer(doc, layer, path, &format!("{name} Layer"));
+}
+
+/// A path rasterized onto a fresh layer, clipped to the selection. `None`
+/// when nothing would be painted (off canvas, or entirely deselected).
+pub(crate) fn rasterized_layer(
+    doc: &Document,
     path: &Path,
     color: Rgba,
     rule: FillRule,
     name: &str,
-) {
+) -> Option<Layer> {
     let bounds = path.bounds().intersect(&doc.canvas_rect());
     if bounds.is_empty() {
-        return;
+        return None;
     }
     let mask = schist_vector::rasterize(path, bounds, rule);
     let w = bounds.width() as usize;
-    let selection = doc.selection.clone();
+    let selection = &doc.selection;
     let depth = doc.depth;
 
     let mut layer = Layer::new_raster(name);
@@ -162,22 +187,75 @@ pub(crate) fn commit_shape(
         }
         tiles.prune_blank();
     }
-    if layer.as_raster().unwrap().tiles.is_empty() {
+    (!layer.as_raster().unwrap().tiles.is_empty()).then_some(layer)
+}
+
+pub(crate) fn commit_shape(
+    doc: &mut Document,
+    path: &Path,
+    color: Rgba,
+    rule: FillRule,
+    name: &str,
+) {
+    let Some(layer) = rasterized_layer(doc, path, color, rule, name) else {
         return;
+    };
+    let path = insert_path(doc, true);
+    commit_layer(doc, layer, path, name);
+}
+
+/// The layer a shape tool shows while its shape is being dragged out.
+///
+/// Affinity and Photoshop draw the actual shape under the cursor, fill
+/// and all, not a marching outline of where it will go. The preview is
+/// the very layer the drag would commit, rebuilt on every move and kept
+/// outside history: it sits in the tree so the compositor paints it like
+/// anything else, and on release it is lifted out and re-inserted as the
+/// one undoable edit. Cancelling just drops it.
+#[derive(Default)]
+pub(crate) struct DragPreview {
+    layer: Option<LayerId>,
+}
+
+impl DragPreview {
+    pub(crate) fn is_showing(&self) -> bool {
+        self.layer.is_some()
     }
 
-    let id = layer.id;
-    let path_index = match doc.active_layer.and_then(|a| doc.tree.path_of(a)) {
-        Some(mut p) => {
-            *p.0.last_mut().unwrap() += 1;
-            p
+    /// Replace the preview with `fresh`, or remove it when the drag would
+    /// commit nothing. The layer keeps its id across updates so the layers
+    /// panel sees one layer growing, not a new one every frame.
+    pub(crate) fn show(&mut self, doc: &mut Document, fresh: Option<Layer>, above_active: bool) {
+        let (path, id) = match self.discard(doc) {
+            Some((path, old)) => (path, Some(old.id)),
+            None => (insert_path(doc, above_active), None),
+        };
+        let Some(mut layer) = fresh else {
+            return;
+        };
+        if let Some(id) = id {
+            layer.id = id;
         }
-        None => LayerPath(vec![doc.tree.layers.len()]),
-    };
-    let mut edit = doc.begin_edit(name.to_string());
-    edit.insert_layer(path_index, layer);
-    edit.commit();
-    doc.active_layer = Some(id);
+        doc.add_damage(layer.content_bounds());
+        self.layer = Some(layer.id);
+        doc.tree.insert_at(&path, layer);
+    }
+
+    /// Lift the preview out of the tree, undamaging its pixels, and hand
+    /// it back with the position it occupied.
+    pub(crate) fn discard(&mut self, doc: &mut Document) -> Option<(LayerPath, Layer)> {
+        let id = self.layer.take()?;
+        let (path, layer) = doc.tree.remove(id)?;
+        doc.add_damage(layer.content_bounds());
+        Some((path, layer))
+    }
+
+    /// Turn the preview into the committed layer.
+    pub(crate) fn commit(&mut self, doc: &mut Document, edit: &str) {
+        if let Some((path, layer)) = self.discard(doc) {
+            commit_layer(doc, layer, path, edit);
+        }
+    }
 }
 
 fn drag_rect(ax: f32, ay: f32, bx: f32, by: f32, square: bool) -> IntRect {
@@ -229,6 +307,7 @@ pub struct ShapeTool {
     anchor: Option<(f32, f32)>,
     current: Option<(f32, f32)>,
     square: bool,
+    preview: DragPreview,
 }
 
 impl ShapeTool {
@@ -243,7 +322,45 @@ impl ShapeTool {
             anchor: None,
             current: None,
             square: false,
+            preview: DragPreview::default(),
         }
+    }
+
+    /// The layer this drag would commit: a live shape layer in Shape mode,
+    /// plain selection-clipped pixels otherwise.
+    fn build_layer(
+        &self,
+        doc: &Document,
+        from: (f32, f32),
+        to: (f32, f32),
+        colour: Rgba,
+    ) -> Option<Layer> {
+        if self.vector {
+            // A live shape layer: the path is kept and the pixels are
+            // derived from it, so it stays editable and stays sharp.
+            if let Some(shape) = self.vector_shape(from, to, colour) {
+                return Some(shape_layer(doc, shape, self.kind.label()));
+            }
+        }
+        let path = self.path_for(from, to);
+        // Stroke outlines self-overlap at joins, so every shape fills with
+        // the nonzero rule.
+        rasterized_layer(doc, &path, colour, FillRule::NonZero, self.kind.label())
+    }
+
+    /// Show the shape as it stands at `to`, once the drag is a drag.
+    fn update_preview(&mut self, ctx: &mut ToolCtx, to: (f32, f32)) {
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        if (to.0 - anchor.0).abs() < 0.5 && (to.1 - anchor.1).abs() < 0.5 {
+            // Still a click; a click commits nothing, so it previews
+            // nothing either.
+            self.preview.show(ctx.doc, None, !self.vector);
+            return;
+        }
+        let fresh = self.build_layer(ctx.doc, anchor, to, ctx.state.foreground);
+        self.preview.show(ctx.doc, fresh, !self.vector);
     }
 
     /// Where the drag actually ends, after Shift constrains it. Rectangles,
@@ -479,40 +596,45 @@ impl ToolPlugin for ShapeTool {
         self.square = input.modifiers.shift;
     }
 
-    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
-        if self.anchor.is_some() {
-            self.current = Some((input.x, input.y));
-            self.square = input.modifiers.shift;
+    fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        if self.anchor.is_none() {
+            return;
+        }
+        let to = (input.x, input.y);
+        let unchanged = self.current == Some(to) && self.square == input.modifiers.shift;
+        self.current = Some(to);
+        self.square = input.modifiers.shift;
+        if !unchanged || !self.preview.is_showing() {
+            self.update_preview(ctx, to);
         }
     }
 
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
-        let Some(anchor) = self.anchor.take() else {
+        if self.anchor.is_none() {
             return;
-        };
-        self.current = None;
-        let to = (input.x, input.y);
-        if (to.0 - anchor.0).abs() < 0.5 && (to.1 - anchor.1).abs() < 0.5 {
-            return; // a click, not a drag
         }
-        let color = ctx.state.foreground;
-        if self.vector {
-            // A live shape layer: the path is kept and the pixels are
-            // derived from it, so it stays editable and stays sharp.
-            if let Some(shape) = self.vector_shape(anchor, to, color) {
-                commit_shape_layer(ctx.doc, shape, self.kind.label());
-                return;
-            }
-        }
-        let path = self.path_for(anchor, to);
-        // Stroke outlines self-overlap at joins, so every shape fills with
-        // the nonzero rule.
-        commit_shape(ctx.doc, &path, color, FillRule::NonZero, self.kind.label());
-    }
-
-    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+        // The release usually lands where the last move did, in which case
+        // the preview already is the layer to commit.
+        self.on_pointer_move(ctx, input);
         self.anchor = None;
         self.current = None;
+        let name = self.kind.label();
+        let edit = if self.vector {
+            format!("{name} Layer")
+        } else {
+            name.to_string()
+        };
+        self.preview.commit(ctx.doc, &edit);
+    }
+
+    fn on_cancel(&mut self, ctx: &mut ToolCtx) {
+        self.anchor = None;
+        self.current = None;
+        self.preview.discard(ctx.doc);
+    }
+
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        self.on_cancel(ctx);
     }
 
     fn options(&self) -> Vec<ToolOption> {
@@ -552,26 +674,18 @@ impl ToolPlugin for ShapeTool {
         }
     }
 
-    fn overlays(&self, _doc: &Document, state: &EditorState) -> Vec<Overlay> {
+    fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
+        // The shape itself is on the canvas while it is dragged; the
+        // overlay is just the box it is being fitted into, the way
+        // Affinity outlines a shape's bounds mid-drag. A line has no
+        // useful box.
         let (Some(a), Some(c)) = (self.anchor, self.current) else {
             return Vec::new();
         };
-        match self.kind {
-            ShapeKind::Line => {
-                let c = self.constrained(a, c);
-                vec![Overlay::Line {
-                    x1: a.0,
-                    y1: a.1,
-                    x2: c.0,
-                    y2: c.1,
-                }]
-            }
-            _ => {
-                let r = drag_rect(a.0, a.1, c.0, c.1, self.square);
-                let _ = state;
-                vec![Overlay::Rect(r)]
-            }
+        if self.kind == ShapeKind::Line {
+            return Vec::new();
         }
+        vec![Overlay::Rect(drag_rect(a.0, a.1, c.0, c.1, self.square))]
     }
 }
 
@@ -861,6 +975,108 @@ mod tests {
         assert_eq!(top_px(&doc, 60, 60)[3], 0);
         doc.undo();
         assert_eq!(doc.tree.layers.len(), 1, "undo removes the shape layer");
+    }
+
+    #[test]
+    fn shape_shows_on_the_canvas_while_it_is_dragged() {
+        let mut doc = doc();
+        let mut state = red();
+        let mut tool = ShapeTool::new(ShapeKind::Ellipse);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
+        assert_eq!(ctx.doc.tree.layers.len(), 1, "a click previews nothing");
+        tool.on_pointer_move(&mut ctx, input(50.0, 50.0));
+        assert_eq!(ctx.doc.tree.layers.len(), 2, "the drag is on the canvas");
+        assert_eq!(top_px(ctx.doc, 30, 30), [255, 0, 0, 255]);
+        assert_eq!(top_px(ctx.doc, 12, 12)[3], 0, "an ellipse, not its box");
+        assert!(!ctx.doc.take_damage().is_empty(), "the preview repaints");
+
+        // Dragging on rebuilds the same layer rather than piling up new ones.
+        let id = ctx.doc.tree.layers[1].id;
+        tool.on_pointer_move(&mut ctx, input(90.0, 90.0));
+        assert_eq!(ctx.doc.tree.layers.len(), 2);
+        assert_eq!(ctx.doc.tree.layers[1].id, id);
+        assert_eq!(top_px(ctx.doc, 50, 50), [255, 0, 0, 255]);
+
+        tool.on_pointer_up(&mut ctx, input(90.0, 90.0));
+        assert_eq!(doc.tree.layers.len(), 2);
+        assert!(
+            doc.tree.layers[1].shape.is_some(),
+            "committed as a live shape"
+        );
+        assert_eq!(doc.undo().as_deref(), Some("Ellipse Layer"));
+        assert_eq!(doc.tree.layers.len(), 1, "one edit for the whole drag");
+        assert_eq!(doc.undo(), None, "the preview left nothing in history");
+    }
+
+    #[test]
+    fn cancelling_a_drag_removes_the_preview() {
+        let mut doc = doc();
+        let mut state = red();
+        let mut tool = ShapeTool::new(ShapeKind::Rectangle);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
+        tool.on_pointer_move(&mut ctx, input(50.0, 50.0));
+        assert_eq!(ctx.doc.tree.layers.len(), 2);
+        tool.on_cancel(&mut ctx);
+        assert_eq!(ctx.doc.tree.layers.len(), 1);
+        assert_eq!(doc.undo(), None);
+        // Nor does a drag that ends back where it started leave anything.
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
+        tool.on_pointer_move(&mut ctx, input(50.0, 50.0));
+        tool.on_pointer_up(&mut ctx, input(10.0, 10.0));
+        assert_eq!(doc.tree.layers.len(), 1);
+    }
+
+    #[test]
+    fn pixel_mode_previews_the_clipped_pixels() {
+        let mut doc = doc();
+        doc.selection.activate();
+        doc.selection
+            .apply_shape(IntRect::new(0, 0, 50, 100), SelectOp::Replace, |_, _| 255);
+        let mut state = red();
+        let mut tool = ShapeTool::new(ShapeKind::Rectangle);
+        tool.set_option("shape-mode", OptionValue::Choice(1));
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
+        tool.on_pointer_move(&mut ctx, input(90.0, 90.0));
+        assert_eq!(ctx.doc.tree.layers.len(), 2);
+        assert_eq!(top_px(ctx.doc, 30, 30), [255, 0, 0, 255]);
+        assert_eq!(top_px(ctx.doc, 70, 70)[3], 0, "outside the selection");
+        assert!(ctx.doc.tree.layers[1].shape.is_none());
+        tool.on_pointer_up(&mut ctx, input(90.0, 90.0));
+        assert_eq!(doc.undo().as_deref(), Some("Rectangle"));
+        assert_eq!(doc.tree.layers.len(), 1);
+    }
+
+    #[test]
+    fn custom_shape_previews_while_dragged() {
+        let mut doc = doc();
+        let mut state = red();
+        let mut tool = paths::CustomShapeTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0));
+        tool.on_pointer_move(&mut ctx, input(90.0, 90.0));
+        assert_eq!(ctx.doc.tree.layers.len(), 2);
+        assert_eq!(top_px(ctx.doc, 50, 50), [255, 0, 0, 255]);
+        tool.on_cancel(&mut ctx);
+        assert_eq!(doc.tree.layers.len(), 1);
     }
 
     #[test]

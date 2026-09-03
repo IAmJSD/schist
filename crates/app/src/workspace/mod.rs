@@ -241,7 +241,7 @@ pub struct Workspace {
     pub open_popup: Option<Popup>,
     /// Scroll state of the open dropdown's list, so it can open at its
     /// current value instead of the top.
-    pub dropdown_scroll: crate::ui::DropdownScroll,
+    pub dropdown: crate::ui::DropdownState,
     /// Path to the open submenu in the menu bar, e.g. [2, 4] for the fifth
     /// row of the third menu. Empty means none.
     pub open_submenu: Vec<usize>,
@@ -1289,7 +1289,7 @@ impl Workspace {
             pointer_down: false,
             status: "Ready".into(),
             open_popup: None,
-            dropdown_scroll: Default::default(),
+            dropdown: Default::default(),
             open_submenu: Vec::new(),
             native_menu: None,
             rotation: 0.0,
@@ -1485,6 +1485,8 @@ pub struct PaintJob {
     /// cover the whole canvas element.
     backdrop: Option<(Bounds<Pixels>, gpui::Hsla)>,
     tiles: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    /// Translucent tool highlights, painted above artwork but below chrome.
+    highlights: Vec<Bounds<Pixels>>,
     outlines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
     polylines: Vec<(Vec<Point<Pixels>>, gpui::Hsla)>,
     /// Marching-ants dashes.

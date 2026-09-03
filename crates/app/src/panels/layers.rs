@@ -66,80 +66,32 @@ pub(super) fn blend_mode_control(
         .and_then(|id| ws.doc.as_ref().and_then(|d| d.tree.find(id)))
         .map(|l| l.blend)
         .unwrap_or(BlendMode::Normal);
-    let is_open = ws.open_popup == Some(Popup::BlendModes);
-    let mut button = div()
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .flex_grow()
-        .h(px(20.0))
-        .px_1()
-        .rounded_sm()
-        .bg(gpui::rgb(palette().field_bg))
-        .text_size(px(11.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|ws, _e, _w, cx| ws.toggle_popup(Popup::BlendModes, cx)),
-        )
-        .child(current.display_name())
-        .child(icon("chevron-down", 11.0, palette().text_dim));
-    if is_open {
-        if let Some(layer_id) = active_layer {
-            let rows: Vec<gpui::AnyElement> = BlendMode::layer_modes()
-                .iter()
-                .map(|&mode| {
-                    let selected = mode == current;
-                    div()
-                        .px_2()
-                        .h(px(20.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .text_size(px(11.0))
-                        .when_active(selected)
-                        .hover(move |s| {
-                            if selected {
-                                s
-                            } else {
-                                s.bg(gpui::rgb(palette().hover))
-                            }
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |ws, _e, _w, cx| {
-                                ws.close_popup(cx);
-                                ws.set_blend_mode(layer_id, mode, cx);
-                            }),
-                        )
-                        .child(mode.display_name())
-                        .into_any_element()
-                })
-                .collect();
-            button = button.child(deferred(
-                div()
-                    .id("blend-modes")
-                    .absolute()
-                    .top(px(22.0))
-                    .left_0()
-                    .w(px(150.0))
-                    .max_h(px(320.0))
-                    .overflow_y_scroll()
-                    .py_1()
-                    .bg(gpui::rgb(palette().popup_bg))
-                    .text_color(gpui::rgb(palette().text))
-                    .border_1()
-                    .border_color(gpui::rgb(palette().edge))
-                    .rounded_sm()
-                    .shadow_lg()
-                    .occlude()
-                    .on_mouse_down_out(cx.listener(|ws, _e, _w, cx| ws.close_popup(cx)))
-                    .children(rows),
-            ));
-        }
-    }
-    button
+    // No layer, no rows: the button still shows but opens nothing.
+    let options = match active_layer {
+        Some(_) => BlendMode::layer_modes()
+            .iter()
+            .map(|&mode| (SharedString::from(mode.display_name()), mode))
+            .collect(),
+        None => Vec::new(),
+    };
+    let spec = ui::Dropdown {
+        popup: Popup::BlendModes,
+        is_open: ws.open_popup == Some(Popup::BlendModes),
+        current,
+        label: current.display_name().into(),
+        width: 0.0,
+        options,
+    };
+    ui::dropdown(
+        &ws.dropdown,
+        spec,
+        |ws, mode, cx| {
+            if let Some(id) = ws.doc.as_ref().and_then(|d| d.active_layer) {
+                ws.set_blend_mode(id, mode, cx);
+            }
+        },
+        cx,
+    )
 }
 
 pub(super) fn layers_panel(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
