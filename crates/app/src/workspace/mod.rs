@@ -1489,6 +1489,8 @@ pub struct PaintJob {
     /// cover the whole canvas element.
     backdrop: Option<(Bounds<Pixels>, gpui::Hsla)>,
     tiles: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    /// Translucent tool highlights, painted above artwork but below chrome.
+    highlights: Vec<Bounds<Pixels>>,
     outlines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
     polylines: Vec<(Vec<Point<Pixels>>, gpui::Hsla)>,
     /// Marching-ants dashes.

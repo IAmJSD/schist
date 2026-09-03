@@ -116,6 +116,9 @@ pub enum Overlay {
     AntsPolygon(Vec<(f32, f32)>),
     /// Solid outline rect (e.g. layer bounds during move).
     Rect(IntRect),
+    /// Translucent selection highlight, drawn above artwork and below
+    /// outline/caret chrome.
+    Highlight(IntRect),
     /// Circle outline (brush cursor), document-space center and radius.
     Circle { cx: f32, cy: f32, r: f32 },
     /// Straight line segment.

@@ -839,12 +839,16 @@ impl ToolPlugin for TypeTool {
                 };
                 if let (Some(l), Some(r)) = (left, right) {
                     if r > l {
-                        out.push(Overlay::Rect(IntRect::new(
+                        let highlight = IntRect::new(
                             (ox + l).floor() as i32,
                             (oy + span.top).floor() as i32,
                             (ox + r).ceil() as i32,
                             (oy + span.top + span.height).ceil() as i32,
-                        )));
+                        )
+                        .intersect(&bounds);
+                        if !highlight.is_empty() {
+                            out.push(Overlay::Highlight(highlight));
+                        }
                     }
                 }
             }
@@ -1278,6 +1282,23 @@ mod tests {
         tool.on_pointer_up(&mut ctx, input(ox + to.x, y));
 
         assert_eq!(tool.editing.as_ref().unwrap().selection(), 3..8);
+        let bounds = ctx
+            .doc
+            .tree
+            .find(ctx.doc.active_layer.unwrap())
+            .unwrap()
+            .tight_bounds();
+        let highlights: Vec<_> = tool
+            .overlays(ctx.doc, ctx.state)
+            .into_iter()
+            .filter_map(|overlay| match overlay {
+                Overlay::Highlight(rect) => Some(rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0], highlights[0].intersect(&bounds));
+
         let base = tool.editing.as_ref().unwrap().stored.spec.family.clone();
         tool.spec.family = "A different family".into();
         tool.on_option_changed(&mut ctx, "type-family");

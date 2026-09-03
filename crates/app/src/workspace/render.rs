@@ -239,6 +239,12 @@ impl Workspace {
                         gpui::rgb(0x44AAFF).into(),
                     ));
                 }
+                Overlay::Highlight(r) => {
+                    job.highlights.push(Bounds {
+                        origin: to_screen(r.left as f32, r.top as f32),
+                        size: size(px(r.width() as f32 * zoom), px(r.height() as f32 * zoom)),
+                    });
+                }
                 Overlay::AntsRect(r) => {
                     let (l, t) = (r.left as f32, r.top as f32);
                     let (rt, b) = (r.right as f32, r.bottom as f32);
@@ -445,6 +451,9 @@ impl Workspace {
                         // below selection ants and tool overlays.
                         for (bounds, color) in job.lines {
                             window.paint_quad(gpui::fill(bounds, color));
+                        }
+                        for bounds in job.highlights {
+                            window.paint_quad(gpui::fill(bounds, gpui::rgba(0x3399FF66)));
                         }
                         for (bounds, color) in job.outlines {
                             window.paint_quad(gpui::outline(
