@@ -13,6 +13,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, TouchPhase, Window,
 };
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use rustc_hash::{FxHashMap, FxHashSet};
 use schist_color::{ColorMode, Depth, Rgba};
 use schist_compositor::TileCache;
@@ -570,6 +571,7 @@ pub struct BatchRecipe {
     pub adjustments: Vec<schist_adjustments::Params>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BatchRecipe {
     /// Whether the recipe does anything at all.
     pub fn is_empty(&self) -> bool {
@@ -608,6 +610,7 @@ pub enum BatchTarget {
     Folder,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BatchTarget {
     pub fn label(self) -> &'static str {
         match self {
