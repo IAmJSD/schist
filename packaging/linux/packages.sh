@@ -47,8 +47,9 @@ rm -rf "$build"
 
 built=()
 
-# libheif is dlopen'd at run time for HEIC import -- present or not, the
-# app starts -- so it is a weak dependency in all three formats.
+# libheif is dlopen'd at run time for HEIC import, and LibRaw for camera
+# raws -- present or not, the app starts -- so both are weak dependencies
+# in all three formats.
 
 build_deb() {
     local work="$build/deb" out size
@@ -78,7 +79,7 @@ Maintainer: $packager
 Installed-Size: $size
 Depends: libc6, libfontconfig1, libfreetype6, libxcb1, libxkbcommon0,
  libxkbcommon-x11-0, libwayland-client0, libvulkan1, hicolor-icon-theme
-Recommends: libheif1
+Recommends: libheif1, libraw23t64 | libraw23
 Homepage: $url
 Description: $summary
  Schist is a layered image editor that opens and writes Photoshop (PSD and
@@ -161,6 +162,7 @@ Requires:       libwayland-client
 Requires:       vulkan-loader
 Requires:       hicolor-icon-theme
 Recommends:     libheif
+Recommends:     LibRaw
 
 %description
 Schist is a layered image editor that opens and writes Photoshop (PSD and
@@ -226,6 +228,7 @@ EOF
         echo "depend = $dep" >> "$work/.PKGINFO"
     done
     echo "optdepend = libheif: HEIC import" >> "$work/.PKGINFO"
+    echo "optdepend = libraw: camera raw import" >> "$work/.PKGINFO"
     # Recorded in the .MTREE below, so it is set before that is written.
     chmod 644 "$work/.PKGINFO"
 

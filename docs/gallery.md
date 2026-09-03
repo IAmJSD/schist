@@ -116,7 +116,10 @@ photo's own format when that format is lossy — a JPEG stays a JPEG,
 byte-for-byte when it is unedited (re-encoding would only cost a
 generation) and at quality 92 when it is not. Everything else becomes
 a PNG, as does anything lossy nothing here can write back: an edited
-HEIC lands as a PNG. The writer is hand-rolled: it deflates each
+HEIC lands as a PNG. A camera raw is the other way round — the capture
+is worth more than any rendering of it, and nothing writes one — so an
+unedited raw goes in byte-for-byte under its own extension, and only an
+edited one becomes a PNG. The writer is hand-rolled: it deflates each
 entry and keeps the smaller of deflated and stored (a JPEG or PNG is
 already compressed and usually stays as it is), and it streams one
 photo at a time, so a whole bucket never has to fit in memory.
@@ -226,7 +229,11 @@ thumbnails are cached as PNGs under the state directory keyed by path,
 mtime and size, so the second launch is instant. HEIC thumbnails need
 the same libheif the editor uses; when they start failing for want of
 it, the gallery raises the managed-download offer once, and retries the
-failed thumbnails after it installs.
+failed thumbnails after it installs. Camera raws need the system's
+LibRaw the same way (there is no download offer for it); their
+thumbnails come from the JPEG the camera embedded, turned upright,
+rather than from developing the sensor data, which takes seconds a
+file.
 
 The grid is virtualised: rows of cells only really exist within a
 viewport's height of the screen, and everything further collapses to

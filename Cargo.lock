@@ -6246,6 +6246,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "schist-codec-raw"
+version = "0.10.0"
+dependencies = [
+ "image",
+ "log",
+ "miniz_oxide",
+ "rayon",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "schist-codecs-common"
 version = "0.10.0"
 dependencies = [
@@ -6256,6 +6267,7 @@ dependencies = [
  "log",
  "moxcms",
  "schist-codec-affinity",
+ "schist-codec-raw",
  "schist-color",
  "schist-colormgmt",
  "schist-compositor",

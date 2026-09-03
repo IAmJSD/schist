@@ -70,12 +70,20 @@ all 27 blend modes, adjustment layers, layer effects, vector shapes,
 channels. Every block Schist doesn't understand is preserved
 byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
-than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos).
-HEIC decodes through libheif loaded at runtime: the system's copy if
-installed, otherwise Schist offers to download a hash-pinned,
-decode-only build (with its LGPL license texts) from
-[libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) — nothing
-links at build time and the build stays pure Rust. Affinity files
+than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos)
+and camera raw import: NEF, ARW, CR2, DNG, RAF, ORF, RW2, PEF, SRW and the
+rest, developed with the camera's white balance to 16-bit sRGB. Raws
+decode through Schist's own clean-room `schist-codec-raw` crate (pure
+Rust, written from the public specifications and verified sample for
+sample against LibRaw across some 250 camera files), which covers most
+bodies; what it declines — Canon CR3 pixels, Fuji's compressed RAF, a
+few odd codecs, and cameras with no colour matrix in its table yet —
+falls back to the system's LibRaw, loaded at runtime (`brew install
+libraw`, or the distro's package). HEIC decodes through libheif the
+same way: the system's copy if installed, otherwise Schist offers to
+download a hash-pinned, decode-only build (with its LGPL license texts)
+from [libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) —
+nothing links at build time and the build stays pure Rust. Affinity files
 (`.af`/`.afphoto`/`.afdesign`/`.afpub` — Affinity 1, 2 and the unified Canva-era format) open through a
 natively reverse-engineered reader
 ([docs/affinity-format.md](docs/affinity-format.md)): pixel layers,

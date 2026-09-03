@@ -59,7 +59,43 @@ pub fn photo_meta(cache: &Option<PathBuf>, original: &Path) -> PhotoMeta {
 pub fn exif_of(path: &Path) -> Option<exif::Exif> {
     let file = std::fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file);
-    exif::Reader::new().read_from_container(&mut reader).ok()
+    exif::Reader::new()
+        .read_from_container(&mut reader)
+        .ok()
+        .or_else(|| raw_exif(path))
+}
+
+/// The EXIF of the camera raws whose container the reader does not
+/// know. Olympus and Panasonic files are TIFF under a private signature,
+/// so putting the standard one back gives a TIFF the reader parses
+/// whole; a Fuji RAF names, in its header, where the camera's JPEG sits
+/// inside it, and that JPEG carries the EXIF. Nikon, Sony, Pentax,
+/// Canon CR2 and DNG are plain TIFF and never get here; Canon CR3 is
+/// not handled and has no capture time or position in the gallery.
+fn raw_exif(path: &Path) -> Option<exif::Exif> {
+    let mut bytes = std::fs::read(path).ok()?;
+    let head: [u8; 4] = bytes.get(0..4)?.try_into().ok()?;
+    match &head {
+        b"IIRO" | b"IIRS" | b"IIU\0" => {
+            bytes[2..4].copy_from_slice(b"*\0");
+            exif::Reader::new().read_raw(bytes).ok()
+        }
+        b"MMOR" => {
+            bytes[2..4].copy_from_slice(b"\0*");
+            exif::Reader::new().read_raw(bytes).ok()
+        }
+        _ if bytes.starts_with(b"FUJIFILMCCD-RAW") => {
+            let field = |at: usize| -> Option<usize> {
+                Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize)
+            };
+            let (at, len) = (field(84)?, field(88)?);
+            let jpeg = bytes.get(at..at.checked_add(len)?)?;
+            exif::Reader::new()
+                .read_from_container(&mut std::io::Cursor::new(jpeg))
+                .ok()
+        }
+        _ => None,
+    }
 }
 
 /// Latitude and longitude in degrees, from the GPS IFD.
@@ -305,4 +341,57 @@ fn summarize(data: exif::Exif) -> Option<ExifSummary> {
         exposure_bias,
     };
     (!summary.is_empty()).then_some(summary)
+}
+
+#[cfg(test)]
+mod raw_tests {
+    /// Every camera file in `SCHIST_RAW_CORPUS` should yield a make and
+    /// a capture time — the TIFF-shaped ones through the reader as it
+    /// is, Olympus/Panasonic/Fuji through the container shims. Canon
+    /// CR3 is the known exception. Skipped without the variable.
+    #[test]
+    fn corpus_exif() {
+        let Ok(dir) = std::env::var("SCHIST_RAW_CORPUS") else {
+            return;
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            // The LibRaw/exiftool oracle sidecars live beside the raws.
+            .filter(|p| {
+                !matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("tiff" | "json" | "txt" | "png" | "ppm" | "pgm" | "sh")
+                )
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            let summary = super::exif_summary(&path);
+            eprintln!(
+                "{}: make={:?} model={:?} taken={:?} gps={:?} exposure={:?}",
+                path.display(),
+                summary.as_ref().and_then(|s| s.make.clone()),
+                summary.as_ref().and_then(|s| s.model.clone()),
+                summary.as_ref().and_then(|s| s.taken.clone()),
+                summary.as_ref().and_then(|s| s.gps),
+                summary.as_ref().and_then(|s| s.exposure.clone()),
+            );
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if ext != "cr3" {
+                let summary = summary.expect("EXIF read");
+                assert!(summary.make.is_some(), "{}: no make", path.display());
+                assert!(
+                    summary.taken.is_some(),
+                    "{}: no capture time",
+                    path.display()
+                );
+            }
+        }
+    }
 }

@@ -17,6 +17,7 @@ crates/app              GPUI shell: window, canvas, panels, dialogs, keymap
 ├── crates/text-engine  font discovery, layout, glyph rasterization
 ├── crates/colormgmt    ICC profiles, display transforms, dithering
 ├── crates/codec-psd    PSD/PSB reader and writer
+├── crates/codec-raw    camera raw decoding and development, clean-room pure Rust
 ├── crates/plugin-host-wasm  sandboxed third-party plugins
 ├── crates/plugin-host-8bf   Photoshop .8bf filter plug-ins (unshipped)
 └── crates/plugin-sdk   what plugin authors compile against
@@ -33,7 +34,7 @@ plugins/                first-party features, each optional at compile time
 ├── tools-vector        shapes, pen
 ├── tools-type          text layers
 ├── filters-core        blur, sharpen, noise
-├── codecs-common       PNG/JPEG/WebP/TIFF/HEIC
+├── codecs-common       PNG/JPEG/WebP/TIFF/HEIC/camera raw
 └── commands-core       menu commands and their keybindings
 ```
 

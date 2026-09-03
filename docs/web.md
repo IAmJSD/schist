@@ -104,6 +104,7 @@ Compiled out entirely, with the reason:
 | Photoshop `.8bf` plug-ins | helper subprocesses and dlopen |
 | Third-party wasm plug-ins | wasmtime is a JIT; a wasm module cannot host one |
 | HEIC import | libheif is dlopen'd |
+| Camera raw import | the plugin wraps a dlopen'd LibRaw fallback; the pure-Rust `schist-codec-raw` decoder itself would build for wasm and is a candidate for a future web-only path |
 | Auto-update | a web deployment updates by serving newer files |
 | Crash reporting (Sentry) | blocking transport; panics go to the console instead |
 | Font downloads | the Google Fonts catalogue trick needs a spoofed legacy user agent to be served TTFs |

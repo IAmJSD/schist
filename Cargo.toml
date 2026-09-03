@@ -16,6 +16,7 @@ members = [
     "crates/color",
     "crates/codec-psd",
     "crates/codec-affinity",
+    "crates/codec-raw",
     "crates/vector",
     "crates/text-engine",
     "crates/adjustments",
@@ -58,6 +59,7 @@ schist-fx = { path = "crates/fx" }
 schist-color = { path = "crates/color" }
 schist-codec-psd = { path = "crates/codec-psd" }
 schist-codec-affinity = { path = "crates/codec-affinity" }
+schist-codec-raw = { path = "crates/codec-raw" }
 schist-vector = { path = "crates/vector" }
 schist-layer-fx = { path = "crates/layer-fx" }
 schist-neural = { path = "crates/neural" }

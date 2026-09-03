@@ -1,0 +1,22 @@
+[package]
+name = "schist-codec-raw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Camera raw decoding and development in pure Rust: DNG and the vendor formats, sensor data to linear sRGB"
+
+# Deliberately standalone: no schist crates, so it builds in seconds and
+# could be published on its own. The plugin in codecs-common adapts its
+# output to a Document.
+[dependencies]
+# DNG's deflate-compressed (and float) tiles.
+miniz_oxide.workspace = true
+# Lossy DNG tiles are baseline JPEG; nothing else here goes through
+# `image`.
+image.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
