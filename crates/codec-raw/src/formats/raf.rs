@@ -305,10 +305,11 @@ fn parse_raw_tiff<'a>(header: &Header<'a>) -> Result<Option<Frame<'a>>> {
 
 /// How the samples of an uncompressed strip are stored.
 ///
-/// Fujifilm has used three layouts, and the strip's own byte count
-/// tells them apart without guessing: it is exactly the pixel count
-/// times two (16-bit words), or times the bit depth over eight
-/// (packed), or neither — and neither means compressed.
+/// Fujifilm has used three uncompressed layouts, and the strip's own
+/// byte count tells them apart without guessing: it is exactly the
+/// pixel count times two (16-bit words) or times the bit depth over
+/// eight (packed). A compressed strip is recognised before either, by
+/// its own header (see [`super::raf_compressed::is_compressed`]).
 ///
 /// The two packings differ, and not in a way any tag announces. The
 /// 12-bit EXR compacts pack least significant bit first across plain
@@ -324,10 +325,20 @@ enum Storage {
     PackedLsb(u32),
     /// Most significant bit first inside 32-bit little-endian words.
     PackedMsb32(u32),
+    /// Fujifilm's own entropy coding, which says so in its own header.
     Compressed,
+    /// A strip that is none of the above: a layout this decoder does
+    /// not know, rather than one it can guess at.
+    Unknown,
 }
 
-fn storage(pixels: usize, bits: u32, len: usize) -> Storage {
+fn storage(strip: &[u8], pixels: usize, bits: u32, len: usize) -> Storage {
+    // The compressed strips announce themselves, and asking them
+    // first is what keeps a frame whose compressed size happens to
+    // land on one of the packings from being unpacked as noise.
+    if super::raf_compressed::is_compressed(strip) {
+        return Storage::Compressed;
+    }
     if len == pixels * 2 {
         return Storage::Words16;
     }
@@ -341,7 +352,7 @@ fn storage(pixels: usize, bits: u32, len: usize) -> Storage {
             };
         }
     }
-    Storage::Compressed
+    Storage::Unknown
 }
 
 /// Little-endian 16-bit words, the simplest and oldest layout.
@@ -563,11 +574,17 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
         Some(frame) => frame.strip,
         None => header.cfa,
     };
-    let data = match storage(pixels, bits, strip.len()) {
+    let data = match storage(strip, pixels, bits, strip.len()) {
         Storage::Words16 => unpack_words16(strip, pixels),
         Storage::PackedLsb(bits) => unpack_packed(strip, width, height, bits, false),
         Storage::PackedMsb32(bits) => unpack_packed(strip, width, height, bits, true),
         Storage::Compressed => super::raf_compressed::decode(strip, width, height, &cfa)?,
+        Storage::Unknown => {
+            return Err(Error::Unsupported(format!(
+            "RAF: a {}-byte strip is no known layout of a {width}x{height} frame at {bits} bits",
+            strip.len()
+        )))
+        }
     };
 
     let mut raw = RawImage::new(Format::Raf, width, height, 1, RawData::U16(data), cfa);
@@ -775,10 +792,18 @@ mod tests {
 
     #[test]
     fn storage_follows_the_strip_length() {
-        assert_eq!(storage(1000, 14, 2000), Storage::Words16);
-        assert_eq!(storage(1000, 14, 1750), Storage::PackedMsb32(14));
-        assert_eq!(storage(1000, 12, 1500), Storage::PackedLsb(12));
-        assert_eq!(storage(1000, 14, 900), Storage::Compressed);
+        assert_eq!(storage(&[], 1000, 14, 2000), Storage::Words16);
+        assert_eq!(storage(&[], 1000, 14, 1750), Storage::PackedMsb32(14));
+        assert_eq!(storage(&[], 1000, 12, 1500), Storage::PackedLsb(12));
+        assert_eq!(storage(&[], 1000, 14, 900), Storage::Unknown);
+        // A compressed header wins over every byte-count rule, even
+        // when the count happens to match a packing exactly.
+        let mut strip = vec![
+            0x49, 0x53, 0x01, 0x10, 0x0e, 0x0f, 0xc6, 0x18, 0x00, 0x17, 0xa0, 0x03, 0x00, 0x08,
+            0x02, 0xa1,
+        ];
+        strip.resize(2000, 0);
+        assert_eq!(storage(&strip, 1000, 14, 2000), Storage::Compressed);
     }
 
     #[test]
@@ -891,13 +916,6 @@ mod corpus {
         // has nowhere to put that.
         ("FinePix_S9600", "SuperCCD"),
         ("DBP_for_GX680", "SuperCCD"),
-        // Fujifilm's compressed strips, lossless and lossy alike: the
-        // container, levels and geometry are read, the entropy-coded
-        // body is not. See `super::super::raf_compressed`.
-        ("GFX100S", "compression"),
-        ("X100F-DSCF5760", "compression"),
-        ("X-Pro3-_DSF2385", "compression"),
-        ("X-T5", "compression"),
     ];
 
     fn corpus_files() -> Vec<PathBuf> {
@@ -1128,9 +1146,17 @@ mod corpus {
             if !tiff.exists() {
                 continue;
             }
-            let want = image::open(&tiff)
-                .unwrap_or_else(|e| panic!("{}: {e}", tiff.display()))
-                .into_luma16();
+            // `image::open` caps its allocation, and a 100-megapixel
+            // oracle is past the cap; the file is ours, so lift it.
+            let want = {
+                let mut reader = image::ImageReader::open(&tiff)
+                    .unwrap_or_else(|e| panic!("{}: {e}", tiff.display()));
+                reader.limits(image::Limits::no_limits());
+                reader
+                    .decode()
+                    .unwrap_or_else(|e| panic!("{}: {e}", tiff.display()))
+                    .into_luma16()
+            };
             assert_eq!(
                 (want.width() as usize, want.height() as usize),
                 (raw.width, raw.height),

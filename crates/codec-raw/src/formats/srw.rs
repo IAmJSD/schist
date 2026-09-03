@@ -17,8 +17,9 @@
 //!   NX300 generation). See [`decompress_v1`].
 //! * `32772` — a Huffman-coded difference per pixel against a table
 //!   built into the firmware (NX mini, NX3000). See [`decompress_v2`].
-//! * `32773` — the last codec, on the NX1 and NX500. Not implemented;
-//!   [`decode`] returns [`crate::Error::Unsupported`] for it.
+//! * `32773` — the last codec, on the NX1 and NX500: sixteen-column
+//!   blocks predicted from the two rows above with a one-dimensional
+//!   motion vector, over an optional quantiser. See [`decompress_v3`].
 //!
 //! Written from observation of the files and their LibRaw-unpacked
 //! frames, plus the TIFF 6.0 and Exif specifications and ExifTool's
@@ -121,11 +122,7 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
                 decompress_v1(strip, &pointers, width, height)
             }
             COMPRESSION_V2 => decompress_v2(strip, width, height),
-            COMPRESSION_V3 => {
-                return Err(Error::Unsupported(
-                    "SRW compression 32773, the NX1 and NX500 codec".into(),
-                ))
-            }
+            COMPRESSION_V3 => decompress_v3(strip, width, height)?,
             other => {
                 return Err(Error::Unsupported(format!(
                     "SRW compression {other} with a strip too small to be plain samples"
@@ -611,6 +608,304 @@ fn decompress_v2(strip: &[u8], width: usize, height: usize) -> Vec<u16> {
     out
 }
 
+// ------------------------------------------------------------ codec v3
+
+/// Columns to a block of the NX1/NX500 codec.
+const V3_BLOCK: usize = 16;
+/// The stream header's size, and the boundary every row starts on.
+const V3_ALIGN: usize = 16;
+/// The narrowest and shortest frame the codec is defined for. Below
+/// this a block's prediction would reach outside the frame.
+const V3_MIN_WIDTH: usize = 646;
+const V3_MIN_HEIGHT: usize = 436;
+
+/// Bits of the header's option nibble. Each one *removes* a per-block
+/// field from the stream, so a decoder that ignored them would read
+/// the fields that are not there and lose the stream immediately.
+mod v3 {
+    /// The difference lengths are in every block; the one-bit "lengths
+    /// unchanged" flag is not written.
+    pub const LENGTHS_ALWAYS: u32 = 1;
+    /// The prediction mode is one bit: 0 means mode 7, 1 means mode 3.
+    pub const SHORT_MODE: u32 = 2;
+    /// No quantiser-scale field: the file is lossless.
+    pub const LOSSLESS: u32 = 4;
+}
+
+/// How far left or right of the target column a prediction mode looks,
+/// and whether it averages two references to land on a half-way
+/// offset. Modes 0..=6; mode 7 predicts along the row instead.
+const V3_MOTION_OFFSET: [i32; 7] = [-4, -2, -2, 0, 0, 2, 4];
+const V3_MOTION_AVERAGE: [bool; 7] = [false, false, true, false, true, false, false];
+
+/// The sixteen-byte stream header. Only three of its fields have a
+/// known meaning; the rest is identical between the two bodies in the
+/// corpus and is skipped by width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct V3Header {
+    /// Sample depth, stored one less than it is.
+    depth: u32,
+    /// See the [`v3`] option bits.
+    options: u32,
+    /// The predictor for the first sixteen columns of every row.
+    initial: u16,
+}
+
+/// Read the header out of the first sixteen bytes of the stream.
+///
+/// The whole header is bit-packed and read with the codec's own
+/// reader — most significant bit first inside 32-bit little-endian
+/// words — so getting the word order wrong is caught here rather than
+/// three megapixels later.
+fn v3_header(strip: &[u8]) -> V3Header {
+    let mut pump = BitPumpMsb32::new(strip);
+    pump.consume(20);
+    let depth = pump.get(4) + 1;
+    // Bits 24..=83: unknown, and the same on both bodies.
+    pump.consume(8);
+    pump.consume(32);
+    pump.consume(16);
+    pump.consume(4);
+    let options = pump.get(4);
+    // Bits 88..=113: unknown.
+    pump.consume(26);
+    V3Header {
+        depth,
+        options,
+        initial: pump.get(14) as u16,
+    }
+}
+
+/// Decode Samsung's last codec (Compression 32773).
+///
+/// The frame is one stream. Rows are independent: each starts on a
+/// sixteen-byte boundary measured from the start of the stream, with
+/// the bit reader reset, so a row's length is only known once it has
+/// been decoded. Within a row, columns are taken sixteen at a time.
+///
+/// Every block first *fills* its sixteen columns with a prediction and
+/// then adds a difference to each in place. The prediction is either
+/// along the row — every column takes the value two columns back,
+/// which for the first block of a row is the header's initial value —
+/// or from the two rows above: on this GRBG sensor the greens of a row
+/// sit diagonally next to the greens of the row above and the reds and
+/// blues sit two rows straight up, so a mode picks that reference and
+/// then slides it left or right by up to four columns. It is a
+/// one-dimensional motion vector, and the two averaging modes give it
+/// the half-way offsets.
+///
+/// The differences are coded in an interleaved order — all eight
+/// even-parity columns of the block, then all eight odd ones — in four
+/// groups of four, each group with its own bit width carried from the
+/// previous block. A quantiser scale, refreshed every fourth block,
+/// multiplies them; at scale 0, which is what a lossless file uses
+/// throughout, it is the identity.
+fn decompress_v3(strip: &[u8], width: usize, height: usize) -> Result<Vec<u16>> {
+    if width < V3_MIN_WIDTH || height < V3_MIN_HEIGHT {
+        return Err(Error::Corrupt(format!(
+            "SRW compression 32773 needs at least {V3_MIN_WIDTH}x{V3_MIN_HEIGHT}, not {width}x{height}"
+        )));
+    }
+    if strip.len() < V3_ALIGN {
+        return Err(Error::Corrupt(
+            "SRW compression 32773 with no room for its header".into(),
+        ));
+    }
+    let header = v3_header(strip);
+    if !(8..=16).contains(&header.depth) {
+        return Err(Error::Corrupt(format!(
+            "SRW compression 32773 claims {} bits a sample",
+            header.depth
+        )));
+    }
+    let datamax = ((1u32 << header.depth) - 1) as i32;
+    let mut out = vec![0u16; width * height];
+    // Row 0 opens immediately after the header.
+    let mut at = V3_ALIGN;
+    for row in 0..height {
+        let mut pump = BitPumpMsb32::new(strip.get(at..).unwrap_or(&[]));
+        decode_v3_row(&mut pump, &mut out, row, width, &header, datamax);
+        // The next row starts at the next sixteen-byte boundary. The
+        // reader fetches whole 32-bit words, so rounding the bits it
+        // consumed up to a byte and then to sixteen lands exactly
+        // where its own fetch pointer would.
+        at += pump.position().div_ceil(8).next_multiple_of(V3_ALIGN);
+    }
+    Ok(out)
+}
+
+/// One row: blocks of sixteen columns until fewer than sixteen are
+/// left. A width that is not a whole number of blocks leaves its last
+/// few columns black; no body in the corpus has one.
+fn decode_v3_row(
+    pump: &mut impl BitPump,
+    out: &mut [u16],
+    row: usize,
+    width: usize,
+    header: &V3Header,
+    datamax: i32,
+) {
+    let mut scale = 0i32;
+    let mut motion = 7u32;
+    // The first two rows have no rows above to lean on, so they open
+    // expecting the wide differences of an absolute-ish first block.
+    let mut lengths = [if row < 2 { 7i32 } else { 4 }; 4];
+    let mut col = 0;
+    while col + V3_BLOCK <= width {
+        // Once every four blocks, and only on a lossy file.
+        if header.options & v3::LOSSLESS == 0 && col.is_multiple_of(4 * V3_BLOCK) {
+            match pump.get(2) {
+                1 => scale -= 2,
+                2 => scale += 2,
+                3 => scale = pump.get(12) as i32,
+                _ => {}
+            }
+        }
+        if header.options & v3::SHORT_MODE != 0 {
+            motion = if pump.get(1) == 0 { 7 } else { 3 };
+        } else if pump.get(1) == 0 {
+            motion = pump.get(3);
+        }
+        // Rows 0 and 1 have no rows above them: only mode 7 is legal
+        // there, and a file that says otherwise is broken rather than
+        // a reason to read outside the frame.
+        let mode = if row < 2 { 7 } else { motion };
+        v3_predict(out, row, col, width, mode, header.initial);
+
+        // With option bit 0 set the lengths are always written; with
+        // it clear a leading 1 bit means "the previous block's".
+        if header.options & v3::LENGTHS_ALWAYS != 0 || pump.get(1) == 0 {
+            v3_lengths(pump, &mut lengths);
+        }
+        if lengths
+            .iter()
+            .any(|l| !(0..=header.depth as i32 + 1).contains(l))
+        {
+            // A length the format cannot mean: the stream has come
+            // apart, and reading on would only spend bits wildly.
+            return;
+        }
+
+        for i in 0..V3_BLOCK {
+            let target = v3_target(row, col, i);
+            let length = lengths[i / 4];
+            // A length of zero reads no bits and codes a quantised
+            // difference of zero — but *not* a difference of zero: the
+            // dequantiser's mid-point offset still applies, so a lossy
+            // file shifts such a group up by its scale.
+            let quantised = if length == 0 {
+                0
+            } else {
+                let value = pump.get(length as u32) as i32;
+                // Two's complement in `length` bits.
+                if value & (1 << (length - 1)) != 0 {
+                    value - (1 << length)
+                } else {
+                    value
+                }
+            };
+            // The lossy step, and its mid-point reconstruction
+            // offset. At scale 0 this is the identity.
+            let difference = quantised * (2 * scale + 1) + scale;
+            let at = row * width + target;
+            if let Some(sample) = out.get_mut(at) {
+                // The clamp is not cosmetic: without it one clipped
+                // highlight propagates into every row below through
+                // the prediction above.
+                *sample = (*sample as i32 + difference).clamp(0, datamax) as u16;
+            }
+        }
+        col += V3_BLOCK;
+    }
+}
+
+/// The four difference lengths of a block, one for each group of four
+/// entries of the interleaved order.
+///
+/// All four two-bit selectors are read before any of them is resolved,
+/// and a selector's "predicted value" is the length the same group had
+/// in the previous block of this row.
+fn v3_lengths(pump: &mut impl BitPump, lengths: &mut [i32; 4]) {
+    let flags = [pump.get(2), pump.get(2), pump.get(2), pump.get(2)];
+    for (length, flag) in lengths.iter_mut().zip(flags) {
+        *length = match flag {
+            1 => *length + 1,
+            2 => *length - 1,
+            3 => pump.get(4) as i32,
+            _ => *length,
+        };
+    }
+}
+
+/// Which column entry `i` of a block's sixteen differences belongs to.
+///
+/// Differences are coded interleaved by column parity: on an even row
+/// the eight even columns come first and the eight odd ones after, and
+/// on an odd row the other way round. The predictions of the same
+/// block were written in plain column order, so the two meet in the
+/// frame.
+fn v3_target(row: usize, col: usize, i: usize) -> usize {
+    if row.is_multiple_of(2) {
+        col + 2 * (i % 8) + i / 8
+    } else {
+        col + 2 * (i % 8) + 1 - i / 8
+    }
+}
+
+/// Fill a block's sixteen columns with their predictions, before any
+/// difference is read.
+fn v3_predict(out: &mut [u16], row: usize, col: usize, width: usize, mode: u32, initial: u16) {
+    let base = row * width;
+    if mode >= 7 || row < 2 {
+        // Along the row, and sequentially: because the source is two
+        // columns back, every even offset in the block ends up with
+        // the last even column of the previous block and every odd
+        // offset with the last odd one.
+        for i in 0..V3_BLOCK {
+            let at = base + col + i;
+            if at >= out.len() {
+                return;
+            }
+            out[at] = if col == 0 { initial } else { out[at - 2] };
+        }
+        return;
+    }
+    let offset = V3_MOTION_OFFSET[mode as usize] as isize;
+    let average = V3_MOTION_AVERAGE[mode as usize];
+    for i in 0..V3_BLOCK {
+        // Green samples sit diagonally above, one row up and one
+        // column across; red and blue sit two rows straight up.
+        let far = !(row + i).is_multiple_of(2);
+        let reference_row = if far { row - 2 } else { row - 1 };
+        let across = if far {
+            0
+        } else if i.is_multiple_of(2) {
+            1
+        } else {
+            -1
+        };
+        let from = (reference_row * width) as isize + (col + i) as isize + offset + across;
+        // The frame is one flat buffer, so a reference that runs off
+        // the side of a row is simply a neighbouring row's sample; one
+        // that runs off the buffer reads as black.
+        let sample = |index: isize| -> u32 {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| out.get(i))
+                .map_or(0, |s| *s as u32)
+        };
+        let value = if average {
+            (sample(from) + sample(from + 2) + 1) >> 1
+        } else {
+            sample(from)
+        };
+        let at = base + col + i;
+        if at < out.len() {
+            out[at] = value as u16;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,6 +971,183 @@ mod tests {
         }
         let out = decompress_v2(&bits.finish(), 6, 2);
         assert_eq!(out, vec![4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7]);
+    }
+
+    // ------------------------------------------------------- codec v3
+
+    /// Writes bits MSB-first into 32-bit little-endian words, the
+    /// order [`BitPumpMsb32`] reads them back in.
+    #[derive(Default)]
+    struct Words {
+        out: Vec<u8>,
+        cache: u64,
+        bits: u32,
+    }
+
+    impl Words {
+        fn put(&mut self, value: u32, bits: u32) {
+            self.cache = (self.cache << bits) | (value & ((1u64 << bits) - 1) as u32) as u64;
+            self.bits += bits;
+            while self.bits >= 32 {
+                self.bits -= 32;
+                let word = (self.cache >> self.bits) as u32;
+                self.out.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        fn finish(mut self) -> Vec<u8> {
+            if self.bits > 0 {
+                let pad = 32 - self.bits;
+                self.put(0, pad);
+            }
+            self.out
+        }
+    }
+
+    /// The sixteen header bytes of the two bodies in the corpus. Ten
+    /// of the sixteen have no known meaning, but the three that do are
+    /// enough to catch a reader that takes the words the wrong way up.
+    #[test]
+    fn the_v3_header_is_read_out_of_little_endian_words() {
+        let nx1 = v3_header(&[
+            0x4B, 0x6D, 0x33, 0x56, 0xF0, 0x10, 0x60, 0x19, 0x00, 0x05, 0x00, 0x00, 0x80, 0x00,
+            0x02, 0x01,
+        ]);
+        assert_eq!(
+            nx1,
+            V3Header {
+                depth: 14,
+                // Lengths always present, and lossless.
+                options: v3::LENGTHS_ALWAYS | v3::LOSSLESS,
+                initial: 128,
+            }
+        );
+        let nx500 = v3_header(&[
+            0x45, 0x6D, 0x33, 0x56, 0xF0, 0x10, 0x60, 0x19, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00,
+            0x02, 0x01,
+        ]);
+        assert_eq!(
+            nx500,
+            V3Header {
+                depth: 14,
+                options: 0,
+                initial: 128,
+            }
+        );
+    }
+
+    /// The four length selectors, resolved against the previous
+    /// block's lengths. This is the NX1's row 0, block at column 32:
+    /// flags 0, 3, 0, 1 over the lengths 10, 9, 9, 8 that its block at
+    /// column 16 left behind.
+    #[test]
+    fn v3_lengths_carry_from_the_previous_block() {
+        let mut bits = Words::default();
+        bits.put(0, 2);
+        bits.put(3, 2);
+        bits.put(0, 2);
+        bits.put(1, 2);
+        // The one literal, for the group whose flag was 3. All four
+        // selectors are read before any literal.
+        bits.put(11, 4);
+        let stream = bits.finish();
+        let mut pump = BitPumpMsb32::new(&stream);
+        let mut lengths = [10, 9, 9, 8];
+        v3_lengths(&mut pump, &mut lengths);
+        assert_eq!(lengths, [10, 11, 9, 9]);
+        assert_eq!(pump.position(), 12);
+    }
+
+    /// The interleaved order the sixteen differences arrive in.
+    #[test]
+    fn v3_differences_are_interleaved_by_column_parity() {
+        let even: Vec<usize> = (0..16).map(|i| v3_target(0, 16, i)).collect();
+        assert_eq!(
+            even,
+            vec![16, 18, 20, 22, 24, 26, 28, 30, 17, 19, 21, 23, 25, 27, 29, 31]
+        );
+        let odd: Vec<usize> = (0..16).map(|i| v3_target(1, 16, i)).collect();
+        assert_eq!(
+            odd,
+            vec![17, 19, 21, 23, 25, 27, 29, 31, 16, 18, 20, 22, 24, 26, 28, 30]
+        );
+    }
+
+    /// Mode 7 predicts two columns back, sequentially, so a whole
+    /// block takes the previous block's last even and last odd column.
+    /// The first block of a row takes the header's initial value.
+    #[test]
+    fn v3_mode_seven_predicts_along_the_row() {
+        let width = 32;
+        let mut frame = vec![0u16; width * 3];
+        v3_predict(&mut frame, 0, 0, width, 7, 128);
+        assert!(frame[..16].iter().all(|s| *s == 128));
+        // Give the first block the NX1's real row 0 and predict the
+        // second: every even offset becomes 4333, every odd 2362.
+        frame[14] = 4333;
+        frame[15] = 2362;
+        v3_predict(&mut frame, 0, 16, width, 7, 128);
+        for (i, sample) in frame[16..32].iter().enumerate() {
+            assert_eq!(*sample, if i.is_multiple_of(2) { 4333 } else { 2362 });
+        }
+    }
+
+    /// Modes 0..=6 take their reference from the row above for the
+    /// diagonal (green) neighbours and from two rows above for the
+    /// ones straight up, then slide it sideways. Mode 3 is the
+    /// no-slide, no-average case; mode 4 averages two references two
+    /// columns apart.
+    #[test]
+    fn v3_motion_prediction_reads_the_two_rows_above() {
+        let width = 32;
+        let mut frame = vec![0u16; width * 3];
+        for c in 0..width {
+            frame[c] = 100 + c as u16;
+            frame[width + c] = 200 + c as u16;
+        }
+        v3_predict(&mut frame, 2, 0, width, 3, 0);
+        // Row 2, column 0 comes from row 1 column 1; column 1 from row
+        // 0 column 1; column 2 from row 1 column 3; and so on.
+        assert_eq!(
+            &frame[2 * width..2 * width + 6],
+            &[201, 101, 203, 103, 205, 105]
+        );
+        v3_predict(&mut frame, 2, 0, width, 4, 0);
+        // Averaging takes the reference and the one two columns on.
+        // (201 + 203 + 1) >> 1 and so on: the reference and the one
+        // two columns further along.
+        assert_eq!(&frame[2 * width..2 * width + 4], &[202, 102, 204, 104]);
+    }
+
+    /// The dequantiser, and its mid-point offset. A group whose length
+    /// resolves to zero reads no bits, but still picks up the offset:
+    /// the difference is `scale`, not zero.
+    #[test]
+    fn v3_dequantises_around_the_interval_midpoint() {
+        let dequantise = |q: i32, scale: i32| q * (2 * scale + 1) + scale;
+        // The NX500's first difference: 3364 = 3 * 1121 + 1.
+        assert_eq!(dequantise(1121, 1), 3364);
+        // Lossless files leave it the identity.
+        assert_eq!(dequantise(-97, 0), -97);
+        assert_eq!(dequantise(0, 3), 3);
+    }
+
+    /// A width narrower than a block, and a stream with no room for a
+    /// header, are refused rather than decoded into nonsense.
+    #[test]
+    fn v3_refuses_frames_it_cannot_describe() {
+        assert!(decompress_v3(&[0; 4096], 640, 480).is_err());
+        assert!(decompress_v3(&[0; 8], 6496, 4336).is_err());
+        // An all-zero header claims one bit a sample.
+        assert!(decompress_v3(&vec![0u8; 1 << 16], V3_MIN_WIDTH, V3_MIN_HEIGHT).is_err());
+        // A real header over a stream of zeros: every field reads
+        // zero, which is a legal stream, and nothing panics.
+        let mut stream = vec![
+            0x4B, 0x6D, 0x33, 0x56, 0xF0, 0x10, 0x60, 0x19, 0x00, 0x05, 0x00, 0x00, 0x80, 0x00,
+            0x02, 0x01,
+        ];
+        stream.resize(1 << 16, 0);
+        let frame = decompress_v3(&stream, V3_MIN_WIDTH, V3_MIN_HEIGHT).unwrap();
+        assert_eq!(frame.len(), V3_MIN_WIDTH * V3_MIN_HEIGHT);
     }
 
     #[test]
@@ -745,11 +1217,9 @@ mod tests {
 
     /// Files this decoder knowingly cannot read, with the reason. A
     /// corpus file that is `Unsupported` for any other reason fails.
-    const UNSUPPORTED: &[&str] = &[
-        // Compression 32773, the NX1/NX500 codec: a sixteen-by-sixteen
-        // block predictor this crate has not reverse-engineered.
-        "SRW compression 32773",
-    ];
+    /// Empty: every Samsung compression in the corpus decodes. The
+    /// list stays for the compressions a future body might bring.
+    const UNSUPPORTED: &[&str] = &[];
 
     fn corpus() -> Vec<PathBuf> {
         let Ok(root) = std::env::var("SCHIST_RAW_CORPUS") else {
@@ -825,6 +1295,104 @@ mod tests {
             })
             .collect();
         Some(Cfa::Bayer(colors.try_into().ok()?))
+    }
+
+    /// A corpus file by name, with its decoded frame.
+    fn decoded(name: &str) -> Option<RawImage> {
+        let path = corpus()
+            .into_iter()
+            .find(|p| p.file_name().is_some_and(|f| f == name))?;
+        let bytes = std::fs::read(path).expect("corpus file reads");
+        Some(crate::decode(&bytes).expect("decodes"))
+    }
+
+    fn samples(raw: &RawImage) -> &[u16] {
+        let RawData::U16(data) = &raw.data else {
+            panic!("SRW frames are integers")
+        };
+        data
+    }
+
+    /// The NX1: option flags 5, so the lengths are in every block and
+    /// the file is lossless. Its first row exercises mode 7 from the
+    /// header's initial value, four 4-bit length literals and the
+    /// interleaved difference order in one block.
+    #[test]
+    fn the_nx1_decodes_its_first_rows_sample_for_sample() {
+        let Some(raw) = decoded("NX1-sam_9364.srw") else {
+            return;
+        };
+        assert_eq!((raw.width, raw.height), (6496, 4336));
+        assert_eq!(raw.cfa, Cfa::GRBG);
+        assert_eq!(raw.white_level, 16383.0);
+        let frame = samples(&raw);
+        let width = raw.width;
+        assert_eq!(
+            &frame[..16],
+            &[
+                4524, 2306, 4662, 2339, 4504, 2464, 4839, 2432, 4384, 2344, 4423, 2373, 4353, 2218,
+                4333, 2362
+            ]
+        );
+        // The second block's predictions are the first's last even and
+        // last odd column, 4333 and 2362.
+        assert_eq!(
+            &[frame[16], frame[18], frame[20], frame[22]],
+            &[4230, 4309, 4604, 4501]
+        );
+
+        // Row 2 is the first that can use the motion modes; its first
+        // block chooses mode 3 — no slide, no averaging — so column 0
+        // predicts from row 1 column 1 and column 1 from row 0
+        // column 1.
+        assert_eq!(&[frame[width + 1], frame[width + 3]], &[4495, 4458]);
+        assert_eq!(&[frame[1], frame[3]], &[2306, 2339]);
+        let row2 = &frame[2 * width..];
+        assert_eq!(
+            &[row2[0], row2[2], row2[4], row2[6]],
+            &[4904, 4453, 4666, 4558]
+        );
+    }
+
+    /// The NX500: option flags 0, so every field is present and the
+    /// file is lossy. Its row 0 opens with a scale selector reading 3
+    /// and a twelve-bit literal of 1, so every difference on that row
+    /// is `3q + 1`.
+    #[test]
+    fn the_nx500_decodes_its_lossy_first_rows_sample_for_sample() {
+        let Some(raw) = decoded("NX500-SAM_2922.SRW") else {
+            return;
+        };
+        assert_eq!((raw.width, raw.height), (6496, 4336));
+        let frame = samples(&raw);
+        let width = raw.width;
+        assert_eq!(
+            &frame[..16],
+            &[
+                3492, 1695, 3510, 1668, 3531, 1620, 3495, 1680, 3531, 1728, 3504, 1728, 3537, 1641,
+                3477, 1725
+            ]
+        );
+        // Row 2's first block uses mode 4: offset zero and an average
+        // of two references two columns apart. Its predictions are
+        // therefore these averages of rows 0 and 1.
+        let average = |a: u16, b: u16| (a as u32 + b as u32 + 1) >> 1;
+        assert_eq!(average(frame[width + 1], frame[width + 3]), 3482);
+        assert_eq!(average(frame[1], frame[3]), 1682);
+        assert_eq!(average(frame[width + 3], frame[width + 5]), 3440);
+        assert_eq!(average(frame[3], frame[5]), 1644);
+        assert_eq!(average(frame[width + 5], frame[width + 7]), 3446);
+        assert_eq!(average(frame[5], frame[7]), 1650);
+        assert_eq!(average(frame[width + 7], frame[width + 9]), 3506);
+        assert_eq!(average(frame[7], frame[9]), 1704);
+        let row2 = &frame[2 * width..];
+        assert_eq!(
+            &[row2[0], row2[2], row2[4], row2[6]],
+            &[3546, 3489, 3450, 3450]
+        );
+        // The clamp: no sample may leave the fourteen-bit range, and
+        // this frame does reach the top of it.
+        assert_eq!(frame.iter().copied().max(), Some(16383));
     }
 
     #[test]
