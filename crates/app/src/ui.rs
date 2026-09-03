@@ -510,11 +510,13 @@ pub fn type_ahead_target(
 /// built as plain values deep inside a panel or dialog body with no path
 /// back to the workspace, so the open one leaves them here as it renders
 /// and `Workspace::dropdown_key` reads them back.
+type DropdownSelect = dyn Fn(&mut Workspace, usize, &mut Context<Workspace>);
+
 pub struct OpenDropdown {
     pub labels: Vec<SharedString>,
     /// Row of the committed value, where keyboard walking starts from.
     pub current: Option<usize>,
-    select: Rc<dyn Fn(&mut Workspace, usize, &mut Context<Workspace>)>,
+    select: Rc<DropdownSelect>,
 }
 
 impl OpenDropdown {

@@ -16,7 +16,7 @@ use schist_plugin_api::{
     EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
     ToolCtx, ToolOption, ToolPlugin,
 };
-use schist_text_engine::{rasterize, Align, StyleRun, TextSpec};
+use schist_text_engine::{hit_test, line_spans, rasterize, Align, StyleRun, TextSpec};
 
 /// Additional-layer-info key under which the text spec is preserved.
 pub const TEXT_BLOCK_KEY: [u8; 4] = *b"PsTx";
@@ -219,6 +219,8 @@ const ALIGNMENTS: &[&str] = &["Left", "Center", "Right"];
 #[derive(Default)]
 pub struct TypeTool {
     editing: Option<Editing>,
+    /// A canvas drag is extending the editing session's selection.
+    selecting: bool,
     /// What new text starts as, and what the options bar shows when
     /// nothing is being edited. Editing a layer adopts its spec, so the
     /// bar always describes the text you are looking at.
@@ -321,6 +323,40 @@ impl TypeTool {
         self.spec.size = style.size;
     }
 
+    /// Whether a point is in the layout box of `stored`.
+    ///
+    /// Ink bounds omit spaces and empty lines, but both are valid places
+    /// to put a text caret, so text hit-testing uses the layout rather than
+    /// pixels alone.
+    fn contains_text(stored: &StoredText, x: f32, y: f32) -> bool {
+        const SLOP: f32 = 4.0;
+        let x = x - stored.origin.0 as f32;
+        let y = y - stored.origin.1 as f32;
+        line_spans(&stored.spec).iter().any(|line| {
+            x >= line.x - SLOP
+                && x <= line.x + line.width + SLOP
+                && y >= line.top - SLOP
+                && y <= line.top + line.height + SLOP
+        })
+    }
+
+    /// Move the current session's caret to a document-space point.
+    fn point_caret(&mut self, x: f32, y: f32, extend: bool) {
+        let Some(session) = &mut self.editing else {
+            return;
+        };
+        let local_x = x - session.stored.origin.0 as f32;
+        let local_y = y - session.stored.origin.1 as f32;
+        let Some(at) = hit_test(&session.stored.spec, local_x, local_y) else {
+            return;
+        };
+        session.caret = at;
+        if !extend {
+            session.anchor = at;
+        }
+        self.sync_bar();
+    }
+
     /// Pick an existing text layer under the cursor, if any.
     fn text_layer_at(doc: &Document, x: f32, y: f32) -> Option<(LayerId, StoredText)> {
         let (px, py) = (x.round() as i32, y.round() as i32);
@@ -329,7 +365,9 @@ impl TypeTool {
             let Some(stored) = read_stored(layer) else {
                 continue;
             };
-            if layer.tight_bounds().inflated(4).contains(px, py) {
+            if layer.tight_bounds().inflated(4).contains(px, py)
+                || Self::contains_text(&stored, x, y)
+            {
                 hit = Some((layer.id, stored));
             }
         }
@@ -370,6 +408,22 @@ impl ToolPlugin for TypeTool {
     }
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        self.selecting = false;
+
+        // A click in the text already being edited places the caret there;
+        // dragging from it selects text. Previously every click committed
+        // and reopened the layer with its caret at the end, so issue #99's
+        // per-selection font controls were not reachable with a mouse.
+        let in_current = self
+            .editing
+            .as_ref()
+            .is_some_and(|session| Self::contains_text(&session.stored, input.x, input.y));
+        if in_current {
+            self.point_caret(input.x, input.y, input.modifiers.shift);
+            self.selecting = true;
+            return;
+        }
+
         // Clicking away from the current text commits it first.
         if self.editing.is_some() {
             self.on_commit(ctx);
@@ -392,7 +446,9 @@ impl ToolPlugin for TypeTool {
                     runs: Vec::new(),
                     ..stored.spec.clone()
                 };
-                let end = stored.spec.text.len();
+                let local_x = input.x - stored.origin.0 as f32;
+                let local_y = input.y - stored.origin.1 as f32;
+                let at = hit_test(&stored.spec, local_x, local_y).unwrap_or(stored.spec.text.len());
                 self.editing = Some(Editing {
                     layer,
                     stored,
@@ -401,9 +457,10 @@ impl ToolPlugin for TypeTool {
                     original_name,
                     created: false,
                     dirty: false,
-                    caret: end,
-                    anchor: end,
+                    caret: at,
+                    anchor: at,
                 });
+                self.selecting = true;
                 self.sync_bar();
                 // A colour picked since this text was set applies to it now,
                 // so the eyedropper works on text like on anything else.
@@ -411,12 +468,25 @@ impl ToolPlugin for TypeTool {
                     self.refresh(ctx.doc);
                 }
             }
-            None => self.start_new(ctx, input.x, input.y),
+            None => {
+                self.start_new(ctx, input.x, input.y);
+                self.selecting = true;
+            }
         }
     }
 
-    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
-    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
+    fn on_pointer_move(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
+        if self.selecting {
+            self.point_caret(input.x, input.y, true);
+        }
+    }
+
+    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, input: PointerInput) {
+        if self.selecting {
+            self.point_caret(input.x, input.y, true);
+            self.selecting = false;
+        }
+    }
 
     fn on_key(
         &mut self,
@@ -428,6 +498,7 @@ impl ToolPlugin for TypeTool {
         if self.editing.is_none() {
             return false;
         }
+        self.selecting = false;
         // The colour panel can be clicked mid-session; the next keystroke
         // is where its choice reaches the text.
         let recolored = self.adopt_foreground(ctx.state);
@@ -649,6 +720,7 @@ impl ToolPlugin for TypeTool {
     }
 
     fn on_commit(&mut self, ctx: &mut ToolCtx) {
+        self.selecting = false;
         let Some(session) = self.editing.take() else {
             return;
         };
@@ -698,6 +770,7 @@ impl ToolPlugin for TypeTool {
     }
 
     fn on_cancel(&mut self, ctx: &mut ToolCtx) {
+        self.selecting = false;
         let Some(session) = self.editing.take() else {
             return;
         };
@@ -1184,6 +1257,39 @@ mod tests {
     }
 
     #[test]
+    fn dragging_over_a_word_lets_it_take_its_own_font() {
+        let mut d = doc();
+        let mut state = EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi there");
+
+        let session = tool.editing.as_ref().unwrap();
+        let (ox, oy) = session.origin_f32();
+        let from = schist_text_engine::caret_at(&session.stored.spec, 3).unwrap();
+        let to = schist_text_engine::caret_at(&session.stored.spec, 8).unwrap();
+        let y = oy + from.top + from.height / 2.0;
+        tool.on_pointer_down(&mut ctx, input(ox + from.x, y));
+        tool.on_pointer_move(&mut ctx, input(ox + to.x, y));
+        tool.on_pointer_up(&mut ctx, input(ox + to.x, y));
+
+        assert_eq!(tool.editing.as_ref().unwrap().selection(), 3..8);
+        let base = tool.editing.as_ref().unwrap().stored.spec.family.clone();
+        tool.spec.family = "A different family".into();
+        tool.on_option_changed(&mut ctx, "type-family");
+
+        let spec = &tool.editing.as_ref().unwrap().stored.spec;
+        assert_eq!(spec.family, base, "the layer's base font stays put");
+        assert_eq!(spec.runs.len(), 1);
+        assert_eq!((spec.runs[0].start, spec.runs[0].end), (3, 8));
+        assert_eq!(spec.runs[0].family.as_deref(), Some("A different family"));
+    }
+
+    #[test]
     fn with_nothing_selected_the_bar_restyles_the_whole_layer() {
         let mut d = doc();
         let mut state = EditorState::default();
@@ -1384,7 +1490,7 @@ mod tests {
         };
         tool.on_pointer_down(
             &mut ctx,
-            input(bounds.left as f32 + 2.0, bounds.top as f32 + 2.0),
+            input(bounds.right as f32 + 2.0, bounds.top as f32 + 2.0),
         );
         assert!(is_editing(&tool), "resumed editing the existing layer");
         type_text(&mut tool, &mut ctx, "C");

@@ -1181,6 +1181,37 @@ pub fn caret_at(spec: &TextSpec, byte: usize) -> Option<Caret> {
     })
 }
 
+/// The text position nearest a point in layout coordinates.
+///
+/// `x` and `y` are relative to the same origin as [`Caret`]. The closest
+/// line is used above or below the text, and the closest pen position on
+/// that line is used to its left or right, so a drag can continue beyond
+/// the ink and still select predictably.
+pub fn hit_test(spec: &TextSpec, x: f32, y: f32) -> Option<usize> {
+    let face = load_font(&spec.family, spec.bold, spec.italic)?;
+    let laid = layout(spec, &face);
+    let span = laid.lines.iter().min_by(|a, b| {
+        let distance = |line: &&LineSpan| {
+            if y < line.top {
+                line.top - y
+            } else if y > line.top + line.height {
+                y - (line.top + line.height)
+            } else {
+                0.0
+            }
+        };
+        distance(a).total_cmp(&distance(b))
+    })?;
+
+    laid.chars
+        .iter()
+        .filter(|pos| span.start <= pos.byte && pos.byte < span.end)
+        .map(|pos| (pos.byte, pos.x))
+        .chain(std::iter::once((span.end, span.x + span.width)))
+        .min_by(|(_, ax), (_, bx)| (x - ax).abs().total_cmp(&(x - bx).abs()))
+        .map(|(byte, _)| byte)
+}
+
 /// Nearest char boundary at or below `byte`, clamped to the string.
 fn clamp_to_boundary(text: &str, byte: usize) -> usize {
     let mut at = byte.min(text.len());
@@ -1334,6 +1365,35 @@ mod tests {
     }
 
     #[test]
+    fn hit_testing_picks_the_nearest_caret_on_the_nearest_line() {
+        let s = spec("ab\ncd");
+        let zero = caret_at(&s, 0).unwrap();
+        let one = caret_at(&s, 1).unwrap();
+        let first_end = caret_at(&s, 2).unwrap();
+        let second_start = caret_at(&s, 3).unwrap();
+        let four = caret_at(&s, 4).unwrap();
+
+        let first_y = zero.top + zero.height / 2.0;
+        let second_y = second_start.top + second_start.height / 2.0;
+        assert_eq!(hit_test(&s, zero.x - 100.0, first_y), Some(0));
+        assert_eq!(
+            hit_test(&s, zero.x + (one.x - zero.x) * 0.75, first_y),
+            Some(1)
+        );
+        assert_eq!(hit_test(&s, first_end.x + 100.0, first_y), Some(2));
+        assert_eq!(hit_test(&s, second_start.x - 100.0, second_y), Some(3));
+        assert_eq!(
+            hit_test(
+                &s,
+                second_start.x + (four.x - second_start.x) * 0.75,
+                second_y + 1_000.0,
+            ),
+            Some(4),
+            "a drag below the text stays on its last line"
+        );
+    }
+
+    #[test]
     fn old_specs_load_without_runs_and_new_ones_keep_them() {
         let old = r#"{"text":"Hi","family":"X","size":12.0,"align":"Left","line_height":1.0,"tracking":0.0,"wrap_width":null}"#;
         let spec: TextSpec = serde_json::from_str(old).unwrap();
@@ -1436,11 +1496,11 @@ mod tests {
         s.splice_runs(5..5, 1);
         assert_eq!(s.runs[0].end, 6);
         // Typing before it goes in plain and pushes it along.
-        s.text.insert_str(3, "X");
+        s.text.insert(3, 'X');
         s.splice_runs(3..3, 1);
         assert_eq!((s.runs[0].start, s.runs[0].end), (4, 7));
         // Typing inside it grows it.
-        s.text.insert_str(5, "Y");
+        s.text.insert(5, 'Y');
         s.splice_runs(5..5, 1);
         assert_eq!((s.runs[0].start, s.runs[0].end), (4, 8));
         // Deleting across its start shortens it from the front.
