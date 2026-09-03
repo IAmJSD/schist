@@ -10,9 +10,11 @@
 #
 # Packages are built for the host architecture only: they carry a compiled
 # binary, and cargo builds one target per invocation. The Arch package here
-# is a *binary* package assembled from this checkout -- it is not what AUR
-# users get, which is built from source by packaging/linux/aur/PKGBUILD and
-# has to stay in step with the dependency lists below.
+# is a *binary* package assembled from this checkout -- AUR users get
+# either packaging/linux/aur/schist/PKGBUILD, built from source, or
+# packaging/linux/aur/schist-bin/PKGBUILD, which re-wraps this file's
+# .pkg.tar.zst once it is a release asset. Both keep their dependency
+# lists in step with the ones below.
 set -euo pipefail
 
 # shellcheck source=packaging/linux/payload.sh

@@ -75,7 +75,8 @@ changing it there ends self-updating silently, so keep the two together.
 4. The release workflow builds, for x86_64 and aarch64, a Linux AppImage
    plus the native packages `packaging/linux/packages.sh` emits (`.deb`,
    `.rpm` and a binary `.pkg.tar.zst` — the last one is a convenience
-   build, not the AUR package from step 5), a macOS `Schist.dmg` and
+   build, not the source-built AUR package from step 6, though it is the
+   payload the `schist-bin` AUR package there re-wraps), a macOS `Schist.dmg` and
    `Schist.zip` (both signed and notarized when the secrets below exist
    — the disk image is the one to point people at, the zip is for
    anything that unpacks a download itself), and a Windows installer,
@@ -88,17 +89,25 @@ changing it there ends self-updating silently, so keep the two together.
 5. When the Sentry settings below are present, the same workflow uploads
    each platform's debug info and registers the release. Nothing about the
    published artifacts changes either way.
-6. Update the AUR package from `packaging/linux/aur/PKGBUILD`: bump
-   `pkgver` to the new version, reset `pkgrel=1`, then in an Arch
-   environment run `updpkgsums` (re-pins the tag tarball's sha256), test
-   with `makepkg -s` + `namcap`, and regenerate `.SRCINFO` with
-   `makepkg --printsrcinfo > .SRCINFO` — the AUR rejects pushes without
-   a current one. Commit `PKGBUILD` + `.SRCINFO` to the AUR remote
-   (`ssh://aur@aur.archlinux.org/schist.git`) and mirror the `PKGBUILD`
-   change back here. The PKGBUILD keeps `options=(!lto)` (makepkg's
-   `-flto=auto` breaks `ring`'s C objects under the clang link) and
-   `clang`/`mold` in `makedepends` for the linker settings in
-   `.cargo/config.toml` — don't drop either when touching it.
+6. Update the two AUR packages under `packaging/linux/aur/`. The loop is
+   the same for both: bump `pkgver` to the new version, reset `pkgrel=1`,
+   then in an Arch environment run `updpkgsums` (re-pins the sources'
+   sha256s), test with `makepkg -s` + `namcap`, and regenerate `.SRCINFO`
+   with `makepkg --printsrcinfo > .SRCINFO` — the AUR rejects pushes
+   without a current one. Commit `PKGBUILD` + `.SRCINFO` to each
+   package's AUR remote (`ssh://aur@aur.archlinux.org/schist.git` and
+   `…/schist-bin.git`) and mirror the `PKGBUILD` changes back here.
+
+   * `schist/PKGBUILD` builds from the tag tarball, so it can go as soon
+     as the tag is pushed. It keeps `options=(!lto)` (makepkg's
+     `-flto=auto` breaks `ring`'s C objects under the clang link) and
+     `clang`/`mold` in `makedepends` for the linker settings in
+     `.cargo/config.toml` — don't drop either when touching it.
+   * `schist-bin/PKGBUILD` re-wraps the `.pkg.tar.zst` release assets, so
+     its `updpkgsums` only works once step 4's draft is published. Its
+     `_relver` mirrors the `release=` in `packages.sh` (part of the asset
+     name), and its dependency lists have to stay in step with that
+     script's — which in turn mirror `schist/PKGBUILD`'s.
 
 Unsigned builds are still produced when signing credentials are absent, so
 forks and local builds work without secrets.
