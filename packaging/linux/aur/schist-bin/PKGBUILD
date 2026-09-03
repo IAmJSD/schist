@@ -17,10 +17,9 @@ license=(MIT)
 # further, and vulkan-swrast satisfies it in software.
 depends=(fontconfig freetype2 hicolor-icon-theme libxcb libxkbcommon
          libxkbcommon-x11 vulkan-driver vulkan-icd-loader wayland)
-# Both dlopen'd at run time; the app starts and opens everything else
-# without them.
-optdepends=('libheif: HEIC import'
-            'libraw: camera raw import')
+# dlopen'd at run time; the app starts and opens everything else
+# without it.
+optdepends=('libheif: HEIC import')
 provides=(schist)
 conflicts=(schist)
 # The released binary ships byte-exact: it is already stripped by the

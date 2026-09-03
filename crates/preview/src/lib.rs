@@ -118,7 +118,6 @@ pub fn render(bytes: &[u8], max_edge: u32) -> Result<Preview> {
         // Camera raws likewise, and before the generic decoder for a
         // second reason: most of them are TIFF containers, which it
         // would open and hand back the thumbnail IFD of.
-        #[cfg(not(target_arch = "wasm32"))]
         if schist_codecs_common::RawCodec.probe(bytes) {
             return raw_preview(bytes, max_edge);
         }
@@ -210,13 +209,9 @@ fn affinity_preview(bytes: &[u8], max_edge: u32) -> Result<Preview> {
 /// is often full size, while developing the raw takes seconds, so the
 /// preview wins whenever it is big enough for the size asked for — and
 /// stands in when development fails, the way the PSD thumbnail does.
-/// A missing LibRaw is reported as it is, so a caller can tell it from
-/// a broken file.
-#[cfg(not(target_arch = "wasm32"))]
 fn raw_preview(bytes: &[u8], max_edge: u32) -> Result<Preview> {
     let embedded = match schist_codecs_common::raw::embedded_preview(bytes) {
         Ok(img) => img,
-        Err(e) if schist_codecs_common::raw::is_missing_library_error(&e) => return Err(e),
         Err(e) => {
             log::info!("raw: embedded preview did not decode: {e}");
             None

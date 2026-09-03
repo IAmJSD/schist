@@ -466,7 +466,6 @@ impl Workspace {
             | Modal::DropImage { .. }
             | Modal::DropFolders { .. }
             | Modal::HeifSupport { .. }
-            | Modal::LibRawSupport { .. }
             | Modal::CameraImport { .. }
             | Modal::CameraImportOptions { .. }
             | Modal::CameraImportFailed { .. }

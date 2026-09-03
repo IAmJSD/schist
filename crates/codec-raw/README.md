@@ -29,10 +29,10 @@ frame on the files listed, drawn from the raw.pixls.us sample set.
 | DNG (incl. ProRAW, Pixel, Leica, Pentax, Ricoh, Sigma, DJI, Hasselblad, GoPro GPR) | exact on 30; uncompressed, lossless JPEG, deflate, lossy JPEG, float, VC-5; JPEG XL unsupported |
 | Sony ARW / SR2 / SRF | exact on 24, every generation incl. ARW 1.0 and ARW 4 lossless |
 | Nikon NEF / NRW | exact on 36 (20 bodies); Z 8/9 High Efficiency unsupported |
-| Canon CR2 | exact on 18, sRAW and mRAW included on the 50D and 7D; sRAW on other bodies is declined by model until verified |
+| Canon CR2 | exact on 45, sRAW and mRAW on all 16 subsampled bodies included |
 | Canon CRW | exact on 4 (compressed and uncompressed) |
 | Canon CR3 | exact on 10: CRX lossless and lossy (cRAW), EOS R through R8, dual-pixel included |
-| Fujifilm RAF | exact on 13: uncompressed, lossless and lossy compressed, X-Trans and Bayer; SuperCCD's 45° grid is decodable but not representable yet |
+| Fujifilm RAF | exact on 15: uncompressed, lossless and lossy compressed, X-Trans and Bayer, and the SuperCCD bodies (FinePix S9600, DBP for GX680) whose 45° lattice `develop` shears, interpolates and rotates back |
 | Olympus / OM ORF | exact on 12, four sensor layouts |
 | Panasonic RW2 / Leica RWL | exact on 31, RawFormat 4 through 8 |
 | Pentax PEF | exact on 10 |
@@ -41,12 +41,12 @@ frame on the files listed, drawn from the raw.pixls.us sample set.
 | Hasselblad 3FR / FFF | exact on 7 |
 | Phase One IIQ | exact on 11, raw, "IIQ L" and both "IIQ S" formats |
 | Leaf MOS | exact on 3 |
-| Sigma X3F | exact on 6: Merrill and Quattro sensor planes (colour from the camera table); SD9/SD10/SD14 unsupported for want of a sample |
+| Sigma X3F | exact on 12: SD9/SD10/SD14, DP1/DP1s/SD15, Merrill and Quattro sensor planes (colour from the camera table) |
 
 Colour needs a matrix. DNG carries its own; the other formats look one
 up in `cameras.rs` (189 bodies, each entry naming its source). A camera
 with no entry develops in camera RGB, and the Schist plugin prefers
-LibRaw for those.
+adding its matrix fixes it.
 
 ## Verifying
 

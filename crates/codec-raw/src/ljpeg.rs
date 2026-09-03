@@ -38,6 +38,13 @@ pub struct LjpegImage {
 /// worst.
 const MAX_SAMPLES: usize = 1 << 28;
 
+/// Canon stopped offering sRAW/mRAW after the 50 MP 5DS generation;
+/// its largest subsampled stream in the corpus is 42 M coded samples.
+/// Keep a generous ceiling above that while preventing a forged SOF
+/// from turning a normal CR2 scan into several gigabytes of decoded and
+/// reconstructed intermediates.
+const MAX_SUBSAMPLED_SAMPLES: usize = 64 << 20;
+
 /// Everything the markers before the entropy-coded data say.
 struct Header {
     precision: u32,
@@ -594,11 +601,19 @@ fn find_restart(scan: &[u8], from: usize, expected: u8) -> Result<usize> {
 /// the CR2 module place them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubsampledImage {
-    /// The luma width the frame header declares: the widest the
-    /// reassembled picture can be before the container's slices trim
-    /// it. Always even.
+    /// The luma width the frame header declares. Always even, and on
+    /// most bodies the picture's width — but not on all: several bodies
+    /// write the frame *wrapped* (the 6D family's mRAW declares
+    /// 2736x4104 for a 4104x2736 picture, the 5DS's 3888x7200 for
+    /// 6480x4320), so that the entropy row and the picture row are
+    /// different lengths and only the container's slice tag knows the
+    /// picture's. What the header's width fixes is where the row-head
+    /// predictors reset; the samples are one continuous run of MCUs
+    /// whatever the row length.
     pub width: usize,
-    /// The luma height, which is the picture's height.
+    /// The luma height the frame header declares; the picture's on
+    /// the unwrapped bodies, and on the wrapped ones only the product
+    /// `width * height` is the picture's.
     pub height: usize,
     /// Canon's "sraw parameter": `1` when the luma is sampled 2x1 and
     /// `3` when it is sampled 2x2. Components `0..=p` of an MCU are
@@ -624,6 +639,16 @@ pub struct SubsampledImage {
 /// to catch an error from [`header`], which refuses subsampled frames.
 pub fn sampling(bytes: &[u8]) -> Result<u8> {
     Ok(parse(bytes, true)?.sampling[0])
+}
+
+/// The SOF's luma area without decoding its entropy stream. CR2 uses
+/// this to cross-check SensorInfo before a forged frame can allocate.
+pub(crate) fn subsampled_frame_area(bytes: &[u8]) -> Result<usize> {
+    let header = parse(bytes, true)?;
+    header
+        .width
+        .checked_mul(header.height)
+        .ok_or_else(|| Error::Corrupt("subsampled lossless JPEG frame area overflow".into()))
 }
 
 /// Decode a Canon sRAW or mRAW stream. Ordinary 1:1 frames are refused:
@@ -700,7 +725,7 @@ pub fn decode_subsampled(bytes: &[u8]) -> Result<SubsampledImage> {
     // The same ceiling the rest of the crate sizes frames with, so a
     // forged header cannot ask for an unbounded allocation.
     let samples = crate::frame_samples(blocks, rows, components)?;
-    if samples > MAX_SAMPLES {
+    if samples > MAX_SUBSAMPLED_SAMPLES {
         return Err(Error::Unsupported(format!(
             "a subsampled lossless JPEG of {samples} samples is larger than this decoder allows"
         )));
@@ -1208,6 +1233,7 @@ mod tests {
             // 1:1 entry points still refuse the frame exactly as they
             // did before this path existed.
             assert_eq!(sampling(&stream).unwrap(), if p == 3 { 0x22 } else { 0x21 });
+            assert_eq!(subsampled_frame_area(&stream).unwrap(), width * height);
             assert!(matches!(decode(&stream), Err(Error::Unsupported(_))));
             assert!(matches!(header(&stream), Err(Error::Unsupported(_))));
         }
@@ -1262,6 +1288,16 @@ mod tests {
         huge[sof + 5] = 0xFF;
         huge[sof + 7] = 0xFF;
         assert!(decode_subsampled(&huge).is_err());
+        // Still below the general lossless-JPEG ceiling, but far past
+        // every Canon subsampled frame. This must fail before looking
+        // at (or allocating for) the tiny scan.
+        let mut oversized = stream.clone();
+        oversized[sof + 5..sof + 7].copy_from_slice(&10_000u16.to_be_bytes());
+        oversized[sof + 7..sof + 9].copy_from_slice(&10_000u16.to_be_bytes());
+        assert!(matches!(
+            decode_subsampled(&oversized),
+            Err(Error::Unsupported(message)) if message.contains("larger than this decoder allows")
+        ));
 
         // A predictor other than plain left: the luma chain only
         // computes rule 1, so anything else is refused, not decoded.

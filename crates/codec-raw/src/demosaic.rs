@@ -40,7 +40,7 @@
 //! algorithms come from their published descriptions and the code is
 //! this crate's own.
 
-use crate::{Cfa, CfaColor, Error, Result};
+use crate::{frame_samples, Cfa, CfaColor, Error, Result};
 use rayon::prelude::*;
 
 /// How much work to spend.
@@ -112,7 +112,8 @@ pub fn demosaic(
     cfa: &Cfa,
     quality: Quality,
 ) -> Result<Vec<f32>> {
-    if data.len() != width * height {
+    let samples = frame_samples(width, height, 1)?;
+    if data.len() != samples {
         return Err(Error::Corrupt(format!(
             "demosaic: {} samples for a {}x{} plane",
             data.len(),
@@ -128,6 +129,8 @@ pub fn demosaic(
             "demosaic: Cfa::None is three samples a pixel already".into(),
         ));
     }
+    // Every path below allocates three floats per input pixel.
+    frame_samples(width, height, 3)?;
     let mosaic = Mosaic::build(data, width, height, cfa)?;
     // A Bayer array that is not actually Bayer (a vendor's odd
     // four-colour layout squeezed into the variant) falls through to
@@ -180,7 +183,10 @@ impl Mosaic {
                 height: ph,
                 colors,
             } => {
-                if *pw == 0 || *ph == 0 || colors.len() < pw * ph {
+                let cells = pw.checked_mul(*ph).filter(|n| *n <= 4096).ok_or_else(|| {
+                    Error::Corrupt(format!("demosaic: filter pattern of {pw}x{ph}"))
+                })?;
+                if *pw == 0 || *ph == 0 || colors.len() < cells {
                     return Err(Error::Corrupt(format!(
                         "demosaic: {}x{} filter pattern with {} colours",
                         pw,
@@ -190,11 +196,21 @@ impl Mosaic {
                 }
                 (*pw, *ph)
             }
+            // The stored rectangle interpolated as it lies: the colours
+            // are right, the geometry is not — the picture comes out
+            // sheared by 45 degrees. `develop` re-indexes the
+            // photosites into a Bayer frame before it gets here; this
+            // arm only serves a caller who wants the stored rectangle.
+            Cfa::SuperCcd { row_staggered, .. } => Cfa::super_ccd_period(*row_staggered),
         };
         // One period of colour codes, laid out for *padded*
         // coordinates: padded x corresponds to sensor x - PAD, so the
         // period is rotated by PAD (mod the period).
-        let mut period = vec![0u8; cw * ch];
+        let period_len = cw
+            .checked_mul(ch)
+            .filter(|n| *n <= 4096)
+            .ok_or_else(|| Error::Corrupt(format!("demosaic: filter pattern of {cw}x{ch}")))?;
+        let mut period = vec![0u8; period_len];
         for py in 0..ch {
             for px in 0..cw {
                 let ox = (px + cw * (PAD / cw + 1) - PAD) % cw;
@@ -205,8 +221,16 @@ impl Mosaic {
                 period[py * cw + px] = code_of(color)?;
             }
         }
-        let (pw, ph) = (width + 2 * PAD, height + 2 * PAD);
-        let mut plane = vec![0f32; pw * ph];
+        let (pw, ph) = (
+            width
+                .checked_add(2 * PAD)
+                .ok_or_else(|| Error::Corrupt("demosaic: padded width overflow".into()))?,
+            height
+                .checked_add(2 * PAD)
+                .ok_or_else(|| Error::Corrupt("demosaic: padded height overflow".into()))?,
+        );
+        let padded = frame_samples(pw, ph, 1)?;
+        let mut plane = vec![0f32; padded];
         plane.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
             let sy = wrap(py as isize - PAD as isize, height, ch);
             let src = &data[sy * width..sy * width + width];
@@ -218,7 +242,7 @@ impl Mosaic {
                 row[px] = src[wrap(px as isize - PAD as isize, width, cw)];
             }
         });
-        let mut codes = vec![0u8; pw * ph];
+        let mut codes = vec![0u8; padded];
         codes.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
             let base = (py % ch) * cw;
             let mut i = 0;

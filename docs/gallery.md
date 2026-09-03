@@ -229,11 +229,9 @@ thumbnails are cached as PNGs under the state directory keyed by path,
 mtime and size, so the second launch is instant. HEIC thumbnails need
 the same libheif the editor uses; when they start failing for want of
 it, the gallery raises the managed-download offer once, and retries the
-failed thumbnails after it installs. Camera raws need the system's
-LibRaw the same way (there is no download offer for it); their
-thumbnails come from the JPEG the camera embedded, turned upright,
-rather than from developing the sensor data, which takes seconds a
-file.
+failed thumbnails after it installs. Camera raw thumbnails come from
+the JPEG the camera embedded, turned upright, rather than from
+developing the sensor data, which takes a second or more a file.
 
 The grid is virtualised: rows of cells only really exist within a
 viewport's height of the screen, and everything further collapses to
