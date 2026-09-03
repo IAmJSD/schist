@@ -112,7 +112,7 @@ pub(super) fn batch_dialog(
         .child(ui::field_row(
             "Rotate",
             ui::dropdown(
-                &ws.dropdown_scroll,
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("batch-rotate"),
                     is_open: state.open_popup == Some(Popup::Field("batch-rotate")),
@@ -179,7 +179,7 @@ pub(super) fn batch_dialog(
     body = body.child(section("Size")).child(ui::field_row(
         "Upscale",
         ui::dropdown(
-            &ws.dropdown_scroll,
+            &ws.dropdown,
             ui::Dropdown {
                 popup: Popup::Field("batch-upscale"),
                 is_open: state.open_popup == Some(Popup::Field("batch-upscale")),
@@ -217,7 +217,7 @@ pub(super) fn batch_dialog(
                 .items_center()
                 .gap_2()
                 .child(ui::dropdown(
-                    &ws.dropdown_scroll,
+                    &ws.dropdown,
                     ui::Dropdown {
                         popup: Popup::Field(popup),
                         is_open: state.open_popup == Some(Popup::Field(popup)),
@@ -283,7 +283,7 @@ pub(super) fn batch_dialog(
         body = body.child(ui::field_row(
             "Add",
             ui::dropdown(
-                &ws.dropdown_scroll,
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("batch-adj-add"),
                     is_open: state.open_popup == Some(Popup::Field("batch-adj-add")),
@@ -319,7 +319,7 @@ pub(super) fn batch_dialog(
     body = body.child(section("Output")).child(ui::field_row(
         "Save as",
         ui::dropdown(
-            &ws.dropdown_scroll,
+            &ws.dropdown,
             ui::Dropdown {
                 popup: Popup::Field("batch-target"),
                 is_open: state.open_popup == Some(Popup::Field("batch-target")),
@@ -359,7 +359,7 @@ pub(super) fn batch_dialog(
         body = body.child(ui::field_row(
             "Format",
             ui::dropdown(
-                &ws.dropdown_scroll,
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("batch-format"),
                     is_open: state.open_popup == Some(Popup::Field("batch-format")),

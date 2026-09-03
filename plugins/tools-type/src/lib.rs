@@ -1,7 +1,9 @@
 //! Type tool (T): editable text layers.
 //!
 //! A text layer is a raster layer plus a `PsTx` block in its preserved-PSD
-//! extras holding the JSON [`TextSpec`] it was rendered from. That block
+//! extras holding the JSON [`TextSpec`] it was rendered from, character
+//! runs and all: select a word and pick a font, and only that word
+//! changes. That block
 //! rides through save/load untouched (the PSD writer re-emits unknown
 //! blocks verbatim), so text stays re-editable across sessions while
 //! Photoshop still sees ordinary pixels.
@@ -14,7 +16,7 @@ use schist_plugin_api::{
     EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
     ToolCtx, ToolOption, ToolPlugin,
 };
-use schist_text_engine::{rasterize, Align, TextSpec};
+use schist_text_engine::{rasterize, Align, StyleRun, TextSpec};
 
 /// Additional-layer-info key under which the text spec is preserved.
 pub const TEXT_BLOCK_KEY: [u8; 4] = *b"PsTx";
@@ -113,9 +115,11 @@ pub fn families_used(doc: &Document) -> Vec<String> {
             let Some(stored) = read_stored(layer) else {
                 continue;
             };
-            let family = stored.spec.family.trim();
-            if !family.is_empty() && !out.iter().any(|f| f == family) {
-                out.push(family.to_string());
+            for family in stored.spec.families() {
+                let family = family.trim();
+                if !family.is_empty() && !out.iter().any(|f| f == family) {
+                    out.push(family.to_string());
+                }
             }
         }
     }
@@ -135,8 +139,13 @@ pub fn rerender_family(doc: &mut Document, family: &str) -> usize {
             if let Some(children) = layer.children() {
                 collect(children, family, out);
             }
-            if read_stored(layer).is_some_and(|s| s.spec.family.trim().eq_ignore_ascii_case(family))
-            {
+            let uses = |s: &StoredText| {
+                s.spec
+                    .families()
+                    .iter()
+                    .any(|f| f.trim().eq_ignore_ascii_case(family))
+            };
+            if read_stored(layer).is_some_and(|s| uses(&s)) {
                 out.push(layer.id);
             }
         }
@@ -173,6 +182,11 @@ struct Editing {
     stored: StoredText,
     /// Pixels before this session, for undo capture on commit.
     original: TileMap,
+    /// The layer's preserved blocks and name before this session, so the
+    /// commit can record them changing alongside the pixels and a
+    /// cancel can put them back.
+    original_extras: Vec<RawBlock>,
+    original_name: String,
     /// True once the layer was created by this session (so cancelling
     /// removes it entirely).
     created: bool,
@@ -246,6 +260,8 @@ impl TypeTool {
         let mut layer = Layer::new_raster("Text");
         write_stored(&mut layer, &stored);
         let id = layer.id;
+        let original_extras = layer.extras.clone();
+        let original_name = layer.name.clone();
         let path = match ctx.doc.active_layer.and_then(|a| ctx.doc.tree.path_of(a)) {
             Some(mut p) => {
                 *p.0.last_mut().unwrap() += 1;
@@ -261,6 +277,8 @@ impl TypeTool {
             layer: id,
             stored,
             original: TileMap::new(),
+            original_extras,
+            original_name,
             created: true,
             dirty: false,
             caret: 0,
@@ -287,6 +305,20 @@ impl TypeTool {
         session.stored.color = fg;
         session.dirty = true;
         true
+    }
+
+    /// Show the font at the caret in the options bar: the selection's
+    /// first character, or the character before an insertion point, the
+    /// way every editor's font menu follows the cursor.
+    fn sync_bar(&mut self) {
+        let Some(session) = &self.editing else {
+            return;
+        };
+        let style = session.caret_style();
+        self.spec.family = style.family;
+        self.spec.bold = style.bold;
+        self.spec.italic = style.italic;
+        self.spec.size = style.size;
     }
 
     /// Pick an existing text layer under the cursor, if any.
@@ -344,17 +376,20 @@ impl ToolPlugin for TypeTool {
         }
         match Self::text_layer_at(ctx.doc, input.x, input.y) {
             Some((layer, stored)) => {
-                let original = ctx
-                    .doc
-                    .tree
-                    .find(layer)
+                let found = ctx.doc.tree.find(layer);
+                let original = found
                     .and_then(|l| l.as_raster())
                     .map(|r| r.tiles.clone())
                     .unwrap_or_default();
+                let original_extras = found.map(|l| l.extras.clone()).unwrap_or_default();
+                let original_name = found.map(|l| l.name.clone()).unwrap_or_default();
                 ctx.doc.active_layer = Some(layer);
-                // Show this layer's own type settings in the bar.
+                // Show this layer's own type settings in the bar. Its
+                // runs stay with it: the bar describes one font at a
+                // time, the one at the caret.
                 self.spec = TextSpec {
                     text: String::new(),
+                    runs: Vec::new(),
                     ..stored.spec.clone()
                 };
                 let end = stored.spec.text.len();
@@ -362,11 +397,14 @@ impl ToolPlugin for TypeTool {
                     layer,
                     stored,
                     original,
+                    original_extras,
+                    original_name,
                     created: false,
                     dirty: false,
                     caret: end,
                     anchor: end,
                 });
+                self.sync_bar();
                 // A colour picked since this text was set applies to it now,
                 // so the eyedropper works on text like on anything else.
                 if self.adopt_foreground(ctx.state) {
@@ -436,11 +474,7 @@ impl ToolPlugin for TypeTool {
                             session.prev_boundary(session.caret)
                         };
                         if to != session.caret {
-                            session
-                                .stored
-                                .spec
-                                .text
-                                .replace_range(to..session.caret, "");
+                            session.replace(to..session.caret, "");
                             session.caret = to;
                             session.anchor = to;
                         }
@@ -455,11 +489,7 @@ impl ToolPlugin for TypeTool {
                             session.next_boundary(session.caret)
                         };
                         if to != session.caret {
-                            session
-                                .stored
-                                .spec
-                                .text
-                                .replace_range(session.caret..to, "");
+                            session.replace(session.caret..to, "");
                         }
                     }
                     changed = true;
@@ -493,6 +523,7 @@ impl ToolPlugin for TypeTool {
         if changed || recolored {
             self.refresh(ctx.doc);
         }
+        self.sync_bar();
         if !handled {
             return false;
         }
@@ -571,17 +602,47 @@ impl ToolPlugin for TypeTool {
         }
     }
 
-    /// Push the bar's settings onto the text being edited, so a font or
+    /// Push the bar's setting onto the text being edited, so a font or
     /// size change shows up immediately rather than on the next click.
-    fn on_option_changed(&mut self, ctx: &mut ToolCtx, _key: &str) {
+    ///
+    /// Font, style and size are character settings: with a selection
+    /// they apply to just those characters, so one layer can mix
+    /// families (issue #99); with none they apply to the whole layer.
+    /// Alignment, leading and tracking belong to the layer either way.
+    fn on_option_changed(&mut self, ctx: &mut ToolCtx, key: &str) {
         let Some(session) = &mut self.editing else {
             return;
         };
-        let text = std::mem::take(&mut session.stored.spec.text);
-        session.stored.spec = TextSpec {
-            text,
-            ..self.spec.clone()
+        let over = match key {
+            "type-family" => StyleRun {
+                family: Some(self.spec.family.clone()),
+                ..Default::default()
+            },
+            "type-style" => StyleRun {
+                bold: Some(self.spec.bold),
+                italic: Some(self.spec.italic),
+                ..Default::default()
+            },
+            "type-size" => StyleRun {
+                size: Some(self.spec.size),
+                ..Default::default()
+            },
+            _ => {
+                let spec = &mut session.stored.spec;
+                spec.align = self.spec.align;
+                spec.line_height = self.spec.line_height;
+                spec.tracking = self.spec.tracking;
+                StyleRun::default()
+            }
         };
+        if !over.is_plain() {
+            let range = if session.has_selection() {
+                session.selection()
+            } else {
+                0..session.stored.spec.text.len()
+            };
+            session.stored.spec.apply_style(range, &over);
+        }
         session.dirty = true;
         self.adopt_foreground(ctx.state);
         self.refresh(ctx.doc);
@@ -614,19 +675,25 @@ impl ToolPlugin for TypeTool {
             }
             return;
         }
-        // Re-apply through the edit builder so undo restores the pre-edit
-        // pixels in one step.
+        // Put the layer back as it stood before the session, then
+        // re-apply everything through the edit builder so one undo
+        // restores the pre-edit pixels, spec and name together. Undoing
+        // the pixels alone left the layer's text disagreeing with its
+        // glyphs, so the next click into it edited the wrong words.
         let (tiles, _) = render_tiles(ctx.doc, &session.stored);
-        if let Some(raster) = ctx
-            .doc
-            .tree
-            .find_mut(session.layer)
-            .and_then(|l| l.as_raster_mut())
-        {
+        let name = display_name(&session.stored.spec.text);
+        let Some(layer) = ctx.doc.tree.find_mut(session.layer) else {
+            return;
+        };
+        if let Some(raster) = layer.as_raster_mut() {
             raster.tiles = session.original.clone();
         }
+        layer.name = session.original_name.clone();
+        let extras = std::mem::replace(&mut layer.extras, session.original_extras.clone());
         let mut edit = ctx.doc.begin_edit("Edit Text");
         edit.replace_layer_tiles(session.layer, tiles);
+        edit.set_extras(session.layer, extras);
+        edit.change_props(session.layer, |l| l.name = name);
         edit.commit();
     }
 
@@ -640,13 +707,12 @@ impl ToolPlugin for TypeTool {
             .find(session.layer)
             .map(|l| l.content_bounds())
             .unwrap_or(IntRect::EMPTY);
-        if let Some(raster) = ctx
-            .doc
-            .tree
-            .find_mut(session.layer)
-            .and_then(|l| l.as_raster_mut())
-        {
-            raster.tiles = session.original.clone();
+        if let Some(layer) = ctx.doc.tree.find_mut(session.layer) {
+            if let Some(raster) = layer.as_raster_mut() {
+                raster.tiles = session.original.clone();
+            }
+            layer.extras = session.original_extras.clone();
+            layer.name = session.original_name.clone();
         }
         ctx.doc.add_damage(before);
         if session.created {
@@ -741,13 +807,33 @@ impl Editing {
         &self.stored.spec.text
     }
 
+    /// Replace `range` of the text with `s`, keeping the style runs in
+    /// step so a word typed after a bold one stays bold.
+    fn replace(&mut self, range: std::ops::Range<usize>, s: &str) {
+        self.stored.spec.text.replace_range(range.clone(), s);
+        self.stored.spec.splice_runs(range, s.len());
+    }
+
+    /// The font at the caret: the selection's first character, or the
+    /// character before an insertion point.
+    fn caret_style(&self) -> schist_text_engine::CharStyle {
+        let at = if self.has_selection() {
+            self.selection().start
+        } else if self.caret > 0 {
+            self.prev_boundary(self.caret)
+        } else {
+            0
+        };
+        self.stored.spec.style_at(at)
+    }
+
     /// Collapse the selection, returning true if anything was removed.
     fn delete_selection(&mut self) -> bool {
         let range = self.selection();
         if range.is_empty() {
             return false;
         }
-        self.stored.spec.text.replace_range(range.clone(), "");
+        self.replace(range.clone(), "");
         self.caret = range.start;
         self.anchor = range.start;
         true
@@ -757,7 +843,7 @@ impl Editing {
     fn insert(&mut self, s: &str) {
         self.delete_selection();
         let at = self.caret.min(self.stored.spec.text.len());
-        self.stored.spec.text.insert_str(at, s);
+        self.replace(at..at, s);
         self.caret = at + s.len();
         self.anchor = self.caret;
     }
@@ -928,7 +1014,14 @@ pub fn set_align(tool: &mut TypeTool, doc: &mut Document, align: Align) {
 /// Set the font size of the layer currently being edited.
 pub fn set_size(tool: &mut TypeTool, doc: &mut Document, size: f32) {
     if let Some(session) = &mut tool.editing {
-        session.stored.spec.size = size.clamp(4.0, 800.0);
+        let len = session.stored.spec.text.len();
+        session.stored.spec.apply_style(
+            0..len,
+            &StyleRun {
+                size: Some(size.clamp(4.0, 800.0)),
+                ..Default::default()
+            },
+        );
         session.dirty = true;
     }
     tool.refresh(doc);
@@ -942,7 +1035,14 @@ pub fn editing_family(tool: &TypeTool) -> Option<String> {
 /// Set the font family of the layer currently being edited.
 pub fn set_family(tool: &mut TypeTool, doc: &mut Document, family: String) {
     if let Some(session) = &mut tool.editing {
-        session.stored.spec.family = family;
+        let len = session.stored.spec.text.len();
+        session.stored.spec.apply_style(
+            0..len,
+            &StyleRun {
+                family: Some(family),
+                ..Default::default()
+            },
+        );
         session.dirty = true;
     }
     tool.refresh(doc);
@@ -1007,15 +1107,144 @@ mod tests {
 
         // Size, alignment and style all land on the live session.
         tool.set_option("type-size", OptionValue::Num(96.0));
-        tool.set_option("type-align", OptionValue::Choice(2));
-        tool.set_option("type-style", OptionValue::Choice(3));
         tool.on_option_changed(&mut ctx, "type-size");
+        tool.set_option("type-align", OptionValue::Choice(2));
+        tool.on_option_changed(&mut ctx, "type-align");
+        tool.set_option("type-style", OptionValue::Choice(3));
+        tool.on_option_changed(&mut ctx, "type-style");
 
         let session = tool.editing.as_ref().expect("still editing");
         assert_eq!(session.stored.spec.size, 96.0);
         assert_eq!(session.stored.spec.align, Align::Right);
         assert!(session.stored.spec.bold && session.stored.spec.italic);
         assert_eq!(session.stored.spec.text, "Hi", "the typing survives");
+    }
+
+    fn select(tool: &mut TypeTool, anchor: usize, caret: usize) {
+        let session = tool.editing.as_mut().expect("editing");
+        session.anchor = anchor;
+        session.caret = caret;
+        tool.sync_bar();
+    }
+
+    fn shown(tool: &TypeTool, key: &str) -> OptionValue {
+        tool.options()
+            .into_iter()
+            .find(|o| o.key == key)
+            .expect("an option")
+            .value
+    }
+
+    #[test]
+    fn a_selected_word_takes_its_own_size_and_typing_after_it_keeps_it() {
+        let mut d = doc();
+        let mut state = EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi there");
+        let plain = d.tree.layers[1].tight_bounds();
+
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        select(&mut tool, 3, 8);
+        tool.set_option("type-size", OptionValue::Num(96.0));
+        tool.on_option_changed(&mut ctx, "type-size");
+        {
+            let spec = &tool.editing.as_ref().unwrap().stored.spec;
+            assert_eq!(spec.size, 48.0, "the layer's own size is untouched");
+            assert_eq!(spec.runs.len(), 1);
+            assert_eq!((spec.runs[0].start, spec.runs[0].end), (3, 8));
+            assert_eq!(spec.runs[0].size, Some(96.0));
+        }
+        assert!(
+            d.tree.layers[1].tight_bounds().height() > plain.height() + 10,
+            "the big word shows on the canvas"
+        );
+
+        // Typing after the big word continues in it, and the bar says so.
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        select(&mut tool, 8, 8);
+        tool.on_key(&mut ctx, "!", Some("!"), Modifiers::default());
+        let spec = &tool.editing.as_ref().unwrap().stored.spec;
+        assert_eq!(spec.text, "Hi there!");
+        assert_eq!((spec.runs[0].start, spec.runs[0].end), (3, 9));
+        assert_eq!(shown(&tool, "type-size").num(), 96.0);
+        // The caret back in the small text shows the small size.
+        select(&mut tool, 1, 1);
+        assert_eq!(shown(&tool, "type-size").num(), 48.0);
+    }
+
+    #[test]
+    fn with_nothing_selected_the_bar_restyles_the_whole_layer() {
+        let mut d = doc();
+        let mut state = EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi there");
+        select(&mut tool, 3, 8);
+        tool.set_option("type-style", OptionValue::Choice(1));
+        tool.on_option_changed(&mut ctx, "type-style");
+        select(&mut tool, 8, 8);
+        tool.set_option("type-size", OptionValue::Num(20.0));
+        tool.on_option_changed(&mut ctx, "type-size");
+        let spec = &tool.editing.as_ref().unwrap().stored.spec;
+        assert_eq!(spec.size, 20.0);
+        assert!(!spec.bold, "the layer's own style is unchanged");
+        assert_eq!(spec.runs.len(), 1, "the bold word keeps its bold");
+        assert_eq!(spec.runs[0].bold, Some(true));
+        assert_eq!(spec.runs[0].size, None);
+    }
+
+    #[test]
+    fn undo_restores_the_text_and_name_with_the_pixels() {
+        let mut d = doc();
+        let mut state = EditorState::default();
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "Hi");
+        tool.on_commit(&mut ctx);
+        let layer = d.tree.layers[1].id;
+        assert_eq!(read_stored(&d.tree.layers[1]).unwrap().spec.text, "Hi");
+
+        let mut ctx = ToolCtx {
+            doc: &mut d,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(30.0, 80.0));
+        assert_eq!(tool.editing.as_ref().unwrap().layer, layer, "resumed");
+        select(&mut tool, 0, 2);
+        tool.set_option("type-size", OptionValue::Num(96.0));
+        tool.on_option_changed(&mut ctx, "type-size");
+        type_text(&mut tool, &mut ctx, "Yo");
+        tool.on_commit(&mut ctx);
+        assert_eq!(read_stored(&d.tree.layers[1]).unwrap().spec.text, "Yo");
+        assert_eq!(d.tree.layers[1].name, "Yo");
+
+        assert_eq!(d.undo().as_deref(), Some("Edit Text"));
+        let stored = read_stored(&d.tree.layers[1]).unwrap();
+        assert_eq!(stored.spec.text, "Hi", "the spec undoes with the pixels");
+        assert_eq!(stored.spec.size, 48.0);
+        assert_eq!(d.tree.layers[1].name, "Hi");
+        d.redo();
+        assert_eq!(read_stored(&d.tree.layers[1]).unwrap().spec.text, "Yo");
+        assert_eq!(d.tree.layers[1].name, "Yo");
     }
 
     #[test]

@@ -576,6 +576,14 @@ impl Workspace {
             self.close_context_menu(cx);
             return;
         }
+        // A dropdown is the innermost thing open, inside a dialog or
+        // not: escape folds it up and leaves whatever it sits in alone.
+        // It used to be checked after the modal, so escape on an open
+        // dropdown in a dialog closed the whole dialog.
+        if self.open_popup.is_some() {
+            self.close_popup(cx);
+            return;
+        }
         // A focused field takes the escape first: it drops focus and
         // leaves the dialog up, which is what `field_key`'s "escape" arm
         // meant to do before `CancelGesture` -- bound in the
@@ -595,10 +603,6 @@ impl Workspace {
         }
         if self.modal.is_some() {
             self.close_modal(cx);
-            return;
-        }
-        if self.open_popup.is_some() {
-            self.close_popup(cx);
             return;
         }
         self.pointer_down = false;
