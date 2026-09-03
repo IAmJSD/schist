@@ -30,6 +30,7 @@ pub mod raf;
 pub mod raf_compressed;
 pub mod rw2;
 pub mod srw;
+pub mod vc5;
 pub mod x3f;
 
 /// Shared helpers for the TIFF-shaped formats.

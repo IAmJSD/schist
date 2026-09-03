@@ -21,6 +21,7 @@ use rayon::prelude::*;
 
 use crate::bits::{BitPump, BitPumpMsb};
 use crate::formats::common;
+use crate::formats::vc5;
 use crate::ljpeg;
 use crate::tiff::{tags, Ifd, ImageLayout, Tiff};
 use crate::{Cfa, CfaColor, Error, Format, RawData, RawImage, Rect, Result};
@@ -471,9 +472,35 @@ fn decode_samples(
             return Err(Error::Unsupported("DNG 1.7 JPEG XL compression".into()))
         }
         compression::VC5 => {
-            return Err(Error::Unsupported(
-                "GoPro GPR: a DNG whose raw IFD is a VC-5 wavelet stream".into(),
-            ))
+            // A GoPro GPR: the tile is a VC-5 wavelet stream rather
+            // than anything in the DNG specification. The codec works
+            // in 12-bit log space and its decoder log curve lands on
+            // 16 bits, so the samples come down to the depth WhiteLevel
+            // advertises -- 14 bits, a shift of 2, in every GPR seen.
+            if spp != 1 {
+                return Err(Error::Unsupported(format!(
+                    "VC-5 tile with {spp} samples a pixel"
+                )));
+            }
+            // A VC-5 sample carries the whole frame's dimensions in its
+            // own header, so one tile always spans the frame. Nothing
+            // GoPro ships is tiled, and a grid would need the layer and
+            // image-section loops this decoder does not implement.
+            if grid.across != 1 || grid.down != 1 {
+                return Err(Error::Unsupported(format!(
+                    "VC-5 split across a {}x{} tile grid",
+                    grid.across, grid.down
+                )));
+            }
+            let white = ifd
+                .get(tag::WHITE_LEVEL)
+                .and_then(|e| e.u32(0))
+                .unwrap_or(16383)
+                .clamp(1, 65535);
+            let shift = 16 - (32 - white.leading_zeros());
+            assemble(bytes, layout, &grid, spp, |chunk, cols, rows| {
+                Tile::new(vc5::decode(chunk, cols, rows, shift)?, cols, rows)
+            })?
         }
         other => return Err(Error::Unsupported(format!("DNG compression {other}"))),
     };
@@ -2320,13 +2347,24 @@ mod tests {
     #[test]
     fn compressions_this_module_has_no_decoder_for_are_unsupported() {
         let pixels = pack_msb(&vec![vec![0u16; 4]; 2], 12);
-        for (code, what) in [(52546u16, "JPEG XL"), (9, "VC-5"), (5, "LZW")] {
+        for (code, what) in [(52546u16, "JPEG XL"), (5, "LZW")] {
             let build = Build::new(4, 2)
                 .raw(tags::COMPRESSION, V::Short(vec![code]))
                 .strip(pixels.clone());
             let error = decode(&build.bytes()).expect_err(what);
             assert!(matches!(error, Error::Unsupported(_)), "{what}: {error}");
         }
+    }
+
+    /// Compression 9 now reaches the VC-5 decoder, so a tile that is
+    /// not a VC-5 sample is corrupt rather than unsupported.
+    #[test]
+    fn a_vc5_tile_that_is_not_a_vc5_sample_is_corrupt() {
+        let build = Build::new(4, 2)
+            .raw(tags::COMPRESSION, V::Short(vec![compression::VC5 as u16]))
+            .strip(pack_msb(&vec![vec![0u16; 4]; 2], 12));
+        let error = decode(&build.bytes()).expect_err("not a VC-5 sample");
+        assert!(matches!(error, Error::Corrupt(_)), "{error}");
     }
 
     #[test]
@@ -2418,11 +2456,11 @@ mod tests {
 
     /// Files this module knowingly refuses, and why. A corpus file
     /// that fails for any other reason fails the test.
-    fn unsupported_reason(path: &Path) -> Option<&'static str> {
-        let name = path.file_name()?.to_str()?;
-        name.to_ascii_lowercase()
-            .ends_with(".gpr")
-            .then_some("GoPro VC-5, not a DNG compression")
+    fn unsupported_reason(_path: &Path) -> Option<&'static str> {
+        // Nothing in the corpus is refused any more: GoPro's GPR, the
+        // one dialect that used to be listed here, decodes through the
+        // VC-5 module.
+        None
     }
 
     /// LibRaw's own view of a file, as far as this test compares it.
@@ -2676,6 +2714,9 @@ mod tests {
             }
             if let Some(flip) = identify.flip {
                 let want = match flip {
+                    // LibRaw's flip 1 is a horizontal mirror, which is
+                    // what every GoPro GPR carries (EXIF orientation 2).
+                    1 => crate::Orientation::MirrorHorizontal,
                     3 => crate::Orientation::Rotate180,
                     5 => crate::Orientation::Rotate270CW,
                     6 => crate::Orientation::Rotate90CW,

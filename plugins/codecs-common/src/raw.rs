@@ -147,13 +147,18 @@ pub fn embedded_preview(bytes: &[u8]) -> anyhow::Result<Option<image::RgbaImage>
     {
         return native_answer.unwrap_or(Ok(None)).map_err(web_refusal);
     }
+    // LibRaw only improves on a native *failure*; a native "no
+    // preview" is definitive (a GoPro GPR has none), and LibRaw not
+    // opening the file at all — it knows fewer formats than the crate
+    // now — must not turn that answer into an error.
     #[cfg(not(target_arch = "wasm32"))]
-    match libraw::embedded_preview(bytes) {
-        Err(missing) if is_missing_library_error(&missing) => match native_answer {
-            Some(answer) => answer.map_err(|err| err.context(format!("{missing}"))),
-            None => Err(missing),
-        },
-        answer => answer,
+    match (libraw::embedded_preview(bytes), native_answer) {
+        (Ok(found), _) => Ok(found),
+        (Err(libraw_err), Some(answer)) => {
+            log::info!("raw: LibRaw preview failed too ({libraw_err:#})");
+            answer.map_err(|err| err.context(format!("{libraw_err}")))
+        }
+        (Err(libraw_err), None) => Err(libraw_err),
     }
 }
 
@@ -184,7 +189,7 @@ impl CodecPlugin for RawCodec {
         let choice = decoder_choice();
         let native = match choice {
             Decoder::LibRaw => None,
-            _ => Some(guarded(|| native::develop_document(bytes))),
+            _ => Some(guarded(|| native::develop_document(bytes, false))),
         };
         let native_err = match native {
             Some(Ok(doc)) => return Ok(doc),
@@ -197,6 +202,12 @@ impl CodecPlugin for RawCodec {
         };
         #[cfg(target_arch = "wasm32")]
         {
+            if native_err
+                .as_ref()
+                .is_some_and(|e| e.downcast_ref::<native::NoColourMatrix>().is_some())
+            {
+                return native::develop_document(bytes, true);
+            }
             return Err(web_refusal(native_err.unwrap_or_else(|| {
                 anyhow::anyhow!("the native decoder was disabled")
             })));
@@ -205,6 +216,19 @@ impl CodecPlugin for RawCodec {
         // diagnosis is the useful one; the missing library is context.
         #[cfg(not(target_arch = "wasm32"))]
         match libraw::develop_document(bytes) {
+            Ok(doc) => Ok(doc),
+            // The native decoder read the file and only lacked a
+            // matrix; if LibRaw cannot help (missing, or a format it
+            // does not know — Foveon on a stock build), camera RGB
+            // beats nothing.
+            Err(libraw_err)
+                if native_err
+                    .as_ref()
+                    .is_some_and(|e| e.downcast_ref::<native::NoColourMatrix>().is_some()) =>
+            {
+                log::info!("raw: LibRaw could not render it either ({libraw_err:#})");
+                native::develop_document(bytes, true)
+            }
             Err(missing) if is_missing_library_error(&missing) => match native_err {
                 Some(native_err) => Err(native_err.context(format!("{missing}"))),
                 None => Err(missing),
@@ -258,19 +282,38 @@ mod native {
     use schist_color::Depth;
     use schist_core::Document;
 
+    /// The one native decline a caller may want to override: the
+    /// frame decoded, but the camera table has no colour matrix for
+    /// the body, so the picture would be camera RGB.
+    #[derive(Debug)]
+    pub(super) struct NoColourMatrix(pub String);
+
+    impl std::fmt::Display for NoColourMatrix {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "no colour matrix for {}", self.0)
+        }
+    }
+
+    impl std::error::Error for NoColourMatrix {}
+
     /// Decode and develop through `schist-codec-raw`, then the same
     /// exposure and encoding as the LibRaw path. A camera the table
-    /// has no colour matrix for is declined (`Err`), so the caller can
-    /// let LibRaw, which may know it, render the colours rather than
-    /// show raw camera RGB.
-    pub(super) fn develop_document(bytes: &[u8]) -> anyhow::Result<Document> {
+    /// has no colour matrix for is declined with `NoColourMatrix`
+    /// unless `camera_rgb` is set, so the caller can let LibRaw, which
+    /// may know it, render the colours — and fall back to camera RGB
+    /// when LibRaw cannot read the file either.
+    pub(super) fn develop_document(bytes: &[u8], camera_rgb: bool) -> anyhow::Result<Document> {
         let raw = schist_codec_raw::decode(bytes).context("decoding")?;
-        anyhow::ensure!(
-            raw.color_matrix.is_some(),
-            "no colour matrix for {} {}",
-            raw.make,
-            raw.model
-        );
+        if raw.color_matrix.is_none() && !camera_rgb {
+            return Err(NoColourMatrix(format!("{} {}", raw.make, raw.model)).into());
+        }
+        if raw.color_matrix.is_none() {
+            log::warn!(
+                "raw: no colour matrix for {} {}; developing in camera RGB",
+                raw.make,
+                raw.model
+            );
+        }
         let developed =
             schist_codec_raw::develop(&raw, &DevelopOptions::default()).context("developing")?;
         let (w, h) = (developed.width as u32, developed.height as u32);
@@ -616,7 +659,7 @@ pub(crate) mod tests {
                 .display()
                 .to_string();
             let started = std::time::Instant::now();
-            let native = native::develop_document(&bytes);
+            let native = native::develop_document(&bytes, false);
             let native_time = started.elapsed();
             let started = std::time::Instant::now();
             let reference = match libraw::develop_document(&bytes) {

@@ -76,9 +76,10 @@ rest, developed with the camera's white balance to 16-bit sRGB. Raws
 decode through Schist's own clean-room `schist-codec-raw` crate (pure
 Rust, written from the public specifications and verified sample for
 sample against LibRaw across some 250 camera files), which covers most
-bodies, Canon's CR3 and Fuji's compressed RAF included; what it
-declines — Sigma's Foveon sensor data, GoPro's VC-5, a few old odd
-codecs, and cameras with no colour matrix in its table yet —
+bodies, Canon's CR3 and Fuji's compressed RAF, Sigma's Foveon and
+GoPro's VC-5 included; what it still declines — a couple of ancient
+Sigma and Fuji sensors, Nikon's licensed High Efficiency NEF, and
+cameras with no colour matrix in its table yet —
 falls back to the system's LibRaw, loaded at runtime (`brew install
 libraw`, or the distro's package); the browser build, which cannot load
 one, refuses those few files and opens everything else. HEIC decodes through libheif the

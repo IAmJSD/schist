@@ -33,8 +33,17 @@
 //!   want them.
 //! * 65000 — Kodak's own scheme, on the DCR bodies. See
 //!   [`decode_65000_segment`].
-//! * 32867 — the DC40/DC50's much older scheme. `Unsupported`.
+//! * 32867 — the DC40/DC50's much older "RADC" scheme. A
+//!   green/colour-difference pyramid coder behind an 8-bit table-driven
+//!   Huffman front end; see [`decode_radc`].
 //! * 1 — uncompressed, packed at the stated depth.
+//!
+//! Two Kodak variants are deliberately out of scope. RADC's finer
+//! escape quantiser (`CompressedBitsPerPixel` 243, [`radc_shift`]) is
+//! implemented but unexercised — no sample selects it, so it has never
+//! been checked against an oracle. The DC120 is a *different* scheme
+//! again, a bilinear-interpolated loader rather than this one, and is
+//! not folded in here.
 //!
 //! Whichever codec wrote it, a DCS frame decodes to *indices* into a
 //! linearisation curve rather than to samples — KodakIFD 0x090D where
@@ -82,6 +91,10 @@ const GRAY_RESPONSE_CURVE: u16 = 0x0123;
 // Tags of a 65000-compressed image IFD.
 const K65000_SEGMENT: u16 = 0xFDE8;
 const K65000_OFFSETS: u16 = 0xFDE9;
+
+/// EXIF CompressedBitsPerPixel, tag 0x9102. The RADC codec keys its
+/// escape-table quantiser off it: a value of 243 means a finer step.
+const COMPRESSED_BITS_PER_PIXEL: u16 = 0x9102;
 
 /// A private directory Kodak points at with a plain LONG offset: not a
 /// SubIFD, so the shared parser never followed it, but an ordinary IFD
@@ -292,6 +305,405 @@ fn decode_65000(strip: &[u8], ifd: &Ifd, width: usize, height: usize) -> Result<
     Ok(out)
 }
 
+// ------------------------------------------------------------- RADC
+
+// The DC40/DC50 "RADC" scheme. Every frame is a fixed 768x512, decoded
+// in stripes of four rows. Three colour channels are reconstructed at
+// half horizontal resolution into small line buffers, then scattered
+// into the Bayer output; a diagonal fix-up and a tone curve finish it.
+//
+// The whole thing is a green/colour-difference pyramid coder behind an
+// 8-bit table-driven Huffman front end: peek eight bits, index a
+// 256-entry table, consume the length the table records and take its
+// symbol byte as a signed char. Tables 0..9 are "tree" tables whose
+// symbol is the next tree to read; tables 10..17 carry step and
+// difference values; table 18 is a procedural escape quantiser.
+
+/// RADC frames are always this size; the reference rejects anything
+/// larger, and the tag-declared 756x504 is only the active window.
+const RADC_WIDTH: usize = 768;
+const RADC_HEIGHT: usize = 512;
+/// Working columns: everything happens at half horizontal resolution.
+const RADC_HALF: usize = RADC_WIDTH / 2;
+/// Line-buffer width: the 384 working columns plus two guard columns.
+/// The walk seeds column `RADC_HALF` and every predictor reads its
+/// right neighbour `x + 1`, so index 384 must exist; the green
+/// channel's slide is offset by one short and writes index 385.
+const RADC_LINE: usize = RADC_HALF + 2;
+/// Saturation after the tone curve maps the ~12-bit working range up.
+const RADC_MAX: u16 = 0x3FFF;
+
+/// The 19 direct-lookup Huffman tables. Each entry packs
+/// `(codeLength << 8) | symbolByte`; a peek of eight bits indexes it.
+struct RadcTables {
+    tables: [[u16; 256]; 19],
+}
+
+impl RadcTables {
+    /// Build the tables. Tables 0..17 come from a fixed `(length,
+    /// symbol)` list, replicated across `256 >> length` lookup slots and
+    /// laid end to end so each 256-slot span is one table. Table 18 is
+    /// the escape quantiser, whose step is `1 << shift`.
+    fn build(shift: u32) -> RadcTables {
+        // The (length, symbol) list, read left to right. Tables 0..9 are
+        // the tree tables selected by the walk; 10..17 the value/step
+        // tables. Symbols are signed. Each table's lengths sum to
+        // exactly 256 lookup slots, so the boundaries fall out of a
+        // straight sequential fill.
+        #[rustfmt::skip]
+        const SPEC: &[(u8, i8)] = &[
+            (1,1),(2,3),(3,4),(4,2),(5,7),(6,5),(7,6),(7,8),
+            (1,0),(2,1),(3,3),(4,4),(5,2),(6,7),(7,6),(8,5),(8,8),
+            (2,1),(2,3),(3,0),(3,2),(3,4),(4,6),(5,5),(6,7),(6,8),
+            (2,0),(2,1),(2,3),(3,2),(4,4),(5,6),(6,7),(7,5),(7,8),
+            (2,1),(2,4),(3,0),(3,2),(3,3),(4,7),(5,5),(6,6),(6,8),
+            (2,3),(3,1),(3,2),(3,4),(3,5),(3,6),(4,7),(5,0),(5,8),
+            (2,3),(2,6),(3,0),(3,1),(4,4),(4,5),(4,7),(5,2),(5,8),
+            (2,4),(2,7),(3,3),(3,6),(4,1),(4,2),(4,5),(5,0),(5,8),
+            (2,6),(3,1),(3,3),(3,5),(3,7),(3,8),(4,0),(5,2),(5,4),
+            (2,0),(2,1),(3,2),(3,3),(4,4),(4,5),(5,6),(5,7),(4,8),
+            (1,0),(2,2),(2,-2),(1,-3),(1,3),
+            (2,-17),(2,-5),(2,5),(2,17),(2,-7),(2,2),(2,9),(2,18),
+            (2,-18),(2,-9),(2,-2),(2,7),(2,-28),(2,28),
+            (3,-49),(3,-9),(3,9),(4,49),(5,-79),(5,79),
+            (2,-1),(2,13),(2,26),(3,39),(4,-16),(5,55),(6,-37),(6,76),
+            (2,-26),(2,-13),(2,1),(3,-39),(4,16),(5,-55),(6,-76),(6,37),
+        ];
+        let mut tables = [[0u16; 256]; 19];
+        let mut table = 0usize;
+        let mut slot = 0usize;
+        for &(length, symbol) in SPEC {
+            let packed = ((length as u16) << 8) | (symbol as u8 as u16);
+            // A code of length L fills 2^(8-L) consecutive slots.
+            for _ in 0..(256usize >> length) {
+                tables[table][slot] = packed;
+                slot += 1;
+                if slot == 256 {
+                    slot = 0;
+                    table += 1;
+                }
+            }
+        }
+        debug_assert_eq!((table, slot), (18, 0), "RADC list did not fill 18 tables");
+
+        // Table 18: coarse, evenly spaced luma levels. Code length is
+        // 8-shift; the symbol is the index rounded down to a multiple of
+        // 2^shift with the mid-step bit set.
+        for (c, entry) in tables[18].iter_mut().enumerate() {
+            let symbol = ((c >> shift) << shift) | (1 << (shift - 1));
+            *entry = (((8 - shift) as u16) << 8) | symbol as u16;
+        }
+        RadcTables { tables }
+    }
+}
+
+/// The RADC bit reader and table set. MSB-first over the payload; past
+/// the end it yields zero bits so truncated input never panics.
+struct Radc<'a> {
+    data: &'a [u8],
+    pos: usize,
+    accumulator: u64,
+    buffered_bits: u32,
+    tables: RadcTables,
+}
+
+impl<'a> Radc<'a> {
+    fn new(data: &'a [u8], shift: u32) -> Radc<'a> {
+        Radc {
+            data,
+            pos: 0,
+            accumulator: 0,
+            buffered_bits: 0,
+            tables: RadcTables::build(shift),
+        }
+    }
+
+    /// Pull bytes until at least `need` bits are buffered, zero-filling
+    /// past the end of the payload.
+    fn refill(&mut self, need: u32) {
+        while self.buffered_bits < need {
+            let byte = self.data.get(self.pos).copied().unwrap_or(0);
+            self.pos += 1;
+            self.accumulator = (self.accumulator << 8) | byte as u64;
+            self.buffered_bits += 8;
+        }
+    }
+
+    /// The next `n` bits (n <= 8 here), MSB first.
+    fn getbits(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        self.refill(n);
+        let shift = self.buffered_bits - n;
+        let value = ((self.accumulator >> shift) & ((1u64 << n) - 1)) as u32;
+        self.buffered_bits = shift;
+        self.accumulator &= (1u64 << shift) - 1;
+        value
+    }
+
+    /// Decode one Huffman symbol from `table`: peek eight bits, look up,
+    /// consume the recorded length, return the symbol as a signed char.
+    fn radc_token(&mut self, table: usize) -> i32 {
+        self.refill(8);
+        let index = ((self.accumulator >> (self.buffered_bits - 8)) & 0xff) as usize;
+        let entry = self.tables.tables[table][index];
+        let length = (entry >> 8) as u32;
+        // Every filled slot has a non-zero length; guard anyway so a
+        // hostile build can never spin here.
+        debug_assert!(length > 0);
+        self.buffered_bits -= length.min(self.buffered_bits);
+        self.accumulator &= (1u64 << self.buffered_bits) - 1;
+        (entry as u8 as i8) as i32
+    }
+}
+
+/// The spatial predictor. Green (channel 0) averages three neighbours
+/// with the one above weighted double; the colour-difference channels
+/// average the two orthogonal neighbours.
+fn radc_predictor(buf: &[[[i16; RADC_LINE]; 3]; 3], c: usize, y: usize, x: usize) -> i32 {
+    let at = |yy: usize, xx: usize| buf[c][yy][xx] as i32;
+    if c == 0 {
+        (at(y - 1, x + 1) + 2 * at(y - 1, x) + at(y, x + 1)) / 4
+    } else {
+        (at(y - 1, x) + at(y, x + 1)) / 2
+    }
+}
+
+/// The global tone curve: piecewise-linear across a fixed knot table,
+/// carrying the ~12-bit working range up to a 14-bit output and
+/// clipping everything above 4095 to the maximum.
+fn radc_curve() -> Vec<u16> {
+    // Interleaved (x, y) control points.
+    const PT: [(i64, i64); 6] = [
+        (0, 0),
+        (1280, 1344),
+        (2320, 3616),
+        (3328, 8000),
+        (4095, 16383),
+        (65535, 16383),
+    ];
+    let mut curve = vec![0u16; 65536];
+    for pair in PT.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        for c in x0..=x1 {
+            // Linear interpolation rounded to nearest, halves up: the
+            // oracle differs from plain truncation by one count over
+            // much of the range. Done in integers as
+            // floor(v + 1/2) = (2*num + den) / (2*den).
+            let (num, den) = ((c - x0) * (y1 - y0), x1 - x0);
+            let value = (2 * num + den) / (2 * den) + y0;
+            curve[c as usize] = value as u16;
+        }
+    }
+    curve
+}
+
+/// The escape table's quantiser step, from the file's
+/// CompressedBitsPerPixel. A value of 243 asks for the finer grid
+/// (six-bit codes); everything else, the DC40/DC50 sample included
+/// (which reads 1.52), gets the coarse one.
+///
+/// The 243 branch is untested: no corpus file selects it. See the
+/// module notes.
+fn radc_shift(compressed_bpp: Option<f64>) -> u32 {
+    if compressed_bpp.is_some_and(|v| (v - 243.0).abs() < 0.5) {
+        2
+    } else {
+        3
+    }
+}
+
+/// Decode a whole RADC strip into the 768x512 single-channel Bayer
+/// frame, black not subtracted, tone curve applied.
+fn decode_radc(strip: &[u8], compressed_bpp: Option<f64>) -> Result<Vec<u16>> {
+    let total = crate::frame_samples(RADC_WIDTH, RADC_HEIGHT, 1)?;
+    let mut r = Radc::new(strip, radc_shift(compressed_bpp));
+    let mut raw = vec![0u16; total];
+
+    // Working buffers: three channels, three lines each, persisting
+    // across stripes and channels. Initialised to 2048 (the green bias
+    // the diagonal fix-up later removes).
+    let mut buf = [[[2048i16; RADC_LINE]; 3]; 3];
+    // Per-channel gain memory carried into the next stripe's rescale.
+    let mut last = [16i64; 3];
+
+    for row in (0..RADC_HEIGHT).step_by(4) {
+        let mul = [
+            r.getbits(6) as i64,
+            r.getbits(6) as i64,
+            r.getbits(6) as i64,
+        ];
+        if mul.contains(&0) {
+            return Err(Error::Corrupt(
+                "Kodak RADC stripe with a zero channel gain".into(),
+            ));
+        }
+
+        for c in 0..3 {
+            // 4.2 Rescale the carried buffer from the previous stripe's
+            // gain to this one's. The val>65564 threshold and the
+            // 0x7ff/round constants are empirical fixed constants from
+            // the reference, reproduced verbatim.
+            // The working buffer is read as signed here; the spec's
+            // pseudo-code masks it to sixteen bits (unsigned). On the
+            // one sample with an oracle no value is ever negative at
+            // this point, so the two readings agree and the choice is
+            // an interpretation awaiting a second body.
+            let mut val = ((0x100_0000i64 / last[c] + 0x7ff) >> 12) * mul[c];
+            let sh: u32 = if val > 65564 { 10 } else { 12 };
+            let round = (1i64 << (sh - 1)) - 1;
+            val <<= 12 - sh;
+            for line in buf[c].iter_mut() {
+                for sample in line.iter_mut() {
+                    let scaled = ((*sample as i64) * val + round).min(0x7FFF_FFFF);
+                    *sample = ((scaled >> sh) & 0xFFFF) as u16 as i16;
+                }
+            }
+            last[c] = mul[c];
+
+            // 4.3 Decode the field: green as two sub-rows, colour
+            // channels as one.
+            let sub_rows = if c == 0 { 2 } else { 1 };
+            for sub in 0..sub_rows {
+                // Seed the middle of the two working lines.
+                buf[c][1][RADC_HALF] = (mul[c] << 7) as i16;
+                buf[c][2][RADC_HALF] = (mul[c] << 7) as i16;
+
+                let mut col = RADC_HALF as i32;
+                let mut tree = 1usize;
+                while col > 0 {
+                    // The token both drives this cell and becomes the
+                    // next tree to read: a non-zero token descends to
+                    // tree 1..8, a zero (run) token drops back to tree 0.
+                    let token = r.radc_token(tree);
+                    tree = token as usize;
+                    if token != 0 {
+                        col -= 2;
+                        if col >= 0 {
+                            let x0 = col as usize;
+                            // Both branches read a *fresh* token at each
+                            // of the four cell positions — the spec's
+                            // "apply the assignment to the four buffer
+                            // positions" means the token read inside it
+                            // too, as the oracle proves: one token per
+                            // cell desynchronises the bitstream.
+                            if token == 8 {
+                                // Coarse absolute levels from the escape
+                                // table, scaled by gain. The symbol is
+                                // taken unsigned here.
+                                for y in [1usize, 2] {
+                                    for x in [x0 + 1, x0] {
+                                        let level = (r.radc_token(18) & 0xff) as i64;
+                                        buf[c][y][x] = (level * mul[c]) as i16;
+                                    }
+                                }
+                            } else {
+                                // Signed differences (value table
+                                // tree+10) times 16, over the predictor.
+                                for y in [1usize, 2] {
+                                    for x in [x0 + 1, x0] {
+                                        let diff = r.radc_token(tree + 10);
+                                        let pred = radc_predictor(&buf, c, y, x);
+                                        buf[c][y][x] = (diff * 16 + pred) as i16;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // A run token: a run of copy/step cells.
+                        loop {
+                            let nreps = if col > 2 { r.radc_token(9) + 1 } else { 1 };
+                            let mut rep = 0;
+                            while rep < 8 && rep < nreps && col > 0 {
+                                col -= 2;
+                                if col >= 0 {
+                                    let x0 = col as usize;
+                                    for y in [1usize, 2] {
+                                        for x in [x0 + 1, x0] {
+                                            buf[c][y][x] = radc_predictor(&buf, c, y, x) as i16;
+                                        }
+                                    }
+                                    // Every odd repeat adds a step.
+                                    if rep & 1 == 1 {
+                                        let step = r.radc_token(10) << 4;
+                                        for y in [1usize, 2] {
+                                            buf[c][y][x0 + 1] =
+                                                (buf[c][y][x0 + 1] as i32 + step) as i16;
+                                            buf[c][y][x0] = (buf[c][y][x0] as i32 + step) as i16;
+                                        }
+                                    }
+                                }
+                                rep += 1;
+                            }
+                            // A run of exactly nine continues.
+                            if nreps != 9 {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 4.4 Emit the field to the Bayer output, undoing the
+                // <<7 gain domain.
+                // Each (x, y) lands on its own Bayer site, so the two
+                // loops may run in either order.
+                for y in [0usize, 1] {
+                    for (x, sample) in buf[c][y + 1][..RADC_HALF].iter().enumerate() {
+                        let mut value = ((*sample as i32) << 4) / (mul[c] as i32);
+                        if value < 0 {
+                            value = 0;
+                        }
+                        // Green fills both sites of its 2x2 across the
+                        // two sub-rows; red and blue their one diagonal.
+                        let (out_row, out_col) = if c != 0 {
+                            (row + y * 2 + c - 1, x * 2 + 2 - c)
+                        } else {
+                            (row + sub * 2 + y, x * 2 + y)
+                        };
+                        raw[out_row * RADC_WIDTH + out_col] = value as u16;
+                    }
+                }
+
+                // 4.5 Slide working line 2 down to line 0 as the top
+                // predictor context for the next sub-row/stripe; green
+                // is offset by one short.
+                let off = if c == 0 { 1 } else { 0 };
+                for i in 0..(RADC_LINE - off) {
+                    buf[c][0][off + i] = buf[c][2][i];
+                }
+            }
+        }
+
+        // 5. Diagonal fix-up over the four stripe rows: the differential
+        // green samples at the "odd" sites become absolute values from
+        // their horizontal neighbours and the 2048 bias.
+        for y in row..row + 4 {
+            for x in 0..RADC_WIDTH {
+                if (x + y) & 1 == 1 {
+                    let left = if x > 0 { x - 1 } else { x + 1 };
+                    let right = if x + 1 < RADC_WIDTH { x + 1 } else { x - 1 };
+                    let mut value = (raw[y * RADC_WIDTH + x] as i32 - 2048) * 2
+                        + (raw[y * RADC_WIDTH + left] as i32 + raw[y * RADC_WIDTH + right] as i32)
+                            / 2;
+                    if value < 0 {
+                        value = 0;
+                    }
+                    raw[y * RADC_WIDTH + x] = value as u16;
+                }
+            }
+        }
+    }
+
+    // 6. Global tone curve, once, over the whole frame.
+    let curve = radc_curve();
+    for sample in raw.iter_mut() {
+        *sample = curve[*sample as usize];
+    }
+    Ok(raw)
+}
+
 // ---------------------------------------------------------- packing
 
 /// Unpack samples stored without compression at `bits` a piece, most
@@ -441,9 +853,25 @@ fn decode_tiff_raw(
         }
         65000 => decode_65000(strip, ifd, layout.width, layout.height)?,
         32867 => {
-            return Err(Error::Unsupported(
-                "Kodak Compression 32867, the DC40/DC50 scheme".into(),
-            ))
+            // RADC always reconstructs the full 768x512 sensor frame,
+            // wider than the 756x504 the SubIFD tags advertise, and it
+            // owns its own colour layout and white level. The oracle
+            // dumps the full frame, so build the result here and return
+            // rather than fall through the tag-driven path below.
+            let compressed_bpp = ifd.get(COMPRESSED_BITS_PER_PIXEL).and_then(|e| e.f64(0));
+            let samples = decode_radc(strip, compressed_bpp)?;
+            let mut raw = RawImage::new(
+                Format::Kodak,
+                RADC_WIDTH,
+                RADC_HEIGHT,
+                1,
+                RawData::U16(samples),
+                // Filter code 0xE1E1E1E1 (cdesc RGBG) is GRBG, which the
+                // §4.4 site formulae place at the frame origin.
+                Cfa::GRBG,
+            );
+            raw.white_level = RADC_MAX as f32;
+            return Ok(raw);
         }
         other => return Err(Error::Unsupported(format!("Kodak Compression {other}"))),
     };
@@ -958,6 +1386,129 @@ mod tests {
     }
 
     #[test]
+    fn radc_tables_fill_sequentially() {
+        let t = RadcTables::build(3);
+        // Tree table 0 opens with a length-1 code for symbol 1, filling
+        // the low half of its 256 slots, then a length-2 code for 3.
+        assert_eq!(t.tables[0][0], (1 << 8) | 1);
+        assert_eq!(t.tables[0][127], (1 << 8) | 1);
+        assert_eq!(t.tables[0][128], (2 << 8) | 3);
+        // Table 1 opens with length-1 symbol 0.
+        // Length 1, symbol 0.
+        assert_eq!(t.tables[1][0], 1 << 8);
+        // Table 10's first three entries (1,0)(2,2)(2,-2) exactly fill
+        // its 256 slots: 128 + 64 + 64.
+        assert_eq!(t.tables[10][0], 1 << 8);
+        assert_eq!(t.tables[10][128], (2 << 8) | 2);
+        assert_eq!(t.tables[10][192], (2 << 8) | (0xFEu16)); // -2 as a byte
+                                                             // A negative symbol round-trips through the signed-char decode.
+        let entry = t.tables[10][192];
+        assert_eq!((entry as u8 as i8) as i32, -2);
+    }
+
+    #[test]
+    fn radc_tables_are_complete_and_prefix_free() {
+        // Every slot of all 19 tables must carry a usable code length:
+        // a zero would stall the reader, and a table that did not add up
+        // to 256 slots would silently shift every later table along. Per
+        // table the lengths must satisfy Kraft equality, sum(2^(8-L)) ==
+        // 256, which is exactly what "fills its 256 slots" means.
+        let t = RadcTables::build(3);
+        for (index, table) in t.tables.iter().enumerate() {
+            let mut slots = 0usize;
+            let mut i = 0usize;
+            while i < 256 {
+                let length = (table[i] >> 8) as u32;
+                assert!(
+                    (1..=8).contains(&length),
+                    "table {index} slot {i} has code length {length}"
+                );
+                let run = 256usize >> length;
+                // Every slot a code covers must repeat that code.
+                for j in i..i + run {
+                    assert_eq!(table[j], table[i], "table {index} slot {j} breaks its run");
+                }
+                slots += run;
+                i += run;
+            }
+            assert_eq!(slots, 256, "table {index} does not fill 256 slots");
+        }
+    }
+
+    #[test]
+    fn radc_shift_follows_compressed_bits_per_pixel() {
+        // The DC50 sample records 152/100; only a 243 selects the finer
+        // quantiser, and a file with no tag at all gets the coarse one.
+        assert_eq!(radc_shift(Some(1.52)), 3);
+        assert_eq!(radc_shift(None), 3);
+        assert_eq!(radc_shift(Some(243.0)), 2);
+    }
+
+    #[test]
+    fn radc_escape_table_is_a_coarse_quantiser() {
+        // shift 3: five-bit codes over levels that are the index rounded
+        // down to a multiple of 8 with bit 2 set.
+        let t = RadcTables::build(3);
+        assert_eq!(t.tables[18][0], (5 << 8) | 4);
+        assert_eq!(t.tables[18][7], (5 << 8) | 4);
+        assert_eq!(t.tables[18][8], (5 << 8) | 12);
+        assert_eq!(t.tables[18][255], (5 << 8) | 252);
+        // shift 2: six-bit codes over a finer grid.
+        let fine = RadcTables::build(2);
+        assert_eq!(fine.tables[18][0], (6 << 8) | 2);
+        assert_eq!(fine.tables[18][255], (6 << 8) | 254);
+    }
+
+    #[test]
+    fn radc_bit_reader_is_msb_first_and_zero_fills() {
+        // 0b1011_0010, 0b1100_0000 then nothing.
+        let mut r = Radc::new(&[0xB2, 0xC0], 3);
+        assert_eq!(r.getbits(3), 0b101);
+        assert_eq!(r.getbits(5), 0b10010);
+        assert_eq!(r.getbits(2), 0b11);
+        // Past the payload the reader yields zeros rather than failing.
+        assert_eq!(r.getbits(8), 0);
+        assert_eq!(r.getbits(8), 0);
+    }
+
+    #[test]
+    fn radc_curve_passes_through_its_knots() {
+        let curve = radc_curve();
+        assert_eq!(curve[0], 0);
+        assert_eq!(curve[1280], 1344);
+        assert_eq!(curve[2320], 3616);
+        assert_eq!(curve[3328], 8000);
+        assert_eq!(curve[4095], 16383);
+        // Everything above the last real knot clips to the maximum.
+        assert_eq!(curve[4096], 16383);
+        assert_eq!(curve[65535], 16383);
+        // Monotone non-decreasing across a segment.
+        assert!(curve[100] <= curve[200] && curve[200] <= curve[1280]);
+    }
+
+    #[test]
+    fn radc_rejects_a_zero_channel_gain() {
+        // Three six-bit gains of zero: the first stripe is corrupt.
+        let strip = [0u8; 64];
+        assert!(matches!(decode_radc(&strip, None), Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn radc_decodes_hostile_input_without_panicking() {
+        // Garbage must always terminate and either decode to a full
+        // frame or be rejected as corrupt, never loop or panic. A run of
+        // cut points exercises the zero-fill and the walk's bounds.
+        for len in [0usize, 1, 7, 64, 500, 4096] {
+            let strip = vec![0xA5u8; len];
+            match decode_radc(&strip, None) {
+                Ok(frame) => assert_eq!(frame.len(), RADC_WIDTH * RADC_HEIGHT),
+                Err(Error::Corrupt(_)) => {}
+                Err(other) => panic!("unexpected error on garbage: {other}"),
+            }
+        }
+    }
+
+    #[test]
     fn garbage_is_rejected() {
         assert!(decode(b"MM\0*nonsense").is_err());
         assert!(decode(&[]).is_err());
@@ -976,10 +1527,13 @@ mod tests {
                 Ok(raw) => raw,
                 Err(Error::Unsupported(why)) => {
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let allowed: &[(&str, &str)] = &[(
-                        "DC50",
-                        "Compression 32867, the DC40/DC50 scheme, is not implemented",
-                    )];
+                    // The DC50 (RADC, Compression 32867) now decodes. The
+                    // only Kodak variants still out of scope are the s=2
+                    // RADC quantiser (CompressedBitsPerPixel 243, no
+                    // corpus sample) and the DC120's separate bilinear
+                    // scheme; neither appears in the corpus, so the
+                    // allow-list is empty and any Unsupported is a bug.
+                    let allowed: &[(&str, &str)] = &[];
                     let reason = allowed
                         .iter()
                         .find(|(file, _)| name.contains(file))
