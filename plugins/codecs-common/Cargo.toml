@@ -20,6 +20,9 @@ schist-compositor.workspace = true
 # libheif to open, so the codec (and its loader) stay off the wasm build.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading.workspace = true
+# The pure-Rust raw decoder; LibRaw stays as the fallback for what it
+# does not cover yet.
+schist-codec-raw.workspace = true
 
 [dev-dependencies]
 crc32fast.workspace = true

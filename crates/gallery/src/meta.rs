@@ -359,6 +359,13 @@ mod raw_tests {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.is_file())
+            // The LibRaw/exiftool oracle sidecars live beside the raws.
+            .filter(|p| {
+                !matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("tiff" | "json" | "txt" | "png" | "ppm" | "pgm" | "sh")
+                )
+            })
             .collect();
         paths.sort();
         for path in paths {
