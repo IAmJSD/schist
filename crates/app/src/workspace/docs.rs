@@ -393,19 +393,6 @@ impl Workspace {
                 self.status = "HEIC support is not installed".into();
                 self.open_modal(Modal::HeifSupport { path }, cx);
             }
-            // A raw Schist's own decoder declines needs LibRaw, and
-            // there is none to load: say how to get one and offer a
-            // retry. (The web build refuses these files outright with
-            // a message of its own, through the plain arm below.)
-            #[cfg(not(target_arch = "wasm32"))]
-            Err(err)
-                if schist_codecs_common::raw::is_missing_library_error(&err)
-                    && self.modal.is_none() =>
-            {
-                log::info!("open needs LibRaw: {err:#}");
-                self.status = "LibRaw is not installed".into();
-                self.open_modal(Modal::LibRawSupport { path }, cx);
-            }
             Err(err) => {
                 log::error!("open failed: {err:#}");
                 self.status = format!("Open failed: {err}").into();

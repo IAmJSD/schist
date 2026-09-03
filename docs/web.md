@@ -115,12 +115,8 @@ rather than left to fail.
 ## Known gaps
 
 Camera raws open through the pure-Rust `schist-codec-raw` decoder, the
-same one the desktop uses first. The few things it declines — a couple
-of ancient Sigma and Fuji sensors, Nikon's licensed High Efficiency
-NEF — go to a runtime
-LibRaw on the desktop; a browser has no library to load, so those files
-are refused with a message saying so (their embedded previews still
-show).
+same code the desktop runs; there is no library to load and nothing is
+refused on the web that the desktop would open.
 
 - Text layers can only use the fonts the page ships (IBM Plex Sans
   Regular today — add more in `web/fonts/` and they are picked up by the

@@ -1,14 +1,12 @@
-//! Camera raw import: the pure-Rust `schist-codec-raw` decoder first,
-//! then, off the web, LibRaw loaded at runtime for whatever it declines
-//! (see `libraw`).
+//! Camera raw import through the pure-Rust `schist-codec-raw` crate.
 //!
 //! A raw file is a sensor dump in one of some dozens of vendor
 //! containers: most are TIFF with a proprietary compression (Nikon,
 //! Sony, Pentax, DNG), Canon's CR3 is ISO-BMFF, and Fuji, Olympus and
-//! Panasonic use private headers. The native crate reads nearly all of
-//! them exactly; the few codecs it does not (Canon's CRX, Fuji's
-//! compressed RAF, a handful of odd ones) go to LibRaw on the desktop
-//! and are refused, with a message saying why, in the browser.
+//! Panasonic use private headers. The crate reads all of them, with
+//! no library to load, so this module is the same on the desktop and
+//! in the browser; the one file it refuses is Nikon's licensed High
+//! Efficiency NEF, which nothing reads without the vendor's SDK.
 //!
 //! Import only: a raw is a capture, and nothing writes one.
 //!
@@ -21,36 +19,6 @@
 
 use schist_core::Document;
 use schist_plugin_api::CodecPlugin;
-#[cfg(not(target_arch = "wasm32"))]
-mod libraw;
-#[cfg(not(target_arch = "wasm32"))]
-pub use libraw::managed_dir;
-
-/// True when an `import` error means no LibRaw could be loaded — the
-/// case an install (or, one day, a consented download) fixes, as
-/// opposed to a broken file. Never true on the web, which has no
-/// library to load.
-pub fn is_missing_library_error(err: &anyhow::Error) -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        libraw::is_missing_library_error(err)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = err;
-        false
-    }
-}
-
-/// What a browser says about a file only LibRaw could develop: the
-/// native crate has declined it, and there is no library to load.
-#[cfg(target_arch = "wasm32")]
-fn web_refusal(err: anyhow::Error) -> anyhow::Error {
-    err.context(
-        "this raw file needs LibRaw, which the web build cannot load; the desktop app opens it",
-    )
-}
-
 /// Bring linear developed pixels up to display brightness and encode
 /// them as sRGB, in place.
 ///
@@ -124,42 +92,9 @@ fn srgb_encode(v: f32) -> f32 {
 /// The camera's own preview — most raws embed a JPEG, often full size —
 /// as straight RGBA, turned upright. `None` when the file has no usable
 /// one. Orders of magnitude cheaper than developing, which is what a
-/// thumbnail wants. The native crate finds it in every container; the
-/// LibRaw fallback only matters where that fails.
+/// thumbnail wants.
 pub fn embedded_preview(bytes: &[u8]) -> anyhow::Result<Option<image::RgbaImage>> {
-    let choice = decoder_choice();
-    // The native answer, kept so a machine without LibRaw still gets
-    // it: "this file embeds no preview" is a definitive answer, and a
-    // native error is a better diagnosis than "no LibRaw".
-    let mut native_answer = None;
-    if choice != Decoder::LibRaw {
-        match guarded(|| native::embedded_preview(bytes)) {
-            Ok(Some(img)) => return Ok(Some(img)),
-            answer if choice == Decoder::Native => return answer,
-            Ok(None) => native_answer = Some(Ok(None)),
-            Err(err) => {
-                log::info!("raw: native preview declined ({err:#}); trying LibRaw");
-                native_answer = Some(Err(err));
-            }
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        return native_answer.unwrap_or(Ok(None)).map_err(web_refusal);
-    }
-    // LibRaw only improves on a native *failure*; a native "no
-    // preview" is definitive (a GoPro GPR has none), and LibRaw not
-    // opening the file at all — it knows fewer formats than the crate
-    // now — must not turn that answer into an error.
-    #[cfg(not(target_arch = "wasm32"))]
-    match (libraw::embedded_preview(bytes), native_answer) {
-        (Ok(found), _) => Ok(found),
-        (Err(libraw_err), Some(answer)) => {
-            log::info!("raw: LibRaw preview failed too ({libraw_err:#})");
-            answer.map_err(|err| err.context(format!("{libraw_err}")))
-        }
-        (Err(libraw_err), None) => Err(libraw_err),
-    }
+    guarded(|| native::embedded_preview(bytes))
 }
 
 /// Camera raw files, import only.
@@ -186,55 +121,7 @@ impl CodecPlugin for RawCodec {
         schist_codec_raw::probe(bytes).is_some()
     }
     fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
-        let choice = decoder_choice();
-        let native = match choice {
-            Decoder::LibRaw => None,
-            _ => Some(guarded(|| native::develop_document(bytes, false))),
-        };
-        let native_err = match native {
-            Some(Ok(doc)) => return Ok(doc),
-            Some(Err(err)) if choice == Decoder::Native => return Err(err),
-            Some(Err(err)) => {
-                log::info!("raw: native decoder declined ({err:#}); trying LibRaw");
-                Some(err)
-            }
-            None => None,
-        };
-        #[cfg(target_arch = "wasm32")]
-        {
-            if native_err
-                .as_ref()
-                .is_some_and(|e| e.downcast_ref::<native::NoColourMatrix>().is_some())
-            {
-                return native::develop_document(bytes, true);
-            }
-            return Err(web_refusal(native_err.unwrap_or_else(|| {
-                anyhow::anyhow!("the native decoder was disabled")
-            })));
-        }
-        // With no LibRaw to fall back on, the native decoder's
-        // diagnosis is the useful one; the missing library is context.
-        #[cfg(not(target_arch = "wasm32"))]
-        match libraw::develop_document(bytes) {
-            Ok(doc) => Ok(doc),
-            // The native decoder read the file and only lacked a
-            // matrix; if LibRaw cannot help (missing, or a format it
-            // does not know — Foveon on a stock build), camera RGB
-            // beats nothing.
-            Err(libraw_err)
-                if native_err
-                    .as_ref()
-                    .is_some_and(|e| e.downcast_ref::<native::NoColourMatrix>().is_some()) =>
-            {
-                log::info!("raw: LibRaw could not render it either ({libraw_err:#})");
-                native::develop_document(bytes, true)
-            }
-            Err(missing) if is_missing_library_error(&missing) => match native_err {
-                Some(native_err) => Err(native_err.context(format!("{missing}"))),
-                None => Err(missing),
-            },
-            result => result,
-        }
+        guarded(|| native::develop_document(bytes))
     }
 }
 
@@ -256,24 +143,6 @@ fn guarded<T>(f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     }
 }
 
-/// Which decoder `import` and `embedded_preview` use. The default tries
-/// the native crate and falls back to LibRaw; `SCHIST_RAW_DECODER`
-/// (`native` or `libraw`) pins one, for comparing them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Decoder {
-    Auto,
-    Native,
-    LibRaw,
-}
-
-fn decoder_choice() -> Decoder {
-    match std::env::var("SCHIST_RAW_DECODER").as_deref() {
-        Ok("native") => Decoder::Native,
-        Ok("libraw") => Decoder::LibRaw,
-        _ => Decoder::Auto,
-    }
-}
-
 /// The pure-Rust path.
 mod native {
     use super::expose_and_encode;
@@ -282,31 +151,13 @@ mod native {
     use schist_color::Depth;
     use schist_core::Document;
 
-    /// The one native decline a caller may want to override: the
-    /// frame decoded, but the camera table has no colour matrix for
-    /// the body, so the picture would be camera RGB.
-    #[derive(Debug)]
-    pub(super) struct NoColourMatrix(pub String);
-
-    impl std::fmt::Display for NoColourMatrix {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "no colour matrix for {}", self.0)
-        }
-    }
-
-    impl std::error::Error for NoColourMatrix {}
-
-    /// Decode and develop through `schist-codec-raw`, then the same
-    /// exposure and encoding as the LibRaw path. A camera the table
-    /// has no colour matrix for is declined with `NoColourMatrix`
-    /// unless `camera_rgb` is set, so the caller can let LibRaw, which
-    /// may know it, render the colours — and fall back to camera RGB
-    /// when LibRaw cannot read the file either.
-    pub(super) fn develop_document(bytes: &[u8], camera_rgb: bool) -> anyhow::Result<Document> {
+    /// Decode and develop through `schist-codec-raw`, then the
+    /// exposure lift and encoding. A body the camera table has no
+    /// colour matrix for develops in white-balanced camera RGB —
+    /// recognisable, not right — and says so in the log; adding its
+    /// matrix to the table is the fix.
+    pub(super) fn develop_document(bytes: &[u8]) -> anyhow::Result<Document> {
         let raw = schist_codec_raw::decode(bytes).context("decoding")?;
-        if raw.color_matrix.is_none() && !camera_rgb {
-            return Err(NoColourMatrix(format!("{} {}", raw.make, raw.model)).into());
-        }
         if raw.color_matrix.is_none() {
             log::warn!(
                 "raw: no colour matrix for {} {}; developing in camera RGB",
@@ -500,15 +351,23 @@ pub(crate) mod tests {
         assert!(!RawCodec.probe(&plain), "an RGB TIFF is not a raw");
     }
 
-    /// The developed picture, or None (skip, like the HEIC tests) when
-    /// this machine has no LibRaw.
+    /// The developed picture, or None when the crate declines the
+    /// file (`Unsupported`): the sweep reports those rather than
+    /// failing, since a decline is a documented gap, not a bug.
     fn develop_or_skip(bytes: &[u8]) -> Option<Document> {
         match RawCodec.import(bytes) {
-            Err(err) if is_missing_library_error(&err) => {
-                eprintln!("skipping: {err:#}");
+            Ok(doc) => Some(doc),
+            Err(err) => {
+                let declined = err.chain().any(|e| {
+                    matches!(
+                        e.downcast_ref::<schist_codec_raw::Error>(),
+                        Some(schist_codec_raw::Error::Unsupported(_))
+                    )
+                });
+                assert!(declined, "{err:#}");
+                eprintln!("declined: {err:#}");
                 None
             }
-            result => Some(result.unwrap()),
         }
     }
 
@@ -576,177 +435,22 @@ pub(crate) mod tests {
 
     #[test]
     fn a_dng_without_a_preview_yields_none() {
-        match embedded_preview(&synthetic_dng(64, 32)) {
-            Err(err) if is_missing_library_error(&err) => eprintln!("skipping: {err:#}"),
-            Ok(None) => {}
-            Ok(Some(img)) => panic!(
-                "no preview was embedded, got {}x{}",
-                img.width(),
-                img.height()
-            ),
-            Err(err) => panic!("{err:#}"),
-        }
+        assert!(embedded_preview(&synthetic_dng(64, 32)).unwrap().is_none());
     }
 
     #[test]
-    fn a_broken_raw_is_an_error_not_a_missing_library() {
+    fn a_broken_raw_is_an_error() {
         let mut bytes = synthetic_dng(64, 32);
         bytes.truncate(bytes.len() / 2);
-        match RawCodec.import(&bytes) {
-            Err(err) if is_missing_library_error(&err) => eprintln!("skipping: {err:#}"),
-            Err(err) => assert!(!is_missing_library_error(&err), "{err:#}"),
-            Ok(_) => panic!("half a file should not develop"),
-        }
-    }
-
-    /// The native decoder against LibRaw over `SCHIST_RAW_CORPUS`
-    /// (recursive): each file developed both ways, compared as PSNR
-    /// of the encoded 8-bit pictures after downscaling to 512 px, with
-    /// a table printed. Decline (`Unsupported`, no matrix) is counted,
-    /// not failed, and so is a crop-policy size difference; a file both
-    /// decode that lands under 18 dB fails (the corpus sits at a
-    /// median of 33 dB — the two develop pipelines differ in demosaic
-    /// and tone, so this is a smoke test for gross errors, not parity).
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn native_agrees_with_libraw() {
-        let Ok(dir) = std::env::var("SCHIST_RAW_CORPUS") else {
-            return;
-        };
-        if std::env::var("SCHIST_RAW_COMPARE").is_err() {
-            return;
-        }
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if !matches!(
-                    path.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.to_ascii_lowercase())
-                        .as_deref(),
-                    Some("tiff" | "json" | "txt" | "png" | "ppm" | "pgm" | "sh")
-                ) {
-                    out.push(path);
-                }
-            }
-        }
-        let mut files = Vec::new();
-        walk(std::path::Path::new(&dir), &mut files);
-        files.sort();
-        let thumb = |doc: &Document| -> Option<image::RgbaImage> {
-            let rect = doc.canvas_rect();
-            let rgba = schist_compositor::composite_region_rgba8(doc, rect);
-            let img = image::RgbaImage::from_raw(rect.width() as u32, rect.height() as u32, rgba)?;
-            Some(image::imageops::resize(
-                &img,
-                512,
-                512 * img.height() / img.width().max(1),
-                image::imageops::FilterType::Triangle,
-            ))
-        };
-        let mut rows = Vec::new();
-        let (mut declined, mut failed) = (0, Vec::new());
-        for path in &files {
-            let bytes = std::fs::read(path).unwrap();
-            if !RawCodec.probe(&bytes) {
-                continue;
-            }
-            let name = path
-                .strip_prefix(&dir)
-                .unwrap_or(path)
-                .display()
-                .to_string();
-            let started = std::time::Instant::now();
-            let native = native::develop_document(&bytes, false);
-            let native_time = started.elapsed();
-            let started = std::time::Instant::now();
-            let reference = match libraw::develop_document(&bytes) {
-                Err(err) if is_missing_library_error(&err) => return,
-                reference => reference,
-            };
-            let libraw_time = started.elapsed();
-            match (native, reference) {
-                (Ok(a), Ok(b)) => {
-                    let (Some(a), Some(b)) = (thumb(&a), thumb(&b)) else {
-                        continue;
-                    };
-                    // The two decoders crop differently by a few
-                    // pixels (the file's own active area versus
-                    // LibRaw's per-model margins), which is policy, not
-                    // a decoding error: compare the common centre.
-                    // Anything further apart is a real disagreement.
-                    let (w, h) = (a.width().min(b.width()), a.height().min(b.height()));
-                    if a.width().abs_diff(b.width()) * 100 > w
-                        || a.height().abs_diff(b.height()) * 100 > h
-                    {
-                        // Beyond a percent it is a policy difference
-                        // worth reading, not a decode error: Panasonic
-                        // aspect-mode files (we honour the camera's 1:1
-                        // or 16:9 crop, LibRaw shows the whole sensor),
-                        // the Hasselblad backs' active area.
-                        rows.push(format!(
-                            "{name:60} SIZE MISMATCH native {:?} libraw {:?}",
-                            a.dimensions(),
-                            b.dimensions()
-                        ));
-                        continue;
-                    }
-                    let centre = |img: &image::RgbaImage| {
-                        image::imageops::crop_imm(
-                            img,
-                            (img.width() - w) / 2,
-                            (img.height() - h) / 2,
-                            w,
-                            h,
-                        )
-                        .to_image()
-                    };
-                    let (a, b) = (centre(&a), centre(&b));
-                    let mse: f64 = a
-                        .as_raw()
-                        .iter()
-                        .zip(b.as_raw())
-                        .map(|(x, y)| {
-                            let d = *x as f64 - *y as f64;
-                            d * d
-                        })
-                        .sum::<f64>()
-                        / a.as_raw().len() as f64;
-                    let psnr = 10.0 * (255.0f64 * 255.0 / mse.max(1e-9)).log10();
-                    rows.push(format!(
-                        "{name:60} {psnr:5.1} dB   native {:5.2?}  libraw {:5.2?}",
-                        native_time, libraw_time
-                    ));
-                    if psnr < 18.0 {
-                        failed.push(name.clone());
-                    }
-                }
-                (Err(err), _) => {
-                    declined += 1;
-                    rows.push(format!("{name:60} declined: {err:#}"));
-                }
-                (Ok(_), Err(err)) => rows.push(format!("{name:60} native only (LibRaw: {err})")),
-            }
-        }
-        for row in &rows {
-            eprintln!("{row}");
-        }
-        eprintln!(
-            "{} files, {declined} declined by native, {} below 20 dB",
-            rows.len(),
-            failed.len()
-        );
         assert!(
-            failed.is_empty(),
-            "native and LibRaw disagree on: {failed:?}"
+            RawCodec.import(&bytes).is_err(),
+            "half a file should not develop"
         );
     }
 
     /// Every file in `SCHIST_RAW_CORPUS` (a directory of real camera
     /// files) must probe as raw, develop, and yield an upright preview
-    /// when it embeds one. Skipped without the variable or LibRaw.
+    /// when it embeds one. Skipped without the variable.
     #[test]
     fn corpus_sweep() {
         let Ok(dir) = std::env::var("SCHIST_RAW_CORPUS") else {
@@ -780,16 +484,15 @@ pub(crate) mod tests {
                 eprintln!("{}: not probed as raw, skipped", path.display());
                 continue;
             }
-            // A sample with no `.tiff` sidecar is one LibRaw's own
-            // tools could not unpack (Foveon, GoPro, ProRAW...): the
-            // fallback cannot help there, so only files with an oracle
-            // are required to develop.
+            // A sample with no `.tiff` sidecar is one the oracle tools
+            // could not unpack; only files with an oracle are required
+            // to develop here (the crate's own tests cover the rest).
             let oracle = path.with_file_name(format!(
                 "{}.tiff",
                 path.file_name().unwrap().to_string_lossy()
             ));
             if !oracle.exists() {
-                eprintln!("{}: no LibRaw oracle, skipped", path.display());
+                eprintln!("{}: no oracle, skipped", path.display());
                 continue;
             }
             let bytes = std::fs::read(&path).unwrap();
@@ -800,7 +503,7 @@ pub(crate) mod tests {
             );
             let started = std::time::Instant::now();
             let Some(doc) = develop_or_skip(&bytes) else {
-                return;
+                continue;
             };
             let developed = started.elapsed();
             let started = std::time::Instant::now();

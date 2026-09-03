@@ -42,6 +42,9 @@ pub mod meta {
     pub const CROP_TOP_LEFT: u16 = 0x0110;
     /// How much of it is picture, `(height, width)`.
     pub const CROPPED_SIZE: u16 = 0x0111;
+    /// SuperCCD bodies only: the photosite lattice's size, `(height,
+    /// width)`, in column-staggered terms (ExifTool's RawImageSize).
+    pub const RAW_IMAGE_SIZE: u16 = 0x0121;
     /// Four bytes describing how the samples are laid out; see
     /// [`super::Layout`].
     pub const FUJI_LAYOUT: u16 = 0x0130;
@@ -179,25 +182,162 @@ fn words(data: &[u8], n: usize) -> Option<Vec<u16>> {
 
 /// What tag 0x0130 says about the sample arrangement.
 ///
-/// The first byte's top bit is set on the SuperCCD bodies that write
-/// their two half-height fields interleaved; the second byte's bit 3
-/// is *clear* on the ones whose octagonal photosites are recorded on a
-/// grid turned 45 degrees, which is what makes their stored frame
-/// nearly twice as wide as the picture and turns the developed image
-/// into a diamond. Both need geometry this crate does not model, so
-/// both are refused rather than decoded into a smeared frame.
+/// The second byte's bit 3 is *clear* on the SuperCCD bodies, whose
+/// octagonal photosites sit on a square lattice turned 45 degrees and
+/// are stored as an axis-aligned rectangle nearly twice as wide as the
+/// picture (see [`Cfa::SuperCcd`]); it is set on every X-Trans and
+/// Bayer body, where the samples are the picture as stored. The first
+/// byte's top bit says which axis of that rectangle carries the
+/// lattice's half-pitch stagger: set, each stored row is one lattice
+/// row (the FinePix bodies); clear, each stored column is one lattice
+/// column (the DBP back for the GX680). It is not, as this module
+/// once read it, a mark of two interleaved fields.
 struct Layout {
-    interleaved: bool,
+    row_staggered: bool,
     rotated: bool,
 }
 
 impl Layout {
     fn parse(data: &[u8]) -> Layout {
         Layout {
-            interleaved: data.first().is_some_and(|b| b & 0x80 != 0),
+            row_staggered: data.first().is_some_and(|b| b & 0x80 != 0),
             rotated: data.get(1).is_some_and(|b| b & 8 == 0),
         }
     }
+}
+
+/// The DBP for GX680, Fujifilm's digital back for the GX680 camera,
+/// as its RAF header names it. The only column-staggered SuperCCD
+/// body seen, and the one whose frame the file describes least: the
+/// margins, the 90-degree turn and the tiling below are keyed on this
+/// name.
+const DBP_FOR_GX680: &str = "DBP for GX680";
+
+/// The DBP writes its 16-bit samples big-endian, unlike every other
+/// RAF, and as eight vertical tiles laid end to end: all of tile 0's
+/// rows, then tile 1's, each row `width / 8` samples.
+const DBP_TILES: usize = 8;
+
+/// A SuperCCD frame's geometry, from which [`Cfa::super_ccd`] and the
+/// crop follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuperCcd {
+    row_staggered: bool,
+    /// The photosites' rectangle inside the stored frame.
+    active: Rect,
+    /// Photosites along one stagger line.
+    fuji_width: usize,
+}
+
+/// The active rectangle and fuji width of a rotated body's frame.
+///
+/// For the FinePix bodies tag 0x0121 gives the lattice as `(height,
+/// width)` in column-staggered terms — a lattice row per stored row
+/// pair — so a row-staggered frame halves the width and doubles the
+/// height to get the rectangle it actually stores. The margins centre
+/// that rectangle in the frame, rounded down to an even number so the
+/// filter phase is preserved. The DBP's tag (7680 x 2720) describes
+/// nothing the frame holds; its 32-column and 8-row margins are a
+/// fact about the body. In both cases the photosites used are the
+/// rows from the top margin to its mirror at the bottom, and exactly
+/// one stagger line of columns.
+fn super_ccd_geometry(
+    layout: &Layout,
+    image_size: Option<&[u8]>,
+    width: usize,
+    height: usize,
+    dbp: bool,
+) -> Result<SuperCcd> {
+    let (active_w, left, top) = if dbp {
+        (width.saturating_sub(64), 32, 8)
+    } else {
+        let size = image_size
+            .and_then(|data| words(data, 2))
+            .ok_or_else(|| Error::Corrupt("SuperCCD frame without its lattice size".into()))?;
+        let (lattice_h, lattice_w) = (size[0] as usize, size[1] as usize);
+        let (active_w, active_h) = if layout.row_staggered {
+            (lattice_w / 2, lattice_h * 2)
+        } else {
+            (lattice_w, lattice_h)
+        };
+        if active_w == 0 || active_h == 0 || active_w > width || active_h > height {
+            return Err(Error::Corrupt(format!(
+                "SuperCCD lattice of {active_w}x{active_h} in a {width}x{height} frame"
+            )));
+        }
+        let left = (width - active_w) / 4 * 2;
+        let top = (height - active_h) / 4 * 2;
+        (active_w, left, top)
+    };
+    let stagger = usize::from(layout.row_staggered);
+    let fuji_width = active_w >> (1 - stagger);
+    let line = fuji_width << (1 - stagger);
+    let rows = height.saturating_sub(2 * top);
+    if fuji_width == 0 || rows == 0 || left + line > width {
+        return Err(Error::Corrupt(format!(
+            "SuperCCD frame of {width}x{height} holds no lattice"
+        )));
+    }
+    Ok(SuperCcd {
+        row_staggered: layout.row_staggered,
+        active: Rect {
+            x: left,
+            y: top,
+            width: line,
+            height: rows,
+        },
+        fuji_width,
+    })
+}
+
+/// The sheared frame's 2x2 pattern for a fuji width: with an even
+/// count of photosites along a stagger line the frame reads G B over
+/// R G from its origin, with an odd one R G over G B. Both corpus
+/// bodies are even.
+fn super_ccd_bayer(fuji_width: usize) -> [CfaColor; 4] {
+    if fuji_width.is_multiple_of(2) {
+        [
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Red,
+            CfaColor::Green,
+        ]
+    } else {
+        [
+            CfaColor::Red,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+        ]
+    }
+}
+
+/// The DBP's tiled, big-endian strip stitched into one frame: tile
+/// `t`'s row `y` lands at columns `t * tile .. (t + 1) * tile` of row
+/// `y`. A strip too short for a tile leaves it black.
+fn unpack_words16_be_tiles(
+    strip: &[u8],
+    width: usize,
+    height: usize,
+    tiles: usize,
+) -> Result<Vec<u16>> {
+    if tiles == 0 || !width.is_multiple_of(tiles) {
+        return Err(Error::Corrupt(format!(
+            "a {width}-sample row does not split into {tiles} tiles"
+        )));
+    }
+    let tile = width / tiles;
+    let mut out = vec![0u16; width * height];
+    out.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+        for (t, span) in row.chunks_exact_mut(tile).enumerate() {
+            let start = (t * height + y) * tile * 2;
+            let bytes = strip.get(start..start + tile * 2).unwrap_or(&[]);
+            for (sample, word) in span.iter_mut().zip(bytes.as_chunks::<2>().0) {
+                *sample = u16::from_be_bytes(*word);
+            }
+        }
+    });
+    Ok(out)
 }
 
 /// The 6x6 X-Trans array from tag 0x0131.
@@ -517,25 +657,13 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     };
 
     let layout = meta(meta::FUJI_LAYOUT).map(Layout::parse);
-    if let Some(layout) = &layout {
-        if layout.rotated || layout.interleaved {
-            // SuperCCD: the samples are on a grid rotated 45 degrees
-            // (and on some bodies split into two interleaved fields),
-            // so no colour filter array describes the stored frame and
-            // the picture only appears after a shear this crate has no
-            // place to express.
-            return Err(Error::Unsupported(format!(
-                "RAF: SuperCCD sensor layout ({}{}) on the {}",
-                if layout.rotated { "45-degree grid" } else { "" },
-                if layout.interleaved {
-                    ", interleaved fields"
-                } else {
-                    ""
-                },
-                header.model
-            )));
-        }
-    }
+    // SuperCCD: the samples are photosites of a grid turned 45
+    // degrees. The stored rectangle decodes like any uncompressed
+    // frame; what differs is the filter array (a `Cfa::SuperCcd`,
+    // which carries the geometry `develop` needs to un-shear it), the
+    // levels and the crop, all set below.
+    let super_ccd = layout.as_ref().filter(|layout| layout.rotated);
+    let dbp = super_ccd.is_some() && header.model == DBP_FOR_GX680;
 
     let cfa = match meta(meta::XTRANS_LAYOUT) {
         Some(data) => xtrans_cfa(data)?,
@@ -575,6 +703,7 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
         None => header.cfa,
     };
     let data = match storage(strip, pixels, bits, strip.len()) {
+        Storage::Words16 if dbp => unpack_words16_be_tiles(strip, width, height, DBP_TILES)?,
         Storage::Words16 => unpack_words16(strip, pixels),
         Storage::PackedLsb(bits) => unpack_packed(strip, width, height, bits, false),
         Storage::PackedMsb32(bits) => unpack_packed(strip, width, height, bits, true),
@@ -588,14 +717,48 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     };
 
     let mut raw = RawImage::new(Format::Raf, width, height, 1, RawData::U16(data), cfa);
-    raw.white_level = ((1u32 << bits) - 1) as f32;
-    if let Some(black) = frame.as_ref().and_then(|frame| black_levels(&frame.black)) {
-        raw.black_levels = black;
-    } else if let Some(black) = meta(meta::BLACK_LEVELS)
-        .and_then(|data| words(data, 4))
-        .and_then(|values| grgb_by_position(&raw.cfa, &values))
-    {
-        raw.black_levels = black;
+    if let Some(layout) = super_ccd {
+        let geometry = super_ccd_geometry(layout, meta(meta::RAW_IMAGE_SIZE), width, height, dbp)?;
+        raw.cfa = Cfa::super_ccd(
+            geometry.row_staggered,
+            geometry.fuji_width,
+            super_ccd_bayer(geometry.fuji_width),
+            (geometry.active.x, geometry.active.y),
+        );
+        // The inset-crop tags (0x0110/0x0111) describe the camera's
+        // JPEG framing on the lattice, not anything in the stored
+        // rectangle; the picture is the whole active rectangle.
+        raw.crop = geometry.active;
+        // Neither body records a saturation level. The DBP's samples
+        // are 12-bit (its frame clips at 4095); the FinePix bodies'
+        // are 14-bit, and 0x3E00 is the level the SuperCCD note gives
+        // for them (the reference's table value), used as it stands —
+        // `develop` does not lower it to the frame's brightest sample
+        // as the reference does.
+        raw.white_level = if dbp { 4095.0 } else { 15872.0 };
+        // Tag 0x4000 names the colours G, R, G2, B; the stored
+        // rectangle has no 2x2 to spread them over, so they are kept
+        // per colour in `wb_coeffs` order (R, G, B, G2).
+        if let Some(v) = meta(meta::BLACK_LEVELS).and_then(|data| words(data, 4)) {
+            raw.black_levels = [v[1] as f32, v[0] as f32, v[3] as f32, v[2] as f32];
+        }
+    } else {
+        raw.white_level = ((1u32 << bits) - 1) as f32;
+        if let Some(black) = frame.as_ref().and_then(|frame| black_levels(&frame.black)) {
+            raw.black_levels = black;
+        } else if let Some(black) = meta(meta::BLACK_LEVELS)
+            .and_then(|data| words(data, 4))
+            .and_then(|values| grgb_by_position(&raw.cfa, &values))
+        {
+            raw.black_levels = black;
+        }
+        raw.crop = crop(
+            &raw.cfa,
+            meta(meta::CROP_TOP_LEFT),
+            meta(meta::CROPPED_SIZE),
+            width,
+            height,
+        );
     }
 
     // White balance: three values on the newer bodies, four in the
@@ -617,14 +780,6 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
         }
     }
 
-    raw.crop = crop(
-        &raw.cfa,
-        meta(meta::CROP_TOP_LEFT),
-        meta(meta::CROPPED_SIZE),
-        width,
-        height,
-    );
-
     let exif = jpeg_exif(bytes, header.jpeg_at, header.jpeg);
     if let Some(exif) = &exif {
         raw.orientation = common::orientation(exif);
@@ -633,6 +788,13 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
         if !model.is_empty() {
             raw.set_camera(&make, &model);
         }
+    }
+    if dbp {
+        // The back's Exif says upright, but its lattice is stored
+        // turned: the picture is portrait as decoded and lands
+        // landscape after a quarter turn clockwise, which is how the
+        // reference and the camera's own JPEG show it.
+        raw.orientation = crate::Orientation::Rotate90CW;
     }
     if raw.model.is_empty() {
         raw.set_camera("FUJIFILM", &header.model);
@@ -780,14 +942,111 @@ mod tests {
 
     #[test]
     fn the_layout_byte_names_superccd() {
-        // X-Trans and the modern Bayer bodies: neither bit set.
+        // X-Trans and the modern Bayer bodies: bit 3 of byte 1 set,
+        // nothing staggered.
         assert!(!Layout::parse(&[0x0c, 0x0c, 0x0c, 0x0c]).rotated);
-        assert!(!Layout::parse(&[0x0a, 0x0b, 0x09, 0x08]).interleaved);
-        // The S9600's interleaved, rotated SuperCCD, and the GX680
-        // digital back's rotated-only one.
-        assert!(Layout::parse(&[0x83, 0x82, 0x81, 0x80]).interleaved);
-        assert!(Layout::parse(&[0x83, 0x82, 0x81, 0x80]).rotated);
-        assert!(Layout::parse(&[0x00, 0x01, 0x02, 0x01]).rotated);
+        assert!(!Layout::parse(&[0x0a, 0x0b, 0x09, 0x08]).row_staggered);
+        // The S9600's row-staggered SuperCCD, and the GX680 digital
+        // back's column-staggered one.
+        let s9600 = Layout::parse(&[0x83, 0x82, 0x81, 0x80]);
+        assert!(s9600.rotated && s9600.row_staggered);
+        let gx680 = Layout::parse(&[0x00, 0x01, 0x02, 0x01]);
+        assert!(gx680.rotated && !gx680.row_staggered);
+        // Too short to say anything is not a SuperCCD.
+        assert!(!Layout::parse(&[0x83]).rotated);
+    }
+
+    /// The two bodies' geometry, as the SuperCCD note works it out.
+    #[test]
+    fn superccd_geometry_of_both_bodies() {
+        let s9600 = Layout::parse(&[0x83, 0x82, 0x81, 0x80]);
+        // Tag 0x0121 = (1844, 4896): halved and doubled for the
+        // row-staggered store, centred with even margins.
+        let g =
+            super_ccd_geometry(&s9600, Some(&[0x07, 0x34, 0x13, 0x20]), 2512, 3688, false).unwrap();
+        assert_eq!(
+            g,
+            SuperCcd {
+                row_staggered: true,
+                active: Rect {
+                    x: 32,
+                    y: 0,
+                    width: 2448,
+                    height: 3688
+                },
+                fuji_width: 2448,
+            }
+        );
+        let gx680 = Layout::parse(&[0x00, 0x01, 0x02, 0x01]);
+        let g =
+            super_ccd_geometry(&gx680, Some(&[0x0a, 0xa0, 0x1e, 0x00]), 5504, 3856, true).unwrap();
+        assert_eq!(
+            g,
+            SuperCcd {
+                row_staggered: false,
+                active: Rect {
+                    x: 32,
+                    y: 8,
+                    width: 5440,
+                    height: 3840
+                },
+                fuji_width: 2720,
+            }
+        );
+        // A lattice the frame cannot hold, a missing tag, and a frame
+        // too small for the DBP's margins are all refused.
+        assert!(matches!(
+            super_ccd_geometry(&s9600, Some(&[0x07, 0x34, 0x13, 0x20]), 2000, 3688, false),
+            Err(Error::Corrupt(_))
+        ));
+        assert!(matches!(
+            super_ccd_geometry(&s9600, None, 2512, 3688, false),
+            Err(Error::Corrupt(_))
+        ));
+        assert!(matches!(
+            super_ccd_geometry(&gx680, None, 64, 16, true),
+            Err(Error::Corrupt(_))
+        ));
+        assert!(matches!(
+            super_ccd_geometry(&gx680, None, 72, 20, true),
+            Ok(SuperCcd { fuji_width: 4, .. })
+        ));
+    }
+
+    /// The sheared frame's pattern follows the fuji width's parity,
+    /// and the array built from it reads back the same pattern at the
+    /// active origin.
+    #[test]
+    fn superccd_pattern_follows_the_fuji_width() {
+        let Cfa::Bayer(gbrg) = Cfa::GBRG else {
+            unreachable!()
+        };
+        let Cfa::Bayer(rggb) = Cfa::RGGB else {
+            unreachable!()
+        };
+        assert_eq!(super_ccd_bayer(2448), gbrg);
+        assert_eq!(super_ccd_bayer(2447), rggb);
+        let cfa = Cfa::super_ccd(true, 2448, super_ccd_bayer(2448), (32, 0));
+        assert_eq!(cfa.super_ccd_bayer((32, 0)), Some(gbrg));
+    }
+
+    /// The DBP's strip: big-endian words, tile by tile.
+    #[test]
+    fn the_dbp_strip_is_tiled_and_big_endian() {
+        // A 4x2 frame in two tiles of 2 columns: tile 0 holds rows 0
+        // and 1 of columns 0-1, tile 1 the same rows of columns 2-3.
+        let strip: Vec<u8> = [1u16, 2, 3, 4, 5, 6, 7, 8]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let out = unpack_words16_be_tiles(&strip, 4, 2, 2).unwrap();
+        assert_eq!(out, [1, 2, 5, 6, 3, 4, 7, 8]);
+        // A short strip leaves the missing tile black, and a width
+        // that does not split is refused.
+        let out = unpack_words16_be_tiles(&strip[..8], 4, 2, 2).unwrap();
+        assert_eq!(out, [1, 2, 0, 0, 3, 4, 0, 0]);
+        assert!(unpack_words16_be_tiles(&strip, 5, 2, 2).is_err());
+        assert!(unpack_words16_be_tiles(&strip, 4, 2, 0).is_err());
     }
 
     #[test]
@@ -908,14 +1167,26 @@ mod corpus {
     use std::path::{Path, PathBuf};
 
     /// Files this decoder knowingly refuses, and why. A corpus file
-    /// that fails for any other reason is a test failure.
-    const UNSUPPORTED: &[(&str, &str)] = &[
-        // SuperCCD: samples on a grid turned 45 degrees, so the frame
-        // is nearly twice as wide as the picture and no CFA describes
-        // it. LibRaw shears these into a diamond and crops; this crate
-        // has nowhere to put that.
-        ("FinePix_S9600", "SuperCCD"),
-        ("DBP_for_GX680", "SuperCCD"),
+    /// that fails for any other reason is a test failure. Empty since
+    /// the SuperCCD bodies gained `Cfa::SuperCcd`.
+    const UNSUPPORTED: &[(&str, &str)] = &[];
+
+    /// Files whose as-shot multipliers the oracle does not take from
+    /// the file, and why this decoder's differ.
+    const WB_NOT_FROM_THE_FILE: &[(&str, &str)] = &[
+        // The DBP's 0x2FF0 record (and every preset beside it) reads
+        // G R G2 B = 105 258 105 179, which ExifTool reports as is;
+        // the oracle prints 196 105 153 105, every preset scaled by
+        // the same factors of about 0.76 on red and 6/7 on blue, and
+        // nothing in the file yields those. The oracle's values do
+        // neutralise the scene (the file's give a strong magenta
+        // cast), so they are right and the file's are in some other
+        // gain domain, but a rule that cannot be read from the file
+        // is not one this decoder can apply.
+        (
+            "DBP_for_GX680",
+            "as-shot multipliers scaled by a rule the file does not carry",
+        ),
     ];
 
     fn corpus_files() -> Vec<PathBuf> {
@@ -1068,8 +1339,15 @@ mod corpus {
             // metadata block means the APP1 walk missed it.
             assert!(raw.metadata.iso.is_some(), "{}: no ISO", path.display());
             assert!(
-                raw.metadata.exposure_time.is_some() && raw.metadata.f_number.is_some(),
+                raw.metadata.exposure_time.is_some(),
                 "{}: no exposure",
+                path.display()
+            );
+            // The DBP is a back on a manual camera with no lens
+            // coupling: its Exif has an aperture of 0, which is none.
+            assert!(
+                raw.metadata.f_number.is_some() || raw.model == DBP_FOR_GX680,
+                "{}: no aperture",
                 path.display()
             );
             assert!(
@@ -1091,7 +1369,12 @@ mod corpus {
                     path.display()
                 );
             }
-            if let Some(inset) = oracle.inset() {
+            let super_ccd = matches!(raw.cfa, Cfa::SuperCcd { .. });
+            // A SuperCCD's "Raw inset" is the camera's JPEG framing
+            // on the lattice, which the oracle parses but never
+            // applies; the crop it does use is the active rectangle,
+            // checked in `superccd_worked_values` below.
+            if let Some(inset) = oracle.inset().filter(|_| !super_ccd) {
                 assert_eq!(raw.crop, inset, "{}: crop", path.display());
             }
             if let Some(flip) = oracle.flip() {
@@ -1104,17 +1387,34 @@ mod corpus {
                 assert_eq!(raw.orientation, expect, "{}: orientation", path.display());
             }
             if let Some(pattern) = oracle.filter_pattern() {
+                // For a SuperCCD the oracle prints the *sheared*
+                // frame's pattern, the one the interpolation sees.
+                let sheared = raw.cfa.super_ccd_bayer((raw.crop.x, raw.crop.y));
                 let mine: String = (0..16)
-                    .map(|i| match raw.cfa.color_at(i & 1, i >> 1) {
-                        Some(CfaColor::Red) => 'R',
-                        Some(CfaColor::Green) | Some(CfaColor::Green2) => 'G',
-                        Some(CfaColor::Blue) => 'B',
-                        _ => '?',
+                    .map(|i| {
+                        let color = match &sheared {
+                            Some(bayer) => Some(bayer[(i >> 1 & 1) * 2 + (i & 1)]),
+                            None => raw.cfa.color_at(i & 1, i >> 1),
+                        };
+                        match color {
+                            Some(CfaColor::Red) => 'R',
+                            Some(CfaColor::Green) | Some(CfaColor::Green2) => 'G',
+                            Some(CfaColor::Blue) => 'B',
+                            _ => '?',
+                        }
                     })
                     .collect();
                 assert_eq!(mine, pattern, "{}: filter pattern", path.display());
             }
-            if let Some(shot) = oracle.as_shot() {
+            let wb_elsewhere = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| {
+                    WB_NOT_FROM_THE_FILE
+                        .iter()
+                        .any(|(stem, _)| name.contains(stem))
+                });
+            if let Some(shot) = oracle.as_shot().filter(|_| !wb_elsewhere) {
                 // LibRaw prints the same R G B G2 multipliers this
                 // crate stores, unnormalised, with green as the unit.
                 let expect = [shot[0] / shot[1], 1.0, shot[2] / shot[1], 1.0];
@@ -1194,6 +1494,168 @@ mod corpus {
             );
         }
         assert!(checked > 0, "the corpus held no decodable RAF");
+    }
+
+    /// The SuperCCD note's worked values for the two rotated bodies:
+    /// geometry, stored samples and their colours and cells, levels
+    /// and the scaled values the reference feeds its interpolator.
+    #[test]
+    fn superccd_worked_values() {
+        use crate::{super_ccd_cell, Orientation};
+        /// (x, y) in the active rectangle, sample, colour, cell, the
+        /// value after black, multiplier and 65535/white.
+        type Sample = ((usize, usize), u16, CfaColor, (i64, i64), u16);
+        struct Body {
+            stem: &'static str,
+            row_staggered: bool,
+            fuji_width: usize,
+            crop: Rect,
+            white: f32,
+            effective_white: f32,
+            black: [f32; 4],
+            wb: [f32; 4],
+            orientation: Orientation,
+            samples: &'static [Sample],
+        }
+        let bodies = [
+            Body {
+                stem: "FinePix_S9600",
+                row_staggered: true,
+                fuji_width: 2448,
+                crop: Rect {
+                    x: 32,
+                    y: 0,
+                    width: 2448,
+                    height: 3688,
+                },
+                white: 15872.0,
+                effective_white: 15604.0,
+                black: [0.0; 4],
+                wb: [494.0 / 320.0, 1.0, 384.0 / 320.0, 1.0],
+                orientation: Orientation::Normal,
+                samples: &[
+                    ((1000, 1000), 5855, CfaColor::Red, (1947, 1500), 37961),
+                    ((1001, 1000), 5327, CfaColor::Blue, (1946, 1501), 26847),
+                    ((1002, 1000), 5400, CfaColor::Red, (1945, 1502), 35011),
+                    ((1000, 1001), 7206, CfaColor::Green, (1947, 1501), 30264),
+                    ((1001, 1001), 6639, CfaColor::Green, (1946, 1502), 27883),
+                    ((1001, 1002), 5229, CfaColor::Red, (1947, 1502), 33902),
+                ],
+            },
+            Body {
+                stem: "DBP_for_GX680",
+                row_staggered: false,
+                fuji_width: 2720,
+                crop: Rect {
+                    x: 32,
+                    y: 8,
+                    width: 5440,
+                    height: 3840,
+                },
+                white: 4095.0,
+                effective_white: 3977.0,
+                black: [118.0, 129.0, 118.0, 129.0],
+                // What the oracle prints (196 105 153 105) is not
+                // what the file records; see WB_NOT_FROM_THE_FILE.
+                wb: [258.0 / 105.0, 1.0, 179.0 / 105.0, 1.0],
+                orientation: Orientation::Rotate90CW,
+                samples: &[
+                    ((2000, 1000), 195, CfaColor::Red, (2719, 2000), 2368),
+                    ((2001, 1000), 296, CfaColor::Green, (2719, 2001), 2751),
+                    ((2002, 1000), 261, CfaColor::Blue, (2718, 2001), 3433),
+                    ((2000, 1001), 266, CfaColor::Blue, (2720, 2001), 3553),
+                    ((2001, 1001), 312, CfaColor::Green, (2720, 2002), 3015),
+                    ((2000, 1002), 201, CfaColor::Red, (2721, 2002), 2553),
+                ],
+            },
+        ];
+        // The reference's multipliers, for the scaled column.
+        let reference_wb = [
+            [494.0 / 320.0, 1.0, 384.0 / 320.0, 1.0],
+            [196.0 / 105.0, 1.0, 153.0 / 105.0, 1.0],
+        ];
+        let files = corpus_files();
+        for (body, reference_wb) in bodies.iter().zip(reference_wb) {
+            let Some(path) = files
+                .iter()
+                .find(|p| p.to_str().is_some_and(|p| p.contains(body.stem)))
+            else {
+                continue;
+            };
+            let bytes = std::fs::read(path).expect("corpus file");
+            let raw = decode(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let Cfa::SuperCcd {
+                row_staggered,
+                fuji_width,
+                ..
+            } = &raw.cfa
+            else {
+                panic!("{}: not decoded as SuperCCD: {:?}", path.display(), raw.cfa)
+            };
+            assert_eq!(
+                (*row_staggered, *fuji_width),
+                (body.row_staggered, body.fuji_width),
+                "{}",
+                body.stem
+            );
+            assert_eq!(raw.crop, body.crop, "{}: active rectangle", body.stem);
+            assert_eq!(raw.white_level, body.white, "{}: white", body.stem);
+            assert_eq!(raw.black_levels, body.black, "{}: black", body.stem);
+            for (mine, want) in raw.wb_coeffs.iter().zip(body.wb) {
+                assert!(
+                    (mine - want).abs() < 1e-5,
+                    "{}: wb {:?}",
+                    body.stem,
+                    raw.wb_coeffs
+                );
+            }
+            assert_eq!(raw.orientation, body.orientation, "{}", body.stem);
+            let RawData::U16(data) = &raw.data else {
+                unreachable!()
+            };
+            for ((x, y), value, color, cell, scaled) in body.samples {
+                let (sx, sy) = (raw.crop.x + x, raw.crop.y + y);
+                assert_eq!(
+                    data[sy * raw.width + sx],
+                    *value,
+                    "{}: sample ({x}, {y})",
+                    body.stem
+                );
+                assert_eq!(
+                    raw.cfa.color_at(sx, sy),
+                    Some(*color),
+                    "{}: colour ({x}, {y})",
+                    body.stem
+                );
+                assert_eq!(
+                    super_ccd_cell(*row_staggered, *fuji_width, *x, *y),
+                    *cell,
+                    "{}: cell ({x}, {y})",
+                    body.stem
+                );
+                let channel = match color {
+                    CfaColor::Red => 0,
+                    CfaColor::Green => 1,
+                    CfaColor::Blue => 2,
+                    _ => 3,
+                };
+                // The note's white is already less the common black
+                // (4095 - 118 = 3977 on the DBP).
+                let v = (*value as f64 - body.black[channel] as f64).max(0.0)
+                    * reference_wb[channel]
+                    * 65535.0
+                    / body.effective_white as f64;
+                assert_eq!(v as u16, *scaled, "{}: scaled ({x}, {y}) = {v}", body.stem);
+            }
+            // The padding is not the picture: the S9600 fills its
+            // margins with a constant, the DBP with masked black.
+            let padding = data[1000 * raw.width];
+            if body.row_staggered {
+                assert_eq!(padding, 8192, "{}: fill value", body.stem);
+            } else {
+                assert!(padding < 1200, "{}: masked border {padding}", body.stem);
+            }
+        }
     }
 
     #[test]

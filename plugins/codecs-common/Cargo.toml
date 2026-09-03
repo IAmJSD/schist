@@ -15,14 +15,14 @@ sha2 = "0.10"
 schist-color.workspace = true
 schist-colormgmt.workspace = true
 schist-compositor.workspace = true
+# Camera raws are pure Rust and use the same implementation on desktop
+# and wasm.
+schist-codec-raw.workspace = true
 
 # HEIC rides on a dlopen'd libheif; a browser has neither dlopen nor a
 # libheif to open, so the codec (and its loader) stay off the wasm build.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading.workspace = true
-# The pure-Rust raw decoder; LibRaw stays as the fallback for what it
-# does not cover yet.
-schist-codec-raw.workspace = true
 
 [dev-dependencies]
 crc32fast.workspace = true

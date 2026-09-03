@@ -1,6 +1,6 @@
 //! Common raster format codecs (PNG, JPEG, WebP, TIFF) via the `image`
 //! crate, HEIC/HEIF via the system's libheif, camera raws via the
-//! system's LibRaw, wrapped as `CodecPlugin`s, plus layered Affinity
+//! pure-Rust `schist-codec-raw` crate, wrapped as `CodecPlugin`s, plus layered Affinity
 //! import/export. For the simple formats, import produces a single
 //! "Background" layer and export flattens through the compositor.
 
@@ -9,7 +9,6 @@ use anyhow::Context as _;
 #[cfg(not(target_arch = "wasm32"))]
 pub use heif::HeifCodec;
 use image::ImageFormat;
-#[cfg(not(target_arch = "wasm32"))]
 pub use raw::RawCodec;
 use schist_color::Depth;
 use schist_core::{blit_rgba8, blit_rgba_f32, Document, IntRect, Layer};
@@ -18,7 +17,6 @@ use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegist
 mod affinity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod heif;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod raw;
 
 /// A single-"Background"-layer document from decoded RGBA8 pixels.
@@ -403,7 +401,6 @@ impl PluginManifest for CommonCodecsPlugin {
         // containers, and probing goes in registration order. The raw
         // probe only claims files holding sensor data, so an ordinary
         // TIFF still falls through to its own codec.
-        #[cfg(not(target_arch = "wasm32"))]
         registry.register_codec(Box::new(RawCodec));
         registry.register_codec(Box::new(TiffCodec));
         #[cfg(not(target_arch = "wasm32"))]

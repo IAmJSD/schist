@@ -75,14 +75,12 @@ and camera raw import: NEF, ARW, CR2, DNG, RAF, ORF, RW2, PEF, SRW and the
 rest, developed with the camera's white balance to 16-bit sRGB. Raws
 decode through Schist's own clean-room `schist-codec-raw` crate (pure
 Rust, written from the public specifications and verified sample for
-sample against LibRaw across some 250 camera files), which covers most
-bodies, Canon's CR3 and Fuji's compressed RAF, Sigma's Foveon and
-GoPro's VC-5 included; what it still declines — a couple of ancient
-Sigma and Fuji sensors, Nikon's licensed High Efficiency NEF, and
-cameras with no colour matrix in its table yet —
-falls back to the system's LibRaw, loaded at runtime (`brew install
-libraw`, or the distro's package); the browser build, which cannot load
-one, refuses those few files and opens everything else. HEIC decodes through libheif the
+sample against LibRaw across some 250 camera files), covering every
+vendor's codecs including Canon's CR3 and sRAW, Fuji's compressed RAF and
+SuperCCD, Sigma's Foveon and GoPro's VC-5; nothing links at build time
+and there is no fallback library to install, on the desktop or in the
+browser. The one thing it refuses is Nikon's licensed High Efficiency
+NEF, which no decoder reads without the vendor's SDK. HEIC decodes through libheif the
 same way: the system's copy if installed, otherwise Schist offers to
 download a hash-pinned, decode-only build (with its LGPL license texts)
 from [libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) —
