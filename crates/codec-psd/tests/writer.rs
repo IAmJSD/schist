@@ -277,6 +277,108 @@ fn psd_keeps_u32_lengths_for_the_same_keys() {
 }
 
 #[test]
+fn a_converted_profile_replaces_the_preserved_one() {
+    // Convert/Assign Profile rewrite `doc.icc_profile` while the resource
+    // preserved from the source file still describes the old space. The
+    // writer re-emitted that one and suppressed the new tag, so converted
+    // pixels came back tagged with the profile they were converted away
+    // from.
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "l",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [1, 2, 3, 255],
+        Depth::Eight,
+    ));
+    // A file that arrived carrying one profile...
+    doc.preserved_resources.push(PreservedResource {
+        id: 0x040F,
+        name: Vec::new(),
+        data: b"OLD-PROFILE-BYTES".to_vec(),
+    });
+    // ...and was then converted to another.
+    doc.icc_profile = Some(b"NEW-PROFILE-BYTES".to_vec());
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert_eq!(
+        back.icc_profile.as_deref(),
+        Some(b"NEW-PROFILE-BYTES".as_slice()),
+        "the document's own profile must win"
+    );
+    let iccs = back
+        .preserved_resources
+        .iter()
+        .filter(|r| r.id == 0x040F)
+        .count();
+    assert!(iccs <= 1, "the stale profile must not be written alongside");
+}
+
+#[test]
+fn an_untagged_document_keeps_a_preserved_profile() {
+    // The other direction: with no profile of its own, dropping the
+    // preserved resource would lose the file's colour space outright.
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "l",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [1, 2, 3, 255],
+        Depth::Eight,
+    ));
+    doc.preserved_resources.push(PreservedResource {
+        id: 0x040F,
+        name: Vec::new(),
+        data: b"ONLY-PROFILE".to_vec(),
+    });
+    doc.icc_profile = None;
+
+    let back = read_psd(&write_psd(&doc).unwrap()).unwrap();
+    assert_eq!(
+        back.icc_profile.as_deref(),
+        Some(b"ONLY-PROFILE".as_slice()),
+        "the preserved profile must survive"
+    );
+}
+
+#[test]
+fn a_round_trip_leaves_the_resource_section_where_it_was() {
+    // The reader always mirrors ICC into `doc.icc_profile`, so the
+    // substitution above fires on every round trip. Appending the tag at
+    // the end instead of writing it in the preserved block's own place
+    // rewrote the resource layout of a file nothing had changed.
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "l",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [1, 2, 3, 255],
+        Depth::Eight,
+    ));
+    doc.preserved_resources.push(PreservedResource {
+        id: 0x040F,
+        name: Vec::new(),
+        data: b"THE-PROFILE".to_vec(),
+    });
+    doc.preserved_resources.push(PreservedResource {
+        id: 0x0421,
+        name: Vec::new(),
+        data: b"after-the-profile".to_vec(),
+    });
+    doc.icc_profile = Some(b"THE-PROFILE".to_vec());
+
+    let once = write_psd(&doc).unwrap();
+    let twice = write_psd(&read_psd(&once).unwrap()).unwrap();
+    assert_eq!(once, twice, "saving again moved bytes around");
+
+    let back = read_psd(&once).unwrap();
+    let ids: Vec<u16> = back.preserved_resources.iter().map(|r| r.id).collect();
+    let icc = ids.iter().position(|id| *id == 0x040F).expect("icc kept");
+    let after = ids
+        .iter()
+        .position(|id| *id == 0x0421)
+        .expect("the block after it kept");
+    assert!(icc < after, "the profile moved to the end: {ids:?}");
+}
+
+#[test]
 fn an_adjustment_layer_made_in_schist_survives_a_save() {
     // The critical one: adjustment layers created in the app carry their
     // settings only in `params_json`. With no encoder the writer emitted

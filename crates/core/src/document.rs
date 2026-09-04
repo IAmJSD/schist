@@ -490,6 +490,19 @@ impl Document {
                 self.selection = (**target).clone();
                 self.revision += 1;
             }
+            EditOp::IccProfileSet { before, after } => {
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                self.icc_profile = target.clone();
+                // The profile decides what every pixel means, so the whole
+                // canvas has to repaint. Without this the restored pixels
+                // kept rendering through the transform built for the other
+                // profile, and a pure Assign did not repaint at all.
+                self.damage_all();
+            }
             EditOp::ColorModeSet { before, after } => {
                 self.mode = if dir == Direction::Undo {
                     *before
@@ -914,6 +927,24 @@ impl<'a> EditBuilder<'a> {
                 after: mask.map(Box::new),
             });
         }
+    }
+
+    /// Set the document's embedded ICC profile as part of this edit.
+    ///
+    /// Assign and Convert to Profile set it outside the edit, so undo
+    /// restored the pixels but left the new tag in place: the old numbers
+    /// were then interpreted under the wrong profile, which is worse than
+    /// either state on its own.
+    pub fn set_icc_profile(&mut self, profile: Option<Vec<u8>>) {
+        let before = self.doc.icc_profile.clone();
+        if before == profile {
+            return;
+        }
+        self.doc.icc_profile = profile.clone();
+        self.ops.push(EditOp::IccProfileSet {
+            before,
+            after: profile,
+        });
     }
 
     /// Change the document's colour mode as part of this edit.
@@ -1402,6 +1433,64 @@ mod tests {
         doc.damage_all();
         assert!(doc.revision > 0, "repaint was requested");
         assert!(!doc.dirty, "but nothing was actually changed");
+    }
+
+    #[test]
+    fn the_icc_profile_undoes_with_the_pixels() {
+        // Convert to Profile rewrites the pixels *and* the tag. Setting
+        // the tag outside the edit meant undo restored the old numbers
+        // while leaving the new profile on them, which reads as a
+        // different colour than either state.
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        doc.icc_profile = Some(b"OLD".to_vec());
+
+        let mut edit = doc.begin_edit("Convert");
+        edit.set_icc_profile(Some(b"NEW".to_vec()));
+        edit.commit();
+        assert_eq!(doc.icc_profile.as_deref(), Some(b"NEW".as_slice()));
+
+        doc.undo();
+        assert_eq!(
+            doc.icc_profile.as_deref(),
+            Some(b"OLD".as_slice()),
+            "undo must put the original tag back"
+        );
+        doc.redo();
+        assert_eq!(doc.icc_profile.as_deref(), Some(b"NEW".as_slice()));
+    }
+
+    #[test]
+    fn setting_the_same_profile_records_nothing() {
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        doc.icc_profile = Some(b"SAME".to_vec());
+        let mut edit = doc.begin_edit("Assign");
+        edit.set_icc_profile(Some(b"SAME".to_vec()));
+        edit.commit();
+        assert!(!doc.history.can_undo(), "a no-op must not enter history");
+    }
+    /// Undoing a profile change has to repaint: the profile decides what
+    /// every pixel means, and without damage the canvas kept rendering
+    /// the restored pixels through the transform built for the profile
+    /// that had just been undone away.
+    #[test]
+    fn undoing_a_profile_change_damages_the_canvas() {
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        doc.push_layer(Layer::new_raster("bg"));
+        let mut edit = doc.begin_edit("Assign Profile");
+        edit.set_icc_profile(Some(vec![1, 2, 3, 4]));
+        assert!(edit.commit());
+        doc.take_damage();
+
+        doc.undo().unwrap();
+        assert!(doc.icc_profile.is_none(), "the profile was restored");
+        assert!(
+            !doc.take_damage().is_empty(),
+            "undo left nothing for the canvas to repaint"
+        );
+
+        doc.redo().unwrap();
+        assert_eq!(doc.icc_profile.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert!(!doc.take_damage().is_empty(), "redo repaints too");
     }
 
     #[test]

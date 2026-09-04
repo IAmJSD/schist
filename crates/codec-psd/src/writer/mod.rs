@@ -139,7 +139,26 @@ fn write_image_resources(b: &mut Buf, doc: &Document) {
             continue; // written as its own section above
         }
         seen_resolution |= res.id == RES_RESOLUTION_INFO;
-        seen_icc |= res.id == RES_ICC_PROFILE;
+        // `doc.icc_profile` is the authority when it is set. Convert and
+        // Assign Profile rewrite it, while the preserved resource still
+        // describes the space the file arrived in; re-emitting that one
+        // tagged converted pixels with the profile they were converted
+        // away from.
+        //
+        // It goes in the preserved block's own place rather than being
+        // appended at the end. The reader always mirrors ICC into
+        // `doc.icc_profile`, so the substitution fires on every round
+        // trip, and moving the tag rewrote the resource section's layout
+        // for a file nothing had actually changed.
+        let mut data: &[u8] = &res.data;
+        if res.id == RES_ICC_PROFILE {
+            seen_icc = true;
+            // With no profile of its own the document keeps whatever the
+            // file arrived with, rather than losing its colour space.
+            if let Some(icc) = &doc.icc_profile {
+                data = icc;
+            }
+        }
         b.bytes(b"8BIM");
         b.u16(res.id);
         // `name` holds the raw pascal bytes (length byte + content + pad)
@@ -152,8 +171,8 @@ fn write_image_resources(b: &mut Buf, doc: &Document) {
                 b.u8(0);
             }
         }
-        b.u32(res.data.len() as u32);
-        b.bytes(&res.data);
+        b.u32(data.len() as u32);
+        b.bytes(data);
         b.pad_to(2);
     }
 

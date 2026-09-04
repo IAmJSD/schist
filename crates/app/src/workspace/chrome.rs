@@ -205,6 +205,7 @@ impl Workspace {
 
     /// Jump in history: negative = undo n steps, positive = redo n steps.
     pub fn history_jump(&mut self, steps: i32, cx: &mut Context<Self>) {
+        let profile_before = self.doc.as_ref().and_then(|doc| doc.icc_profile.clone());
         if let Some(doc) = &mut self.doc {
             if steps < 0 {
                 for _ in 0..(-steps) {
@@ -219,6 +220,9 @@ impl Workspace {
                     }
                 }
             }
+        }
+        if self.doc.as_ref().and_then(|doc| doc.icc_profile.clone()) != profile_before {
+            self.rebuild_color_transforms();
         }
         self.after_change(cx);
     }

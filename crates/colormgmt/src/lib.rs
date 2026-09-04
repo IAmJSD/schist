@@ -94,18 +94,29 @@ impl Profile {
     }
 
     pub fn srgb() -> Profile {
-        Profile {
-            profile: Arc::new(ColorProfile::new_srgb()),
-            bytes: None,
-            name: "sRGB".into(),
-        }
+        Profile::builtin(ColorProfile::new_srgb(), "sRGB")
     }
 
     pub fn display_p3() -> Profile {
+        Profile::builtin(ColorProfile::new_display_p3(), "Display P3")
+    }
+
+    /// A built-in profile, serialized so it can be embedded on save.
+    ///
+    /// These used to carry `bytes: None`, which made them unusable as
+    /// assignment targets: `icc_bytes()` returned `None`, so assigning
+    /// either of the two profiles the UI offers *untagged* the document
+    /// instead of tagging it, and the next open reinterpreted the pixels
+    /// against whatever the working space happened to be.
+    fn builtin(profile: ColorProfile, name: &str) -> Profile {
+        let bytes = profile.encode().ok().map(Arc::new);
+        if bytes.is_none() {
+            log::warn!("could not serialize the built-in {name} profile");
+        }
         Profile {
-            profile: Arc::new(ColorProfile::new_display_p3()),
-            bytes: None,
-            name: "Display P3".into(),
+            profile: Arc::new(profile),
+            bytes,
+            name: name.into(),
         }
     }
 
@@ -184,6 +195,13 @@ impl ColorTransform {
     /// Convert a straight-alpha f32 RGBA buffer in place.
     ///
     /// Alpha is carried through untouched: it is coverage, not colour.
+    ///
+    /// Note this cannot preserve extended range even on the editing path:
+    /// moxcms clamps to 0..1 while evaluating the transfer curves
+    /// (`gamma.rs`), so a 32-bit document's out-of-range highlights are
+    /// clipped by the CMS before we see the output. Removing the clamp
+    /// below would not change that; it needs either CMS support or a
+    /// matrix-only path that skips the curves.
     pub fn apply(&self, pixels: &mut [f32]) {
         if self.identity || pixels.is_empty() {
             return;
@@ -194,8 +212,8 @@ impl ColorTransform {
             pixels.copy_from_slice(&src);
             return;
         }
-        // Extended-range output can exceed 0..1; clamp for display and
-        // restore alpha, which a matrix transform may have touched.
+        // Clamp for display and restore alpha, which a matrix transform
+        // may have touched.
         for (out, inp) in pixels
             .as_chunks_mut::<4>()
             .0
@@ -234,20 +252,19 @@ impl Default for ColorSettings {
 }
 
 impl ColorSettings {
-    /// Build the transform for a document with the given embedded profile.
+    /// Build the display hop for a document with the given embedded
+    /// profile.
     ///
-    /// Soft proofing runs document→proof→display; the two hops are baked
-    /// into one executor chain by applying them in sequence.
+    /// Soft proofing runs document → proof → display, applied in
+    /// sequence. The second hop therefore starts at the *proof* profile:
+    /// building it from the document profile, as this used to, converts
+    /// from a space the pixels already left, so Proof Colors was doubly
+    /// wrong whenever the display profile differed from the document's --
+    /// and people make colour decisions against that view.
     pub fn transform_for(&self, document_icc: Option<&[u8]>) -> ColorTransform {
-        let source = match document_icc {
-            Some(bytes) => match Profile::from_bytes(bytes) {
-                Ok(p) => p,
-                Err(err) => {
-                    log::warn!("{err:#}; falling back to the working space");
-                    self.working.clone()
-                }
-            },
-            None => self.working.clone(),
+        let source = match &self.proof {
+            Some(proof) => proof.clone(),
+            None => self.document_profile(document_icc),
         };
         match ColorTransform::new(&source, &self.display, self.intent) {
             Ok(t) => t,
@@ -261,13 +278,25 @@ impl ColorSettings {
     /// The proofing hop, if soft proofing is on.
     pub fn proof_transform(&self, document_icc: Option<&[u8]>) -> Option<ColorTransform> {
         let proof = self.proof.as_ref()?;
-        let source = match document_icc {
-            Some(bytes) => Profile::from_bytes(bytes).unwrap_or_else(|_| self.working.clone()),
-            None => self.working.clone(),
-        };
+        let source = self.document_profile(document_icc);
         // Proofing is colorimetric by definition: it must show the target's
         // gamut clipping rather than re-map it pleasingly.
         ColorTransform::new(&source, proof, Intent::RelativeColorimetric).ok()
+    }
+
+    /// The document's own profile, or the working space when it has none
+    /// or carries one we cannot read.
+    fn document_profile(&self, document_icc: Option<&[u8]>) -> Profile {
+        match document_icc {
+            Some(bytes) => match Profile::from_bytes(bytes) {
+                Ok(p) => p,
+                Err(err) => {
+                    log::warn!("{err:#}; falling back to the working space");
+                    self.working.clone()
+                }
+            },
+            None => self.working.clone(),
+        }
     }
 }
 
@@ -610,5 +639,91 @@ mod tests {
             .unwrap()
             .apply(&mut b);
         assert_eq!(a, b);
+    }
+    #[test]
+    fn builtin_profiles_can_be_embedded() {
+        // `bytes: None` made these unusable as assignment targets:
+        // `assign_profile` writes `icc_bytes()` onto the document, so
+        // assigning either of the two profiles the UI offers untagged the
+        // document rather than tagging it.
+        for p in [Profile::srgb(), Profile::display_p3()] {
+            let bytes = p
+                .icc_bytes()
+                .unwrap_or_else(|| panic!("{} has no bytes", p.name));
+            assert!(bytes.len() > 128, "{} icc is implausibly small", p.name);
+            assert_eq!(&bytes[36..40], b"acsp", "{} is not an icc profile", p.name);
+            // And it must round-trip back through the parser.
+            assert!(
+                Profile::from_bytes(bytes).is_ok(),
+                "{} did not parse back",
+                p.name
+            );
+        }
+    }
+
+    /// Proofing to the very profile the display uses must show exactly
+    /// what an unproofed document→display conversion shows: the proof hop
+    /// takes the pixels to P3 and the display hop then has nothing left
+    /// to do. Building the display hop from the *document* profile
+    /// instead -- as it used to -- runs sRGB→P3 a second time over pixels
+    /// that are already P3, so Proof Colors was doubly wrong whenever the
+    /// display profile differed from the document's, and people make
+    /// colour decisions against that view.
+    #[test]
+    fn the_display_hop_starts_where_the_proof_hop_ended() {
+        let mut proofed = [0.8f32, 0.2, 0.1, 1.0];
+        let mut direct = proofed;
+
+        let proofing = ColorSettings {
+            working: Profile::srgb(),
+            display: Profile::display_p3(),
+            intent: Intent::Perceptual,
+            proof: Some(Profile::display_p3()),
+        };
+        proofing.proof_transform(None).unwrap().apply(&mut proofed);
+        proofing.transform_for(None).apply(&mut proofed);
+
+        let plain = ColorSettings {
+            proof: None,
+            ..proofing
+        };
+        plain.transform_for(None).apply(&mut direct);
+
+        for (got, want) in proofed.iter().zip(&direct) {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "proof + display applied a second conversion: {proofed:?} vs {direct:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn conversion_still_leaves_alpha_alone() {
+        let mut px = vec![0.4f32, 0.2, 0.7, 0.33];
+        convert_pixels(
+            &mut px,
+            &Profile::srgb(),
+            &Profile::display_p3(),
+            Intent::Perceptual,
+        )
+        .unwrap();
+        assert!((px[3] - 0.33).abs() < 1e-6, "alpha changed: {}", px[3]);
+    }
+
+    /// With proofing off, the display hop is still document → display.
+    #[test]
+    fn without_proofing_the_display_hop_is_unchanged() {
+        let settings = ColorSettings {
+            working: Profile::srgb(),
+            display: Profile::display_p3(),
+            intent: Intent::Perceptual,
+            proof: None,
+        };
+        let mut pixels = [0.8f32, 0.2, 0.1, 1.0];
+        settings.transform_for(None).apply(&mut pixels);
+        assert!(
+            (pixels[0] - 0.8).abs() > 1e-3 || (pixels[1] - 0.2).abs() > 1e-3,
+            "sRGB to Display P3 should have moved the pixel"
+        );
     }
 }

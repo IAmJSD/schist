@@ -652,7 +652,17 @@ fn composite(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 d.rgb,
                             );
                         }
-                        stack[sp - 1u] = vec4(d.rgb + (adjusted - d.rgb) * weight, d.a);
+                        // Mirrors the CPU compositor: the adjustment's
+                        // own blend mode applies, with the adjusted colour
+                        // as the source and `weight` as its alpha. It used
+                        // to be uploaded and then ignored, so every
+                        // adjustment rendered as Normal.
+                        if (op.mode == M_NORMAL) {
+                            stack[sp - 1u] = vec4(d.rgb + (adjusted - d.rgb) * weight, d.a);
+                        } else {
+                            let blended = blend_px(op.mode, vec4(adjusted, weight), d, x, y);
+                            stack[sp - 1u] = vec4(blended.rgb, d.a);
+                        }
                     }
                 }
             }

@@ -59,6 +59,7 @@ impl Workspace {
         if id.starts_with("edit.paste") {
             self.sync_clipboard_in(cx);
         }
+        let profile_before = self.doc.as_ref().and_then(|doc| doc.icc_profile.clone());
         let Some(doc) = self.doc.as_mut() else { return };
         if let Some(command) = self.registry.command(id) {
             let mut ctx = CommandCtx {
@@ -79,6 +80,12 @@ impl Workspace {
             }
         } else {
             log::warn!("unknown command {id}");
+        }
+        // Undo and redo are plugin commands, so a profile restored by
+        // their history operation must rebuild the cached display hop.
+        // Damage alone only drops pixels rendered through that cache.
+        if self.doc.as_ref().and_then(|doc| doc.icc_profile.clone()) != profile_before {
+            self.rebuild_color_transforms();
         }
         self.after_change(cx);
     }
