@@ -322,6 +322,12 @@ impl ToolPlugin for MarqueeTool {
                 MarqueeShape::Ellipse => target.select_ellipse(rect, op),
             });
             sel.clip_to(canvas);
+            // The clipped rect can touch the canvas while the ellipse
+            // itself does not. Do not leave an active all-zero mask that
+            // silently blocks every subsequent pixel tool.
+            if sel.bounds().is_empty() {
+                sel.deselect();
+            }
         });
         edit.commit();
     }
@@ -1634,6 +1640,34 @@ mod tests {
         assert!(
             b.left >= 0 && b.top >= 0 && b.right <= 64 && b.bottom <= 64,
             "selection escaped the canvas: {b:?}"
+        );
+    }
+
+    #[test]
+    fn an_ellipse_that_only_touches_a_canvas_corner_deselects() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        doc.selection
+            .select_rect(IntRect::from_xywh(10, 10, 30, 30), SelectOp::Replace);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Ellipse);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        // The bounding box clips the canvas at its corner, but the ellipse
+        // inscribed in that box has no coverage there.
+        drag(
+            &mut tool,
+            &mut ctx,
+            (190.0, 190.0),
+            (400.0, 400.0),
+            Modifiers::default(),
+        );
+
+        assert!(
+            ctx.doc.selection.is_empty(),
+            "an all-zero mask must not remain active"
         );
     }
 

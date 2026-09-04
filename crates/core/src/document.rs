@@ -1001,7 +1001,7 @@ impl<'a> EditBuilder<'a> {
     /// image size and the rotate/flip commands moved the pixels and left
     /// all of it at the old coordinates. `map` takes a document-space
     /// point and returns where it lands.
-    pub fn map_geometry(&mut self, map: impl Fn(f32, f32) -> (f32, f32)) {
+    pub fn map_geometry(&mut self, map: impl Fn(f32, f32) -> (f32, f32), swap_guide_axes: bool) {
         let before = self.doc.geometry();
         for guide in &mut self.doc.guides {
             let (x, y) = if guide.horizontal {
@@ -1009,6 +1009,9 @@ impl<'a> EditBuilder<'a> {
             } else {
                 map(guide.position, 0.0)
             };
+            if swap_guide_axes {
+                guide.horizontal = !guide.horizontal;
+            }
             guide.position = if guide.horizontal { y } else { x };
         }
         let map_rect = |r: IntRect| {
@@ -1819,5 +1822,41 @@ mod tests {
                 .is_none(),
             "undo must remove a tile that did not exist before"
         );
+    }
+
+    #[test]
+    fn quarter_turns_swap_guide_orientation_and_undo() {
+        let mut doc = Document::new("t", 200, 100, Depth::Eight);
+        doc.guides = vec![
+            Guide {
+                horizontal: true,
+                position: 30.0,
+            },
+            Guide {
+                horizontal: false,
+                position: 40.0,
+            },
+        ];
+        let before = doc.guides.clone();
+
+        let mut edit = doc.begin_edit("Rotate 90");
+        edit.map_geometry(|x, y| (100.0 - y, x), true);
+        assert!(edit.commit());
+
+        assert_eq!(
+            doc.guides,
+            vec![
+                Guide {
+                    horizontal: false,
+                    position: 70.0,
+                },
+                Guide {
+                    horizontal: true,
+                    position: 40.0,
+                },
+            ]
+        );
+        doc.undo().unwrap();
+        assert_eq!(doc.guides, before);
     }
 }

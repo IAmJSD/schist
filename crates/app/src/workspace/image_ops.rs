@@ -384,17 +384,19 @@ pub(super) fn transform_document(doc: &mut Document, op: CanvasTransform) {
         .collect();
     let mut edit = doc.begin_edit(op.title());
     edit.set_canvas_size(nw, nh);
-    // Guides, artboards, slices, notes, counts and paths are not layer
-    // content, so the pixel loop below leaves them at the old
-    // coordinates. Turn them with the canvas.
+    // Document furniture is not layer content, so rotate and flip it with
+    // the pixels. Quarter turns also swap horizontal and vertical guides.
     let (fw, fh) = (w as f32, h as f32);
-    edit.map_geometry(|x, y| match op {
-        CanvasTransform::Cw90 => (fh - y, x),
-        CanvasTransform::Ccw90 => (y, fw - x),
-        CanvasTransform::Rotate180 => (fw - x, fh - y),
-        CanvasTransform::FlipH => (fw - x, y),
-        CanvasTransform::FlipV => (x, fh - y),
-    });
+    edit.map_geometry(
+        |x, y| match op {
+            CanvasTransform::Cw90 => (fh - y, x),
+            CanvasTransform::Ccw90 => (y, fw - x),
+            CanvasTransform::Rotate180 => (fw - x, fh - y),
+            CanvasTransform::FlipH => (fw - x, y),
+            CanvasTransform::FlipV => (x, fh - y),
+        },
+        swaps,
+    );
     for (id, src) in &sources {
         for coord in TileCoord::covering(&IntRect::from_size(nw, nh)) {
             let trect = coord.rect();

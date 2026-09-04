@@ -93,8 +93,9 @@ pub enum TransformMode {
 /// Split `tiles` into the selected pixels and everything else.
 ///
 /// The floating half carries the selection's coverage in its alpha, and
-/// the residue has the same coverage taken out of it, so laying one back
-/// over the other reproduces the layer exactly while nothing has moved.
+/// the residue has the same coverage taken out of it. Hard selections
+/// recombine exactly; feathered edges follow ordinary float compositing
+/// and can retain a slight translucent seam.
 fn lift(
     tiles: &TileMap,
     sel: &schist_core::Selection,
@@ -229,9 +230,9 @@ impl Session {
         let (bx, by) = before.apply(cx, cy);
         let (nx, ny) = after.apply(cx, cy);
         let (dx, dy) = (bx - nx, by - ny);
-        // Undo the rotation, then the scale.
-        let (sin, cos) = (-self.rotation).sin_cos();
-        let (rx, ry) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        // Invert the composed linear map in reverse order: scale, then
+        // rotation. Counter-rotating first is only correct for uniform
+        // scales and made a rotated, one-axis-scaled box jump on repivot.
         let sx = if self.scale.0.abs() < 1e-6 {
             1.0
         } else {
@@ -242,7 +243,10 @@ impl Session {
         } else {
             self.scale.1
         };
-        self.offset = (self.offset.0 + rx / sx, self.offset.1 + ry / sy);
+        let (ux, uy) = (dx / sx, dy / sy);
+        let (sin, cos) = (-self.rotation).sin_cos();
+        let (rx, ry) = (ux * cos - uy * sin, ux * sin + uy * cos);
+        self.offset = (self.offset.0 + rx, self.offset.1 + ry);
     }
 
     /// Current matrix: scale, then rotate, both about the pivot, then
@@ -994,7 +998,7 @@ pub fn crop_to(doc: &mut Document, rect: IntRect) {
     // the pixels; cropping 100 px off the left used to leave every one of
     // them 100 px out of place.
     let (ox, oy) = (rect.left as f32, rect.top as f32);
-    edit.map_geometry(|x, y| (x - ox, y - oy));
+    edit.map_geometry(|x, y| (x - ox, y - oy), false);
     edit.set_canvas_size(rect.width() as u32, rect.height() as u32);
     edit.change_selection(|sel, _| sel.deselect());
     edit.commit();
@@ -1031,7 +1035,7 @@ pub fn resize_image(doc: &mut Document, width: u32, height: u32, filter: Filter)
     // coordinates.
     let sx = width as f32 / from.0.max(1) as f32;
     let sy = height as f32 / from.1.max(1) as f32;
-    edit.map_geometry(|x, y| (x * sx, y * sy));
+    edit.map_geometry(|x, y| (x * sx, y * sy), false);
     edit.set_canvas_size(width, height);
     edit.commit();
 }
@@ -1216,6 +1220,7 @@ pub fn apply_upscaled(doc: &mut Document, up: Upscaled) {
         return;
     }
     let (width, height) = up.to;
+    let from = (doc.width, doc.height);
     let mut edit = doc.begin_edit("Image Size");
     for (id, rgba, (w, h)) in up.layers {
         if edit
@@ -1246,6 +1251,10 @@ pub fn apply_upscaled(doc: &mut Document, up: Upscaled) {
         }
         edit.replace_layer_tiles(id, tiles);
     }
+    rescale_masks(&mut edit, from, (width, height));
+    let sx = width as f32 / from.0.max(1) as f32;
+    let sy = height as f32 / from.1.max(1) as f32;
+    edit.map_geometry(|x, y| (x * sx, y * sy), false);
     edit.set_canvas_size(width, height);
     edit.commit();
 }
@@ -1346,7 +1355,7 @@ pub fn resize_canvas(doc: &mut Document, width: u32, height: u32, anchor: (f32, 
     for id in ids {
         edit.translate_layer(id, dx, dy);
     }
-    edit.map_geometry(|x, y| (x + dx as f32, y + dy as f32));
+    edit.map_geometry(|x, y| (x + dx as f32, y + dy as f32), false);
     edit.set_canvas_size(width, height);
     edit.commit();
 }
@@ -1948,6 +1957,7 @@ mod tests {
             at: (100.0, 60.0),
             author: "me".into(),
             text: "here".into(),
+            color: schist_core::annotate::DEFAULT_NOTE_COLOR,
         });
         doc
     }
@@ -2072,6 +2082,31 @@ mod tests {
             assert!(
                 (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01,
                 "the box jumped on the second press: {a:?} -> {b:?}"
+            );
+        }
+    }
+    #[test]
+    fn repivot_preserves_a_rotated_nonuniform_scale() {
+        let mut doc = doc_with_square();
+        let mut state = EditorState::default();
+        let mut tool = TransformTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_activate(&mut ctx);
+        let session = tool.session.as_mut().unwrap();
+        session.scale = (2.0, 0.75);
+        session.rotation = std::f32::consts::FRAC_PI_4;
+        session.offset = (13.0, -7.0);
+        let before = session.corners();
+
+        session.repivot((0.0, 1.0));
+
+        for (a, b) in before.iter().zip(session.corners()) {
+            assert!(
+                (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01,
+                "repivot moved a rotated nonuniform scale: {a:?} -> {b:?}"
             );
         }
     }
