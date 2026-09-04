@@ -2298,6 +2298,24 @@ fn search_models_downloading(ws: &Workspace) -> bool {
         .any(|d| SEARCH_MODELS.contains(&d.id))
 }
 
+fn search_model_link(
+    id: &'static str,
+    label: &'static str,
+    url: &'static str,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .text_color(gpui::rgb(crate::ui::palette().accent))
+        .hover(|style| style.text_color(gpui::rgb(crate::ui::palette().accent_hover)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_ws, _event, _window, cx| cx.open_url(url)),
+        )
+        .child(label)
+}
+
 /// The licences behind photo search, and the button that accepts them.
 /// One dialog for both models: they are downloaded as a pair.
 pub(crate) fn search_models_dialog(cx: &mut Context<Workspace>) -> impl IntoElement {
@@ -2325,21 +2343,38 @@ pub(crate) fn search_models_dialog(cx: &mut Context<Workspace>) -> impl IntoElem
                     "{} \u{b7} {:.0} MB",
                     spec.name,
                     spec.bytes as f64 / (1 << 20) as f64
-                ))))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(gpui::rgb(crate::ui::palette().text_dim))
-                        .child(SharedString::from(spec.license)),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(gpui::rgb(crate::ui::palette().text_dim))
-                        .child(SharedString::from(spec.note)),
-                ),
+                )))),
         );
     }
+    body = body.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(crate::ui::palette().text_dim))
+            .child(search_model_link(
+                "mobileclip-source",
+                "MobileCLIP by Apple",
+                "https://github.com/apple/ml-mobileclip",
+                cx,
+            ))
+            .child("\u{b7}")
+            .child(search_model_link(
+                "mobileclip-export",
+                "ONNX export by Xenova",
+                "https://huggingface.co/Xenova/mobileclip_s0",
+                cx,
+            ))
+            .child("\u{b7}")
+            .child(search_model_link(
+                "mobileclip-license",
+                "License",
+                "https://github.com/apple/ml-mobileclip/blob/main/LICENSE",
+                cx,
+            )),
+    );
     body = body.child(
         div()
             .pt_1()
