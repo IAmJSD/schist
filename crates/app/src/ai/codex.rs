@@ -96,6 +96,14 @@ fn run(
         .config_override("features.memories", "false")
         .config_override("memories.use_memories", "false")
         .config_override("memories.generate_memories", "false")
+        // Requests in this panel authorize the app's editor tools. With
+        // `never` below, Codex rejects any tool that still needs consent
+        // before our request handler can see it. Pre-approve this server
+        // specifically; other MCP servers keep their own policies.
+        .config_override(
+            "mcp_servers.schist.default_tools_approval_mode",
+            "\"approve\"",
+        )
         .config_override(
             "mcp_servers.schist.command",
             toml_string(&exe.display().to_string()),
@@ -137,6 +145,7 @@ fn run(
                     thread_id: id.clone(),
                     cwd: home_dir(),
                     approval_policy: Some(AskForApproval::Never),
+                    sandbox: Some(SandboxMode::Read_only),
                     developer_instructions: Some(system_prompt.to_string()),
                     ..Default::default()
                 })
@@ -241,18 +250,17 @@ fn forward(shared: &AiShared, notification: Notification) -> bool {
     }
 }
 
-/// Approvals cannot be asked here. The one thing waved through is the
-/// consent prompt Codex raises before calling an MCP tool: the only
-/// server in this profile is the app's own, which is what the panel is
-/// *for*. Commands and file changes are declined, and anything else gets
-/// an error so the server is never left waiting.
+/// Editor tools are pre-approved in the Schist server configuration.
+/// Decline any remaining approval requests, including elicitations from
+/// other MCP servers inherited from the user's config. Anything else
+/// gets an error so the server is never left waiting.
 fn respond_declining(client: &mut SyncClient, id: codex_codes::RequestId, request: ServerRequest) {
     let result = match request {
         ServerRequest::McpServerElicitationRequest(_) => client.respond(
             id,
             &McpServerElicitationRequestResponse {
                 _meta: None,
-                action: McpServerElicitationAction::Accept,
+                action: McpServerElicitationAction::Decline,
                 content: None,
             },
         ),

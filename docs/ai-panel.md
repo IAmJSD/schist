@@ -58,9 +58,12 @@ an ephemeral loopback TCP port and Codex is configured to spawn
 `schist --mcp-bridge <addr>` — this same binary in a mode that just
 pumps stdio into that socket. The port is guarded by a per-launch random
 token (any local process can reach loopback; only children the app
-configured know the token). Codex runs with a read-only sandbox and
-approvals set to `never`; anything that would have needed an approval
-dialog is declined.
+configured know the token). The `schist` server's tools are explicitly
+pre-approved: requests in the panel authorize editing the active document.
+Codex keeps a read-only sandbox and approvals set to `never` for both new
+and resumed conversations; other actions that need an approval dialog
+are declined. Pre-approval must be set on the server itself because
+`never` rejects tool consent before the panel's request handler sees it.
 
 The bridge mode is not specific to Codex: any stdio MCP client can be
 pointed at a running app the same way, if it is handed the address and
