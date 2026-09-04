@@ -267,8 +267,18 @@ impl Workspace {
                         gpui::rgb(0xFFFFFF).into(),
                     ));
                 }
-                Overlay::Caret { x1, y1, x2, y2 } => {
-                    job.carets.push(vec![to_screen(x1, y1), to_screen(x2, y2)]);
+                Overlay::Caret {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
+                } => {
+                    let [r, g, b, _] = color.to_u8();
+                    job.carets.push((
+                        vec![to_screen(x1, y1), to_screen(x2, y2)],
+                        gpui::rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32).into(),
+                    ));
                 }
                 Overlay::Circle { cx: ccx, cy, r } => {
                     let d = r * 2.0 * zoom;
@@ -496,22 +506,14 @@ impl Workspace {
                                 window.paint_path(path, color);
                             }
                         }
-                        // A white hairline disappears on white text or a
-                        // pale photograph. The dark three-pixel underlay
-                        // leaves a one-pixel rim around the white centre,
-                        // giving the insertion caret contrast everywhere.
-                        for pts in job.carets {
-                            for (width, color) in
-                                [(3.0, gpui::rgb(0x000000)), (1.0, gpui::rgb(0xFFFFFF))]
-                            {
-                                let mut pb = PathBuilder::stroke(px(width));
-                                pb.move_to(pts[0]);
-                                for p in &pts[1..] {
-                                    pb.line_to(*p);
-                                }
-                                if let Ok(path) = pb.build() {
-                                    window.paint_path(path, color);
-                                }
+                        for (pts, color) in job.carets {
+                            let mut pb = PathBuilder::stroke(px(1.0));
+                            pb.move_to(pts[0]);
+                            for p in &pts[1..] {
+                                pb.line_to(*p);
+                            }
+                            if let Ok(path) = pb.build() {
+                                window.paint_path(path, color);
                             }
                         }
                         for bounds in job.circles {

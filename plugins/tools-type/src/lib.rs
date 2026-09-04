@@ -104,6 +104,39 @@ fn render_tiles(doc: &Document, stored: &StoredText) -> (TileMap, IntRect) {
     (tiles, bounds)
 }
 
+/// The typographic box occupied by all of `stored`'s laid-out lines.
+///
+/// Raster bounds only cover non-transparent glyph pixels: a lowercase
+/// word therefore starts below the font's ascender and may stop above its
+/// descender. Editing chrome belongs to the complete line box instead, so
+/// the insertion caret cannot protrude through its outline.
+fn layout_bounds(stored: &StoredText) -> IntRect {
+    let mut spans = line_spans(&stored.spec).into_iter();
+    let Some(first) = spans.next() else {
+        return IntRect::EMPTY;
+    };
+    let first_end = first.x + first.width;
+    let (mut left, mut right) = (first.x.min(first_end), first.x.max(first_end));
+    let (mut top, mut bottom) = (first.top, first.top + first.height);
+    for span in spans {
+        let end = span.x + span.width;
+        left = left.min(span.x.min(end));
+        right = right.max(span.x.max(end));
+        top = top.min(span.top);
+        bottom = bottom.max(span.top + span.height);
+    }
+    let ox = stored.origin.0 as f32;
+    let oy = stored.origin.1 as f32;
+    let left = (ox + left).floor() as i32;
+    let mut right = (ox + right).ceil() as i32;
+    let top = (oy + top).floor() as i32;
+    let mut bottom = (oy + bottom).ceil() as i32;
+    // Keep whitespace-only lines representable as rectangles too.
+    right = right.max(left + 1);
+    bottom = bottom.max(top + 1);
+    IntRect::new(left, top, right, bottom)
+}
+
 /// Every font family the document's text layers ask for, in the order
 /// first seen and without repeats.
 pub fn families_used(doc: &Document) -> Vec<String> {
@@ -803,7 +836,7 @@ impl ToolPlugin for TypeTool {
         let Some(session) = &self.editing else {
             return Vec::new();
         };
-        let bounds = doc
+        let ink_bounds = doc
             .tree
             .find(session.layer)
             .map(|l| l.tight_bounds())
@@ -816,8 +849,9 @@ impl ToolPlugin for TypeTool {
         let (ox, oy) = session.origin_f32();
         let spec = &session.stored.spec;
         let mut out = Vec::new();
-        if !bounds.is_empty() {
-            out.push(Overlay::Rect(bounds.inflated(2)));
+        let outline_bounds = ink_bounds.union(&layout_bounds(&session.stored));
+        if !ink_bounds.is_empty() {
+            out.push(Overlay::Rect(outline_bounds.inflated(2)));
         }
 
         if session.has_selection() {
@@ -845,7 +879,7 @@ impl ToolPlugin for TypeTool {
                             (ox + r).ceil() as i32,
                             (oy + span.top + span.height).ceil() as i32,
                         )
-                        .intersect(&bounds);
+                        .intersect(&ink_bounds);
                         if !highlight.is_empty() {
                             out.push(Overlay::Highlight(highlight));
                         }
@@ -862,6 +896,12 @@ impl ToolPlugin for TypeTool {
                 y1: y,
                 x2: x,
                 y2: y + caret.height,
+                color: Rgba::from_u8(
+                    session.stored.color[0],
+                    session.stored.color[1],
+                    session.stored.color[2],
+                    255,
+                ),
             });
         }
         out
@@ -1468,6 +1508,45 @@ mod tests {
         assert_eq!(doc.tree.layers.len(), 2);
         assert!(ink(&doc) > 20, "text drew pixels");
         assert_eq!(doc.tree.layers[1].name, "Hello");
+    }
+
+    #[test]
+    fn the_editing_outline_contains_one_text_coloured_caret() {
+        let mut doc = doc();
+        let mut state = EditorState {
+            foreground: Rgba::from_u8(12, 34, 56, 255),
+            ..EditorState::default()
+        };
+        let mut tool = TypeTool::default();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 60.0));
+        type_text(&mut tool, &mut ctx, "g");
+
+        let mut outline = None;
+        let mut caret = None;
+        for overlay in tool.overlays(ctx.doc, ctx.state) {
+            match overlay {
+                Overlay::Rect(rect) => outline = Some(rect),
+                Overlay::Caret {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
+                } => caret = Some((x1, y1, x2, y2, color.to_u8())),
+                _ => {}
+            }
+        }
+        let outline = outline.expect("text outline");
+        let (x1, y1, x2, y2, color) = caret.expect("insertion caret");
+        assert_eq!(color, [12, 34, 56, 255]);
+        assert_eq!(x1, x2, "the caret is one vertical stroke");
+        assert!(x1 >= outline.left as f32 && x1 <= outline.right as f32);
+        assert!(y1 >= outline.top as f32, "caret starts inside the outline");
+        assert!(y2 <= outline.bottom as f32, "caret ends inside the outline");
     }
 
     #[test]
