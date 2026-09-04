@@ -36,6 +36,12 @@ mod ai;
 mod ai;
 mod chrome;
 mod clipboard;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod cloud;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod cloud_generation;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod cloud_view;
 mod colormgmt;
 mod commands;
 mod compose;
@@ -187,6 +193,8 @@ pub struct ModelDownload {
 }
 
 pub struct Workspace {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) cloud: cloud::CloudState,
     pub registry: PluginRegistry,
     pub editor: EditorState,
     pub doc: Option<Document>,
@@ -928,6 +936,13 @@ pub enum UpdateProgress {
 // plumbing matches exhaustively on every target.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum Modal {
+    #[cfg(not(target_arch = "wasm32"))]
+    CloudGenerate,
+    #[cfg(not(target_arch = "wasm32"))]
+    Cloud {
+        kind: &'static str,
+        fields: Vec<(&'static str, String, String)>,
+    },
     ImageSize {
         width: u32,
         height: u32,
@@ -1268,6 +1283,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut ws = Workspace {
+            #[cfg(not(target_arch = "wasm32"))]
+            cloud: cloud::CloudState::default(),
             registry,
             editor: EditorState::default(),
             doc: None,
@@ -1423,6 +1440,8 @@ impl Workspace {
             }
         })
         .detach();
+        #[cfg(not(target_arch = "wasm32"))]
+        ws.cloud_start(cx);
         ws
     }
 }

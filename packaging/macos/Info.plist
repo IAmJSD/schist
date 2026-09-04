@@ -80,6 +80,9 @@
         </dict>
     </array>
 
+    <key>CFBundleURLTypes</key>
+    <array><dict><key>CFBundleURLName</key><string>Schist Cloud sign-in</string>
+    <key>CFBundleURLSchemes</key><array><string>schist</string></array></dict></array>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

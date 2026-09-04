@@ -27,6 +27,8 @@ impl Workspace {
 
     pub fn after_change(&mut self, cx: &mut Context<Self>) {
         self.refresh_layer_styles();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cloud_capture_edit();
         if let Some(doc) = &mut self.doc {
             let damage = doc.take_damage();
             for rect in &damage {
@@ -50,6 +52,11 @@ impl Workspace {
     }
 
     pub fn run_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if (id == "edit.undo" || id == "edit.redo") && self.cloud_undo(id == "edit.redo", cx) {
+            return;
+        }
+
         // Grow, Similar and Color Range take their tolerance from the
         // magic wand, exactly as Photoshop does.
         self.sync_wand_tolerance();

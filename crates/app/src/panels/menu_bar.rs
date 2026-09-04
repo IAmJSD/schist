@@ -25,6 +25,26 @@ pub(crate) fn run_app_item(
     cx: &mut Context<Workspace>,
 ) {
     match item {
+        AppItem::CloudGenerate => {
+            #[cfg(not(target_arch = "wasm32"))]
+            ws.cloud_generate_open(cx);
+        }
+        AppItem::CloudSignIn => {
+            #[cfg(not(target_arch = "wasm32"))]
+            ws.cloud_sign_in(cx);
+        }
+        AppItem::CloudBrowse => {
+            #[cfg(not(target_arch = "wasm32"))]
+            ws.cloud_browse(schist_cloud::Scope::Library, cx);
+        }
+        AppItem::CloudSignOut => {
+            #[cfg(not(target_arch = "wasm32"))]
+            ws.cloud_sign_out(cx);
+        }
+        AppItem::CloudUpload => {
+            #[cfg(not(target_arch = "wasm32"))]
+            ws.cloud_upload_document(cx);
+        }
         AppItem::New => ws.open_new_file_picker(cx),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),

@@ -28,6 +28,7 @@ members = [
     "crates/colormgmt",
     "crates/mcp",
     "crates/gallery",
+    "crates/cloud",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",

@@ -53,6 +53,8 @@ pub(crate) fn menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
             vec![
                 App("New", New, Some("cmd-n")),
                 App("Open…", Open, Some("cmd-o")),
+                #[cfg(not(target_arch = "wasm32"))]
+                Sub("Schist Cloud", cloud_entries(ws)),
                 App("Browse Gallery…", OpenGallery, Some("cmd-shift-g")),
                 App("Close", Close, Some("cmd-w")),
                 App("Save", Save, Some("cmd-s")),
@@ -319,6 +321,8 @@ fn gallery_menus(ws: &Workspace) -> Vec<(&'static str, Vec<MenuEntry>)> {
     let mut file = vec![
         App("New", New, Some("cmd-n")),
         App("Open…", Open, Some("cmd-o")),
+        #[cfg(not(target_arch = "wasm32"))]
+        Sub("Schist Cloud", cloud_entries(ws)),
     ];
     let recents = recent_entries(ws);
     if !recents.is_empty() {
@@ -656,3 +660,19 @@ pub(super) const FILTER_GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cloud_entries(ws: &Workspace) -> Vec<MenuEntry> {
+    use AppItem::*;
+    use MenuEntry::*;
+    if ws.cloud.account.is_some() {
+        vec![
+            App("Browse Schist Cloud", CloudBrowse, None),
+            App("Generate images…", CloudGenerate, None),
+            App("Upload document to Schist Cloud…", CloudUpload, None),
+            App("Sign out of Schist Cloud", CloudSignOut, None),
+        ]
+    } else {
+        vec![App("Sign into Schist Cloud…", CloudSignIn, None)]
+    }
+}

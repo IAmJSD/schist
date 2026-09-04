@@ -44,6 +44,9 @@ Section "Schist"
   File "schist.ico"
 
   WriteRegStr HKLM "Software\Schist" "InstallDir" "$INSTDIR"
+  WriteRegStr HKCR "schist" "" "URL:Schist Cloud"
+  WriteRegStr HKCR "schist" "URL Protocol" ""
+  WriteRegStr HKCR "schist\shell\open\command" "" '"$INSTDIR\schist.exe" "%1"'
   ; Add/Remove Programs entry.
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Schist" \
     "DisplayName" "Schist"
@@ -78,6 +81,7 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$SMPROGRAMS\Schist.lnk"
   RMDir "$INSTDIR"
+  DeleteRegKey HKCR "schist"
   DeleteRegKey HKLM "Software\Schist"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Schist"
   !insertmacro UnassociateExt "psd"

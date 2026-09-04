@@ -218,3 +218,9 @@ clean-helpers:
 	rm -rf $(HELPER_STAGE)
 
 FORCE:
+
+# Native cloud client and editor integration checks.
+.PHONY: check-cloud
+check-cloud:
+	$(CARGO) test -p schist-cloud
+	$(CARGO) check -p schist-app

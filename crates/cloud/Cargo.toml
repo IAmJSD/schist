@@ -1,0 +1,26 @@
+[package]
+name = "schist-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmpv = { version = "1", features = ["with-serde"] }
+rmp-serde = "1"
+serde_bytes = "0.11"
+tempfile = "3"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures.workspace = true
+yrs = "0.24"
+schist-core.workspace = true
+schist-color.workspace = true
+schist-codec-psd.workspace = true
+
+chrono = "0.4"

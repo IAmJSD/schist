@@ -87,7 +87,7 @@ fn pal() -> &'static GalleryPalette {
 
 impl Workspace {
     pub(super) fn render_gallery(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = if self.library.folders.is_empty() {
+        let body = if self.library.folders.is_empty() && self.cloud.account.is_none() {
             gallery_empty_state(cx).into_any_element()
         } else {
             div()
@@ -96,7 +96,11 @@ impl Workspace {
                 .flex_grow()
                 .min_h(px(0.0))
                 .child(sidebar(self, cx))
-                .child(grid(self, cx))
+                .child(if self.cloud.show {
+                    super::cloud_view::grid(self, cx)
+                } else {
+                    grid(self, cx).into_any_element()
+                })
                 // The same AI panel the editor has, on its own switch
                 // (View ▸ AI Panel here too): the conversation, harness
                 // and model carry over, the prompt says which room.
@@ -134,13 +138,27 @@ impl Workspace {
                     cx.stop_propagation();
                     return;
                 }
+                if ws.cloud.show {
+                    return;
+                }
                 if ws.gallery_search_key(ev, cx) || ws.gallery_nav_key(ev, cx) {
                     cx.stop_propagation();
                 }
             }))
-            .child(top_strip(self, cx))
+            .children((!self.cloud.show).then(|| top_strip(self, cx)))
+            .children(
+                (self.cloud.account.is_none() && self.cloud.message != "Not signed in").then(
+                    || {
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_size(px(12.0))
+                            .child(self.cloud.message.clone())
+                    },
+                ),
+            )
             .child(body)
-            .child(tray(self, cx))
+            .children((!self.cloud.show).then(|| tray(self, cx)))
             .children(context_menu)
             .child(drag_out_listener(cx));
         // Each cell's paint-time probe is what queues its thumbnail;
@@ -571,6 +589,12 @@ fn gallery_empty_state(cx: &mut Context<Workspace>) -> impl IntoElement {
                 .child("Welcome to Schist"),
         )
         .child(div().h(px(12.0)))
+        .child(crate::ui::button(
+            "Sign into Schist Cloud…",
+            false,
+            |ws, _, cx| ws.cloud_sign_in(cx),
+            cx,
+        ))
         .child(caption(
             "Watch folders of photos, or import from a camera. Files stay \
              where they are; edits are versioned beside them:",
@@ -769,6 +793,7 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .child("FOLDERS"),
         )
         .children(rows)
+        .child(super::cloud_view::sidebar(ws, cx))
         .child(
             div()
                 .px_2()
@@ -871,6 +896,7 @@ fn bucket_row(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                ws.cloud.show = false;
                 ws.library.bucket_filter = if ws.library.bucket_filter == Some(index) {
                     None
                 } else {
@@ -914,6 +940,12 @@ fn sidebar_row(
 ) -> impl IntoElement {
     let filter = root.clone();
     let mut row = div()
+        .id(SharedString::from(format!(
+            "local-folder:{}",
+            root.as_ref()
+                .map(|p| p.to_string_lossy())
+                .unwrap_or_default()
+        )))
         .flex()
         .flex_row()
         .items_center()
@@ -931,6 +963,7 @@ fn sidebar_row(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
+                ws.cloud.show = false;
                 ws.library.folder_filter = filter.clone();
                 ws.library.bucket_filter = None;
                 cx.notify();
@@ -946,7 +979,22 @@ fn sidebar_row(
     if let Some(drop_root) = root.clone() {
         // Dragged photos land here as a move — files, sidecars,
         // versions and all.
+        let drag_path = drop_root.clone();
         row = row
+            .on_drag(
+                super::cloud_view::LocalFolderDrag { path: drag_path },
+                |drag, _, _, cx| {
+                    cx.new(|_| {
+                        super::cloud_view::DragLabel(
+                            drag.path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                    })
+                },
+            )
             .drag_over::<super::library::GalleryDrag>(|s, _, _, _| {
                 s.bg(gpui::rgb(pal().select_border))
             })
