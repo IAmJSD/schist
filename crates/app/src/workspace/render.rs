@@ -806,6 +806,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &NextTab, _w, cx| ws.cycle_tab(1, cx)))
             .on_action(cx.listener(|ws, _: &PrevTab, _w, cx| ws.cycle_tab(-1, cx)))
+            // With AppKit's title bar transparent, this row occupies the
+            // native drag/traffic-light area and follows the app theme.
+            // Other platforms retain their native window decorations.
+            .children((chrome && cfg!(target_os = "macos")).then(|| panels::title_bar(self)))
             .children(in_window_menus.then(|| panels::menu_bar(self, cx)))
             .children(editor_chrome.then(|| panels::tool_options_bar(self, cx)))
             .children(editor_chrome.then(|| panels::tab_bar(self, cx)))

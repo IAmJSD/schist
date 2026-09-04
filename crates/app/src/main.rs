@@ -43,8 +43,8 @@ mod workspace;
 
 use actions::{HideApp, HideOthers, Quit, ShowAll};
 use gpui::{
-    px, size, App, AppContext as _, Application, AsyncApp, Bounds, WindowBounds, WindowHandle,
-    WindowOptions,
+    px, size, App, AppContext as _, Application, AsyncApp, Bounds, TitlebarOptions, WindowBounds,
+    WindowHandle, WindowOptions,
 };
 use schist_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
 use std::cell::RefCell;
@@ -343,6 +343,14 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Schist".into()),
+                        // AppKit keeps the traffic lights while allowing
+                        // the workspace to paint a title bar matching its
+                        // own light or dark theme.
+                        appears_transparent: cfg!(target_os = "macos"),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 |_window, cx| {
