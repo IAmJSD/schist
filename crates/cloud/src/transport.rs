@@ -1,16 +1,12 @@
 use crate::{auth, protocol::*};
+use crate::{
+    runtime,
+    socket::{Message, Socket},
+};
 use anyhow::{anyhow, ensure, Result};
-use futures::{SinkExt, StreamExt};
-use std::{
-    collections::HashMap,
-    sync::mpsc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::mpsc, time::Duration};
 use tokio::sync::mpsc as channel;
-use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
-};
+use web_time::Instant;
 
 type Reply = std::result::Result<Value, String>;
 #[derive(Clone)]
@@ -57,7 +53,7 @@ pub enum Event {
 }
 struct Pending {
     started: Instant,
-    reply: Option<mpsc::Sender<Reply>>,
+    reply: Option<tokio::sync::oneshot::Sender<Reply>>,
 }
 enum Command {
     FrameLimit(usize),
@@ -67,7 +63,7 @@ enum Command {
         id: String,
         method: String,
         params: Value,
-        reply: Option<mpsc::Sender<Reply>>,
+        reply: Option<tokio::sync::oneshot::Sender<Reply>>,
     },
     Stop,
 }
@@ -75,6 +71,7 @@ impl Client {
     pub fn start(account: Account) -> Self {
         let (tx, rx) = channel::unbounded_channel();
         let (events, out) = mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -86,6 +83,8 @@ impl Client {
                 }
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        runtime::spawn(run(account, rx, events));
         Self {
             handle: Handle { tx },
             events: out,
@@ -117,19 +116,25 @@ impl Handle {
         });
         id
     }
-    /// For HTTP transfer workers, never the UI thread. Ambiguous mutations are not replayed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn request(&self, method: &str, params: Value) -> Result<Value> {
-        let (tx, rx) = mpsc::channel();
+        futures::executor::block_on(self.request_async(method, params))
+    }
+    pub async fn request_async(&self, method: &str, params: Value) -> Result<Value> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.tx.send(Command::Request {
             id: uuid::Uuid::new_v4().to_string(),
             method: method.into(),
             params,
             reply: Some(tx),
         })?;
-        rx.recv_timeout(Duration::from_secs(35))?
-            .map_err(|e| anyhow!(e))
+        rx.await?.map_err(|e| anyhow!(e))
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload(&self, upload: Upload<'_>) -> Result<Asset> {
+        futures::executor::block_on(self.upload_async(upload))
+    }
+    pub async fn upload_async(&self, upload: Upload<'_>) -> Result<Asset> {
         let Upload {
             name,
             bytes,
@@ -164,15 +169,20 @@ impl Handle {
         if let Some(path) = relative {
             fields.push(("relative_path", path.into()));
         }
-        let ticket = self.request("asset.prepare_upload", map(fields))?;
-        auth::upload(&string(&ticket, "put_url")?, mime, bytes)?;
-        parse(self.request(
-            "asset.commit_upload",
-            map([
-                ("upload_id", string(&ticket, "upload_id")?.into()),
-                ("mutation_id", format!("{mutation}:commit").into()),
-            ]),
-        )?)
+        let ticket = self
+            .request_async("asset.prepare_upload", map(fields))
+            .await?;
+        auth::upload_async(&string(&ticket, "put_url")?, mime, bytes).await?;
+        parse(
+            self.request_async(
+                "asset.commit_upload",
+                map([
+                    ("upload_id", string(&ticket, "upload_id")?.into()),
+                    ("mutation_id", format!("{mutation}:commit").into()),
+                ]),
+            )
+            .await?,
+        )
     }
 }
 fn finish(events: &mpsc::Sender<Event>, id: String, p: Pending, result: Reply) {
@@ -222,24 +232,27 @@ async fn run(
                 return;
             }
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
         if force_refresh || account.credentials.expires_at <= now + 30.0 {
-            let copy = account.clone();
-            match tokio::task::spawn_blocking(move || auth::refresh(&copy)).await {
-                Ok(Ok(c)) => {
-                    account.credentials = c;
+            #[cfg(not(target_arch = "wasm32"))]
+            let refreshed = {
+                let copy = account.clone();
+                tokio::task::spawn_blocking(move || auth::refresh(&copy))
+                    .await
+                    .unwrap_or_else(|e| Err(e.into()))
+            };
+            #[cfg(target_arch = "wasm32")]
+            let refreshed = auth::refresh(&account).await;
+            match refreshed {
+                Ok(credentials) => {
+                    account.credentials = credentials;
                     force_refresh = false;
                     let _ = events.send(Event::Credentials(account.clone()));
                 }
-                result => {
-                    let error = match result {
-                        Ok(Err(e)) => e.to_string(),
-                        Err(e) => e.to_string(),
-                        _ => unreachable!(),
-                    };
+                Err(error) => {
                     let _ = events.send(Event::Disconnected(format!(
                         "Token refresh failed: {error}"
                     )));
@@ -274,7 +287,7 @@ async fn backoff(
     let jitter = uuid::Uuid::new_v4().as_bytes()[0] as u64;
     let delay = Duration::from_millis((500u64 << (*retry).min(6)).min(30_000) + jitter);
     *retry = retry.saturating_add(1);
-    let wait = tokio::time::sleep(delay);
+    let wait = runtime::sleep(delay);
     tokio::pin!(wait);
     loop {
         tokio::select! {
@@ -292,8 +305,6 @@ enum Outcome {
     Stop,
     Refresh,
 }
-type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 struct Session<'a> {
     frame_limit: usize,
     socket: Socket,
@@ -325,14 +336,7 @@ async fn connected(
     if !url.starts_with("ws://127.0.0.1:") {
         auth::secure_url(url, "wss")?;
     }
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_FRAME))
-        .max_frame_size(Some(MAX_FRAME));
-    let (socket, _) = tokio::time::timeout(
-        Duration::from_secs(15),
-        connect_async_with_config(url, Some(config), true),
-    )
-    .await??;
+    let socket = runtime::timeout(Duration::from_secs(15), Socket::connect(url)).await??;
     let now = Instant::now();
     let mut session = Session {
         frame_limit: MAX_FRAME,
@@ -371,11 +375,7 @@ async fn connected(
 impl Session<'_> {
     async fn send(&mut self, value: Value) -> Result<()> {
         let bytes = encode_with_limit(&value, self.frame_limit)?;
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            self.socket.send(Message::Binary(bytes.into())),
-        )
-        .await??;
+        runtime::timeout(Duration::from_secs(10), self.socket.send(bytes)).await??;
         Ok(())
     }
     async fn run(
@@ -385,15 +385,16 @@ impl Session<'_> {
     ) -> Result<Outcome> {
         enum Wake {
             Command(Option<Command>),
-            Wire(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
+            Wire(Option<Result<Message>>),
             Tick,
         }
-        let mut timer = tokio::time::interval(Duration::from_millis(100));
+
+        let mut tick_due = Instant::now();
         loop {
             let wake = tokio::select! {
                 command = commands.recv() => Wake::Command(command),
                 message = self.socket.next() => Wake::Wire(message),
-                _ = timer.tick() => Wake::Tick,
+                _ = runtime::sleep(tick_due.saturating_duration_since(Instant::now())) => Wake::Tick,
             };
             let outcome = match wake {
                 Wake::Command(command) => self.command(command).await?,
@@ -402,6 +403,7 @@ impl Session<'_> {
                         .await?
                 }
                 Wake::Tick => {
+                    tick_due = Instant::now() + Duration::from_millis(100);
                     self.tick().await?;
                     None
                 }
@@ -418,7 +420,7 @@ impl Session<'_> {
         match command {
             Some(Command::FrameLimit(limit)) => self.frame_limit = limit,
             None | Some(Command::Stop) => {
-                let _ = self.socket.close(None).await;
+                let _ = self.socket.close().await;
                 return Ok(Some(Outcome::Stop));
             }
             Some(Command::Watch(id, query)) => {
@@ -480,16 +482,16 @@ impl Session<'_> {
     async fn message(&mut self, message: Message) -> Result<Option<Outcome>> {
         let bytes = match message {
             Message::Binary(bytes) => bytes,
-            Message::Ping(_) => {
+            Message::Ping => {
                 self.socket.flush().await?;
                 return Ok(None);
             }
-            Message::Pong(_) => {
+            Message::Pong => {
                 self.received = Instant::now();
                 return Ok(None);
             }
             Message::Close(frame) => {
-                if frame.is_some_and(|f| u16::from(f.code) == 4401) {
+                if frame == 4401 {
                     return Ok(Some(Outcome::Refresh));
                 }
                 return Err(anyhow!("Cloud connection closed"));
@@ -614,11 +616,11 @@ impl Session<'_> {
         Ok(())
     }
 }
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::net::TcpListener;
-    use tokio_tungstenite::tungstenite::{accept, WebSocket};
+    use tokio_tungstenite::tungstenite::{accept, Message, WebSocket};
     fn read(ws: &mut WebSocket<std::net::TcpStream>) -> Value {
         match ws.read().unwrap() {
             Message::Binary(b) => rmp_serde::from_slice(&b).unwrap(),

@@ -12,11 +12,16 @@ use schist_cloud::{
 use schist_core::DocumentId;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{atomic::AtomicBool, mpsc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 const CREDENTIAL_KEY: &str = "https://schist.app/schist-cloud";
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn state_dir() -> PathBuf {
     schist_gallery::state_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -58,6 +63,7 @@ impl RemoteDocument {
         self.render = false;
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 enum RecoveryTask {
     Write {
         epoch: u64,
@@ -72,6 +78,7 @@ enum Job {
         revision: u64,
         image: Option<Arc<RenderImage>>,
     },
+    #[cfg(not(target_arch = "wasm32"))]
     Browser {
         epoch: u64,
         url: String,
@@ -135,7 +142,9 @@ pub(crate) struct CloudState {
     sender: mpsc::Sender<Job>,
     cancel: Arc<AtomicBool>,
     writes: VecDeque<Option<Account>>,
+    #[cfg(not(target_arch = "wasm32"))]
     writing: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     recovery: mpsc::Sender<RecoveryTask>,
     pub watching: String,
     folders_watch: String,
@@ -146,27 +155,31 @@ pub(crate) struct CloudState {
 impl Default for CloudState {
     fn default() -> Self {
         let (sender, jobs) = mpsc::channel();
-        let (recovery, tasks) = mpsc::channel();
-        let errors = sender.clone();
-        std::thread::spawn(move || {
-            while let Ok(task) = tasks.recv() {
-                match task {
-                    RecoveryTask::Write { epoch, files } => {
-                        for (path, bytes) in files {
-                            if let Err(e) = remote::auth::private_write(&path, &bytes) {
-                                let _ = errors.send(Job::Error {
-                                    epoch,
-                                    error: format!("Cloud recovery failed: {e}"),
-                                });
+        #[cfg(not(target_arch = "wasm32"))]
+        let recovery = {
+            let (recovery, tasks) = mpsc::channel();
+            let errors = sender.clone();
+            std::thread::spawn(move || {
+                while let Ok(task) = tasks.recv() {
+                    match task {
+                        RecoveryTask::Write { epoch, files } => {
+                            for (path, bytes) in files {
+                                if let Err(e) = remote::auth::private_write(&path, &bytes) {
+                                    let _ = errors.send(Job::Error {
+                                        epoch,
+                                        error: format!("Cloud recovery failed: {e}"),
+                                    });
+                                }
                             }
                         }
-                    }
-                    RecoveryTask::Remove(path) => {
-                        let _ = std::fs::remove_file(path);
+                        RecoveryTask::Remove(path) => {
+                            let _ = std::fs::remove_file(path);
+                        }
                     }
                 }
-            }
-        });
+            });
+            recovery
+        };
         Self {
             generation: Default::default(),
             account: None,
@@ -198,7 +211,9 @@ impl Default for CloudState {
             sender,
             cancel: Arc::new(AtomicBool::new(false)),
             writes: VecDeque::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             writing: false,
+            #[cfg(not(target_arch = "wasm32"))]
             recovery,
             watching: String::new(),
             folders_watch: String::new(),
@@ -260,25 +275,28 @@ impl CloudState {
 }
 impl Workspace {
     pub(crate) fn cloud_start(&mut self, cx: &mut Context<Self>) {
-        let read = cx.read_credentials(CREDENTIAL_KEY);
-        let epoch = self.cloud.epoch;
-        cx.spawn(async move |this, cx| {
-            let result = read.await;
-            let _ = this.update(cx, |ws, cx| {
-                if ws.cloud.epoch != epoch {
-                    return;
-                }
-                match result {
-                    Ok(Some((_, data))) => match serde_json::from_slice::<Account>(&data) {
-                        Ok(account) => ws.cloud_connect(account, cx),
-                        Err(e) => ws.cloud_error(format!("Stored cloud login is invalid: {e}")),
-                    },
-                    Ok(None) => {}
-                    Err(e) => ws.cloud_error(format!("Could not read cloud login: {e}")),
-                }
-            });
-        })
-        .detach();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let read = cx.read_credentials(CREDENTIAL_KEY);
+            let epoch = self.cloud.epoch;
+            cx.spawn(async move |this, cx| {
+                let result = read.await;
+                let _ = this.update(cx, |ws, cx| {
+                    if ws.cloud.epoch != epoch {
+                        return;
+                    }
+                    match result {
+                        Ok(Some((_, data))) => match serde_json::from_slice::<Account>(&data) {
+                            Ok(account) => ws.cloud_connect(account, cx),
+                            Err(e) => ws.cloud_error(format!("Stored cloud login is invalid: {e}")),
+                        },
+                        Ok(None) => {}
+                        Err(e) => ws.cloud_error(format!("Could not read cloud login: {e}")),
+                    }
+                });
+            })
+            .detach();
+        }
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(75))
@@ -295,18 +313,25 @@ impl Workspace {
         self.cloud.message = error;
     }
     pub(crate) fn cloud_sign_in(&mut self, cx: &mut Context<Self>) {
-        self.open_modal(
-            Modal::Cloud {
-                kind: "sign-in",
-                fields: vec![(
-                    "cloud-domain",
-                    "Domain".into(),
-                    remote::DEFAULT_DOMAIN.into(),
-                )],
-            },
-            cx,
-        );
-        self.focus_field("cloud-domain", remote::DEFAULT_DOMAIN);
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.cloud_login("https://schist.app".into(), cx);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.open_modal(
+                Modal::Cloud {
+                    kind: "sign-in",
+                    fields: vec![(
+                        "cloud-domain",
+                        "Domain".into(),
+                        remote::DEFAULT_DOMAIN.into(),
+                    )],
+                },
+                cx,
+            );
+            self.focus_field("cloud-domain", remote::DEFAULT_DOMAIN);
+        }
     }
     fn cloud_login(&mut self, domain: String, cx: &mut Context<Self>) {
         self.cloud.epoch += 1;
@@ -316,6 +341,7 @@ impl Workspace {
         let cancel = self.cloud.cancel.clone();
         let sender = self.cloud.sender.clone();
         self.cloud.message = "Opening sign-in in your browser…".into();
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let result = (|| -> Result<()> {
                 let login = remote::auth::Login::discover(&domain, &state_dir())?;
@@ -349,6 +375,23 @@ impl Workspace {
                 });
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        {
+            let result = remote::auth::domain(&domain).and_then(|_| remote::auth::Login::open());
+            match result {
+                Ok(login) => remote::runtime::spawn(async move {
+                    let job = match login.finish(&cancel).await {
+                        Ok(account) => Job::SignedIn { epoch, account },
+                        Err(e) => Job::Error {
+                            epoch,
+                            error: e.to_string(),
+                        },
+                    };
+                    let _ = sender.send(job);
+                }),
+                Err(e) => self.cloud_error(e.to_string()),
+            }
+        }
         cx.notify();
     }
     fn cloud_connect(&mut self, account: Account, cx: &mut Context<Self>) {
@@ -387,8 +430,8 @@ impl Workspace {
         if let Some(account) = account {
             let sender = self.cloud.sender.clone();
             let epoch = self.cloud.epoch;
-            std::thread::spawn(move || {
-                if let Err(e) = remote::auth::logout(&account) {
+            remote::runtime::spawn(async move {
+                if let Err(e) = remote::auth::logout_async(&account).await {
                     let _ = sender.send(Job::Error {
                         epoch,
                         error: format!("Signed out locally; server logout failed: {e}"),
@@ -398,13 +441,20 @@ impl Workspace {
         }
         cx.notify();
     }
+    pub(crate) fn cloud_set_visible(&mut self, visible: bool) {
+        self.cloud.show = visible;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.library.open = visible;
+        }
+    }
     pub(crate) fn cloud_browse(&mut self, scope: Scope, cx: &mut Context<Self>) {
         if self.cloud.account.is_none() {
             self.cloud_sign_in(cx);
             return;
         }
         self.cloud.show = true;
-        self.library.open = true;
+        self.cloud_set_visible(true);
         self.cloud.query.scope = scope;
         self.cloud.query.offset = 0;
         self.cloud.selected.clear();
@@ -492,9 +542,9 @@ impl Workspace {
             let epoch = self.cloud.epoch;
             let id = asset.id.clone();
             let revision = asset.revision;
-            std::thread::spawn(move || {
-                let image = (|| -> Result<Arc<RenderImage>> {
-                    let bytes = remote::auth::download_limited(&url, 8 * 1024 * 1024)?;
+            remote::runtime::spawn(async move {
+                let image = (async {
+                    let bytes = remote::auth::download_limited_async(&url, 8 * 1024 * 1024).await?;
                     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
                         .with_guessed_format()?;
                     let mut limits = image::Limits::default();
@@ -503,13 +553,10 @@ impl Workspace {
                     limits.max_alloc = Some(64 * 1024 * 1024);
                     reader.limits(limits);
                     let image = reader.decode()?.thumbnail(256, 256).to_rgba8();
-                    super::library::rgba_to_render_image(
-                        image.width(),
-                        image.height(),
-                        image.into_raw(),
-                    )
-                    .ok_or_else(|| anyhow!("Invalid thumbnail"))
-                })()
+                    rgba_to_render_image(image.width(), image.height(), image.into_raw())
+                        .ok_or_else(|| anyhow!("Invalid thumbnail"))
+                })
+                .await
                 .ok();
                 let _ = sender.send(Job::Thumbnail {
                     epoch,
@@ -538,6 +585,7 @@ impl Workspace {
                         self.cloud.thumbnails.insert(id, (revision, image));
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 Job::Browser { epoch, url } if epoch == self.cloud.epoch => cx.open_url(&url),
                 Job::SignedIn { epoch, account } if epoch == self.cloud.epoch => {
                     self.cloud_connect(account, cx)
@@ -636,6 +684,7 @@ impl Workspace {
             cx.notify();
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn cloud_persist_credentials(&mut self, cx: &mut Context<Self>) {
         if self.cloud.writing {
             return;
@@ -666,6 +715,10 @@ impl Workspace {
             });
         })
         .detach();
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn cloud_persist_credentials(&mut self, _: &mut Context<Self>) {
+        self.cloud.writes.clear();
     }
     fn cloud_event(&mut self, event: Event, cx: &mut Context<Self>) -> Result<()> {
         match event {
@@ -844,7 +897,9 @@ impl Workspace {
             .import(&data)?;
         doc.title = asset.name.clone();
         doc.path = None;
+        #[allow(unused_mut)]
         let mut shared = remote::document::SharedDocument::unseeded(&doc)?;
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(bytes) = std::fs::read(self.cloud_recovery_path(&asset.id)) {
             match shared.restore(&bytes, &doc) {
                 Ok(mut recovered) => {
@@ -857,7 +912,7 @@ impl Workspace {
         let id = doc.id;
         let generation = u64::from(doc.dirty);
         self.open_in_tab(doc, true);
-        self.library.open = false;
+        self.cloud_set_visible(false);
         self.cloud.docs.insert(
             id,
             RemoteDocument {
@@ -889,11 +944,11 @@ impl Workspace {
                 self.cloud_join(id);
             }
             if self.doc.as_ref().is_some_and(|d| d.id == id) {
-                self.library.open = false;
+                self.cloud_set_visible(false);
             } else if let Some(i) = self.background_tabs.iter().position(|t| t.doc.id == id) {
                 let index = if i >= self.active_tab { i + 1 } else { i };
                 self.select_tab(index, cx);
-                self.library.open = false;
+                self.cloud_set_visible(false);
             }
             cx.notify();
             return;
@@ -905,8 +960,8 @@ impl Workspace {
         let sender = self.cloud.sender.clone();
         let epoch = self.cloud.epoch;
         self.cloud.message = format!("Opening {}…", asset.name);
-        std::thread::spawn(move || {
-            let result = handle.download_asset(&asset.id, None, None);
+        remote::runtime::spawn(async move {
+            let result = handle.download_asset_async(&asset.id, None, None).await;
             let job = match result {
                 Ok(download) => Job::Opened {
                     epoch,
@@ -1164,6 +1219,7 @@ impl Workspace {
             .pending
             .retain(|_, pending| !pending.belongs_to(id));
         if let Some(d) = self.cloud.docs.remove(&id) {
+            #[cfg(not(target_arch = "wasm32"))]
             let _ = self
                 .cloud
                 .recovery
@@ -1174,6 +1230,7 @@ impl Workspace {
             }
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn cloud_recovery_path(&self, asset: &str) -> PathBuf {
         use sha2::Digest;
         let domain = self
@@ -1187,6 +1244,7 @@ impl Workspace {
             sha2::Sha256::digest(format!("{domain}\n{asset}"))
         ))
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn cloud_checkpoint(&mut self) {
         self.cloud_capture_edit();
         let snapshots = self
@@ -1210,6 +1268,10 @@ impl Workspace {
             Err(e) => self.cloud_error(format!("Cloud recovery failed: {e}")),
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn cloud_checkpoint(&mut self) {
+        self.cloud_capture_edit();
+    }
     pub(crate) fn cloud_mutate(&mut self, method: &str, fields: Vec<(&'static str, Value)>) {
         if let Some(c) = &self.cloud.client {
             let mut fields = fields;
@@ -1223,6 +1285,37 @@ impl Workspace {
             "bucket.add",
             vec![("id", bucket.into()), ("items", Value::Array(items))],
         );
+    }
+    pub(crate) fn cloud_pick_upload(&mut self, directory: bool, cx: &mut Context<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let prompt = {
+            let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: !directory,
+                directories: directory,
+                multiple: true,
+                prompt: Some("Upload to Schist Cloud".into()),
+            });
+            async move { picker.await? }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let prompt = crate::web::pick_cloud_files(directory);
+        let (bucket, folder) = match &self.cloud.query.scope {
+            Scope::Bucket { id } => (Some(id.clone()), None),
+            Scope::Folder { id, .. } => (None, Some(id.clone())),
+            _ => (None, None),
+        };
+        cx.spawn(async move |this, cx| {
+            let result = prompt.await;
+            let _ = this.update(cx, |ws, cx| {
+                match result {
+                    Ok(Some(paths)) => ws.cloud_drop_local(bucket, folder, paths, cx),
+                    Ok(None) => {}
+                    Err(error) => ws.cloud_error(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
     pub(crate) fn cloud_drop_local(
         &mut self,
@@ -1238,44 +1331,56 @@ impl Workspace {
         let sender = self.cloud.sender.clone();
         let epoch = self.cloud.epoch;
         self.cloud.message = "Uploading files…".into();
-        std::thread::spawn(move || {
-            let result = (|| -> Result<()> {
+        remote::runtime::spawn(async move {
+            let result: Result<()> = (async {
                 let mut files = Vec::new();
                 for path in paths {
                     if path.is_dir() {
                         enumerate_files(&path, &path, &mut files)?;
                     } else {
-                        files.push((path, None));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let relative = None;
+                        #[cfg(target_arch = "wasm32")]
+                        let relative = crate::web::cloud_relative_path(&path);
+                        files.push((path, relative));
                     }
                 }
                 let mut assets = Vec::new();
                 for (path, relative) in files {
+                    #[cfg(not(target_arch = "wasm32"))]
                     let bytes = std::fs::read(&path)?;
+                    #[cfg(target_arch = "wasm32")]
+                    let bytes = crate::web::read_file(&path)?;
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let mime = mime(&path);
-                    let asset = handle.upload(remote::Upload {
-                        name: &name,
-                        bytes: &bytes,
-                        mime,
-                        folder: folder.as_deref(),
-                        asset: None,
-                        relative: relative.as_deref(),
-                        mutation: &remote::Uuid::new_v4().to_string(),
-                    })?;
+                    let asset = handle
+                        .upload_async(remote::Upload {
+                            name: &name,
+                            bytes: &bytes,
+                            mime,
+                            folder: folder.as_deref(),
+                            asset: None,
+                            relative: relative.as_deref(),
+                            mutation: &remote::Uuid::new_v4().to_string(),
+                        })
+                        .await?;
                     assets.push(map([("kind", "asset".into()), ("id", asset.id.into())]));
                 }
                 if let Some(bucket) = bucket {
-                    handle.request(
-                        "bucket.add",
-                        map([
-                            ("id", bucket.into()),
-                            ("items", Value::Array(assets)),
-                            ("mutation_id", remote::Uuid::new_v4().to_string().into()),
-                        ]),
-                    )?;
+                    handle
+                        .request_async(
+                            "bucket.add",
+                            map([
+                                ("id", bucket.into()),
+                                ("items", Value::Array(assets)),
+                                ("mutation_id", remote::Uuid::new_v4().to_string().into()),
+                            ]),
+                        )
+                        .await?;
                 }
                 Ok(())
-            })();
+            })
+            .await;
             let job = match result {
                 Ok(()) => Job::Done {
                     epoch,
@@ -1353,23 +1458,26 @@ impl Workspace {
         let epoch = self.cloud.epoch;
         let sender = self.cloud.sender.clone();
         self.cloud.message = format!("Downloading {}…", asset.name);
-        std::thread::spawn(move || {
-            let job =
-                match handle.download_asset(&asset.id, format.as_deref(), capabilities.as_ref()) {
-                    Ok(download) => Job::Downloaded {
-                        epoch,
-                        name: download.suggested_name(&asset.name),
-                        download,
-                    },
-                    Err(error) => Job::Error {
-                        epoch,
-                        error: format!("Cloud download failed: {error}"),
-                    },
-                };
+        remote::runtime::spawn(async move {
+            let job = match handle
+                .download_asset_async(&asset.id, format.as_deref(), capabilities.as_ref())
+                .await
+            {
+                Ok(download) => Job::Downloaded {
+                    epoch,
+                    name: download.suggested_name(&asset.name),
+                    download,
+                },
+                Err(error) => Job::Error {
+                    epoch,
+                    error: format!("Cloud download failed: {error}"),
+                },
+            };
             let _ = sender.send(job);
         });
         Ok(())
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn cloud_save_download(
         &mut self,
         name: String,
@@ -1401,6 +1509,19 @@ impl Workspace {
         })
         .detach();
     }
+    #[cfg(target_arch = "wasm32")]
+    fn cloud_save_download(
+        &mut self,
+        name: String,
+        download: DownloadedAsset,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::web::download_bytes(&name, &download.bytes) {
+            Ok(()) => self.cloud.message = format!("Downloaded {name}"),
+            Err(e) => self.cloud_error(e.to_string()),
+        }
+        cx.notify();
+    }
     fn cloud_upload_current(&mut self, folder: Option<String>) -> Result<()> {
         let doc = self
             .doc
@@ -1418,16 +1539,19 @@ impl Workspace {
             .clone();
         let sender = self.cloud.sender.clone();
         let epoch = self.cloud.epoch;
-        std::thread::spawn(move || {
-            let job = match handle.upload(remote::Upload {
-                name: &name,
-                bytes: &data,
-                mime: "image/vnd.adobe.photoshop",
-                folder: folder.as_deref(),
-                asset: None,
-                relative: None,
-                mutation: &remote::Uuid::new_v4().to_string(),
-            }) {
+        remote::runtime::spawn(async move {
+            let job = match handle
+                .upload_async(remote::Upload {
+                    name: &name,
+                    bytes: &data,
+                    mime: "image/vnd.adobe.photoshop",
+                    folder: folder.as_deref(),
+                    asset: None,
+                    relative: None,
+                    mutation: &remote::Uuid::new_v4().to_string(),
+                })
+                .await
+            {
                 Ok(asset) => Job::Uploaded {
                     epoch,
                     doc: id,
@@ -1693,6 +1817,20 @@ fn parse_filters(fields: &[(&'static str, String, String)]) -> Result<Filters> {
         captured_after,
         captured_before,
     })
+}
+
+pub(super) fn rgba_to_render_image(
+    width: u32,
+    height: u32,
+    mut rgba: Vec<u8>,
+) -> Option<Arc<RenderImage>> {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
+    Some(Arc::new(RenderImage::new(smallvec![image::Frame::new(
+        buffer
+    )])))
 }
 
 #[cfg(test)]

@@ -1,5 +1,13 @@
 //! Cloud gallery controls share the local gallery's sidebar and drag targets.
+#[cfg(not(target_arch = "wasm32"))]
+use super::library::GalleryDrag;
 use super::*;
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct GalleryDrag {
+    paths: Vec<PathBuf>,
+}
+
 use crate::ui;
 use gpui::{img, AppContext as _, StatefulInteractiveElement as _, StyledImage as _};
 use schist_cloud::{
@@ -203,16 +211,9 @@ pub(crate) fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::
                         .on_drag(drag, |drag, _, _, cx| {
                             cx.new(|_| DragLabel(drag.label.clone()))
                         })
-                        .on_drop(cx.listener(
-                            move |ws, drag: &super::library::GalleryDrag, _, cx| {
-                                ws.cloud_drop_local(
-                                    None,
-                                    Some(drop_id.clone()),
-                                    drag.paths.clone(),
-                                    cx,
-                                )
-                            },
-                        ))
+                        .on_drop(cx.listener(move |ws, drag: &GalleryDrag, _, cx| {
+                            ws.cloud_drop_local(None, Some(drop_id.clone()), drag.paths.clone(), cx)
+                        }))
                         .child(format!("▸ {}", folder.name)),
                 )
                 .child(
@@ -279,7 +280,7 @@ pub(crate) fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::
                         .cursor_pointer()
                         .hover(|s| s.bg(gpui::rgb(ui::palette().field_bg)))
                         .drag_over::<RemoteDrag>(|s, _, _, _| s.bg(gpui::rgb(ui::palette().accent)))
-                        .drag_over::<super::library::GalleryDrag>(|s, _, _, _| {
+                        .drag_over::<GalleryDrag>(|s, _, _, _| {
                             s.bg(gpui::rgb(ui::palette().accent))
                         })
                         .on_mouse_down(
@@ -288,17 +289,10 @@ pub(crate) fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::
                                 ws.cloud_browse(Scope::Bucket { id: id.clone() }, cx)
                             }),
                         )
-                        .on_drop(cx.listener(
-                            move |ws, drag: &super::library::GalleryDrag, _, cx| {
-                                cx.stop_propagation();
-                                ws.cloud_drop_local(
-                                    Some(local.clone()),
-                                    None,
-                                    drag.paths.clone(),
-                                    cx,
-                                )
-                            },
-                        ))
+                        .on_drop(cx.listener(move |ws, drag: &GalleryDrag, _, cx| {
+                            cx.stop_propagation();
+                            ws.cloud_drop_local(Some(local.clone()), None, drag.paths.clone(), cx)
+                        }))
                         .on_drop(cx.listener(move |ws, drag: &LocalFolderDrag, _, cx| {
                             cx.stop_propagation();
                             ws.cloud_drop_local(
@@ -521,27 +515,13 @@ pub(crate) fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::Any
                 .child(ui::button(
                     "Upload files…",
                     false,
-                    |ws, _window, cx| {
-                        let prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
-                            files: true,
-                            directories: true,
-                            multiple: true,
-                            prompt: Some("Upload to Schist Cloud".into()),
-                        });
-                        let (bucket, folder) = match &ws.cloud.query.scope {
-                            Scope::Bucket { id } => (Some(id.clone()), None),
-                            Scope::Folder { id, .. } => (None, Some(id.clone())),
-                            _ => (None, None),
-                        };
-                        cx.spawn(async move |this, cx| {
-                            if let Ok(Ok(Some(paths))) = prompt.await {
-                                let _ = this.update(cx, |ws, cx| {
-                                    ws.cloud_drop_local(bucket, folder, paths, cx)
-                                });
-                            }
-                        })
-                        .detach();
-                    },
+                    |ws, _, cx| ws.cloud_pick_upload(false, cx),
+                    cx,
+                ))
+                .child(ui::button(
+                    "Upload folder…",
+                    false,
+                    |ws, _, cx| ws.cloud_pick_upload(true, cx),
                     cx,
                 )),
         )
@@ -821,4 +801,51 @@ pub(crate) fn dialog(
             cx,
         ));
     ui::modal_frame(title, 620.0, body, actions).into_any_element()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn browser_gallery(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h(px(0.0))
+        .track_focus(&ws.focus)
+        .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
+            if ws.modal.is_some() {
+                if ev.keystroke.key == "enter" {
+                    ws.commit_focused_field();
+                    ws.confirm_modal(window, cx);
+                } else {
+                    ws.field_key(&ev.keystroke.key, ev.keystroke.key_char.as_deref());
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }
+        }))
+        .child(ui::button(
+            "Back to editor",
+            false,
+            |ws, _, cx| {
+                ws.cloud_set_visible(false);
+                cx.notify();
+            },
+            cx,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_grow()
+                .min_h(px(0.0))
+                .child(
+                    div()
+                        .id("cloud-sidebar")
+                        .w(px(260.0))
+                        .overflow_y_scroll()
+                        .child(sidebar(ws, cx)),
+                )
+                .child(grid(ws, cx)),
+        )
+        .into_any_element()
 }

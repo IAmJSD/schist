@@ -99,9 +99,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
     // action while it builds, so Enter can fire it.
     ui::reset_default_action();
     let body = match modal {
-        #[cfg(not(target_arch = "wasm32"))]
         Modal::CloudGenerate => crate::workspace::cloud_generation::dialog(ws, cx),
-        #[cfg(not(target_arch = "wasm32"))]
         Modal::Cloud { kind, fields } => crate::workspace::cloud_view::dialog(ws, kind, fields, cx),
         Modal::ImageSize {
             width,

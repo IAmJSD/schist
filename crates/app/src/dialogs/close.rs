@@ -57,7 +57,6 @@ pub(super) fn confirm_close_tab(
                     ws.close_tab_after_save();
                     ws.save_current(window, cx);
                     if ws.has_pending_save() {
-                        #[cfg(not(target_arch = "wasm32"))]
                         if ws
                             .doc
                             .as_ref()

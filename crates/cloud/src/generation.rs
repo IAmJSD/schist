@@ -1,6 +1,10 @@
 //! Image-generation API. Its per-generation socket keeps the legacy
 //! slot/chunk wire format; all workspace features still share the MessagePack socket.
 use crate::{auth, Account};
+use crate::{
+    runtime,
+    socket::{Message, Socket},
+};
 use anyhow::{anyhow, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,7 +12,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use tokio_tungstenite::tungstenite::{connect, stream::MaybeTlsStream, Message};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -59,17 +62,56 @@ pub enum Event {
         rejected: Option<String>,
     },
 }
-pub fn form(account: &Account) -> Result<Vec<Item>> {
-    auth::secure_url(&account.credentials.generation_endpoint_url, "https")?;
-    let items: Vec<Item> = auth::agent()
-        .get(&account.credentials.generation_endpoint_url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", account.credentials.access_token),
+async fn request(
+    account: &Account,
+    method: &str,
+    url: &str,
+    inputs: Option<&Inputs>,
+) -> Result<Vec<u8>> {
+    auth::secure_url(url, "https")?;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let agent = auth::agent();
+        let token = format!("Bearer {}", account.credentials.access_token);
+        let mut response = if method == "POST" {
+            agent
+                .post(url)
+                .header("Authorization", token)
+                .send_json(inputs)?
+        } else {
+            agent.get(url).header("Authorization", token).call()?
+        };
+        Ok(response
+            .body_mut()
+            .with_config()
+            .limit(1024 * 1024)
+            .read_to_vec()?)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let body = inputs.map(serde_json::to_vec).transpose()?;
+        Ok(auth::fetch(
+            method,
+            url,
+            body.as_ref().map(|_| "application/json"),
+            body.as_deref(),
+            Some(&account.credentials.access_token),
+            1024 * 1024,
         )
-        .call()?
-        .body_mut()
-        .read_json()?;
+        .await?
+        .bytes)
+    }
+}
+pub async fn form(account: &Account) -> Result<Vec<Item>> {
+    let items: Vec<Item> = serde_json::from_slice(
+        &request(
+            account,
+            "GET",
+            &account.credentials.generation_endpoint_url,
+            None,
+        )
+        .await?,
+    )?;
     let mut ids = HashSet::new();
     for item in &items {
         match item {
@@ -86,17 +128,10 @@ pub fn form(account: &Account) -> Result<Vec<Item>> {
     }
     Ok(items)
 }
-pub fn preview(account: &Account, url: &str, inputs: &Inputs) -> Result<String> {
-    auth::secure_url(url, "https")?;
-    Ok(auth::agent()
-        .post(url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", account.credentials.access_token),
-        )
-        .send_json(inputs)?
-        .body_mut()
-        .read_to_string()?)
+pub async fn preview(account: &Account, url: &str, inputs: &Inputs) -> Result<String> {
+    Ok(String::from_utf8(
+        request(account, "POST", url, Some(inputs)).await?,
+    )?)
 }
 pub fn validate(items: &[Item], inputs: &Inputs) -> Result<()> {
     for item in items {
@@ -134,60 +169,43 @@ pub fn validate(items: &[Item], inputs: &Inputs) -> Result<()> {
                     "Invalid option for {title}"
                 );
             }
-            _ => {}
+            Item::LiveTextPreview { .. } => {}
         }
     }
     Ok(())
 }
-pub fn generate(
+pub async fn generate(
     account: &Account,
     inputs: &Inputs,
     cancel: &AtomicBool,
     mut emit: impl FnMut(Event),
 ) -> Result<()> {
-    auth::secure_url(&account.credentials.generation_endpoint_url, "https")?;
-    let url = auth::agent()
-        .post(&account.credentials.generation_endpoint_url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", account.credentials.access_token),
+    let url = String::from_utf8(
+        request(
+            account,
+            "POST",
+            &account.credentials.generation_endpoint_url,
+            Some(inputs),
         )
-        .send_json(inputs)?
-        .body_mut()
-        .read_to_string()?;
+        .await?,
+    )?;
     auth::secure_url(&url, "wss")?;
-    let (mut ws, _) = connect(url.as_str())?;
-    match ws.get_mut() {
-        MaybeTlsStream::Rustls(s) => {
-            s.sock.set_read_timeout(Some(Duration::from_secs(1)))?;
-            s.sock.set_write_timeout(Some(Duration::from_secs(10)))?;
-        }
-        MaybeTlsStream::Plain(s) => s.set_read_timeout(Some(Duration::from_secs(1)))?,
-        _ => {}
-    }
+    let mut ws = runtime::timeout(Duration::from_secs(15), Socket::connect(&url)).await??;
     let mut slots = None;
     let mut terminal = HashSet::new();
     let mut chunks: HashMap<usize, Vec<u8>> = HashMap::new();
-    let mut last = std::time::Instant::now();
+    let mut last = web_time::Instant::now();
     loop {
         ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
         ensure!(
             last.elapsed() < Duration::from_secs(120),
             "Generation timed out"
         );
-        let message = match ws.read() {
-            Ok(m) => m,
-            Err(tokio_tungstenite::tungstenite::Error::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                continue
-            }
-            Err(e) => return Err(e.into()),
+        let message = tokio::select! {
+            message = ws.next() => message.ok_or_else(|| anyhow!("Generation connection closed"))??,
+            _ = runtime::sleep(Duration::from_millis(100)) => continue,
         };
-        last = std::time::Instant::now();
+        last = web_time::Instant::now();
         match message {
             Message::Text(text) if slots.is_none() => {
                 let layout: Vec<Part> = serde_json::from_str(&text)?;
@@ -251,23 +269,23 @@ pub fn generate(
                     });
                 }
             }
-            Message::Ping(_) => {
-                ws.flush()?;
+            Message::Ping => {
+                ws.flush().await?;
             }
-            Message::Pong(_) => {}
+            Message::Pong => {}
             Message::Close(_) => {
                 return Err(anyhow!("Generation closed before every slot completed"))
             }
-            _ => {}
         }
     }
-    let _ = ws.close(None);
+    let _ = ws.close().await;
     Ok(())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn required_fields() {
         let items = vec![Item::Text {
             id: "prompt".into(),

@@ -5,9 +5,13 @@ use gpui::{img, StatefulInteractiveElement as _, StyledImage as _};
 use schist_cloud::generation::{self as api, Input, Inputs, Item};
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicBool, mpsc},
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
 };
+use web_time::Instant;
 
 pub(crate) struct Generated {
     index: usize,
@@ -81,8 +85,8 @@ impl Workspace {
         g.loading = true;
         let sender = g.sender.clone();
         let epoch = self.cloud.epoch;
-        std::thread::spawn(move || {
-            let result = api::form(&account).map_err(|e| e.to_string());
+        schist_cloud::runtime::spawn(async move {
+            let result = api::form(&account).await.map_err(|e| e.to_string());
             let _ = sender.send(Job::Form(epoch, result));
         });
     }
@@ -165,10 +169,11 @@ impl Workspace {
                     let seq = g.seq;
                     let epoch = self.cloud.epoch;
                     let sender = g.sender.clone();
-                    std::thread::spawn(move || {
+                    schist_cloud::runtime::spawn(async move {
                         for url in urls {
-                            let result =
-                                api::preview(&account, &url, &inputs).map_err(|e| e.to_string());
+                            let result = api::preview(&account, &url, &inputs)
+                                .await
+                                .map_err(|e| e.to_string());
                             let _ = sender.send(Job::Preview(epoch, seq, url, result));
                         }
                     });
@@ -203,7 +208,7 @@ impl Workspace {
         let cancel = g.cancel.clone();
         let sender = g.sender.clone();
         let epoch = self.cloud.epoch;
-        std::thread::spawn(move || {
+        schist_cloud::runtime::spawn(async move {
             let mut retained = 0usize;
             let result = api::generate(&account, &inputs, &cancel, |event| {
                 if let api::Event::Image { index, bytes } = event {
@@ -221,7 +226,7 @@ impl Workspace {
                         limits.max_alloc = Some(256 * 1024 * 1024);
                         reader.limits(limits);
                         let i = reader.decode()?.thumbnail(180, 140).to_rgba8();
-                        Ok(super::library::rgba_to_render_image(
+                        Ok(super::cloud::rgba_to_render_image(
                             i.width(),
                             i.height(),
                             i.into_raw(),
@@ -241,6 +246,7 @@ impl Workspace {
                     let _ = sender.send(Job::Event(epoch, event));
                 }
             })
+            .await
             .map_err(|e| e.to_string())
             .and_then(|()| {
                 if retained > 256 * 1024 * 1024 {
@@ -269,7 +275,7 @@ impl Workspace {
                 doc.path = None;
                 doc.dirty = true;
                 self.open_in_tab(doc, true);
-                self.library.open = false;
+                self.cloud_set_visible(false);
                 self.close_modal(cx);
             }
             Err(e) => {

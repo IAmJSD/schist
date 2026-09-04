@@ -9,10 +9,32 @@ browser. Installed Linux, macOS and Windows packages register the
 
 The provider must serve `https://<domain>/.schist/auth-urls.json` and implement
 the [Rust protocol types](../crates/cloud/src/protocol.rs) and
-[transport contract](../crates/cloud/src/transport.rs) described below. This is a native client
-implementation; it does not deploy the provider service or provision accounts.
+[transport contract](../crates/cloud/src/transport.rs) described below. The client supports desktop and the hosted WASM editor.
 The [provider specification](https://gist.github.com/IAmJSD/f2d639079c5437424e693686490621c0)
 describes capability discovery and native download behavior in sections 8.6–8.9.
+
+## Browser
+
+At **https://try.schist.app**, choose **File → Schist Cloud → Sign into Schist Cloud…**.
+A popup signs into **schist.app** without replacing the editor page. WASM supports
+only this provider and hosted editor origin; desktop retains the domain prompt.
+The popup uses a state-bound, verifier-bound authorization code and validates the
+message origin and popup identity. Credentials stay in tab memory, so reloading
+requires signing in again.
+
+The browser shares the same live folders, buckets, search, filters, exports,
+and collaborative image model with desktop. One binary MessagePack workspace
+socket carries queries and edits. Browser fetch handles original uploads and
+downloads; the provider proxies S3 downloads so storage-bucket CORS is unnecessary.
+The legacy generation stream still uses its own per-job socket.
+
+**Upload files…** selects multiple files; **Upload folder…** preserves relative
+paths and can import directly into a cloud folder or bucket. Each selection is
+limited to 512 MiB in browser memory; the provider's upload limits still apply.
+The local filesystem gallery and native drag integration remain desktop features.
+Remote folders and assets can be dragged into remote buckets in either build.
+Downloads use the browser's download flow. Edits survive socket reconnects in the
+open tab, but filesystem recovery across page reloads is not available in WASM.
 
 ## Gallery and documents
 

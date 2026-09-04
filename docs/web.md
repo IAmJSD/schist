@@ -112,6 +112,15 @@ Compiled out entirely, with the reason:
 The menu entries for those features are filtered out of the web build
 rather than left to fail.
 
+## Schist Cloud
+
+The hosted editor at **https://try.schist.app** supports Schist Cloud sign-in,
+live folders and buckets, searches and filters, file/folder uploads, downloads,
+collaborative editing, and generation. Browser cloud connections are restricted
+to **schist.app**; custom providers remain available on desktop. Sign-in uses a
+popup, preserving open documents. See [Cloud](cloud.md#browser) for the browser
+flow, file handling, and session lifetime.
+
 ## Known gaps
 
 Camera raws open through the pure-Rust `schist-codec-raw` decoder, the

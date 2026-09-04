@@ -39,7 +39,21 @@ impl SharedDocument {
     pub fn unseeded(source: &Document) -> Result<Self> {
         let doc = Doc::new();
         let root = doc.get_or_insert_map("schist.image.v1");
-        let mut undo = yrs::UndoManager::new(&doc, &root);
+        let mut undo = yrs::UndoManager::with_scope_and_options(
+            &doc,
+            &root,
+            yrs::undo::Options {
+                capture_timeout_millis: 500,
+                tracked_origins: Default::default(),
+                capture_transaction: None,
+                timestamp: std::sync::Arc::new(|| {
+                    web_time::SystemTime::now()
+                        .duration_since(web_time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64
+                }),
+            },
+        );
         undo.include_origin("local");
         let mut s = Self {
             doc,
@@ -541,7 +555,8 @@ mod tests {
         d.tree.layers.push(Layer::new_raster("B"));
         d
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn concurrent_properties_and_tiles_merge() {
         let mut da = sample();
         let mut a = SharedDocument::new(&da).unwrap();
@@ -569,7 +584,8 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn native_tile_depths_roundtrip() {
         for depth in [Depth::Eight, Depth::Sixteen, Depth::ThirtyTwo] {
             let mut t = TileBuf::new(depth);
@@ -577,7 +593,8 @@ mod tests {
             assert_eq!(t, read_tile(&tile_bytes(&t)).unwrap());
         }
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn edits_during_join_merge_with_existing_room() {
         let mut original = sample();
         let mut server = SharedDocument::new(&original).unwrap();
@@ -593,7 +610,8 @@ mod tests {
         assert_eq!(result.tree.layers[0].name, "Remote");
         assert_eq!(result.tree.layers[1].opacity, 0.4);
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn undo_only_removes_local_changes() {
         let mut local = sample();
         let mut a = SharedDocument::new(&local).unwrap();
@@ -610,7 +628,8 @@ mod tests {
         assert_eq!(result.tree.layers[0].name, "A");
         assert_eq!(result.tree.layers[1].name, "Remote");
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn recovery_keeps_unjoined_edits_without_overwriting_peers() {
         let mut local = sample();
         let mut client = SharedDocument::unseeded(&local).unwrap();
@@ -631,7 +650,8 @@ mod tests {
         assert_eq!(result.tree.layers[0].name, "Peer");
         assert_eq!(result.tree.layers[1].opacity, 0.3);
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn layer_comp_references_survive_other_process_ids() {
         let mut local = sample();
         let mut comp = schist_core::LayerComp::new("Alternative");

@@ -11,12 +11,9 @@ serde_json.workspace = true
 rmpv = { version = "1", features = ["with-serde"] }
 rmp-serde = "1"
 serde_bytes = "0.11"
-tempfile = "3"
 url = "2"
-uuid = { version = "1", features = ["v4"] }
-ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
-tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+uuid = { version = "1", features = ["v4", "js"] }
+tokio = { version = "1", features = ["sync", "macros"] }
 futures.workspace = true
 yrs = "0.24"
 schist-core.workspace = true
@@ -24,3 +21,21 @@ schist-color.workspace = true
 schist-codec-psd.workspace = true
 
 chrono = "0.4"
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+sha2 = "0.10"
+web-sys = { version = "0.3", features = ["Window", "Location", "MessageEvent", "Event", "CloseEvent", "WebSocket", "BinaryType", "Request", "RequestInit", "RequestMode", "RequestCredentials", "RequestRedirect", "Response", "Headers", "ReadableStream", "ReadableStreamDefaultReader", "AbortController", "AbortSignal"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

@@ -225,3 +225,9 @@ check-cloud:
 	$(CARGO) test -p schist-cloud
 	$(CARGO) test -p schist-app cloud_lifecycle_tests
 	$(CARGO) check -p schist-app
+
+# Requires wasm-bindgen-test-runner and a browser WebDriver (e.g. CHROMEDRIVER).
+.PHONY: check-cloud-wasm
+check-cloud-wasm:
+	$(CARGO) check -p schist-app --target wasm32-unknown-unknown
+	CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner $(CARGO) test -p schist-cloud --target wasm32-unknown-unknown --lib

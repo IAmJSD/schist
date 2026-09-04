@@ -264,6 +264,16 @@ pub fn upload(url: &str, mime: &str, bytes: &[u8]) -> Result<()> {
     agent().put(url).header("Content-Type", mime).send(bytes)?;
     Ok(())
 }
+pub async fn upload_async(url: &str, mime: &str, bytes: &[u8]) -> Result<()> {
+    upload(url, mime, bytes)
+}
+pub async fn download_limited_async(url: &str, limit: u64) -> Result<Vec<u8>> {
+    download_limited(url, limit)
+}
+pub async fn logout_async(account: &Account) -> Result<()> {
+    logout(account)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

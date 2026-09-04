@@ -27,7 +27,6 @@ impl Workspace {
 
     pub fn after_change(&mut self, cx: &mut Context<Self>) {
         self.refresh_layer_styles();
-        #[cfg(not(target_arch = "wasm32"))]
         self.cloud_capture_edit();
         if let Some(doc) = &mut self.doc {
             let damage = doc.take_damage();
@@ -52,7 +51,6 @@ impl Workspace {
     }
 
     pub fn run_command(&mut self, id: &str, cx: &mut Context<Self>) {
-        #[cfg(not(target_arch = "wasm32"))]
         if (id == "edit.undo" || id == "edit.redo") && self.cloud_undo(id == "edit.redo", cx) {
             return;
         }

@@ -333,7 +333,8 @@ mod tests {
             original_download: true,
         }
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn capabilities_fallback_only_for_unknown_method() {
         assert!(
             Capabilities::from_reply(Err("method_not_found: older provider".into()))
@@ -349,7 +350,8 @@ mod tests {
         assert!(caps.supports_export("png"));
         assert!(!caps.supports_export("heic"));
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn document_limit_is_independent_of_frame_limit() {
         let caps = capabilities();
         assert!(caps.check_document(128 * 1024 * 1024).is_ok());
@@ -363,7 +365,8 @@ mod tests {
         caps.max_frame_bytes = u64::MAX;
         assert_eq!(caps.frame_limit(), MAX_FRAME);
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn binary_round_trip_and_trailing_data() {
         let b: Vec<u8> = (0..=255).collect();
         let v = map([
@@ -386,7 +389,8 @@ mod tests {
         ]);
         assert!(decode(&encode(&array).unwrap()).is_err());
     }
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn absent_filters_are_not_nil() {
         let v = value(Filters::default());
         assert!(v.as_map().unwrap().is_empty());

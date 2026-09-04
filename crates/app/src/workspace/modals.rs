@@ -342,7 +342,6 @@ impl Workspace {
 
     pub(super) fn commit_field_value(&mut self, id: &'static str) {
         let buffer = self.field_buffer.clone();
-        #[cfg(not(target_arch = "wasm32"))]
         if id == "cloud-generation-input" {
             if let Some(id) = self.cloud.generation.editing.clone() {
                 self.cloud
@@ -352,7 +351,6 @@ impl Workspace {
             }
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
         if id.starts_with("cloud-") {
             self.update_modal(|modal| {
                 if let Modal::Cloud { fields, .. } = modal {
@@ -430,7 +428,6 @@ impl Workspace {
             .map(|d| d.width as f32 / d.height.max(1) as f32)
             .unwrap_or(1.0);
         self.update_modal(|m| match m {
-            #[cfg(not(target_arch = "wasm32"))]
             Modal::Cloud {..} | Modal::CloudGenerate => {},
             Modal::ImageSize {
                 width,

@@ -4,7 +4,9 @@ use crate::{
     protocol::{map, parse, Capabilities, Value},
     Handle,
 };
-use anyhow::{bail, ensure, Context, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::bail;
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -87,6 +89,44 @@ fn params(id: &str, format: Option<&str>, capabilities: Option<&Capabilities>) -
     Ok(map(fields))
 }
 impl Handle {
+    pub async fn download_asset_async(
+        &self,
+        id: &str,
+        format: Option<&str>,
+        capabilities: Option<&Capabilities>,
+    ) -> Result<DownloadedAsset> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.download_asset(id, format, capabilities)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let params = params(id, format, capabilities)?;
+            for attempt in 0..3 {
+                let ticket: Ticket =
+                    parse(self.request_async("asset.download", params.clone()).await?)?;
+                match auth::download_response(&ticket.url, 512 * 1024 * 1024).await {
+                    Ok(response) => {
+                        return Ok(DownloadedAsset {
+                            bytes: response.bytes,
+                            revision: ticket.revision,
+                            content_type: response.content_type,
+                            content_disposition: response.content_disposition,
+                            format: format.map(str::to_owned),
+                        })
+                    }
+                    Err(e)
+                        if e.downcast_ref::<auth::HttpStatus>()
+                            .is_some_and(|s| s.0 == 409)
+                            && attempt < 2 => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            unreachable!()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_asset(
         &self,
         id: &str,
@@ -99,6 +139,7 @@ impl Handle {
         })
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn download_with(
     format: Option<&str>,
     mut ticket: impl FnMut() -> Result<Ticket>,
@@ -197,7 +238,7 @@ fn percent_decode(value: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::{
