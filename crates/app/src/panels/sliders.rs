@@ -150,8 +150,11 @@ pub(super) fn slider(
     }
     row.child(track).child(
         div()
-            .w(px(34.0))
+            // "180 px" is wider than the old 34px slot. Keep quantities
+            // on one line, including at the largest three-digit values.
+            .w(px(44.0))
             .flex_none()
+            .whitespace_nowrap()
             .text_size(px(11.0))
             .child(display),
     )
