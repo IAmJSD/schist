@@ -19,6 +19,7 @@ impl Workspace {
     /// Write a recovery snapshot for every document with unsaved changes.
     /// Returns true when at least one snapshot was written.
     pub fn autosave(&mut self) -> bool {
+        self.cloud_checkpoint();
         let dirty: Vec<&Document> = self
             .doc
             .iter()

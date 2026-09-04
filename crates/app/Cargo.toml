@@ -9,6 +9,8 @@ name = "schist"
 path = "src/main.rs"
 
 [dependencies]
+schist-cloud = { path = "../cloud" }
+web-time = "1"
 gpui.workspace = true
 anyhow.workspace = true
 log.workspace = true

@@ -62,6 +62,12 @@ fn signature(ws: &Workspace) -> String {
         out.push('\u{1f}');
         out.push_str(&recent.to_string_lossy());
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    out.push_str(if ws.cloud.account.is_some() {
+        "cloud-in"
+    } else {
+        "cloud-out"
+    });
     out
 }
 

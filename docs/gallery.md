@@ -6,6 +6,10 @@ a desktop feature — a browser tab has no folders to watch and no cameras
 to mount, so the whole subsystem is compiled out of the web build and its
 menu entries with it.
 
+The gallery also supports [Schist Cloud](cloud.md): choose **Sign into Schist
+Cloud…**, with `schist.app` prefilled, to browse remote folders and buckets,
+search their live contents, upload local folders and edit collaboratively.
+
 ## Boot
 
 A launch with nothing to open lands in the gallery, empty or not — as

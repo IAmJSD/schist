@@ -245,7 +245,8 @@ impl Workspace {
         let textual = id == "layer-name"
             || id == "new-doc-name"
             || id == "bucket-name"
-            || id == "bucket-query";
+            || id == "bucket-query"
+            || id.starts_with("cloud-");
         let hex = id == "cp-hex";
         // The caret belongs to the textual fields; keep it on the rails
         // in case the buffer changed underneath it.
@@ -341,6 +342,25 @@ impl Workspace {
 
     pub(super) fn commit_field_value(&mut self, id: &'static str) {
         let buffer = self.field_buffer.clone();
+        if id == "cloud-generation-input" {
+            if let Some(id) = self.cloud.generation.editing.clone() {
+                self.cloud
+                    .generation
+                    .values
+                    .insert(id, schist_cloud::generation::Input::Text(buffer));
+            }
+            return;
+        }
+        if id.starts_with("cloud-") {
+            self.update_modal(|modal| {
+                if let Modal::Cloud { fields, .. } = modal {
+                    if let Some((_, _, value)) = fields.iter_mut().find(|(key, _, _)| *key == id) {
+                        *value = buffer;
+                    }
+                }
+            });
+            return;
+        }
         if id == "layer-name" {
             self.update_modal(|m| {
                 if let Modal::LayerProperties { name, .. } = m {
@@ -408,6 +428,7 @@ impl Workspace {
             .map(|d| d.width as f32 / d.height.max(1) as f32)
             .unwrap_or(1.0);
         self.update_modal(|m| match m {
+            Modal::Cloud {..} | Modal::CloudGenerate => {},
             Modal::ImageSize {
                 width,
                 height,

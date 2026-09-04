@@ -64,6 +64,11 @@ file, never its output.
 
 ## What it does
 
+**Schist Cloud.** Sign in from the welcome screen or File menu, with
+`schist.app` as the default provider. Live remote folders, searchable buckets,
+filters, uploads and collaborative editing share a MessagePack WebSocket.
+See [docs/cloud.md](docs/cloud.md) for setup and the provider contract.
+
 **Documents.** PSD and PSB read *and* write — layers, nested groups, masks,
 all 27 blend modes, adjustment layers, layer effects, vector shapes,
 8/16/32-bit, RGB, greyscale, CMYK, Lab and Indexed, RLE and zip-compressed

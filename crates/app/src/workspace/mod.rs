@@ -36,6 +36,9 @@ mod ai;
 mod ai;
 mod chrome;
 mod clipboard;
+pub(crate) mod cloud;
+pub(crate) mod cloud_generation;
+pub(crate) mod cloud_view;
 mod colormgmt;
 mod commands;
 mod compose;
@@ -187,6 +190,7 @@ pub struct ModelDownload {
 }
 
 pub struct Workspace {
+    pub(crate) cloud: cloud::CloudState,
     pub registry: PluginRegistry,
     pub editor: EditorState,
     pub doc: Option<Document>,
@@ -435,7 +439,7 @@ impl Workspace {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            false
+            self.cloud.show
         }
     }
 
@@ -928,6 +932,11 @@ pub enum UpdateProgress {
 // plumbing matches exhaustively on every target.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum Modal {
+    CloudGenerate,
+    Cloud {
+        kind: &'static str,
+        fields: Vec<(&'static str, String, String)>,
+    },
     ImageSize {
         width: u32,
         height: u32,
@@ -990,18 +999,30 @@ pub enum Modal {
         preview: bool,
     },
     /// Edit ▸ Content-Aware Scale.
-    ContentAwareScale { width: u32, height: u32 },
+    ContentAwareScale {
+        width: u32,
+        height: u32,
+    },
     /// Edit ▸ Stroke.
     Stroke {
         width: f32,
         position: schist_core::StrokePosition,
     },
     /// Edit ▸ Fill.
-    Fill { source: FillSource, opacity: f32 },
+    Fill {
+        source: FillSource,
+        opacity: f32,
+    },
     /// Select ▸ Modify, which all take one amount.
-    SelectModify { kind: ModifyKind, amount: f32 },
+    SelectModify {
+        kind: ModifyKind,
+        amount: f32,
+    },
     /// Select ▸ Color Range.
-    ColorRange { tolerance: f32, target: Rgba },
+    ColorRange {
+        tolerance: f32,
+        target: Rgba,
+    },
     /// Photoshop's Color Picker.
     ColorPicker {
         target: ColorTarget,
@@ -1017,22 +1038,33 @@ pub enum Modal {
     ConfirmCloseTab,
     /// An image file dropped on the window while a document is open:
     /// open it in its own tab, or place it as a new layer?
-    DropImage { path: PathBuf },
+    DropImage {
+        path: PathBuf,
+    },
     /// Folders dropped on the window: open every image inside as a tab,
     /// or watch them in the gallery? `images` is what a scan found in
     /// them, so the button can say how many tabs that would be.
-    DropFolders { dirs: Vec<PathBuf>, images: usize },
+    DropFolders {
+        dirs: Vec<PathBuf>,
+        images: usize,
+    },
     /// A HEIC file needs the libheif decoder and this machine has none:
     /// offer to download it (with its LGPL license texts), then retry
     /// opening `path`.
-    HeifSupport { path: PathBuf },
+    HeifSupport {
+        path: PathBuf,
+    },
     /// More than one camera is reachable: ask which to import from.
-    CameraImport { sources: Vec<ImportSource> },
+    CameraImport {
+        sources: Vec<ImportSource>,
+    },
     /// Import options for one camera: the navigable OpenStreetMap view
     /// where a boundary can be drawn (only photos whose EXIF position
     /// falls inside it import). The map's own state lives on the
     /// library, not here — it changes every pointer move.
-    CameraImportOptions { source: ImportSource },
+    CameraImportOptions {
+        source: ImportSource,
+    },
     /// A device import failed (a locked iPhone, most often): say so in
     /// a dialog with the way forward, and offer to try again with the
     /// same source and boundary. Only ever constructed on macOS, where
@@ -1046,7 +1078,9 @@ pub enum Modal {
     /// A release newer than this build. On macOS and Windows it offers
     /// to install itself and restart; everywhere else it points at the
     /// release page, since the copy came from a package manager.
-    UpdateAvailable { update: crate::update::Update },
+    UpdateAvailable {
+        update: crate::update::Update,
+    },
     /// The third-party plugin manager.
     PluginManager,
     /// Neural Filters model downloads.
@@ -1268,6 +1302,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut ws = Workspace {
+            cloud: cloud::CloudState::default(),
             registry,
             editor: EditorState::default(),
             doc: None,
@@ -1423,6 +1458,7 @@ impl Workspace {
             }
         })
         .detach();
+        ws.cloud_start(cx);
         ws
     }
 }

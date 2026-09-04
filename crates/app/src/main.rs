@@ -229,6 +229,21 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 }
 
 fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(callback) = std::env::args()
+        .skip(1)
+        .find(|arg| arg.starts_with("schist://"))
+    {
+        let dir = schist_gallery::state_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("schist/cloud");
+        if let Err(error) = schist_cloud::auth::forward_callback(&callback, &dir) {
+            eprintln!("Cloud sign-in callback failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // `schist --mcp-bridge <addr>` is not a GUI launch at all: it is the
     // stdio pump an agent harness spawns as its "MCP server", forwarding
     // into the running app's loopback endpoint. Handled before anything
@@ -301,6 +316,15 @@ fn main() {
     app.on_open_urls({
         let requests = requests.clone();
         move |urls| {
+            #[cfg(not(target_arch = "wasm32"))]
+            for callback in urls.iter().filter(|url| url.starts_with("schist://")) {
+                let dir = schist_gallery::state_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("schist/cloud");
+                if let Err(error) = schist_cloud::auth::forward_callback(callback, &dir) {
+                    log::error!("Cloud callback failed: {error}");
+                }
+            }
             let paths: Vec<PathBuf> = urls.iter().filter_map(|u| path_from_url(u)).collect();
             if paths.is_empty() {
                 return;
@@ -372,7 +396,8 @@ fn main() {
                                 ws.recover_all(recoveries, cx);
                             }
                             if let Some(path) = std::env::args().nth(1) {
-                                ws.load_file(path.into(), cx);
+                                let path = path_from_url(&path).unwrap_or_else(|| path.into());
+                                ws.load_file(path, cx);
                             } else if ws.tab_count() == 0 {
                                 // Picasa boot: a launch with nothing to
                                 // open lands in the gallery, empty or

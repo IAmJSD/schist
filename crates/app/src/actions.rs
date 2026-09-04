@@ -102,6 +102,11 @@ actions!(
 /// `panels` because [`RunAppItem`] carries one.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AppItem {
+    CloudSignIn,
+    CloudGenerate,
+    CloudBrowse,
+    CloudSignOut,
+    CloudUpload,
     New,
     Open,
     Close,

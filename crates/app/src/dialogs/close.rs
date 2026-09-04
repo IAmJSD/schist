@@ -57,6 +57,14 @@ pub(super) fn confirm_close_tab(
                     ws.close_tab_after_save();
                     ws.save_current(window, cx);
                     if ws.has_pending_save() {
+                        if ws
+                            .doc
+                            .as_ref()
+                            .is_some_and(|doc| ws.cloud.docs.contains_key(&doc.id))
+                        {
+                            // The cloud acknowledgement resumes the pending quit.
+                            return;
+                        }
                         // Still waiting on a file prompt. Do not hold a
                         // quit open across it; the tab closes when the
                         // save lands.

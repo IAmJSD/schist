@@ -100,6 +100,7 @@ impl Workspace {
     }
 
     pub(super) fn open_in_tab(&mut self, mut doc: Document, replace_pristine: bool) {
+        self.cloud.show = false;
         // A document arriving is what ends the gallery: whether it came
         // from File ▸ New, a gallery double-click or a crash recovery,
         // the editor is where it lives — and its memory goes with it.
@@ -298,6 +299,7 @@ impl Workspace {
                 self.remove_recovery_for(doc.id);
                 #[cfg(not(target_arch = "wasm32"))]
                 self.forget_backing(doc.id);
+                self.cloud_close_document(doc.id);
             }
             if self.background_tabs.is_empty() {
                 self.active_tab = 0;
@@ -319,6 +321,7 @@ impl Workspace {
             self.remove_recovery_for(tab.doc.id);
             #[cfg(not(target_arch = "wasm32"))]
             self.forget_backing(tab.doc.id);
+            self.cloud_close_document(tab.doc.id);
             if index < self.active_tab {
                 self.active_tab -= 1;
             }
@@ -721,6 +724,9 @@ impl Workspace {
     /// ⌘S: save over the document's existing path, or fall back to Save As
     /// when it has never been saved (or its format can't be written).
     pub fn save_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cloud_save(cx) {
+            return;
+        }
         let path = self.doc.as_ref().and_then(|d| d.path.clone());
         match path {
             Some(path) if self.exporter_for(&path).is_some() => self.save_file_as(path, cx),

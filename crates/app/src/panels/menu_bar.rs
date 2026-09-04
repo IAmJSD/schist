@@ -25,6 +25,21 @@ pub(crate) fn run_app_item(
     cx: &mut Context<Workspace>,
 ) {
     match item {
+        AppItem::CloudGenerate => {
+            ws.cloud_generate_open(cx);
+        }
+        AppItem::CloudSignIn => {
+            ws.cloud_sign_in(cx);
+        }
+        AppItem::CloudBrowse => {
+            ws.cloud_browse(schist_cloud::Scope::Library, cx);
+        }
+        AppItem::CloudSignOut => {
+            ws.cloud_sign_out(cx);
+        }
+        AppItem::CloudUpload => {
+            ws.cloud_upload_document(cx);
+        }
         AppItem::New => ws.open_new_file_picker(cx),
         AppItem::Open => crate::keymap::open_file_dialog(ws, window, cx),
         AppItem::Close => ws.request_close_tab(ws.active_tab(), cx),

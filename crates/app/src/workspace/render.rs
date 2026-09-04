@@ -621,7 +621,7 @@ impl Render for Workspace {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                unreachable!("the gallery is not compiled into the web build")
+                super::cloud_view::browser_gallery(self, cx)
             }
         } else {
             div()

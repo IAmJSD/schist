@@ -349,3 +349,133 @@ pub fn local_set(key: &str, value: &str) {
         let _ = storage.set_item(key, value);
     }
 }
+
+/// Browser file/folder imports retain relative paths for cloud upload tickets.
+pub fn pick_cloud_files(
+    directory: bool,
+) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<PathBuf>>>> {
+    let setup = (|| -> anyhow::Result<_> {
+        let document = web_sys::window()
+            .and_then(|w| w.document())
+            .ok_or_else(|| anyhow::anyhow!("No browser document"))?;
+        let input: web_sys::HtmlInputElement = document
+            .create_element("input")
+            .map_err(|_| anyhow::anyhow!("File picker unavailable"))?
+            .unchecked_into();
+        input.set_type("file");
+        input.set_multiple(true);
+        if directory {
+            input
+                .set_attribute("webkitdirectory", "")
+                .map_err(|_| anyhow::anyhow!("Folder picker unavailable"))?;
+        }
+        let _ = input.style().set_property("display", "none");
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&input);
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let tx = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
+        let selected = input.clone();
+        let sender = tx.clone();
+        let change = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            let files = selected.files();
+            let sender = sender.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = async {
+                    let Some(files) = files else {
+                        return Ok(None);
+                    };
+                    let total: f64 = (0..files.length())
+                        .filter_map(|i| files.item(i))
+                        .map(|f| f.size())
+                        .sum();
+                    anyhow::ensure!(
+                        total <= 512.0 * 1024.0 * 1024.0,
+                        "Choose at most 512 MiB of files per upload"
+                    );
+                    let mut paths = Vec::new();
+                    for i in 0..files.length() {
+                        let file = files
+                            .item(i)
+                            .ok_or_else(|| anyhow::anyhow!("File selection changed"))?;
+                        let name = if directory {
+                            js_sys::Reflect::get(&file, &"webkitRelativePath".into())
+                                .ok()
+                                .and_then(|p| p.as_string())
+                                .filter(|p| !p.is_empty())
+                                .unwrap_or_else(|| file.name())
+                        } else {
+                            file.name()
+                        };
+                        anyhow::ensure!(
+                            !name.contains(['\\', '\0', ':'])
+                                && name
+                                    .split('/')
+                                    .all(|s| !s.is_empty() && s != "." && s != ".."),
+                            "Invalid import path"
+                        );
+                        let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+                            .await
+                            .map_err(|_| anyhow::anyhow!("Could not read selected file"))?;
+                        paths.push(files::store(
+                            &name,
+                            js_sys::Uint8Array::new(&buffer).to_vec(),
+                        ));
+                    }
+                    Ok(Some(paths))
+                }
+                .await;
+                if let Some(sender) = sender.borrow_mut().take() {
+                    let _ = sender.send(result);
+                }
+            });
+        });
+        let cancel = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if let Some(tx) = tx.borrow_mut().take() {
+                let _ = tx.send(Ok(None));
+            }
+        });
+        input.set_onchange(Some(change.as_ref().unchecked_ref()));
+        input
+            .add_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref())
+            .map_err(|_| anyhow::anyhow!("File picker unavailable"))?;
+        struct Picker {
+            input: web_sys::HtmlInputElement,
+            _change: Closure<dyn FnMut(web_sys::Event)>,
+            cancel: Closure<dyn FnMut(web_sys::Event)>,
+        }
+        impl Drop for Picker {
+            fn drop(&mut self) {
+                self.input.set_onchange(None);
+                let _ = self.input.remove_event_listener_with_callback(
+                    "cancel",
+                    self.cancel.as_ref().unchecked_ref(),
+                );
+                self.input.remove();
+            }
+        }
+        input.click();
+        Ok((
+            Picker {
+                input,
+                _change: change,
+                cancel,
+            },
+            rx,
+        ))
+    })();
+    async move {
+        let (_picker, rx) = setup?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("File picker closed"))?
+    }
+}
+pub fn cloud_relative_path(path: &Path) -> Option<String> {
+    let relative: PathBuf = path
+        .strip_prefix("/web/open")
+        .ok()?
+        .components()
+        .skip(1)
+        .collect();
+    (relative.components().count() > 1).then(|| relative.to_string_lossy().into_owned())
+}
