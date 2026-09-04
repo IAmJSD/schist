@@ -1,10 +1,14 @@
 //! One editing session: a document plus the same plugin registry and
 //! editor state the GPUI shell would hold for a window.
 //!
-//! The methods here are the headless counterparts of `Workspace`'s
-//! document-editing paths — same registry, same history semantics, same
-//! selection-feathered filter writes — minus everything that needs a
-//! window (view transforms, previews, system clipboard, dialogs).
+//! The operations live on [`SessionCtx`], borrowed views of a document,
+//! editor state and registry — so the same code runs against a headless
+//! [`Session`] (the stdio server's unit of state) and against the app's
+//! live workspace, which owns those three itself. The methods are the
+//! headless counterparts of `Workspace`'s document-editing paths — same
+//! registry, same history semantics, same selection-feathered filter
+//! writes — minus everything that needs a window (view transforms,
+//! previews, system clipboard, dialogs).
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use schist_core::color::{Depth, Rgba};
@@ -59,7 +63,13 @@ impl PluginManifest for PsdPlugin {
 /// The same first-party plugin set `schist-app` assembles, plus any
 /// installed third-party WebAssembly plugins. Each session gets its own
 /// registry because tools carry per-gesture state.
-fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) {
+type Hosts = (
+    PluginRegistry,
+    schist_plugin_host_wasm::PluginManager,
+    schist_plugin_host_8bf::manager::PluginManager,
+);
+
+pub fn build_registry() -> Hosts {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
         Box::new(schist_tools_basic::BasicToolsPlugin),
@@ -83,7 +93,26 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
         Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
         None => schist_plugin_host_wasm::PluginManager::default(),
     };
-    (registry, manager)
+    // Photoshop plug-ins, out of process. `Interactive::No` because a
+    // `.8bf` shows its own dialog and there is nobody here to dismiss
+    // one: over MCP they run with their own defaults.
+    let photoshop = schist_plugin_host_8bf::manager::PluginManager::load_dirs(
+        &schist_plugin_host_8bf::manager::PluginManager::search_dirs(),
+        &mut registry,
+        schist_plugin_host_8bf::manager::Interactive::No,
+    );
+    (registry, manager, photoshop)
+}
+
+/// Borrowed views of everything an MCP tool call operates on. The stdio
+/// server borrows a [`Session`]'s fields; the app borrows the workspace's.
+pub struct SessionCtx<'a> {
+    pub doc: &'a mut Document,
+    pub state: &'a mut EditorState,
+    pub registry: &'a mut PluginRegistry,
+    /// The Photoshop plug-in scan, for `photoshop_plugins` reporting.
+    /// `None` when the host has no scan to report.
+    pub photoshop: Option<&'a schist_plugin_host_8bf::manager::PluginManager>,
 }
 
 pub struct Session {
@@ -92,6 +121,8 @@ pub struct Session {
     pub registry: PluginRegistry,
     /// Keeps loaded WASM plugins alive for the session's lifetime.
     _wasm: schist_plugin_host_wasm::PluginManager,
+    /// Keeps the discovered Photoshop plug-ins alive alongside them.
+    pub photoshop: schist_plugin_host_8bf::manager::PluginManager,
 }
 
 impl Session {
@@ -110,14 +141,14 @@ impl Session {
             &white,
         );
         doc.push_layer(bg);
-        doc.dirty = false;
+        doc.mark_saved();
         Ok(Session::install(doc))
     }
 
     /// Open a file through the codec registry, like File ▸ Open.
     pub fn open(path: &Path) -> Result<Session> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let (registry, wasm) = build_registry();
+        let (registry, wasm, photoshop) = build_registry();
         let ext = path.extension().and_then(|e| e.to_str());
         let codec = registry
             .codec_for(&bytes, ext)
@@ -134,6 +165,7 @@ impl Session {
             state: EditorState::default(),
             registry,
             _wasm: wasm,
+            photoshop,
         };
         session.after_change();
         Ok(session)
@@ -141,15 +173,115 @@ impl Session {
 
     fn install(mut doc: Document) -> Session {
         doc.snapshot_history_source();
-        let (registry, wasm) = build_registry();
+        let (registry, wasm, photoshop) = build_registry();
         Session {
             doc,
             state: EditorState::default(),
             registry,
             _wasm: wasm,
+            photoshop,
         }
     }
 
+    /// The borrowed view every operation runs against.
+    pub fn ctx(&mut self) -> SessionCtx<'_> {
+        SessionCtx {
+            doc: &mut self.doc,
+            state: &mut self.state,
+            registry: &mut self.registry,
+            photoshop: Some(&self.photoshop),
+        }
+    }
+
+    /// The headless counterpart of the shell's `after_change`: refresh the
+    /// derived caches and drop the damage (there is no display cache here
+    /// to invalidate).
+    pub fn after_change(&mut self) {
+        self.ctx().refresh_caches();
+        self.doc.take_damage();
+    }
+
+    // Thin delegates, so a session reads like the workspace it stands in
+    // for. Each drains the damage the operation queued, as the shell's
+    // `after_change` would.
+
+    pub fn run_command(&mut self, id: &str) -> Result<String> {
+        let out = self.ctx().run_command(id);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn activate_tool(&mut self, id: &str) -> Result<&'static str> {
+        let out = self.ctx().activate_tool(id);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn set_tool_option(&mut self, key: &str, value: OptionValue) -> Result<()> {
+        let out = self.ctx().set_tool_option(key, value);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn stroke(
+        &mut self,
+        points: &[(f32, f32)],
+        pressure: f32,
+        modifiers: Modifiers,
+    ) -> Result<()> {
+        let out = self.ctx().stroke(points, pressure, modifiers);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn tool_input(
+        &mut self,
+        action: &str,
+        key: Option<&str>,
+        text: Option<&str>,
+        modifiers: Modifiers,
+    ) -> Result<bool> {
+        let out = self.ctx().tool_input(action, key, text, modifiers);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn apply_filter(&mut self, id: &str, values: &[(String, f64)]) -> Result<String> {
+        let out = self.ctx().apply_filter(id, values);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn apply_adjustment(
+        &mut self,
+        kind: AdjustmentKind,
+        params: Option<schist_adjustments::Params>,
+    ) -> Result<String> {
+        let out = self.ctx().apply_adjustment(kind, params);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn render(&mut self, region: Option<IntRect>) -> Result<(IntRect, Vec<u8>)> {
+        let out = self.ctx().render(region);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn save(&mut self, path: &Path) -> Result<()> {
+        let out = self.ctx().save(path);
+        self.doc.take_damage();
+        out
+    }
+
+    pub fn export(&mut self, path: &Path, options: &ExportOptions) -> Result<()> {
+        let out = self.ctx().export(path, options);
+        self.doc.take_damage();
+        out
+    }
+}
+
+impl SessionCtx<'_> {
     // ----- commands -----
 
     pub fn run_command(&mut self, id: &str) -> Result<String> {
@@ -161,12 +293,18 @@ impl Session {
             .command(id)
             .ok_or_else(|| anyhow!("unknown command {id:?}"))?;
         let mut ctx = CommandCtx {
-            doc: &mut self.doc,
-            state: &mut self.state,
+            doc: self.doc,
+            state: self.state,
+            refusal: None,
         };
         (command.run)(&mut ctx);
+        // A command that declined has to say so: reporting its own title
+        // told the caller it had worked.
+        if let Some(why) = ctx.refusal {
+            bail!("{why}");
+        }
         let title = command.title.to_string();
-        self.after_change();
+        self.refresh_caches();
         Ok(title)
     }
 
@@ -188,8 +326,8 @@ impl Session {
         if previous != id {
             if let Some(tool) = self.registry.tool_mut(previous) {
                 let mut ctx = ToolCtx {
-                    doc: &mut self.doc,
-                    state: &mut self.state,
+                    doc: self.doc,
+                    state: self.state,
                 };
                 tool.on_deactivate(&mut ctx);
             }
@@ -204,11 +342,11 @@ impl Session {
         self.state.active_tool = static_id;
         let tool = self.registry.tool_mut(static_id).unwrap();
         let mut ctx = ToolCtx {
-            doc: &mut self.doc,
-            state: &mut self.state,
+            doc: self.doc,
+            state: self.state,
         };
         tool.on_activate(&mut ctx);
-        self.after_change();
+        self.refresh_caches();
         Ok(static_id)
     }
 
@@ -232,11 +370,11 @@ impl Session {
         tool.set_option(key, value);
         let tool = self.registry.tool_mut(tool_id).unwrap();
         let mut ctx = ToolCtx {
-            doc: &mut self.doc,
-            state: &mut self.state,
+            doc: self.doc,
+            state: self.state,
         };
         tool.on_option_changed(&mut ctx, key);
-        self.after_change();
+        self.refresh_caches();
         Ok(())
     }
 
@@ -263,15 +401,15 @@ impl Session {
         };
         let tool = self.registry.tool_mut(tool_id).unwrap();
         let mut ctx = ToolCtx {
-            doc: &mut self.doc,
-            state: &mut self.state,
+            doc: self.doc,
+            state: self.state,
         };
         tool.on_pointer_down(&mut ctx, input(&points[0]));
         for point in &points[1..] {
             tool.on_pointer_move(&mut ctx, input(point));
         }
         tool.on_pointer_up(&mut ctx, input(points.last().unwrap()));
-        self.after_change();
+        self.refresh_caches();
         Ok(())
     }
 
@@ -290,8 +428,8 @@ impl Session {
             .tool_mut(tool_id)
             .ok_or_else(|| anyhow!("no active tool"))?;
         let mut ctx = ToolCtx {
-            doc: &mut self.doc,
-            state: &mut self.state,
+            doc: self.doc,
+            state: self.state,
         };
         let consumed = match action {
             "commit" => {
@@ -308,7 +446,7 @@ impl Session {
             }
             other => bail!("unknown action {other:?} (expected key, commit or cancel)"),
         };
-        self.after_change();
+        self.refresh_caches();
         Ok(consumed)
     }
 
@@ -348,8 +486,15 @@ impl Session {
             region.height() as usize,
             &resolved,
         );
+        // A Photoshop plug-in runs in a helper process and can fail
+        // there. Reporting the filter as applied, with an undo entry
+        // that restores pixels nothing touched, would be worse than
+        // saying so.
+        if let Some(err) = filter.last_error() {
+            bail!("filter {id:?} failed: {err}");
+        }
         self.write_region(layer_id, region, &original, &buf, &name);
-        self.after_change();
+        self.refresh_caches();
         Ok(name)
     }
 
@@ -369,7 +514,7 @@ impl Session {
         params.apply_buffer(&mut buf);
         let name = kind.display_name().to_string();
         self.write_region(layer_id, region, &original, &buf, &name);
-        self.after_change();
+        self.refresh_caches();
         Ok(name)
     }
 
@@ -479,13 +624,13 @@ impl Session {
     /// Composite `region` (or the whole canvas) to straight-alpha RGBA8,
     /// with shape and style caches refreshed first.
     pub fn render(&mut self, region: Option<IntRect>) -> Result<(IntRect, Vec<u8>)> {
-        self.after_change();
+        self.refresh_caches();
         let canvas = self.doc.canvas_rect();
         let region = region.map(|r| r.intersect(&canvas)).unwrap_or(canvas);
         if region.is_empty() {
             bail!("render region is empty");
         }
-        let pixels = schist_compositor::composite_region_rgba8(&self.doc, region);
+        let pixels = schist_compositor::composite_region_rgba8(self.doc, region);
         Ok((region, pixels))
     }
 
@@ -502,7 +647,7 @@ impl Session {
     pub fn save(&mut self, path: &Path) -> Result<()> {
         // Raster formats flatten through the compositor, which reads the
         // styled-raster caches — bring them up to date first.
-        self.after_change();
+        self.refresh_caches();
         let codec = self.exporter_for(path).ok_or_else(|| {
             anyhow!(
                 "no exporter for .{} — exportable: {}",
@@ -510,9 +655,9 @@ impl Session {
                 self.export_extensions().join(", ")
             )
         })?;
-        let bytes = codec.export(&self.doc)?;
+        let bytes = codec.export(self.doc)?;
         write_atomically(path, &bytes)?;
-        self.doc.dirty = false;
+        self.doc.mark_saved();
         self.doc.path = Some(path.to_path_buf());
         if let Some(name) = path.file_name() {
             self.doc.title = name.to_string_lossy().into_owned();
@@ -523,7 +668,7 @@ impl Session {
     /// File ▸ Export: flattened export with encoder settings, leaving the
     /// document's own path alone.
     pub fn export(&mut self, path: &Path, options: &ExportOptions) -> Result<()> {
-        self.after_change();
+        self.refresh_caches();
         let codec = self.exporter_for(path).ok_or_else(|| {
             anyhow!(
                 "no exporter for .{} — exportable: {}",
@@ -531,7 +676,7 @@ impl Session {
                 self.export_extensions().join(", ")
             )
         })?;
-        let bytes = codec.export_with(&self.doc, options)?;
+        let bytes = codec.export_with(self.doc, options)?;
         write_atomically(path, &bytes)
     }
 
@@ -545,19 +690,19 @@ impl Session {
 
     // ----- derived caches -----
 
-    /// The headless counterpart of the shell's `after_change`: re-rasterize
-    /// stale vector shapes, rebuild stale layer-effect rasters, and drop
-    /// the damage (there is no display cache here to invalidate).
-    pub fn after_change(&mut self) {
+    /// Re-rasterize stale vector shapes and rebuild stale layer-effect
+    /// rasters, queueing damage for whatever grew. The damage is left on
+    /// the document for the host to drain: the shell feeds it to its
+    /// display caches, the headless session discards it.
+    pub fn refresh_caches(&mut self) {
         let depth = self.doc.depth;
         let canvas = self.doc.canvas_rect();
         let mut grew = Vec::new();
         reshape_layers(&mut self.doc.tree.layers, depth, canvas, &mut grew);
-        restyle_layers(&mut self.doc.tree.layers, &mut grew);
+        schist_compositor::restyle_layers(&mut self.doc.tree.layers, &mut grew);
         for rect in grew {
             self.doc.add_damage(rect);
         }
-        self.doc.take_damage();
     }
 }
 
@@ -595,77 +740,6 @@ fn reshape_layers(layers: &mut [Layer], depth: Depth, canvas: IntRect, damage: &
         layer.styled = None;
         damage.push(before);
         damage.push(layer.content_bounds());
-    }
-}
-
-/// Rebuild stale styled rasters (layer effects), collecting changed areas.
-fn restyle_layers(layers: &mut [Layer], damage: &mut Vec<IntRect>) {
-    for layer in layers.iter_mut() {
-        if let LayerKind::Group(g) = &mut layer.kind {
-            restyle_layers(&mut g.children, damage);
-        }
-        if layer.style.is_empty() {
-            if let Some(old) = layer.styled.take() {
-                damage.push(old.bounds);
-            }
-            continue;
-        }
-        let key = fx_key(layer);
-        if layer.styled.as_ref().map(|s| s.key) == Some(key) {
-            continue;
-        }
-        let before = layer.styled.as_ref().map(|s| s.bounds);
-        layer.styled = schist_compositor::render_styled(layer).map(|mut r| {
-            r.key = key;
-            std::sync::Arc::new(r)
-        });
-        if let Some(b) = before {
-            damage.push(b);
-        }
-        if let Some(s) = &layer.styled {
-            damage.push(s.bounds);
-        }
-    }
-}
-
-/// Fingerprint of everything a styled raster depends on.
-fn fx_key(layer: &Layer) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    format!("{:?}", layer.style).hash(&mut h);
-    layer.fill_opacity.to_bits().hash(&mut h);
-    if let Some(r) = layer.as_raster() {
-        r.tiles.fingerprint().hash(&mut h);
-    }
-    // A group's styled raster renders from its flattened children;
-    // children restyle first, so their styled keys are fresh here.
-    if let LayerKind::Group(g) = &layer.kind {
-        fx_key_children(&g.children, &mut h);
-    }
-    h.finish()
-}
-
-fn fx_key_children(layers: &[Layer], h: &mut rustc_hash::FxHasher) {
-    use std::hash::Hash;
-    for l in layers {
-        l.visible.hash(h);
-        l.opacity.to_bits().hash(h);
-        l.fill_opacity.to_bits().hash(h);
-        format!("{:?}", l.blend).hash(h);
-        l.render_offset.hash(h);
-        l.clipping.hash(h);
-        if let Some(r) = l.as_raster() {
-            r.tiles.fingerprint().hash(h);
-        }
-        if let Some(s) = l.styled.as_ref() {
-            s.key.hash(h);
-        }
-        if let Some(m) = &l.mask {
-            m.enabled.hash(h);
-        }
-        if let LayerKind::Group(g) = &l.kind {
-            fx_key_children(&g.children, h);
-        }
     }
 }
 

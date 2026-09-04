@@ -29,6 +29,12 @@ rustc-hash.workspace = true
 # to hundreds of megabytes on a large document.
 crc32fast.workspace = true
 
+# std's SystemTime::now() panics on wasm32-unknown-unknown; web-time is
+# the same type backed by the browser clock. Only export's creation
+# stamp needs it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+
 [dev-dependencies]
 # Geometry tests decode the embedded thumbnail — Affinity's own render
 # of each fixture — and compare the import against it; the afdiff

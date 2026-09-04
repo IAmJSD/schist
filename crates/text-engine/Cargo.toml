@@ -12,3 +12,6 @@ fontdb = "0.24"
 ttf-parser = "0.25"
 log.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Model Context Protocol server exposing Schist editing sessions over stdio"
 
+[lib]
+name = "schist_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "schist-mcp"
 path = "src/main.rs"
@@ -18,7 +22,11 @@ schist-layer-fx.workspace = true
 schist-adjustments.workspace = true
 schist-codec-psd.workspace = true
 schist-plugin-host-wasm.workspace = true
+schist-plugin-host-8bf = { workspace = true, features = ["registry"] }
 schist-codecs-common.workspace = true
+# The gallery's files on disk, for the gallery_* tools.
+schist-gallery.workspace = true
+schist-neural.workspace = true
 schist-tools-basic.workspace = true
 schist-tools-paint.workspace = true
 schist-tools-retouch.workspace = true
@@ -33,7 +41,6 @@ schist-commands-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rustc-hash.workspace = true
 image.workspace = true
 log.workspace = true
 env_logger.workspace = true

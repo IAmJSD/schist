@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Build Schist.app and the standalone schist-mcp server, signing and
-# notarizing both when credentials are present. Always leaves two
+# Build Schist.app -- with its two Quick Look app extensions inside --
+# and the standalone schist-mcp server, signing and notarizing both when
+# credentials are present. Always leaves three
 # distributables:
+#   dist/Schist.dmg            the app, in a window to drag into /Applications
 #   dist/Schist.zip            the app bundle
 #   dist/schist-mcp-macos.zip  the MCP server, a plain CLI binary
-# Only the zips are safe to hand to CI artifact upload, which would otherwise
-# strip permissions and symlinks and void the signatures.
+# Only the disk image and the zips are safe to hand to CI artifact upload,
+# which would otherwise strip permissions and symlinks and void the
+# signatures.
 #
 # Signing is optional -- without it both still build, unsigned:
 #   MACOS_CERT_NAME   "Developer ID Application: … (TEAMID)"
@@ -21,19 +24,43 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 target="${1:-release}"
 app="$root/dist/Schist.app"
 zip="$root/dist/Schist.zip"
+dmg="$root/dist/Schist.dmg"
+# What the disk image is assembled in: the app plus the /Applications link,
+# and nothing else -- hdiutil images the directory exactly as it finds it.
+dmg_stage="$root/target/macos-dmg"
 # The server is staged outside dist/ and only its zip is published there: a
 # loose binary in dist/ would be uploaded alongside, minus its exec bit.
 mcp_stage="$root/target/macos-mcp"
 mcp="$mcp_stage/schist-mcp"
 mcp_zip="$root/dist/schist-mcp-macos.zip"
 
-cargo build --"$target" -p schist-app -p schist-mcp
+# `debug` names a directory under target/, not a cargo flag: it is what
+# `cargo build` does with no profile flag at all.
+packages=(-p schist-app -p schist-mcp -p schist-quicklook)
+if [ "$target" = "debug" ]; then
+    cargo build "${packages[@]}"
+else
+    cargo build --"$target" "${packages[@]}"
+fi
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/packaging/macos/Info.plist" "$app/Contents/Info.plist"
 cp "$root/target/$target/schist" "$app/Contents/MacOS/schist"
 cp "$root/packaging/macos/schist.icns" "$app/Contents/Resources/"
+
+# Quick Look ships as two app extensions around one executable: macOS
+# allows a bundle only one extension point, and thumbnails (Finder icons)
+# and previews (the space-bar panel) are two. Each Info.plist names the
+# principal class the binary registers for that role.
+install_appex() {
+    ext="$app/Contents/PlugIns/$1.appex"
+    mkdir -p "$ext/Contents/MacOS"
+    cp "$root/packaging/macos/quicklook/$2" "$ext/Contents/Info.plist"
+    cp "$root/target/$target/schist-quicklook" "$ext/Contents/MacOS/schist-quicklook"
+}
+install_appex SchistQuickLookThumbnail thumbnail-Info.plist
+install_appex SchistQuickLookPreview preview-Info.plist
 
 # The MCP server ships on its own rather than inside the bundle: it is a stdio
 # CLI that a client spawns by path, so it wants a short path and has to be
@@ -45,23 +72,34 @@ cp "$root/target/$target/schist-mcp" "$mcp"
 signed=false
 if [ -n "${MACOS_CERT_NAME:-}" ]; then
     echo "signing with $MACOS_CERT_NAME"
+    # Expanded as `${keychain[@]+...}` below: bash 3.2, which is what
+    # /usr/bin/env finds on a stock macOS, calls an empty array unbound
+    # under `set -u`.
     keychain=()
     if [ -n "${MACOS_KEYCHAIN:-}" ]; then
         keychain=(--keychain "$MACOS_KEYCHAIN")
     fi
 
-    # No --deep: it is deprecated, and there is nothing nested to reach --
-    # plugins ship as wasm, not as dylibs.
+    # Inside out, and without --deep, which is deprecated: the app's
+    # signature seals the extensions inside it, so they have to be signed
+    # -- with their own, sandboxed entitlements -- before the app is.
+    for ext in "$app/Contents/PlugIns/"*.appex; do
+        codesign --force --options runtime --timestamp \
+            --entitlements "$root/packaging/macos/quicklook/entitlements.plist" \
+            ${keychain[@]+"${keychain[@]}"} --sign "$MACOS_CERT_NAME" "$ext"
+        codesign --verify --strict --verbose=2 "$ext"
+    done
+
     codesign --force --options runtime --timestamp \
         --entitlements "$root/packaging/macos/entitlements.plist" \
-        "${keychain[@]}" --sign "$MACOS_CERT_NAME" "$app"
+        ${keychain[@]+"${keychain[@]}"} --sign "$MACOS_CERT_NAME" "$app"
     codesign --verify --strict --verbose=2 "$app"
 
     # The server gets the same entitlements as the app: it hosts the same
     # wasmtime plugins, so under the hardened runtime it needs MAP_JIT too.
     codesign --force --options runtime --timestamp \
         --entitlements "$root/packaging/macos/entitlements.plist" \
-        "${keychain[@]}" --sign "$MACOS_CERT_NAME" "$mcp"
+        ${keychain[@]+"${keychain[@]}"} --sign "$MACOS_CERT_NAME" "$mcp"
     codesign --verify --strict --verbose=2 "$mcp"
     signed=true
 else
@@ -123,6 +161,40 @@ fi
 rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
 
+# The disk image, built last and from the finished bundle: whatever signing
+# and stapling happened above is already inside it. ditto rather than cp,
+# which is the only copy that carries a bundle's symlinks and extended
+# attributes across intact -- a signature does not survive losing them.
+rm -rf "$dmg_stage"
+mkdir -p "$dmg_stage"
+ditto "$app" "$dmg_stage/Schist.app"
+# The drag-to-install target. A symlink to the real /Applications, so the
+# window Finder opens has somewhere to drop the app.
+ln -s /Applications "$dmg_stage/Applications"
+rm -f "$dmg"
+hdiutil create -volname Schist -srcfolder "$dmg_stage" -ov -format UDZO "$dmg"
+rm -rf "$dmg_stage"
+
+# The image is signed and notarized in its own right, not just for what it
+# carries: Gatekeeper assesses the .dmg the moment it is opened, which is
+# before anything inside it has been looked at.
+if [ "$signed" = true ]; then
+    codesign --force --timestamp \
+        ${keychain[@]+"${keychain[@]}"} --sign "$MACOS_CERT_NAME" "$dmg"
+    codesign --verify --strict --verbose=2 "$dmg"
+fi
+
+if [ "$signed" = true ] && [ ${#notary[@]} -gt 0 ]; then
+    echo "notarizing the disk image"
+    xcrun notarytool submit "$dmg" "${notary[@]}" --wait
+    # Unlike the flat MCP binary a disk image does take a stapled ticket, so
+    # this is also the check on the submission: stapling a rejected image
+    # fails rather than passing quietly.
+    xcrun stapler staple "$dmg"
+    xcrun stapler validate "$dmg"
+fi
+
 echo "built $app"
 echo "built $zip"
+echo "built $dmg"
 echo "built $mcp_zip"

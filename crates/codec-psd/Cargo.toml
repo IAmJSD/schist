@@ -9,6 +9,9 @@ schist-core.workspace = true
 schist-compositor.workspace = true
 schist-color.workspace = true
 schist-psd-descriptor.workspace = true
+# Adjustment layers re-encode their live parameters on save.
+schist-adjustments.workspace = true
+serde_json.workspace = true
 miniz_oxide.workspace = true
 anyhow.workspace = true
 # Layers' channel data decompresses independently; large documents

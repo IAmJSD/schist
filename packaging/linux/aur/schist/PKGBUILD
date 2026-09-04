@@ -1,0 +1,51 @@
+# Maintainer: Infrawrench LLC <astrid@infrawrench.com>
+pkgname=schist
+pkgver=0.11.0
+pkgrel=1
+pkgdesc="Layered image editor with PSD and Affinity support"
+arch=(x86_64 aarch64)
+url="https://github.com/Infrawrench/schist"
+license=(MIT)
+# fontconfig/wayland/vulkan-icd-loader are dlopen'd, so namcap flags them
+# "may not be needed" — they are. vulkan-driver is the virtual package
+# every ICD provides: the loader on its own renders nothing, and an install
+# with no GPU driver (a VM, most often) would otherwise get as far as the
+# window and no further. vulkan-swrast satisfies it in software.
+depends=(fontconfig freetype2 hicolor-icon-theme libxcb libxkbcommon
+         libxkbcommon-x11 vulkan-driver vulkan-icd-loader wayland)
+# dlopen'd at run time; the app starts and opens everything else
+# without it.
+optdepends=('libheif: HEIC import')
+# clang + mold: the repo's .cargo/config.toml selects them as the linker.
+makedepends=(cargo clang mold)
+# !lto: makepkg's -flto=auto produces GCC-bitcode objects in ring's C archive
+# that the clang-driven link cannot read.
+options=(!lto)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('46f51c34e6afa9f590d4c13b0ebb0356cc0546902e4f718b88e4c501ed12f9ce')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p schist-app
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/schist "$pkgdir/usr/bin/schist"
+  install -Dm644 packaging/linux/schist.desktop \
+    "$pkgdir/usr/share/applications/schist.desktop"
+  # The desktop entry looks the icon up as its Icon= key, com.infrawrench.schist.
+  install -Dm644 packaging/linux/schist.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/com.infrawrench.schist.png"
+  install -Dm644 packaging/linux/com.infrawrench.schist.mime.xml \
+    "$pkgdir/usr/share/mime/packages/com.infrawrench.schist.xml"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

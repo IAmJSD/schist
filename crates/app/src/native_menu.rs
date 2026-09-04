@@ -36,13 +36,18 @@ pub fn sync(ws: &mut Workspace, cx: &mut Context<Workspace>) {
 fn signature(ws: &Workspace) -> String {
     let v = &ws.view;
     let mut out = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
         v.rulers as u8,
         v.grid as u8,
         v.guides as u8,
         v.extras as u8,
         v.snap as u8,
         ws.color.proof.is_some() as u8,
+        // The gallery swaps the whole menu set out.
+        ws.gallery_open() as u8,
+        // Camera Raw changes its label when the active layer carries an
+        // original capture, so switching documents/layers must rebuild it.
+        ws.is_raw_redevelopment("filter.camera_raw") as u8,
     );
     if let Some(doc) = ws.doc.as_ref() {
         for comp in &doc.layer_comps {
@@ -50,15 +55,30 @@ fn signature(ws: &Workspace) -> String {
             out.push_str(&comp.name);
         }
     }
+    // The recents render as menu rows, so a change to them has to
+    // rebuild the bar.
+    #[cfg(not(target_arch = "wasm32"))]
+    for recent in &ws.library.recents {
+        out.push('\u{1f}');
+        out.push_str(&recent.to_string_lossy());
+    }
     out
 }
 
 fn build(ws: &Workspace) -> Vec<Menu> {
     let mut menus = vec![app_menu()];
-    menus.extend(panels::menus(ws).into_iter().map(|(title, entries)| Menu {
-        name: title.into(),
-        items: items(ws, entries),
-    }));
+    menus.extend(
+        panels::menus(ws)
+            .into_iter()
+            .map(|(title, entries)| Menu {
+                name: title.into(),
+                items: items(ws, entries),
+            })
+            // A menu whose every item moved to the application menu —
+            // the gallery's View, which holds only Preferences — would
+            // open onto nothing; drop it instead.
+            .filter(|menu| !menu.items.is_empty()),
+    );
     menus
 }
 
@@ -116,12 +136,7 @@ fn item(ws: &Workspace, entry: MenuEntry) -> Option<MenuItem> {
             }),
         ),
         MenuEntry::Filter(id) => {
-            let name = ws
-                .registry
-                .filters()
-                .find(|f| f.id() == id)
-                .map(|f| format!("{}…", f.name()))
-                .unwrap_or_else(|| id.to_string());
+            let name = panels::filter_menu_label(ws, id);
             action_item(name, Box::new(OpenFilter { id: id.to_string() }))
         }
         MenuEntry::Dynamic(label, item) => action_item(label, Box::new(RunAppItem { item })),
@@ -170,9 +185,12 @@ fn action_for(item: AppItem) -> Option<Box<dyn Action>> {
         AppItem::FreeTransform => Box::new(ActivateTool {
             id: "transform".into(),
         }),
+        // Named so the keymap's cmd-shift-g shows beside the item.
+        AppItem::OpenGallery => Box::new(ToggleGallery),
         AppItem::ToggleRulers => Box::new(ToggleRulers),
         AppItem::ToggleGrid => Box::new(ToggleGrid),
         AppItem::ToggleGuides => Box::new(ToggleGuides),
+        AppItem::ToggleNotes => Box::new(ToggleNotes),
         AppItem::ToggleExtras => Box::new(ToggleExtras),
         AppItem::ToggleSnap => Box::new(ToggleSnap),
         AppItem::ClearGuides => Box::new(ClearGuides),
@@ -196,6 +214,7 @@ fn label_for(ws: &Workspace, label: &'static str, item: AppItem) -> String {
         AppItem::ToggleRulers => toggled(ws.view.rulers, SHOW, "Rulers"),
         AppItem::ToggleGrid => toggled(ws.view.grid, SHOW, "Grid"),
         AppItem::ToggleGuides => toggled(ws.view.guides, SHOW, "Guides"),
+        AppItem::ToggleNotes => toggled(ws.view.notes, SHOW, "Notes"),
         AppItem::ToggleExtras => toggled(ws.view.extras, SHOW, "Extras"),
         AppItem::ToggleSnap => toggled(ws.view.snap, ENABLE, "Snapping"),
         AppItem::ProofColors => toggled(ws.color.proof.is_some(), ENABLE, "Proof Colors"),

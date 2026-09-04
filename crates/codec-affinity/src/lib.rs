@@ -21,14 +21,28 @@
 //! object graphs byte-exactly, [`container`] writes archives, and
 //! [`export`] builds a whole document from a [`schist_core::Document`].
 
+/// How Affinity's `Radi` on a blur-shaped layer effect converts to our
+/// own blur radius, on which the standard deviation is `radius/sqrt(3)`.
+///
+/// Affinity's is a standard deviation of about 0.34 x `Radi`, measured
+/// by fitting an error function to an inner glow on a hard-edged square
+/// at radius 20, 40 and 80 (fixtures/affinity-probe/ig_r*_i0.af). Import
+/// multiplies by this and export divides by it, so the two cannot drift
+/// — and so a shadow we write comes back the size we meant. A stroke's
+/// `Radi` is a width rather than a blur and does not use it.
+pub(crate) const BLUR_RADI: f32 = 0.58;
+
 pub mod archive;
 pub mod container;
+pub(crate) mod distort;
 pub mod emit;
 pub mod error;
 pub mod export;
 pub mod graph;
 pub mod import;
+pub(crate) mod liveblur;
 pub mod preserve;
+pub(crate) mod vignette;
 
 pub use archive::{is_affinity, Archive};
 pub use error::AffinityError;

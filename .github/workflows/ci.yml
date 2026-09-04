@@ -25,7 +25,16 @@ jobs:
           sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev \
             clang mold
+          # Links the Photoshop plug-in helpers, which are Windows binaries
+          # even when Schist itself is not.
+          sudo apt-get install -y gcc-mingw-w64
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The plug-in helpers are the one thing `cargo test` cannot cover:
+      # they are built for other architectures than the one under test, so
+      # nothing else would notice them failing to compile or link.
+      - name: Cross-build the plug-in helpers, and check they unpack
+        if: runner.os == 'Linux'
+        run: make check-bundle PROFILE=debug

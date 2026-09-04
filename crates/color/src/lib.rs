@@ -145,8 +145,16 @@ pub fn f32_to_u8(v: f32) -> u8 {
 
 #[inline]
 pub fn u16_to_f32(v: u16) -> f32 {
-    // PSD 16-bit uses 0..=32768 internally, but we normalize storage to the
-    // full u16 range and convert at the codec boundary.
+    // The full u16 range, which is also what the PSD codec reads and
+    // writes -- there is no conversion at the codec boundary.
+    //
+    // Photoshop's 16-bit *editing* model is 15+1 bit (0..=32768 with
+    // 32768 as full scale), and this comment used to claim we converted
+    // for it. We do not, in either direction, so the claim was simply
+    // untrue; whether the samples on disk carry that range or the full
+    // u16 one is a question only a Photoshop-authored fixture can
+    // settle, and changing the scaling on a guess would halve or double
+    // the brightness of every 16-bit file we read.
     v as f32 / 65535.0
 }
 

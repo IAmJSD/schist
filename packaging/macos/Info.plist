@@ -4,9 +4,9 @@
 <dict>
     <key>CFBundleName</key><string>Schist</string>
     <key>CFBundleDisplayName</key><string>Schist</string>
-    <key>CFBundleIdentifier</key><string>place.astrid.schist</string>
-    <key>CFBundleVersion</key><string>0.6.0</string>
-    <key>CFBundleShortVersionString</key><string>0.6.0</string>
+    <key>CFBundleIdentifier</key><string>com.infrawrench.schist</string>
+    <key>CFBundleVersion</key><string>0.11.0</string>
+    <key>CFBundleShortVersionString</key><string>0.11.0</string>
     <key>CFBundleExecutable</key><string>schist</string>
     <key>CFBundleIconFile</key><string>schist</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -17,7 +17,7 @@
          bind an extension to the app unless some bundle names the UTI, and
          only Adobe and Serif ship the ones below, so import them, using
          the vendors' own identifiers where they are known, rather than
-         minting place.astrid.* types that would shadow the real apps. -->
+         minting com.infrawrench.* types that would shadow the real apps. -->
     <key>UTImportedTypeDeclarations</key>
     <array>
         <dict>
@@ -118,6 +118,7 @@
                 <string>org.webmproject.webp</string>
                 <string>public.heic</string>
                 <string>public.heif</string>
+                <string>public.camera-raw-image</string>
             </array>
         </dict>
     </array>

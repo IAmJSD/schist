@@ -11,13 +11,20 @@
 
 use schist_plugin_api::{FilterParam, FilterPlugin, FilterValues, PluginManifest, PluginRegistry};
 
+pub mod artistic;
+pub mod blurgallery;
+pub mod brush;
+pub mod bump;
 pub mod camera_raw;
 pub mod distort;
+pub mod lens;
 pub mod neural;
 pub mod other;
 pub mod pixelate;
 pub mod render;
+pub mod sketch;
 pub mod stylize;
+pub mod texture;
 pub mod util;
 
 /// A `FilterParam` without the struct-literal noise.
@@ -93,6 +100,66 @@ macro_rules! simple_filter {
                 }
                 #[allow(clippy::redundant_closure_call)]
                 ($body)(pixels, width, height, values)
+            }
+        }
+    };
+}
+
+/// The same, for a filter that reads its
+/// [`FilterContext`](schist_plugin_api::FilterContext) -- the toolbox
+/// colours, a chosen image, the active path.
+///
+/// The body takes one more argument than [`simple_filter`]'s does. Run
+/// with no host to gather a context -- from a test, or a plug-in host
+/// that predates the idea -- it gets the default one, which is black on
+/// white and nothing else, and that is what these filters were pictured
+/// with anyway.
+#[macro_export]
+macro_rules! context_filter {
+    ($ty:ident, $id:expr, $name:expr, $category:expr, [$($param:expr),* $(,)?], $body:expr) => {
+        pub struct $ty;
+
+        impl FilterPlugin for $ty {
+            fn id(&self) -> &'static str {
+                $id
+            }
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn category(&self) -> &'static str {
+                $category
+            }
+            fn params(&self) -> Vec<FilterParam> {
+                vec![$($param),*]
+            }
+            fn apply(
+                &self,
+                pixels: &mut [f32],
+                width: usize,
+                height: usize,
+                values: &FilterValues,
+            ) {
+                self.apply_with(
+                    pixels,
+                    width,
+                    height,
+                    values,
+                    &schist_plugin_api::FilterContext::default(),
+                )
+            }
+            fn apply_with(
+                &self,
+                pixels: &mut [f32],
+                width: usize,
+                height: usize,
+                values: &FilterValues,
+                context: &schist_plugin_api::FilterContext,
+            ) {
+                if width == 0 || height == 0 {
+                    return;
+                }
+                #[allow(clippy::redundant_closure_call)]
+                ($body)(pixels, width, height, values, context)
             }
         }
     };
@@ -378,6 +445,15 @@ impl FilterPlugin for AddNoise {
                 choices: &[],
             },
             FilterParam {
+                key: "distribution",
+                label: "Distribution",
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                suffix: "",
+                choices: &["Uniform", "Gaussian"],
+            },
+            FilterParam {
                 key: "monochrome",
                 label: "Monochrome",
                 min: 0.0,
@@ -394,9 +470,10 @@ impl FilterPlugin for AddNoise {
             return;
         }
         let mono = values.get("monochrome") >= 0.5;
+        let gaussian = values.get("distribution") >= 0.5;
         // Deterministic hash noise: same input, same output, so undo/redo
         // and re-runs are reproducible.
-        let hash = |x: u32, y: u32, c: u32| -> f32 {
+        let raw = |x: u32, y: u32, c: u32| -> f32 {
             let mut h = x.wrapping_mul(0x9E37_79B9)
                 ^ y.wrapping_mul(0x85EB_CA6B)
                 ^ c.wrapping_mul(0xC2B2_AE35);
@@ -406,6 +483,21 @@ impl FilterPlugin for AddNoise {
             h = h.wrapping_mul(0x297A_2D39);
             h ^= h >> 15;
             (h as f32 / u32::MAX as f32) * 2.0 - 1.0
+        };
+        // Uniform noise is flat across its range; Gaussian bunches around
+        // zero with a long tail, so most pixels move less and a few move
+        // much more. Photoshop offers both because they look different at
+        // the same Amount: uniform reads as static, Gaussian as grain.
+        // Three samples averaged is enough of a bell for the eye, and is
+        // what the central limit theorem promises.
+        let hash = |x: u32, y: u32, c: u32| -> f32 {
+            if !gaussian {
+                return raw(x, y, c);
+            }
+            let a = raw(x, y, c);
+            let b = raw(x ^ 0x5bd1_e995, y, c);
+            let d = raw(x, y ^ 0x1b87_3593, c);
+            (a + b + d) / 3.0 * 1.7
         };
         for y in 0..height {
             for x in 0..width {
@@ -490,12 +582,19 @@ impl PluginManifest for CoreFiltersPlugin {
         registry.register_filter(Box::new(UnsharpMask));
         registry.register_filter(Box::new(AddNoise));
         registry.register_filter(Box::new(Median));
+        artistic::register(registry);
+        blurgallery::register(registry);
+        bump::register(registry);
+        brush::register(registry);
         camera_raw::register(registry);
+        lens::register(registry);
         neural::register(registry);
         distort::register(registry);
         pixelate::register(registry);
         render::register(registry);
+        sketch::register(registry);
         stylize::register(registry);
+        texture::register(registry);
         other::register(registry);
     }
 }

@@ -17,6 +17,7 @@ use gpui::{
     SharedString, Styled,
 };
 use schist_adjustments::{CurveChannel, Curves};
+use schist_core::{Document, IntRect, Layer};
 
 /// Side of the square graph, in pixels.
 const SIZE: f32 = 256.0;
@@ -77,39 +78,89 @@ fn commit(ws: &mut Workspace, curves: Curves, cx: &mut Context<Workspace>) {
     }
 }
 
-/// Histogram of the layer under the adjustment, 64 buckets, normalised.
+/// The pixels the open adjustment actually acts on.
+///
+/// An adjustment layer is not a raster, so looking it up through
+/// `as_raster` always missed and fell through to `tree.iter().last()` --
+/// the topmost layer of the document, which is normally *above* the
+/// adjustment and so not something it affects at all. The histogram was
+/// therefore drawn against the wrong pixels whenever a curves adjustment
+/// layer was being edited.
+///
+/// What such a layer sees is the composite of its lower siblings, so
+/// that is what this builds: the document with the adjustment itself and
+/// everything stacked over it inside its container removed.
+fn source_document(ws: &Workspace) -> Option<Document> {
+    let doc = ws.doc.as_ref()?;
+    // A scratch document that composites the same way the real one does:
+    // same canvas, depth and colour mode, but only the layers of interest.
+    let mut scratch = Document::new(&doc.title, doc.width, doc.height, doc.depth);
+    scratch.mode = doc.mode;
+    scratch.icc_profile = doc.icc_profile.clone();
+
+    let Some(Modal::Adjustment { layer, .. }) = ws.modal.as_ref() else {
+        // Image > Adjustments > Curves acts on the active layer's pixels.
+        let id = doc.active_layer?;
+        let mut only = doc.tree.find(id)?.clone();
+        only.visible = true;
+        only.opacity = 1.0;
+        scratch.tree.layers = vec![only];
+        return Some(scratch);
+    };
+    let path = doc.tree.path_of(*layer)?;
+    // Walk down to the adjustment's container, then keep only what is
+    // stacked below it there.
+    let (last, groups) = path.0.split_last()?;
+    let mut layers: &[Layer] = &doc.tree.layers;
+    for step in groups {
+        layers = layers.get(*step)?.children()?;
+    }
+    scratch.tree.layers = layers.get(..*last)?.to_vec();
+    Some(scratch)
+}
+
+/// Histogram of what the adjustment is acting on, 64 buckets, normalised.
 fn histogram(ws: &Workspace) -> Vec<f32> {
     let mut buckets = vec![0f32; 64];
-    let Some(doc) = ws.doc.as_ref() else {
+    let Some(doc) = source_document(ws) else {
         return buckets;
     };
-    let Some(raster) = doc
-        .active_layer
-        .and_then(|id| doc.tree.find(id))
-        .and_then(|l| l.as_raster())
-        .or_else(|| doc.tree.iter().last().and_then(|l| l.as_raster()))
-    else {
+    let canvas = doc.canvas_rect();
+    if canvas.is_empty() {
         return buckets;
-    };
-    let rect = doc.canvas_rect();
-    // Sample rather than scan: a histogram sketch does not need every
-    // pixel of a 100-megapixel document.
-    let step = ((rect.width() * rect.height()) as f32 / 20_000.0)
-        .sqrt()
-        .max(1.0) as i32;
-    let mut y = rect.top;
-    while y < rect.bottom {
-        let mut x = rect.left;
-        while x < rect.right {
-            let p = raster.tiles.pixel(x, y);
-            if p.a > 0.0 {
-                let l = 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
-                let b = ((l * 63.0).round() as usize).min(63);
+    }
+    // Sample blocks rather than the whole canvas: a histogram sketch does
+    // not need every pixel of a 100-megapixel document, and compositing
+    // one is far too slow to do on every frame of a curve drag.
+    const BLOCK: i32 = 48;
+    const GRID: i32 = 4;
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            // Divide by GRID - 1 so the last row and column reach the far
+            // edge; dividing by GRID never sampled the rightmost or
+            // bottom quarter of the canvas at all.
+            let span = (GRID - 1).max(1);
+            let left = canvas.left + (canvas.width() - BLOCK).max(0) * gx / span;
+            let top = canvas.top + (canvas.height() - BLOCK).max(0) * gy / span;
+            let rect = IntRect::from_xywh(
+                left,
+                top,
+                BLOCK.min(canvas.width()) as u32,
+                BLOCK.min(canvas.height()) as u32,
+            );
+            if rect.is_empty() {
+                continue;
+            }
+            let rgba = schist_compositor::composite_region_rgba8(&doc, rect);
+            for px in rgba.as_chunks::<4>().0 {
+                if px[3] == 0 {
+                    continue;
+                }
+                let l = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
+                let b = ((l * 63.0 / 255.0).round() as usize).min(63);
                 buckets[b] += 1.0;
             }
-            x += step;
         }
-        y += step;
     }
     let peak = buckets.iter().cloned().fold(0.0f32, f32::max);
     if peak > 0.0 {
@@ -213,6 +264,7 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
         .child(ui::field_row(
             "Channel",
             ui::dropdown(
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("curve-channel"),
                     is_open: ws.open_popup == Some(Popup::Field("curve-channel")),

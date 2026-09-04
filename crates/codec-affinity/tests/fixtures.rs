@@ -361,6 +361,19 @@ fn documents_import() {
     }
 }
 
+/// The app rebuilds styled rasters when a document opens; the probe
+/// comparison has to do the same for layer effects to composite.
+fn restyle(layers: &mut [schist_core::Layer]) {
+    for l in layers {
+        if let schist_core::LayerKind::Group(g) = &mut l.kind {
+            restyle(&mut g.children);
+        }
+        if !l.style.is_empty() {
+            l.styled = schist_compositor::render_styled(l).map(std::sync::Arc::new);
+        }
+    }
+}
+
 /// The adjustment fixtures in fixtures/affinity-probe were each drawn in
 /// Affinity itself — one document per adjustment type, distinctive
 /// slider values — and their embedded thumbnails are Affinity's own
@@ -368,6 +381,57 @@ fn documents_import() {
 /// truth; the bounds below encode how close each importer currently
 /// gets (0.5 = exact up to resampling, larger = a documented
 /// approximation).
+/// The blur probes are a white square on transparency, so the
+/// over-white metric the test above uses would score them zero however
+/// wrong the blur was. Compare them premultiplied instead: an alpha
+/// difference counts, and the undefined colour of a fully transparent
+/// fringe pixel does not.
+#[test]
+fn probed_blur_radii_match_affinitys_alpha() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/affinity-probe");
+    // Radi 30, 90 and 180; Affinity's own sigma there is 11.3, 31.9
+    // and 67.1 pixels, which is what the 0.373 factor in the importer
+    // was measured from.
+    for (file, max_rms) in [
+        ("blur_r10.af", 1.2),
+        ("blur_r30.af", 0.6),
+        ("blur_r60.af", 1.3),
+    ] {
+        let path = dir.join(file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skipping: no {}", path.display());
+            continue;
+        };
+        let archive = schist_codec_affinity::Archive::parse(&bytes).expect("parse");
+        let thumb = image::load_from_memory(archive.thumbnail().expect("thumb"))
+            .expect("decode")
+            .to_rgba8();
+        let (mut doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+        restyle(&mut doc.tree.layers);
+        let region = schist_core::IntRect::from_size(doc.width, doc.height);
+        let pixels = schist_compositor::composite_region_rgba8(&doc, region);
+        let ours = image::RgbaImage::from_raw(doc.width, doc.height, pixels).expect("buffer");
+        let (mut sum, mut n) = (0.0f64, 0u64);
+        for (a, b) in ours.pixels().zip(thumb.pixels()) {
+            let pm = |p: &image::Rgba<u8>, i: usize| {
+                if i == 3 {
+                    p.0[3] as f64
+                } else {
+                    p.0[i] as f64 * p.0[3] as f64 / 255.0
+                }
+            };
+            for i in 0..4 {
+                let d = pm(a, i) - pm(b, i);
+                sum += d * d;
+                n += 1;
+            }
+        }
+        let rms = (sum / n as f64).sqrt();
+        println!("{file}: premultiplied rms {rms:.2} (bound {max_rms})");
+        assert!(rms <= max_rms, "{file}: rms {rms:.2} above bound {max_rms}");
+    }
+}
+
 #[test]
 fn probed_adjustments_match_affinitys_render() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/affinity-probe");
@@ -383,22 +447,142 @@ fn probed_adjustments_match_affinitys_render() {
         ("exposure.af", 1.0),
         ("gradientmap.af", 0.5),
         ("hsl_hue.af", 1.0),
+        ("hsl_hue_neg.af", 0.5),
         ("hsl_lum.af", 0.5),
+        ("hsl_lum_neg.af", 0.5),
         ("hsl_probe.af", 0.5),
+        ("hsl_range_green_lum.af", 0.5),
+        ("hsl_range_green_lumneg.af", 0.5),
+        ("hsl_range_mix.af", 0.5),
+        ("hsl_range_red_hue.af", 0.5),
+        ("hsl_range_red_sat.af", 0.5),
         ("hsl_sat.af", 0.5),
+        ("hsl_sat_neg.af", 0.5),
         ("invert.af", 0.5),
-        ("lensfilter.af", 8.0), // fitted density scale
+        ("lensfilter.af", 1.5),
         ("levels.af", 2.0),
         ("posterise.af", 1.0),
         ("recolour.af", 1.0),
         ("selectivecolour.af", 4.0),
         ("splittoning.af", 8.0), // no-op layer keeping its native data
         ("threshold.af", 8.0),   // saturated-colour boundary differs
-        ("vibrance.af", 12.0),   // formula differs on saturated colour
-        ("wb_tint.af", 1.0),
-        ("wb_warm.af", 3.5),
-        ("wb_warm30.af", 2.5),
-        ("whitebalance.af", 2.5), // Bradford + calibrated grey gains
+        ("sat_only50.af", 2.0),  // Lab chroma scale, gamut clipping aside
+        ("sat_only_neg50.af", 2.0),
+        ("vib_only100.af", 3.0),
+        ("vib_only50.af", 2.0),
+        ("vibrance.af", 2.0), // both sliders
+        ("wb_cool100.af", 0.5),
+        ("wb_cool30.af", 0.5),
+        ("wb_cool50.af", 0.5),
+        ("wb_tint.af", 0.5),
+        ("wb_tint_neg.af", 0.5),
+        ("wb_warm.af", 0.5),
+        ("wb_warm30.af", 0.5),
+        // Both sliders at once, now that the measured interaction
+        // table corrects the two tables' product.
+        ("whitebalance.af", 1.0),
+        // The RGB-cube probes: one document per feature, whose
+        // thumbnail is a byte-exact render, so these pin the whole
+        // transfer function rather than one card's worth of it.
+        ("cube_vib100.af", 4.0),    // hue window + chroma curve
+        ("cube_vib50.af", 3.0),     // the slider law
+        ("cube_vibneg100.af", 1.5), // a flat half-chroma scale
+        ("cube_lens100.af", 1.0),
+        ("cube_lens100_nolum.af", 0.5),
+        ("cube_wb_w50t50.af", 0.5),
+        ("cube_wb_wneg50t50.af", 0.5),
+        ("cube_wb_w100t100.af", 0.5),
+        ("cube_wb_wneg100tneg100.af", 0.5),
+        // Layer effects, one probe document per panel setting: the
+        // mapping is exact, the residuals below are our own effect
+        // renderers' falloffs against Affinity's.
+        ("fx_bevel_emboss.af", 10.5),
+        ("fx_bevel_inner.af", 4.5),
+        ("fx_bevel_outer.af", 2.5),
+        ("fx_bevel_pillow.af", 16.0),
+        ("fx_glow_outer.af", 0.5),
+        ("fx_gradient_overlay.af", 0.5),
+        ("fx_inner_glow.af", 4.0),
+        ("fx_inner_shadow.af", 1.0),
+        ("fx_shadow_spread.af", 2.0),
+        ("fx_stroke_centre.af", 1.0),
+        ("fx_stroke_inside.af", 0.5),
+        ("fx_stroke_outside.af", 1.0),
+        // Effects and filters we don't implement at all: the bound is
+        // the size of the gap, and drops when we do.
+        // Pillow bevel at two radii on a mid-grey square. These are
+        // the size of the gap, not a tolerance: Affinity's ramp is a
+        // distance field `Radi` wide whose slope does not depend on
+        // `Radi`, ours is the gradient of an alpha blurred by it, so
+        // the wider bevel comes out nearly flat.
+        ("bv_pillow_10.af", 17.0),
+        ("bv_pillow_30.af", 28.0),
+        // Inner glow on a hard-edged square, which isolates the blur
+        // from the card's own content: one radius pair for the size
+        // convention, one intensity for the post-blur gain.
+        // An outside stroke at two widths: `Radi` is the width in
+        // pixels exactly, and the outer corner is the shape dilated by
+        // it (a quarter circle), so what these pin is the edge.
+        ("st_out_10.af", 1.0),
+        ("st_out_30.af", 1.2),
+        ("ig_r40_i0.af", 1.0),
+        ("ig_r80_i0.af", 1.0),
+        ("ig_r40_i80.af", 3.0),
+        ("fx_3d.af", 11.0),           // PhgB, the 3D effect
+        ("fx_gaussian.af", 2.0),      // Gaus, a layer-style blur
+        ("flrn_perspective.af", 0.5), // Live Perspective, resampled through
+        // The geometric live filters, each on the RGB cube — whose
+        // every pixel is a distinct colour, so the render is the
+        // filter's own displacement field and the mapping falls out of
+        // one file. Two settings each where a second one pins something
+        // the first cannot: the twirl's radius, the pinch's sign, the
+        // spherical's two directions and the ripple's slider law.
+        ("lf_twirl.af", 0.1),
+        ("lf_twirl45r80.af", 0.1),
+        ("lf_punch.af", 0.1),
+        ("lf_sphericalneg.af", 0.1),
+        ("lf_lensdist.af", 0.1),
+        ("lf_pixelate.af", 0.1),
+        ("lf_pixelate32.af", 0.1),
+        ("lf_ripple.af", 0.5),
+        ("lf_ripple25.af", 1.0),
+        ("lf_ripple50.af", 2.5), // the fitted amplitude law, +/-2%
+        // Where the filter magnifies, Affinity resamples each 256x256
+        // bitmap tile on its own: the source seam at x = y = 256 comes
+        // back unblended, and these two disagree along that cross and
+        // nowhere else — 99.4% of both cards is bit-identical.
+        ("lf_pinch.af", 1.5),
+        ("lf_spherical.af", 1.5),
+        ("lf_spherical100.af", 2.0),
+        // The live blurs. Maximum and median come back bit-exact, down
+        // to the darker band the median leaves where its window hangs
+        // off the page; the rest are the fitted size conventions.
+        ("lf_maxblur.af", 0.1),
+        ("lf_medblur.af", 0.1),
+        ("lf_box10.af", 0.5),
+        ("lf_motion30.af", 0.6),
+        ("lf_radial.af", 1.0),
+        ("lf_gauss10.af", 0.5), // three box passes, sigma = Radi/3
+        ("lf_gauss30.af", 0.5),
+        // Unsharp mask over the same blur. The widest of the three is
+        // where Affinity's own blur stops scaling with Radi.
+        ("lf_usm_r5.af", 0.3),
+        ("lf_usm_r10.af", 0.3),
+        ("lf_usm_r20.af", 3.0),
+        ("lf_highpass.af", 1.0), // mid grey plus half the same detail
+        // Dust & Scratches is the median gated by a tolerance, and both
+        // probes come back byte-exact.
+        ("lf_dust_r8.af", 0.1),
+        ("lf_dust_r8t50.af", 0.1),
+        // The vignette: one probe per field, all on the same ellipse.
+        // `lf_vig_hard1` is a hard edge, where the whole disagreement is
+        // the one ring Affinity antialiases and we do not; away from it
+        // that probe is at 0.31.
+        ("lf_vig_base.af", 1.5),
+        ("lf_vig_b.af", 1.5),      // Hard 0, a ramp from the centre
+        ("lf_vig_c.af", 1.5),      // Scal 0.5
+        ("lf_vig_shap50.af", 1.5), // Shap 0.5, half as wide
+        ("lf_vig_hard1.af", 5.0),
         // Shapes — each drawn once with its tool; the embedded
         // thumbnail is Affinity's own render of it.
         ("shp_arrow.af", 1.0),
@@ -415,11 +599,11 @@ fn probed_adjustments_match_affinitys_render() {
         ("shp_pie.af", 1.0),
         ("shp_polygon.af", 0.5),
         ("shp_segment.af", 1.0),
-        ("shp_star_curved.af", 6.0), // fitted bow model
-        ("shp_tear.af", 3.0),        // fitted profile
+        ("shp_star_curved.af", 4.5), // fitted bow model
+        ("shp_tear.af", 2.5),        // fitted profile
         ("shp_trapezoid.af", 0.5),
         ("shp_triangle.af", 0.5),
-        ("text_rotated.af", 4.0), // resampled through the rotation
+        ("text_rotated.af", 2.5), // resampled through the rotation
     ];
     for (file, max_rms) in bounds {
         let path = dir.join(file);
@@ -431,16 +615,27 @@ fn probed_adjustments_match_affinitys_render() {
         let thumb = image::load_from_memory(archive.thumbnail().expect("thumb"))
             .expect("decode")
             .to_rgba8();
-        let (doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+        let (mut doc, _) = schist_codec_affinity::read_affinity(&bytes).expect("import");
+        // The app rebuilds styled rasters when a document opens; without
+        // that the layer-effect fixtures would composite bare.
+        restyle(&mut doc.tree.layers);
         let region = schist_core::IntRect::from_size(doc.width, doc.height);
         let pixels = schist_compositor::composite_region_rgba8(&doc, region);
         let ours = image::RgbaImage::from_raw(doc.width, doc.height, pixels).expect("buffer");
-        let ours = image::imageops::resize(
-            &ours,
-            thumb.width(),
-            thumb.height(),
-            image::imageops::Triangle,
-        );
+        // `resize` is a convolution even at the same size, which
+        // smears a probe card of hard colour edges into a blur the
+        // comparison then blames on the importer; only resample when
+        // the thumbnail really is a different size.
+        let ours = if ours.dimensions() == thumb.dimensions() {
+            ours
+        } else {
+            image::imageops::resize(
+                &ours,
+                thumb.width(),
+                thumb.height(),
+                image::imageops::Triangle,
+            )
+        };
         let mut sum = 0.0f64;
         let mut n = 0u64;
         for (a, b) in ours.pixels().zip(thumb.pixels()) {

@@ -9,3 +9,5 @@ schist-core.workspace = true
 schist-plugin-api.workspace = true
 schist-pixel-ops.workspace = true
 schist-color.workspace = true
+schist-neural.workspace = true
+log.workspace = true

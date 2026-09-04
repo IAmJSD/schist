@@ -1,0 +1,42 @@
+[package]
+name = "schist-plugin-host-8bf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host for Adobe Photoshop filter plug-ins (.8bf)"
+
+[dependencies]
+libloading.workspace = true
+# The shared pixel buffer between Schist and a helper process. Both map
+# the same file, so an image crosses the process boundary once.
+memmap2 = "0.9"
+# Inflates the bundled helpers. Deflate rather than something stronger
+# because the helpers are stripped before they are packed, and at that
+# size the better ratios are worth tens of kilobytes; pure Rust, so it
+# cross-compiles to every helper target without a C toolchain.
+miniz_oxide = "0.8"
+
+# Only for `manager`, which joins discovered plug-ins to the editor's
+# filter registry. Optional so the helper — cross-compiled to every
+# architecture a plug-in might be — never builds them.
+schist-plugin-api = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+
+[features]
+# Photoshop plug-ins as registry filters, for the app and the MCP server.
+registry = ["dep:schist-plugin-api", "dep:log"]
+
+# The out-of-process plug-in host. Cross-compiled to every architecture
+# a plug-in might be built for, which is what lets an x86-64 filter run
+# on an Apple Silicon Mac and a Windows filter run on Linux.
+[[bin]]
+name = "schist-8bf-helper"
+path = "src/bin/helper.rs"
+
+[build-dependencies]
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+libloading.workspace = true

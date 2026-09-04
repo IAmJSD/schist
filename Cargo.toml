@@ -16,13 +16,18 @@ members = [
     "crates/color",
     "crates/codec-psd",
     "crates/codec-affinity",
+    "crates/codec-raw",
     "crates/vector",
     "crates/text-engine",
     "crates/adjustments",
+    "crates/plugin-host-8bf",
     "crates/plugin-host-wasm",
     "crates/plugin-sdk",
+    "crates/preview",
+    "crates/quicklook",
     "crates/colormgmt",
     "crates/mcp",
+    "crates/gallery",
     "plugins/codecs-common",
     "plugins/tools-basic",
     "plugins/tools-paint",
@@ -38,10 +43,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/IAmJSD/schist"
+repository = "https://github.com/Infrawrench/schist"
 
 [workspace.dependencies]
 # internal
@@ -54,10 +59,12 @@ schist-fx = { path = "crates/fx" }
 schist-color = { path = "crates/color" }
 schist-codec-psd = { path = "crates/codec-psd" }
 schist-codec-affinity = { path = "crates/codec-affinity" }
+schist-codec-raw = { path = "crates/codec-raw" }
 schist-vector = { path = "crates/vector" }
 schist-layer-fx = { path = "crates/layer-fx" }
 schist-neural = { path = "crates/neural" }
 schist-psd-descriptor = { path = "crates/psd-descriptor" }
+schist-preview = { path = "crates/preview" }
 
 # zlib for PSD's zip-compressed channels; pure Rust, no C toolchain.
 miniz_oxide = "0.8"
@@ -67,6 +74,7 @@ ruzstd = "0.9"
 crc32fast = "1.5"
 schist-text-engine = { path = "crates/text-engine" }
 schist-adjustments = { path = "crates/adjustments" }
+schist-plugin-host-8bf = { path = "crates/plugin-host-8bf" }
 schist-plugin-host-wasm = { path = "crates/plugin-host-wasm" }
 schist-plugin-sdk = { path = "crates/plugin-sdk" }
 schist-colormgmt = { path = "crates/colormgmt" }
@@ -82,13 +90,17 @@ schist-tools-vector = { path = "plugins/tools-vector" }
 schist-tools-type = { path = "plugins/tools-type" }
 schist-filters-core = { path = "plugins/filters-core" }
 schist-commands-core = { path = "plugins/commands-core" }
+schist-mcp = { path = "crates/mcp" }
+schist-gallery = { path = "crates/gallery" }
 
 # external
 # Fork of gpui 0.2.2 adding PinchEvent/on_pinch and stylus pressure on the
 # mouse events, which upstream has no equivalent of; needed for trackpad
-# pinch-to-zoom and pressure-sensitive painting on the canvas.
+# pinch-to-zoom and pressure-sensitive painting on the canvas. It also
+# carries images to the Linux clipboards, which upstream writes as an
+# empty string.
 # Pinned by rev so a push to the fork cannot silently change builds.
-gpui = { git = "https://github.com/IAmJSD/gpui", rev = "84bdb01b29887ca09b6c437dad9a0ae838fe48e8" }
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "73c9da683944ce7f4f2fdde767cded8aaf783276" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -105,11 +117,36 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 libloading = "0.8"
 byteorder = "1.5"
 log = "0.4"
+# The AI sidebar drives coding-agent harnesses through their SDKs: the
+# community Rust port of the Claude Agent SDK (Claude Code), and the typed
+# app-server protocol client for OpenAI's Codex. Both wrap the CLIs the
+# user already has installed and logged in; neither talks to a model API
+# directly, so no keys are handled here.
+claude-agent-sdk-rs = "0.6"
+codex-codes = { version = "0.150", default-features = false, features = ["sync-client"] }
+# claude-agent-sdk-rs is tokio-based; the app runs one small runtime on
+# the AI worker thread rather than adopting tokio app-wide.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+futures = "0.3"
+async-trait = "0.1"
 # GPU compositing backend; wgpu is its own instance (GPUI's renderer does
 # not expose a device to share).
 wgpu = "27"
 pollster = "0.4"
 env_logger = "0.11"
+# Opt-in crash reporting. No default features: they would pull reqwest and
+# native-tls (an OpenSSL build) and turn on release-health sessions, logs and
+# metrics -- all of which report on a *running* editor, not a crashed one.
+# The ureq/rustls transport is the same HTTP stack the update check already
+# links, so this adds no new way of talking to the network.
+sentry = { version = "0.49", default-features = false, features = [
+    "backtrace",
+    "contexts",
+    "debug-images",
+    "panic",
+    "ureq",
+    "rustls",
+] }
 
 [profile.dev]
 opt-level = 1
@@ -120,3 +157,31 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 debug = 1
+
+# The .8bf plug-in helpers. They ship compressed inside the app binary,
+# so their size is worth caring about in a way the app's own is not, and
+# `debug = 1` costs a great deal here: a helper is 2.8 MB with debug info
+# and 390 KB without. Nothing reads it — the crash handler reports a raw
+# fault address belonging to the *plug-in*, and never symbolises anything
+# — so it goes.
+[profile.helper]
+inherits = "release"
+debug = false
+strip = true
+
+# The browser build (tools/web-build.sh). `release` keeps debuginfo for
+# Sentry's symbolication; in a wasm download that is a third of the bytes
+# and nothing reads DWARF in a browser, so it goes.
+[profile.web]
+inherits = "release"
+debug = false
+strip = "debuginfo"
+
+# gpui's wasm32 support needs its vendored gpui_util/gpui_http_client (the
+# registry versions pull smol, dirs, which, walkdir — none of which build on
+# wasm32). `[patch.crates-io]` is only honored in the top-level manifest, so
+# the fork's two patch entries are restated here; on native targets the
+# vendored crates are byte-identical to the registry sources.
+[patch.crates-io]
+gpui_util = { git = "https://github.com/IAmJSD/gpui", rev = "73c9da683944ce7f4f2fdde767cded8aaf783276" }
+gpui_http_client = { git = "https://github.com/IAmJSD/gpui", rev = "73c9da683944ce7f4f2fdde767cded8aaf783276" }

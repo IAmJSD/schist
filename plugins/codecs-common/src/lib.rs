@@ -1,19 +1,23 @@
 //! Common raster format codecs (PNG, JPEG, WebP, TIFF) via the `image`
-//! crate, HEIC/HEIF via the system's libheif, wrapped as
-//! `CodecPlugin`s, plus layered Affinity import/export. For the simple
-//! formats, import produces a single "Background" layer and export
-//! flattens through the compositor.
+//! crate, HEIC/HEIF via the system's libheif, camera raws via the
+//! pure-Rust `schist-codec-raw` crate, wrapped as `CodecPlugin`s, plus layered Affinity
+//! import/export. For the simple formats, import produces a single
+//! "Background" layer and export flattens through the compositor.
 
 pub use affinity::AffinityCodec;
 use anyhow::Context as _;
+#[cfg(not(target_arch = "wasm32"))]
 pub use heif::HeifCodec;
 use image::ImageFormat;
+pub use raw::RawCodec;
 use schist_color::Depth;
-use schist_core::{blit_rgba8, Document, IntRect, Layer};
+use schist_core::{blit_rgba8, blit_rgba_f32, Document, IntRect, Layer};
 use schist_plugin_api::{CodecPlugin, ExportOptions, PluginManifest, PluginRegistry};
 
 mod affinity;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod heif;
+pub mod raw;
 
 /// A single-"Background"-layer document from decoded RGBA8 pixels.
 fn flat_document(
@@ -35,7 +39,7 @@ fn flat_document(
     );
     doc.push_layer(layer);
     doc.damage_all();
-    doc.dirty = false;
+    doc.mark_saved();
     Ok(doc)
 }
 
@@ -55,6 +59,23 @@ fn png_cicp(bytes: &[u8]) -> Option<[u8; 4]> {
         rest = rest.get(8 + len + 4..)?;
     }
     None
+}
+
+/// Which depth a decoded image deserves.
+///
+/// Everything landed on `Depth::Eight` via `to_rgba8()`, so a 16-bit png
+/// or a 16/32-bit float tiff lost half its precision or more on the way
+/// in, permanently and with no warning.
+///
+/// An HDR png that has been tone-mapped to sRGB above is 8-bit by then,
+/// so this only sees the untouched sources.
+fn depth_for(color: image::ColorType) -> Depth {
+    use image::ColorType::*;
+    match color {
+        L16 | La16 | Rgb16 | Rgba16 => Depth::Sixteen,
+        Rgb32F | Rgba32F => Depth::ThirtyTwo,
+        _ => Depth::Eight,
+    }
 }
 
 fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result<Document> {
@@ -79,6 +100,7 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
     let cicp = (format == ImageFormat::Png)
         .then(|| png_cicp(bytes))
         .flatten();
+    let mut tone_mapped = false;
     let rgba = match cicp {
         Some([primaries, transfer @ (16 | 18), 0, 1]) => {
             // Bake from the decoder's full precision: HDR PNGs are
@@ -87,6 +109,7 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
             match schist_colormgmt::bake_hdr_to_srgb(&mut pixels, primaries, transfer) {
                 Ok(()) => {
                     icc = None; // the pixels are sRGB now
+                    tone_mapped = true;
                     let bytes: Vec<u8> = pixels
                         .iter()
                         .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
@@ -102,7 +125,53 @@ fn import_with(format: ImageFormat, bytes: &[u8], title: &str) -> anyhow::Result
         _ => img.to_rgba8(),
     };
 
-    flat_document(title, w, h, rgba.as_raw(), icc)
+    // The tone-mapped HDR branch above has already collapsed to 8 bits;
+    // anything untouched keeps the depth it arrived with, so a 16-bit
+    // scan does not lose half its precision on the way in.
+    if tone_mapped {
+        return flat_document(title, w, h, rgba.as_raw(), icc);
+    }
+    match depth_for(img.color()) {
+        Depth::Eight => flat_document(title, w, h, rgba.as_raw(), icc),
+        Depth::Sixteen => {
+            let src = img.to_rgba16();
+            let deep: Vec<f32> = src.as_raw().iter().map(|&v| v as f32 / 65535.0).collect();
+            deep_document(title, w, h, &deep, Depth::Sixteen, icc)
+        }
+        Depth::ThirtyTwo => deep_document(
+            title,
+            w,
+            h,
+            img.to_rgba32f().as_raw(),
+            Depth::ThirtyTwo,
+            icc,
+        ),
+    }
+}
+
+/// `flat_document` for a source that carries more than 8 bits a channel.
+pub(crate) fn deep_document(
+    title: &str,
+    w: u32,
+    h: u32,
+    rgba: &[f32],
+    depth: Depth,
+    icc: Option<Vec<u8>>,
+) -> anyhow::Result<Document> {
+    anyhow::ensure!(rgba.len() == w as usize * h as usize * 4, "buffer size");
+    let mut doc = Document::new(title, w, h, depth);
+    doc.icc_profile = icc;
+    let mut layer = Layer::new_raster("Background");
+    blit_rgba_f32(
+        &mut layer.as_raster_mut().unwrap().tiles,
+        depth,
+        IntRect::from_size(w, h),
+        rgba,
+    );
+    doc.push_layer(layer);
+    doc.damage_all();
+    doc.dirty = false;
+    Ok(doc)
 }
 
 fn export_flat(
@@ -128,10 +197,50 @@ fn export_flat(
     // reads as sRGB elsewhere, so embed it wherever the format can.
     let icc = doc.icc_profile.clone();
     use image::ImageEncoder as _;
+
+    // `bit_depth` was only ever consulted to pick the dither level, so
+    // "export 16-bit png" was not achievable: every path built an 8-bit
+    // buffer. png and tiff carry 16 bits per channel; jpeg and webp do
+    // not, so they stay at 8 whatever is asked.
+    if options.bit_depth > 8 && matches!(format, ImageFormat::Png | ImageFormat::Tiff) {
+        let deep: Vec<u16> = pixels
+            .iter()
+            .map(|v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16)
+            .collect();
+        // The encoder reads these back as native-endian `u16`s and
+        // byte-swaps for the container itself, so handing it big-endian
+        // bytes would write every sample swapped.
+        let raw: Vec<u8> = deep.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let (w, h) = (doc.width, doc.height);
+        if format == ImageFormat::Png {
+            let mut encoder = image::codecs::png::PngEncoder::new(&mut out);
+            if let Some(icc) = icc {
+                let _ = encoder.set_icc_profile(icc);
+            }
+            encoder.write_image(&raw, w, h, image::ExtendedColorType::Rgba16)?;
+        } else {
+            let mut encoder = image::codecs::tiff::TiffEncoder::new(&mut out);
+            if let Some(icc) = icc {
+                let _ = encoder.set_icc_profile(icc);
+            }
+            encoder.write_image(&raw, w, h, image::ExtendedColorType::Rgba16)?;
+        }
+        return Ok(out.into_inner());
+    }
+
     match format {
         // JPEG has no alpha and takes a quality setting.
         ImageFormat::Jpeg => {
-            let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+            // JPEG has no alpha, and `to_rgb8` simply drops it. A straight
+            // alpha composite leaves rgb at 0 where nothing was painted,
+            // so every transparent area came out black. Matte onto white
+            // instead, which is what Photoshop offers by default.
+            let mut rgb = image::RgbImage::new(doc.width, doc.height);
+            for (dst, src) in rgb.pixels_mut().zip(img.pixels()) {
+                let a = src[3] as f32 / 255.0;
+                let matte = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
+                *dst = image::Rgb([matte(src[0]), matte(src[1]), matte(src[2])]);
+            }
             let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
                 &mut out,
                 options.quality.clamp(1, 100),
@@ -143,6 +252,33 @@ fn export_flat(
         }
         ImageFormat::Png => {
             let mut encoder = image::codecs::png::PngEncoder::new(&mut out);
+            if let Some(icc) = icc {
+                let _ = encoder.set_icc_profile(icc);
+            }
+            encoder.write_image(
+                img.as_raw(),
+                doc.width,
+                doc.height,
+                image::ExtendedColorType::Rgba8,
+            )?;
+        }
+        // WebP and TIFF take a profile as well; only png and jpeg were
+        // wired up, so a wide-gamut document exported to either came out
+        // untagged.
+        ImageFormat::WebP => {
+            let mut encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
+            if let Some(icc) = icc {
+                let _ = encoder.set_icc_profile(icc);
+            }
+            encoder.write_image(
+                img.as_raw(),
+                doc.width,
+                doc.height,
+                image::ExtendedColorType::Rgba8,
+            )?;
+        }
+        ImageFormat::Tiff => {
+            let mut encoder = image::codecs::tiff::TiffEncoder::new(&mut out);
             if let Some(icc) = icc {
                 let _ = encoder.set_icc_profile(icc);
             }
@@ -173,8 +309,17 @@ macro_rules! simple_codec {
                 $exts
             }
             fn probe(&self, bytes: &[u8]) -> bool {
-                let magic: &[&[u8]] = $magic;
-                magic.iter().any(|m| bytes.starts_with(m))
+                // Each alternative is a list of (offset, bytes) that must
+                // all match. A bare prefix is not enough for every format:
+                // "RIFF" alone matches wav and avi as well as webp.
+                let magic: &[&[(usize, &[u8])]] = $magic;
+                magic.iter().any(|alt| {
+                    alt.iter().all(|(at, want)| {
+                        bytes
+                            .get(*at..at + want.len())
+                            .is_some_and(|got| got == *want)
+                    })
+                })
             }
             fn import(&self, bytes: &[u8]) -> anyhow::Result<Document> {
                 import_with($format, bytes, $name)
@@ -205,7 +350,7 @@ simple_codec!(
     "PNG",
     ImageFormat::Png,
     &["png"],
-    &[b"\x89PNG"]
+    &[&[(0, b"\x89PNG")]]
 );
 simple_codec!(
     JpegCodec,
@@ -213,7 +358,7 @@ simple_codec!(
     "JPEG",
     ImageFormat::Jpeg,
     &["jpg", "jpeg"],
-    &[b"\xFF\xD8\xFF"]
+    &[&[(0, b"\xFF\xD8\xFF")]]
 );
 simple_codec!(
     WebPCodec,
@@ -221,7 +366,10 @@ simple_codec!(
     "WebP",
     ImageFormat::WebP,
     &["webp"],
-    &[b"RIFF"]
+    // "RIFF" alone is any RIFF container; webp also declares itself at
+    // offset 8. Without that, a .wav was handed to the webp decoder,
+    // because `decode_file` probes before it looks at the extension.
+    &[&[(0, b"RIFF"), (8, b"WEBP")]]
 );
 simple_codec!(
     TiffCodec,
@@ -229,7 +377,13 @@ simple_codec!(
     "TIFF",
     ImageFormat::Tiff,
     &["tif", "tiff"],
-    &[b"II*\x00", b"MM\x00*"]
+    // Classic TIFF plus BigTIFF, which uses version 43 instead of 42.
+    &[
+        &[(0, b"II*\x00")],
+        &[(0, b"MM\x00*")],
+        &[(0, b"II+\x00")],
+        &[(0, b"MM\x00+")],
+    ]
 );
 
 pub struct CommonCodecsPlugin;
@@ -243,7 +397,13 @@ impl PluginManifest for CommonCodecsPlugin {
         registry.register_codec(Box::new(PngCodec));
         registry.register_codec(Box::new(JpegCodec));
         registry.register_codec(Box::new(WebPCodec));
+        // Before TIFF: most raws (NEF, ARW, PEF, DNG...) are TIFF
+        // containers, and probing goes in registration order. The raw
+        // probe only claims files holding sensor data, so an ordinary
+        // TIFF still falls through to its own codec.
+        registry.register_codec(Box::new(RawCodec));
         registry.register_codec(Box::new(TiffCodec));
+        #[cfg(not(target_arch = "wasm32"))]
         registry.register_codec(Box::new(HeifCodec));
         registry.register_codec(Box::new(AffinityCodec));
     }
@@ -332,6 +492,33 @@ mod tests {
         assert_eq!(doc2.icc_profile.as_deref(), Some(display_p3.as_slice()));
     }
 
+    /// Only png and jpeg were wired to `set_icc_profile`, so a
+    /// wide-gamut document exported to tiff or webp came out untagged and
+    /// every other application read it as sRGB.
+    ///
+    /// Asserted on the bytes: `image`'s own tiff decoder cannot read back
+    /// the `IccProfile` tag its encoder writes, so a round-trip through
+    /// it would test the reader rather than what we emit.
+    #[test]
+    fn tiff_and_webp_exports_carry_the_profile() {
+        let display_p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+        let mut doc = Document::new("t", 4, 4, Depth::Eight);
+        doc.push_layer(schist_core::Layer::new_raster("l"));
+        doc.icc_profile = Some(display_p3.clone());
+
+        for (name, bytes) in [
+            ("tiff", TiffCodec.export(&doc).unwrap()),
+            ("webp", WebPCodec.export(&doc).unwrap()),
+        ] {
+            assert!(
+                bytes
+                    .windows(display_p3.len())
+                    .any(|w| w == display_p3.as_slice()),
+                "{name} lost the profile"
+            );
+        }
+    }
+
     #[test]
     fn png_cicp_pq_bakes_to_srgb() {
         // Three PQ greys: black, ~203-nit reference white, ~1000 nits.
@@ -392,6 +579,25 @@ mod tests {
             "codec.heif"
         );
         assert_eq!(reg.codec_for(b"", Some("heic")).unwrap().id(), "codec.heif");
+        // A raw in a TIFF container goes to the raw codec, not TIFF's;
+        // a plain TIFF header with nothing behind it still goes to TIFF.
+        assert_eq!(
+            reg.codec_for(&raw::tests::synthetic_dng(8, 8), None)
+                .unwrap()
+                .id(),
+            "codec.raw"
+        );
+        assert_eq!(
+            reg.codec_for(b"II*\x00\x08\x00\x00\x00", None)
+                .unwrap()
+                .id(),
+            "codec.tiff"
+        );
+        assert_eq!(
+            reg.codec_for(b"FUJIFILMCCD-RAW ", None).unwrap().id(),
+            "codec.raw"
+        );
+        assert_eq!(reg.codec_for(b"", Some("NEF")).unwrap().id(), "codec.raw");
         // AVIF shares the container but is not claimed.
         assert!(reg
             .codec_for(b"\x00\x00\x00\x18ftypavif....", None)
@@ -421,7 +627,7 @@ mod tests {
         };
         assert!(HeifCodec.probe(&bytes), "{name} should probe as HEIF");
         match HeifCodec.import(&bytes) {
-            Err(err) if heif::download_would_help(&err) => {
+            Err(err) if heif::no_decoder_available(&err) => {
                 eprintln!("skipping: {err:#}");
                 None
             }
@@ -446,12 +652,25 @@ mod tests {
             "nothing written on mismatch"
         );
 
+        assert!(
+            !heif::installed_matches(&file),
+            "nothing installed before the good write"
+        );
+
         let path = heif::install(&file, b"payload").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
         assert!(
             !path.with_extension("part").exists(),
             "temp file renamed away"
         );
+        // What stops the download dialog looping: with the pinned bytes
+        // on disk, a second download has nothing to add. Bytes that are
+        // merely *present* do not count -- an older pinned version is
+        // exactly what a download replaces.
+        assert!(heif::installed_matches(&file), "pinned bytes recognised");
+        std::fs::write(&path, b"an older pinned build").unwrap();
+        assert!(!heif::installed_matches(&file), "stale build is not it");
+
         std::env::remove_var("SCHIST_LIBHEIF_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -503,5 +722,141 @@ mod tests {
         assert!(black < 5, "PQ black stays black: {black}");
         assert!(white > 240, "reference white bakes near white: {white}");
         assert!(spec >= white, "speculars roll off above white: {spec}");
+    }
+    #[test]
+    fn the_webp_probe_does_not_claim_every_riff_file() {
+        // `decode_file` probes before it consults the extension, so a wav
+        // was handed to the webp decoder and failed with "decoding WebP".
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&[0; 4]);
+        wav.extend_from_slice(b"WAVEfmt ");
+        assert!(!WebPCodec.probe(&wav), "a wav is not a webp");
+
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0; 4]);
+        webp.extend_from_slice(b"WEBPVP8 ");
+        assert!(WebPCodec.probe(&webp), "a real webp must still probe");
+    }
+
+    #[test]
+    fn the_tiff_probe_accepts_bigtiff() {
+        assert!(TiffCodec.probe(b"II*\x00rest"), "classic little-endian");
+        assert!(TiffCodec.probe(b"MM\x00*rest"), "classic big-endian");
+        assert!(TiffCodec.probe(b"II+\x00rest"), "bigtiff little-endian");
+        assert!(TiffCodec.probe(b"MM\x00+rest"), "bigtiff big-endian");
+        assert!(!TiffCodec.probe(b"II!\x00rest"), "and nothing else");
+    }
+
+    #[test]
+    fn transparent_areas_export_to_jpeg_as_white_not_black() {
+        // JPEG has no alpha and `to_rgb8` just drops it. A straight-alpha
+        // composite leaves rgb at 0 where nothing was painted, so every
+        // transparent region came out black.
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        doc.push_layer(Layer::new_raster("empty"));
+        let bytes = export_flat(&doc, ImageFormat::Jpeg, &ExportOptions::default()).unwrap();
+
+        let img = image::load_from_memory_with_format(&bytes, ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgb8();
+        let px = img.get_pixel(4, 4);
+        assert!(
+            px[0] > 200 && px[1] > 200 && px[2] > 200,
+            "transparent should matte to white, got {px:?}"
+        );
+    }
+
+    /// Every non-psd import was forced through `to_rgba8()` and
+    /// `Document::new(.., Depth::Eight)`, so a 16-bit scan lost half its
+    /// precision permanently and with no warning.
+    #[test]
+    fn a_sixteen_bit_png_keeps_its_precision() {
+        let mut img: image::ImageBuffer<image::Rgba<u16>, Vec<u16>> = image::ImageBuffer::new(4, 2);
+        // A value that has no 8-bit representation: 0x0101 is the nearest
+        // 8-bit-expressible neighbour either side.
+        for (_, _, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([0x0180, 0x8000, 0xFFFF, 0xFFFF]);
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, ImageFormat::Png).unwrap();
+
+        let doc = PngCodec.import(&bytes.into_inner()).unwrap();
+        assert_eq!(doc.depth, Depth::Sixteen);
+        let px = doc.tree.layers[0].as_raster().unwrap().tiles.pixel(1, 1);
+        // 0x0180 / 65535 == 0.005889..., which rounds to 2/255 == 0.00784
+        // if it goes through 8 bits.
+        assert!(
+            (px.r - 0x0180 as f32 / 65535.0).abs() < 1e-4,
+            "red came back as {} (8-bit quantised is {})",
+            px.r,
+            2.0 / 255.0
+        );
+    }
+
+    /// And an 8-bit source stays 8-bit, so ordinary files do not quadruple
+    /// in memory for nothing.
+    #[test]
+    fn an_eight_bit_png_stays_eight_bit() {
+        let mut img = image::RgbaImage::new(4, 2);
+        img.fill(200);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        assert_eq!(
+            PngCodec.import(&bytes.into_inner()).unwrap().depth,
+            Depth::Eight
+        );
+    }
+
+    /// `bit_depth` was only consulted to pick the dither level, never to
+    /// choose an output depth, so "export 16-bit png" was unreachable.
+    #[test]
+    fn export_honours_the_requested_bit_depth() {
+        let mut doc = Document::new("t", 8, 4, Depth::Sixteen);
+        let mut layer = Layer::new_raster("Background");
+        let buf: Vec<f32> = [0.00589f32, 0.5, 1.0, 1.0].repeat(8 * 4);
+        schist_core::blit_rgba_f32(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Sixteen,
+            IntRect::from_size(8, 4),
+            &buf,
+        );
+        doc.push_layer(layer);
+
+        let deep = PngCodec
+            .export_with(
+                &doc,
+                &ExportOptions {
+                    bit_depth: 16,
+                    dither: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let back = PngCodec.import(&deep).unwrap();
+        assert_eq!(back.depth, Depth::Sixteen, "export dropped to 8 bits");
+        let px = back.tree.layers[0].as_raster().unwrap().tiles.pixel(1, 1);
+        assert!((px.r - 0.00589).abs() < 1e-4, "got {}", px.r);
+
+        // The default is still 8-bit.
+        let shallow = PngCodec.export(&doc).unwrap();
+        assert_eq!(PngCodec.import(&shallow).unwrap().depth, Depth::Eight);
+    }
+
+    /// jpeg cannot carry 16 bits, so asking for it must not fail the
+    /// export.
+    #[test]
+    fn a_format_without_sixteen_bit_still_exports() {
+        let mut doc = Document::new("t", 8, 4, Depth::Eight);
+        doc.push_layer(Layer::new_raster("Background"));
+        let bytes = JpegCodec
+            .export_with(
+                &doc,
+                &ExportOptions {
+                    bit_depth: 16,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(JpegCodec.probe(&bytes));
     }
 }

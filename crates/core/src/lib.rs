@@ -11,16 +11,20 @@ pub mod geom;
 pub mod history;
 pub mod layer;
 pub mod path;
+pub mod raw;
 pub mod resample;
 pub mod selection;
 pub mod smart;
 pub mod style;
 pub mod tile;
 
-pub use annotate::{Artboard, CountGroup, LayerComp, LayerCompState, Note, Slice};
+pub use annotate::{
+    Artboard, CountGroup, LayerComp, LayerCompState, Note, Slice, DEFAULT_NOTE_COLOR,
+};
 pub use blend::BlendMode;
 pub use document::{
-    blit_rgba8, Document, DocumentId, EditBuilder, Guide, PreservedResource, StrokeEdit,
+    blit_rgba8, blit_rgba_f32, Document, DocumentId, EditBuilder, Guide, PreservedResource,
+    StrokeEdit,
 };
 pub use geom::IntRect;
 pub use history::{Edit, EditOp, History, LayerProps};
@@ -29,11 +33,12 @@ pub use layer::{
     LayerTree, RasterLayer, RawBlock, StyledRaster,
 };
 pub use path::{Anchor, SubPath, VectorPath, VectorShape};
+pub use raw::{RawDevelopment, RawSettings};
 pub use resample::{Affine, Filter};
 pub use selection::{SelectOp, Selection};
 pub use smart::SmartObject;
 pub use style::{
-    BevelStyle, BevelStyle_, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
+    BevelStyle, BevelStyle_, BlurStyle, ColorOverlayStyle, Effect, GlowStyle, GradientOverlayStyle,
     GradientShape, LayerStyle, SatinStyle, ShadowStyle, StrokePosition, StrokeStyle, Technique,
 };
 pub use tile::{MaskTileMap, TileBuf, TileCoord, TileMap, TILE_PIXELS, TILE_SIZE};

@@ -2,7 +2,7 @@
 
 use crate::geom::IntRect;
 use crate::history::{Edit, EditOp, History, LayerProps};
-use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree};
+use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree, RawBlock};
 use crate::selection::Selection;
 use crate::tile::{TileBuf, TileCoord, TileMap, TILE_PIXELS};
 use rustc_hash::FxHashMap;
@@ -55,6 +55,18 @@ pub struct Document {
     pub history: History,
     /// PSD image resources we preserve for round-trip fidelity.
     pub preserved_resources: Vec<PreservedResource>,
+    /// The PSD Global Layer Mask Info payload, verbatim.
+    ///
+    /// Read and discarded, then written back as a zero length -- so the
+    /// block was silently dropped on every save.
+    pub global_layer_mask: Vec<u8>,
+    /// Document-level additional layer information blocks, verbatim:
+    /// `Patt` pattern definitions, `lnk2` linked smart objects, `Txt2`,
+    /// `FMsk` and anything else a writer put there. Also read and
+    /// discarded before; open a file with pattern definitions or linked
+    /// smart objects, save, and all of it was gone -- while the README
+    /// promised every block preserved byte-for-byte.
+    pub preserved_layer_info: Vec<crate::layer::RawBlock>,
     /// Monotonic counter bumped on every visible change; views compare it
     /// to decide whether to recomposite.
     pub revision: u64,
@@ -108,6 +120,8 @@ impl Document {
             selected: Vec::new(),
             history: History::new(),
             preserved_resources: Vec::new(),
+            global_layer_mask: Vec::new(),
+            preserved_layer_info: Vec::new(),
             revision: 0,
             guides: Vec::new(),
             last_selection: None,
@@ -186,13 +200,14 @@ impl Document {
     ///
     /// `dirty` is otherwise set only by the edit machinery, so document
     /// state that is mutated directly (guides, layer comps, saved
-    /// selections, notes, counts) never reached it: the tab closed with no
+    /// selections, counts) never reached it: the tab closed with no
     /// prompt and `autosave`, which filters on `dirty`, skipped the
     /// document entirely.
     ///
     /// This is the minimum for not losing the work. Those lists still
     /// belong in history; when they get their own `EditOp` the call here
-    /// becomes redundant rather than wrong.
+    /// becomes redundant rather than wrong -- as it now is for notes,
+    /// which go through [`EditBuilder::change_notes`].
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -214,12 +229,22 @@ impl Document {
         }
     }
 
+    /// The document on disk now matches this state: clear the dirty flag
+    /// and remember where in history that is, so undoing back here later
+    /// clears it again rather than leaving a saved file marked modified.
+    pub fn mark_saved(&mut self) {
+        self.dirty = false;
+        self.history.mark_saved();
+    }
+
     pub fn undo(&mut self) -> Option<String> {
         let edit = self.history.pop_undo()?;
         for op in edit.ops.iter().rev() {
             self.apply_op(op, Direction::Undo);
         }
-        self.dirty = true;
+        // Undoing back to the last save leaves the document matching
+        // what is on disk, so it is no longer dirty.
+        self.dirty = !self.history.at_saved();
         Some(edit.name)
     }
 
@@ -228,7 +253,7 @@ impl Document {
         for op in edit.ops.iter() {
             self.apply_op(op, Direction::Redo);
         }
-        self.dirty = true;
+        self.dirty = !self.history.at_saved();
         Some(edit.name)
     }
 
@@ -287,9 +312,7 @@ impl Document {
                     }
                     Direction::Undo => {
                         self.tree.remove_at(path);
-                        if self.active_layer == Some(layer.id) {
-                            self.active_layer = None;
-                        }
+                        self.reselect_after_removal(layer.id, path);
                     }
                 }
                 self.add_damage(layer.content_bounds());
@@ -299,9 +322,7 @@ impl Document {
                 match dir {
                     Direction::Redo => {
                         self.tree.remove_at(path);
-                        if self.active_layer == Some(layer.id) {
-                            self.active_layer = None;
-                        }
+                        self.reselect_after_removal(layer.id, path);
                     }
                     Direction::Undo => {
                         self.tree.insert_at(path, (**layer).clone());
@@ -382,6 +403,36 @@ impl Document {
                 }
                 self.structure_changed();
             }
+            EditOp::LayerExtrasSet {
+                layer,
+                before,
+                after,
+            } => {
+                let want = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    l.extras = want.clone();
+                }
+                self.structure_changed();
+            }
+            EditOp::RawDevelopmentSet {
+                layer,
+                before,
+                after,
+            } => {
+                let want = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    l.raw = want.clone();
+                }
+                self.structure_changed();
+            }
             EditOp::LayerStyleSet {
                 layer,
                 before,
@@ -452,6 +503,39 @@ impl Document {
                 // profile, and a pure Assign did not repaint at all.
                 self.damage_all();
             }
+            EditOp::ColorModeSet { before, after } => {
+                self.mode = if dir == Direction::Undo {
+                    *before
+                } else {
+                    *after
+                };
+                self.damage_all();
+            }
+            EditOp::NotesSet { before, after } => {
+                let target = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                // No revision bump and no damage: notes are overlay
+                // furniture, so nothing composited depends on them and
+                // invalidating caches here would be pure waste.
+                self.notes = target.clone();
+            }
+        }
+    }
+
+    /// Keep the panel pointed at something after `removed` (which sat at
+    /// `path`) leaves the tree.
+    ///
+    /// Nulling `active_layer` left the document with no active layer at
+    /// all, and every command that edits pixels -- copy, cut, fill, the
+    /// brush -- became a silent no-op until you clicked a row. Undoing a
+    /// paste was enough to get there.
+    fn reselect_after_removal(&mut self, removed: LayerId, path: &LayerPath) {
+        self.selected.retain(|&id| id != removed);
+        if self.active_layer == Some(removed) {
+            self.active_layer = self.tree.neighbour_of(path);
         }
     }
 
@@ -586,9 +670,7 @@ impl<'a> EditBuilder<'a> {
             return false;
         };
         self.damage = self.damage.union(&layer.content_bounds());
-        if self.doc.active_layer == Some(id) {
-            self.doc.active_layer = None;
-        }
+        self.doc.reselect_after_removal(id, &path);
         self.ops.push(EditOp::LayerRemove {
             path,
             layer: Box::new(layer),
@@ -703,6 +785,27 @@ impl<'a> EditBuilder<'a> {
         });
     }
 
+    /// Attach, replace or clear the original capture and settings behind a
+    /// camera-raw layer.
+    pub fn set_raw_development(
+        &mut self,
+        layer: LayerId,
+        after: Option<Box<crate::raw::RawDevelopment>>,
+    ) {
+        let before = self.doc.tree.find(layer).and_then(|l| l.raw.clone());
+        if before == after {
+            return;
+        }
+        if let Some(l) = self.doc.tree.find_mut(layer) {
+            l.raw = after.clone();
+        }
+        self.ops.push(EditOp::RawDevelopmentSet {
+            layer,
+            before,
+            after,
+        });
+    }
+
     /// Record a change to a layer's effects.
     pub fn record_layer_style(
         &mut self,
@@ -724,6 +827,22 @@ impl<'a> EditBuilder<'a> {
         });
         let canvas = self.doc.canvas_rect();
         self.damage = self.damage.union(&canvas);
+    }
+
+    /// Replace a layer's preserved blocks, recording the change.
+    pub fn set_extras(&mut self, layer: LayerId, after: Vec<RawBlock>) {
+        let Some(l) = self.doc.tree.find_mut(layer) else {
+            return;
+        };
+        if l.extras == after {
+            return;
+        }
+        let before = std::mem::replace(&mut l.extras, after.clone());
+        self.ops.push(EditOp::LayerExtrasSet {
+            layer,
+            before,
+            after,
+        });
     }
 
     pub fn record_adjustment_params(
@@ -828,6 +947,19 @@ impl<'a> EditBuilder<'a> {
         });
     }
 
+    /// Change the document's colour mode as part of this edit.
+    pub fn set_color_mode(&mut self, mode: schist_color::ColorMode) {
+        if self.doc.mode == mode {
+            return;
+        }
+        let before = self.doc.mode;
+        self.doc.mode = mode;
+        self.ops.push(EditOp::ColorModeSet {
+            before,
+            after: mode,
+        });
+    }
+
     /// Replace the selection via closure; captures before/after.
     pub fn change_selection(&mut self, f: impl FnOnce(&mut Selection, IntRect)) {
         let canvas = self.doc.canvas_rect();
@@ -840,6 +972,22 @@ impl<'a> EditBuilder<'a> {
         let after = Box::new(self.doc.selection.clone());
         self.ops.push(EditOp::SelectionSet { before, after });
         self.damage = self.damage.union(&canvas);
+    }
+
+    /// Replace the document's notes, capturing before/after.
+    pub fn change_notes(&mut self, f: impl FnOnce(&mut Vec<crate::annotate::Note>)) {
+        let before = self.doc.notes.clone();
+        f(&mut self.doc.notes);
+        if before == self.doc.notes {
+            return;
+        }
+        let after = self.doc.notes.clone();
+        self.ops.push(EditOp::NotesSet { before, after });
+        // Deliberately no damage: a note is an overlay, not pixels.
+        // Damage invalidates cached composited tiles, so reporting the
+        // canvas here would recomposite the whole document every time a
+        // marker was nudged. The shell repaints after every edit anyway,
+        // and the overlays are rebuilt from scratch each frame.
     }
 
     /// Finish: snapshot `after` states for tile writes and push to history.
@@ -1051,6 +1199,40 @@ impl StrokeEdit {
             doc.add_damage(coord.rect());
         }
     }
+}
+
+/// Blit straight-alpha f32 RGBA into a tile map at the map's own depth.
+///
+/// The u8 form below is the common path, but it caps everything that goes
+/// through it at 8 bits per channel -- which is why every non-PSD import
+/// used to collapse a 16-bit scan to half its precision on the way in.
+pub fn blit_rgba_f32(tiles: &mut TileMap, depth: Depth, rect: IntRect, rgba: &[f32]) {
+    use crate::tile::TILE_SIZE;
+    assert_eq!(
+        rgba.len(),
+        rect.width() as usize * rect.height() as usize * 4
+    );
+    let w = rect.width() as usize;
+    for coord in TileCoord::covering(&rect) {
+        let trect = coord.rect();
+        let clip = trect.intersect(&rect);
+        if clip.is_empty() {
+            continue;
+        }
+        let buf = tiles.get_mut_or_insert(coord, depth);
+        for y in clip.top..clip.bottom {
+            let sy = (y - rect.top) as usize;
+            let ly = (y - trect.top) as usize;
+            for x in clip.left..clip.right {
+                let sx = (x - rect.left) as usize;
+                let lx = (x - trect.left) as usize;
+                let s = (sy * w + sx) * 4;
+                let px = schist_color::Rgba::new(rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]);
+                buf.set(ly * TILE_SIZE as usize + lx, px);
+            }
+        }
+    }
+    tiles.prune_blank();
 }
 
 /// Fill a whole raster layer tilemap region from an RGBA8 buffer
@@ -1309,5 +1491,181 @@ mod tests {
         doc.redo().unwrap();
         assert_eq!(doc.icc_profile.as_deref(), Some(&[1, 2, 3, 4][..]));
         assert!(!doc.take_damage().is_empty(), "redo repaints too");
+    }
+
+    #[test]
+    fn the_colour_mode_undoes_with_the_pixels() {
+        // Image > Mode set `doc.mode` outside the edit, so undo restored
+        // the colour and left the document still reporting greyscale,
+        // which is also what it would then have been saved as.
+        let mut doc = Document::new("t", 16, 16, Depth::Eight);
+        assert_eq!(doc.mode, schist_color::ColorMode::Rgb);
+
+        let mut edit = doc.begin_edit("Grayscale");
+        edit.set_color_mode(schist_color::ColorMode::Grayscale);
+        edit.commit();
+        assert_eq!(doc.mode, schist_color::ColorMode::Grayscale);
+
+        doc.undo();
+        assert_eq!(
+            doc.mode,
+            schist_color::ColorMode::Rgb,
+            "undo must restore the mode too"
+        );
+        doc.redo();
+        assert_eq!(doc.mode, schist_color::ColorMode::Grayscale);
+    }
+    /// Removing the active layer -- by deleting it, or by undoing the
+    /// insert that created it -- used to leave `active_layer` at None,
+    /// and every pixel command silently did nothing until a row was
+    /// clicked. Photoshop moves the selection to the layer below.
+    #[test]
+    fn removing_the_active_layer_selects_a_neighbour() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let bottom = doc.push_layer(Layer::new_raster("bottom"));
+        let top = doc.push_layer(Layer::new_raster("top"));
+        assert_eq!(doc.active_layer, Some(top));
+
+        let mut edit = doc.begin_edit("Delete Layer");
+        edit.remove_layer(top);
+        edit.commit();
+        assert_eq!(doc.active_layer, Some(bottom), "delete left nothing active");
+
+        doc.undo().unwrap();
+        doc.active_layer = Some(top);
+        doc.redo().unwrap();
+        assert_eq!(doc.active_layer, Some(bottom), "redo left nothing active");
+
+        // Undoing an insert is the paste case: the layer that was there
+        // before the new one comes back as the active one.
+        let mut edit = doc.begin_edit("Paste");
+        let pasted = edit.insert_layer(LayerPath(vec![1]), Layer::new_raster("pasted"));
+        edit.commit();
+        doc.active_layer = Some(pasted);
+        doc.undo().unwrap();
+        assert_eq!(doc.active_layer, Some(bottom), "undo left nothing active");
+    }
+
+    /// The last layer in a group leaves the group itself selected, and the
+    /// last layer in the document leaves nothing -- there is nothing else.
+    #[test]
+    fn removing_the_only_layer_falls_back_to_its_group() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let mut group = Layer::new_group("group");
+        let child = Layer::new_raster("child");
+        let child_id = child.id;
+        let group_id = group.id;
+        match &mut group.kind {
+            crate::layer::LayerKind::Group(g) => g.children.push(child),
+            _ => unreachable!(),
+        }
+        doc.push_layer(group);
+        doc.active_layer = Some(child_id);
+
+        let mut edit = doc.begin_edit("Delete Layer");
+        edit.remove_layer(child_id);
+        edit.commit();
+        assert_eq!(doc.active_layer, Some(group_id));
+
+        let mut edit = doc.begin_edit("Delete Layer");
+        edit.remove_layer(group_id);
+        edit.commit();
+        assert_eq!(doc.active_layer, None, "an empty document has no layer");
+    }
+
+    #[test]
+    fn undoing_back_to_the_save_point_is_no_longer_dirty() {
+        // Undo used to set `dirty = true` unconditionally, so a document
+        // that had been saved and then edited stayed marked modified even
+        // after the edit was undone, and closing it still nagged.
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let id = doc.push_layer(Layer::new_raster("l"));
+        doc.mark_saved();
+        assert!(!doc.dirty);
+
+        let mut edit = doc.begin_edit("Rename");
+        edit.change_props(id, |l| l.name = "renamed".into());
+        assert!(edit.commit());
+        assert!(doc.dirty);
+
+        doc.undo().unwrap();
+        assert!(!doc.dirty, "undo back to the save point left it dirty");
+
+        doc.redo().unwrap();
+        assert!(doc.dirty, "redoing past the save point is a modification");
+    }
+
+    #[test]
+    fn saving_after_an_edit_moves_the_save_point() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let id = doc.push_layer(Layer::new_raster("l"));
+        let mut edit = doc.begin_edit("Rename");
+        edit.change_props(id, |l| l.name = "a".into());
+        edit.commit();
+        doc.mark_saved();
+
+        let mut edit = doc.begin_edit("Rename");
+        edit.change_props(id, |l| l.name = "b".into());
+        edit.commit();
+        doc.undo().unwrap();
+        assert!(!doc.dirty);
+        // Undoing *past* the save point is a change from what is on disk.
+        doc.undo().unwrap();
+        assert!(doc.dirty, "undoing past the save point must be dirty");
+    }
+    /// A save point that ends up in a discarded redo branch is
+    /// unreachable, so it must not go on matching the undo depth.
+    ///
+    /// Draw A, save, undo A, draw B (the redo branch holding the save
+    /// point is discarded), undo B, redo B: the depth matched again and
+    /// redo reported the document clean while it held B and the disk held
+    /// A. Behind the quit confirmation that loses B without asking.
+    #[test]
+    fn a_save_point_in_a_discarded_branch_does_not_come_back() {
+        let mut doc = Document::new("t", 8, 8, Depth::Eight);
+        let id = doc.push_layer(Layer::new_raster("l"));
+        let rename = |doc: &mut Document, to: &str| {
+            let mut e = doc.begin_edit("Rename");
+            e.change_props(id, |l| l.name = to.into());
+            assert!(e.commit());
+        };
+
+        rename(&mut doc, "a");
+        doc.mark_saved();
+        assert!(!doc.dirty);
+
+        doc.undo().unwrap();
+        rename(&mut doc, "b"); // discards the branch the save point was in
+        doc.undo().unwrap();
+        doc.redo().unwrap();
+
+        assert_eq!(doc.tree.find(id).unwrap().name, "b");
+        assert!(
+            doc.dirty,
+            "the document holds b and the disk holds a, so it is not saved"
+        );
+    }
+
+    #[test]
+    fn raw_development_settings_undo_and_redo() {
+        let mut doc = Document::new("raw", 8, 8, Depth::Sixteen);
+        let id = doc.push_layer(Layer::new_raster("capture"));
+        let original = crate::RawDevelopment {
+            source: std::sync::Arc::from(&b"original capture"[..]),
+            settings: crate::RawSettings::default(),
+        };
+        doc.tree.find_mut(id).unwrap().raw = Some(Box::new(original.clone()));
+        let mut changed = original.clone();
+        changed.settings.exposure = 1.25;
+
+        let mut edit = doc.begin_edit("Camera Raw Development");
+        edit.set_raw_development(id, Some(Box::new(changed.clone())));
+        assert!(edit.commit());
+        assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&changed));
+
+        assert_eq!(doc.undo().as_deref(), Some("Camera Raw Development"));
+        assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&original));
+        assert_eq!(doc.redo().as_deref(), Some("Camera Raw Development"));
+        assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&changed));
     }
 }

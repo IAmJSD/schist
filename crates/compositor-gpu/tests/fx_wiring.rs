@@ -100,8 +100,15 @@ fn noise_f32(w: usize, h: usize, seed: u64) -> Vec<f32> {
         .collect()
 }
 
-fn values(pairs: &[(&'static str, f32)]) -> FilterValues {
-    let mut v = FilterValues::default();
+/// A filter's own defaults with a few settings overridden.
+///
+/// Starting from the defaults rather than from nothing matters: a filter
+/// that grows a parameter later would otherwise be handed a zero for it
+/// -- and a zero is a real setting, not "unset". Lens Blur's specular
+/// threshold at zero, for instance, means something quite different from
+/// leaving it alone.
+fn values(filter: &dyn FilterPlugin, pairs: &[(&'static str, f32)]) -> FilterValues {
+    let mut v = FilterValues::defaults(&filter.params());
     for (k, n) in pairs {
         v.set(k, *n);
     }
@@ -137,18 +144,21 @@ fn the_blur_filters_run_through_the_installed_backend() {
     let (w, h) = (512usize, 384usize);
     let px = noise_f32(w, h, 0x5EED);
     let cases: Vec<(Box<dyn FilterPlugin>, FilterValues)> = vec![
-        (
-            Box::new(schist_filters_core::GaussianBlur),
-            values(&[("radius", 8.0)]),
-        ),
-        (
-            Box::new(schist_filters_core::BoxBlur),
-            values(&[("radius", 20.0)]),
-        ),
-        (
-            Box::new(schist_filters_core::other::LensBlur),
-            values(&[("radius", 10.0), ("brightness", 40.0)]),
-        ),
+        {
+            let f = schist_filters_core::GaussianBlur;
+            let v = values(&f, &[("radius", 8.0)]);
+            (Box::new(f) as Box<dyn FilterPlugin>, v)
+        },
+        {
+            let f = schist_filters_core::BoxBlur;
+            let v = values(&f, &[("radius", 20.0)]);
+            (Box::new(f) as Box<dyn FilterPlugin>, v)
+        },
+        {
+            let f = schist_filters_core::other::LensBlur;
+            let v = values(&f, &[("radius", 10.0), ("brightness", 40.0)]);
+            (Box::new(f) as Box<dyn FilterPlugin>, v)
+        },
     ];
     for (filter, v) in cases {
         let before = backend.took();

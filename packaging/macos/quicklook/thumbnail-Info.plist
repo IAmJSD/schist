@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>SchistQuickLookThumbnail</string>
+    <key>CFBundleDisplayName</key><string>Schist Thumbnails</string>
+    <key>CFBundleIdentifier</key><string>com.infrawrench.schist.quicklook-thumbnail</string>
+    <key>CFBundleVersion</key><string>0.11.0</string>
+    <key>CFBundleShortVersionString</key><string>0.11.0</string>
+    <key>CFBundleExecutable</key><string>schist-quicklook</string>
+    <!-- An app extension is an XPC service, not an application. -->
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.quicklook.thumbnail</string>
+        <!-- Registered from Rust at startup; see crates/quicklook. -->
+        <key>NSExtensionPrincipalClass</key>
+        <string>SchistThumbnailProvider</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <!-- The types the app's Info.plist imports, and only those:
+                 where Affinity itself is installed it declares its own
+                 (com.canva.affinity*) and previews them with its own
+                 extension, which needs no help from us. -->
+            <key>QLSupportedContentTypes</key>
+            <array>
+                <string>com.adobe.photoshop-image</string>
+                <string>com.adobe.photoshop-large-image</string>
+                <string>com.seriflabs.afphoto</string>
+                <string>com.seriflabs.afdesign</string>
+                <string>com.seriflabs.afpub</string>
+                <string>com.seriflabs.af</string>
+            </array>
+            <!-- No size is too small to be worth drawing: every one of
+                 these formats can carry a picture at any dimension. -->
+            <key>QLThumbnailMinimumDimension</key><integer>0</integer>
+        </dict>
+    </dict>
+</dict>
+</plist>

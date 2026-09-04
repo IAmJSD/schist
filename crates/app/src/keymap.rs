@@ -7,7 +7,9 @@
 
 use crate::actions::*;
 use crate::workspace::Workspace;
-use gpui::{Context, KeyBinding, PathPromptOptions, Window};
+#[cfg(not(target_arch = "wasm32"))]
+use gpui::PathPromptOptions;
+use gpui::{Action, Context, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, Window};
 use schist_plugin_api::PluginRegistry;
 use std::path::PathBuf;
 
@@ -111,6 +113,8 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
         KeyBinding::new(&translate("cmd-alt-;"), ClearGuides, CONTEXT),
         KeyBinding::new("tab", TogglePanels, TYPING_SAFE),
         KeyBinding::new("f", CycleScreenMode, TYPING_SAFE),
+        KeyBinding::new(&translate("cmd-shift-a"), ToggleAiPanel, CONTEXT),
+        KeyBinding::new(&translate("cmd-shift-g"), ToggleGallery, CONTEXT),
         // Adjustment layers, matching Photoshop's Image ▸ Adjustments keys.
         KeyBinding::new(
             &translate("cmd-l"),
@@ -155,24 +159,73 @@ pub fn build_bindings(registry: &PluginRegistry) -> Vec<KeyBinding> {
     // Format: { "<keystroke>": "command:<id>" | "tool:<id>" }
     if let Some(user) = load_user_keymap() {
         for (keystroke, target) in user {
-            if let Some(id) = target.strip_prefix("command:") {
-                bindings.push(KeyBinding::new(
-                    &keystroke,
-                    RunCommand { id: id.to_string() },
-                    CONTEXT,
-                ));
+            let action: Box<dyn Action> = if let Some(id) = target.strip_prefix("command:") {
+                Box::new(RunCommand { id: id.to_string() })
             } else if let Some(id) = target.strip_prefix("tool:") {
-                bindings.push(KeyBinding::new(
-                    &keystroke,
-                    ActivateTool { id: id.to_string() },
-                    CONTEXT,
-                ));
+                Box::new(ActivateTool { id: id.to_string() })
             } else {
                 log::warn!("keymap: unknown target {target:?} for {keystroke:?}");
+                continue;
+            };
+            // An unmodified key has to yield to whatever is capturing
+            // typing, exactly as the built-in tool shortcuts do. Binding
+            // an override in `CONTEXT` meant rebinding `e` to the eraser
+            // made the letter "e" unreachable inside a text layer, and
+            // since user bindings are appended last they win the tie-break
+            // against the built-in binding they were meant to replace.
+            let context = override_context(&keystroke);
+            match try_binding(&keystroke, action, context) {
+                Some(kb) => bindings.push(kb),
+                // `KeyBinding::new` panics on a keystroke gpui cannot
+                // parse, and "ctrl-page-up" or "cmd-arrow-left" are
+                // plausible things to write. One typo used to take the
+                // app down at launch, before any window existed to
+                // report it, leaving the user to find the file by hand.
+                None => log::error!(
+                    "keymap: cannot parse keystroke {keystroke:?} (bound to {target:?}); ignoring it"
+                ),
             }
         }
     }
     bindings
+}
+
+/// Which context a user override belongs in.
+///
+/// An unmodified key has to yield to whatever is capturing typing, as the
+/// built-in tool shortcuts do. Overrides were bound in `CONTEXT`
+/// unconditionally, so rebinding `e` to the eraser made the letter "e"
+/// unreachable inside a text layer -- and since user bindings are
+/// appended last they also win the tie-break against the built-in
+/// binding they were meant to replace, so the behaviour could not be
+/// restored without deleting the entry.
+fn override_context(keystroke: &str) -> Option<&'static str> {
+    if keystroke.contains('-') {
+        CONTEXT
+    } else {
+        TYPING_SAFE
+    }
+}
+
+/// `KeyBinding::new` without the panic on an unparseable keystroke.
+fn try_binding(
+    keystroke: &str,
+    action: Box<dyn Action>,
+    context: Option<&str>,
+) -> Option<KeyBinding> {
+    let predicate = match context {
+        Some(c) => Some(std::rc::Rc::new(KeyBindingContextPredicate::parse(c).ok()?)),
+        None => None,
+    };
+    KeyBinding::load(
+        keystroke,
+        action,
+        predicate,
+        false,
+        None,
+        &DummyKeyboardMapper,
+    )
+    .ok()
 }
 
 /// Where user keybinding overrides live.
@@ -201,6 +254,29 @@ fn dirs_config() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".config"))
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn open_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    // gpui's web backend has no path prompt to offer (there are no
+    // paths); a transient <input type=file> stands in, and the picked
+    // bytes land in the in-memory map under an invented path.
+    let accept: String = ws
+        .registry
+        .codecs()
+        .flat_map(|c| c.extensions())
+        .map(|e| format!(".{e}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rx = crate::web::pick_file(&accept);
+    cx.spawn_in(window, async move |this, cx| {
+        if let Ok(Some(path)) = rx.await {
+            this.update_in(cx, |ws, _window, cx| ws.load_file(path, cx))
+                .ok();
+        }
+    })
+    .detach();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_file_dialog(_ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let rx = cx.prompt_for_paths(PathPromptOptions {
         files: true,
@@ -220,6 +296,7 @@ pub fn open_file_dialog(_ws: &mut Workspace, window: &mut Window, cx: &mut Conte
 }
 
 /// Pick a `.wasm` plugin to install.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn install_plugin_dialog(
     _ws: &mut Workspace,
     window: &mut Window,
@@ -242,18 +319,28 @@ pub fn install_plugin_dialog(
     .detach();
 }
 
-pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let dir = ws
-        .doc
-        .as_ref()
-        .and_then(|d| d.path.as_ref())
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    // PSD is the native save format; keep an existing
-    // extension when the document already has a writable one.
-    let suggested = ws
-        .doc
+#[cfg(target_arch = "wasm32")]
+pub fn save_file_dialog(ws: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) {
+    // No paths to prompt for: the one open question is the file's name
+    // (whose extension picks the format), and the browser's own prompt
+    // answers it. The save lands as a download.
+    let suggested = suggested_name(ws);
+    match crate::web::prompt_string(
+        "Save as \u{2014} the extension picks the format:",
+        &suggested,
+    ) {
+        Some(name) => {
+            let path = PathBuf::from("/web/save").join(name);
+            ws.save_file_as(path, cx);
+        }
+        None => ws.cancel_pending_save(),
+    }
+}
+
+/// The name a save prompt starts from: the document's stem plus a
+/// writable extension, PSD when it has none.
+fn suggested_name(ws: &Workspace) -> String {
+    ws.doc
         .as_ref()
         .map(|d| {
             let stem = std::path::Path::new(&d.title)
@@ -269,12 +356,35 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
                 .unwrap_or("psd");
             format!("{stem}.{ext}")
         })
-        .unwrap_or_else(|| "untitled.psd".into());
+        .unwrap_or_else(|| "untitled.psd".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let dir = ws
+        .doc
+        .as_ref()
+        .and_then(|d| d.path.as_ref())
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    // PSD is the native save format; keep an existing
+    // extension when the document already has a writable one.
+    let suggested = suggested_name(ws);
     let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
     cx.spawn_in(window, async move |this, cx| {
-        if let Ok(Ok(Some(path))) = rx.await {
-            this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx))
-                .ok();
+        match rx.await {
+            Ok(Ok(Some(path))) => {
+                this.update_in(cx, |ws, _window, cx| ws.save_file_as(path, cx))
+                    .ok();
+            }
+            // Cancelled, or the prompt failed. Anything waiting on the
+            // save -- closing the tab, say -- has to be called off, or it
+            // would fire on some later unrelated save instead.
+            _ => {
+                this.update_in(cx, |ws, _window, _cx| ws.cancel_pending_save())
+                    .ok();
+            }
         }
     })
     .detach();
@@ -282,7 +392,8 @@ pub fn save_file_dialog(ws: &mut Workspace, window: &mut Window, cx: &mut Contex
 
 #[cfg(test)]
 mod tests {
-    use super::{ALWAYS, CONTEXT, TYPING_SAFE};
+    use super::{override_context, try_binding, ALWAYS, CONTEXT, TYPING_SAFE};
+    use crate::actions::ActivateTool;
     use gpui::{KeyBindingContextPredicate, KeyContext};
 
     /// Does a binding registered with `predicate` fire in `state`?
@@ -350,5 +461,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_bad_user_keystroke_is_skipped_not_fatal() {
+        // `KeyBinding::new` panics on anything gpui cannot parse, and it
+        // runs before the window exists, so one typo in keymap.json took
+        // the app down at launch with a bare unwrap backtrace.
+        let tool = || {
+            Box::new(ActivateTool {
+                id: "eraser".into(),
+            })
+        };
+        assert!(try_binding("ctrl-s", tool(), CONTEXT).is_some());
+        // Two non-modifier components: gpui rejects these.
+        for bad in ["ctrl-s-a", "ctrl-page-up", "cmd-arrow-left", "alt-num-1"] {
+            assert!(
+                try_binding(bad, tool(), CONTEXT).is_none(),
+                "{bad} should be declined, not panic"
+            );
+        }
+    }
+
+    #[test]
+    fn unmodified_overrides_yield_to_typing() {
+        assert_eq!(override_context("e"), TYPING_SAFE);
+        assert_eq!(override_context("5"), TYPING_SAFE);
+        assert_eq!(override_context("ctrl-e"), CONTEXT);
+        assert_eq!(override_context("cmd-shift-s"), CONTEXT);
     }
 }

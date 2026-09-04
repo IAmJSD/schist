@@ -13,12 +13,14 @@ use std::sync::Arc;
 fn cmd(
     id: &'static str,
     title: &'static str,
+    description: &'static str,
     keybind: Option<&'static str>,
     run: impl Fn(&mut CommandCtx) + Send + 'static,
 ) -> Command {
     Command {
         id,
         title,
+        description,
         keybind,
         run: Box::new(run),
     }
@@ -33,6 +35,7 @@ fn cmd(
 /// tolerance, which is what `state.tolerance` carries.
 fn grow_selection(ctx: &mut CommandCtx, contiguous: bool) {
     if ctx.doc.selection.is_empty() {
+        ctx.refuse("Select something first");
         return;
     }
     let canvas = ctx.doc.canvas_rect();
@@ -154,6 +157,10 @@ fn reid(layer: &mut Layer) {
     }
 }
 
+/// Why copy and cut decline: no active layer, or one made of something
+/// other than pixels.
+const NOTHING_TO_COPY: &str = "Select a pixel layer to copy from";
+
 /// Copy the active layer's pixels within the selection to a ClipboardImage.
 fn copy_pixels(doc: &Document, merged: bool) -> Option<ClipboardImage> {
     let canvas = doc.canvas_rect();
@@ -248,7 +255,8 @@ fn merge_down(ctx: &mut CommandCtx) {
     };
     let ix = *path.0.last().unwrap();
     if ix == 0 {
-        return; // nothing below
+        ctx.refuse("No layer below to merge into");
+        return;
     }
     let mut below_path = path.clone();
     *below_path.0.last_mut().unwrap() = ix - 1;
@@ -306,9 +314,37 @@ fn merge_down(ctx: &mut CommandCtx) {
 }
 
 fn merge_visible(ctx: &mut CommandCtx) {
+    merge_all(ctx, false)
+}
+
+/// Flatten: like Merge Visible, but hidden layers are discarded and the
+/// result is opaque, named Background.
+///
+/// `layer.flatten` used to call `merge_visible` verbatim, so Flatten Image
+/// left every hidden layer in place, kept transparency, and named the
+/// result "Merged". Someone flattening before export still shipped a
+/// multi-layer file with holes in it.
+fn flatten_image(ctx: &mut CommandCtx) {
+    merge_all(ctx, true)
+}
+
+fn merge_all(ctx: &mut CommandCtx, flatten: bool) {
     let canvas = ctx.doc.canvas_rect();
-    let rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
-    let mut merged = Layer::new_raster("Merged");
+    let mut rgba = schist_compositor::composite_region_rgba8(ctx.doc, canvas);
+    if flatten {
+        // Flattening composites onto an opaque white background, the way
+        // Photoshop does, so the result has no transparency left.
+        for px in rgba.as_chunks_mut::<4>().0 {
+            let a = px[3] as u32;
+            let inv = 255 - a;
+            for c in px[..3].iter_mut() {
+                *c = ((*c as u32 * a + 255 * inv) / 255) as u8;
+            }
+            px[3] = 255;
+        }
+    }
+    let name = if flatten { "Background" } else { "Merged" };
+    let mut merged = Layer::new_raster(name);
     blit_rgba8(
         &mut merged.as_raster_mut().unwrap().tiles,
         ctx.doc.depth,
@@ -317,17 +353,23 @@ fn merge_visible(ctx: &mut CommandCtx) {
     );
     let merged_id = merged.id;
 
-    let visible_ids: Vec<LayerId> = ctx
+    // Flatten removes every layer; Merge Visible leaves the hidden ones.
+    let doomed: Vec<LayerId> = ctx
         .doc
         .tree
         .layers
         .iter()
-        .filter(|l| l.visible)
+        .filter(|l| flatten || l.visible)
         .map(|l| l.id)
         .collect();
-    let mut edit = ctx.doc.begin_edit("Merge Visible");
-    for vid in visible_ids {
-        edit.remove_layer(vid);
+    let title = if flatten {
+        "Flatten Image"
+    } else {
+        "Merge Visible"
+    };
+    let mut edit = ctx.doc.begin_edit(title);
+    for id in doomed {
+        edit.remove_layer(id);
     }
     let top = LayerPath(vec![edit.doc().tree.layers.len()]);
     edit.insert_layer(top, merged);
@@ -337,6 +379,7 @@ fn merge_visible(ctx: &mut CommandCtx) {
 
 fn paste(ctx: &mut CommandCtx, in_place: bool) {
     let Some(clip) = ctx.state.clipboard.clone() else {
+        ctx.refuse("Nothing on the clipboard");
         return;
     };
     let rect = if in_place {
@@ -415,61 +458,78 @@ impl CommandPlugin for CoreCommandsPlugin {
     fn commands(&self) -> Vec<Command> {
         vec![
             // --- Edit ---
-            cmd("edit.undo", "Undo", Some("cmd-z"), |ctx| {
+            cmd("edit.undo", "Undo",
+                "Step back one entry in the document's undo history.", Some("cmd-z"), |ctx| {
                 ctx.doc.undo();
             }),
-            cmd("edit.redo", "Redo", Some("cmd-shift-z"), |ctx| {
+            cmd("edit.redo", "Redo",
+                "Redo the edit that was last undone.", Some("cmd-shift-z"), |ctx| {
                 ctx.doc.redo();
             }),
-            cmd("edit.copy", "Copy", Some("cmd-c"), |ctx| {
-                if let Some(clip) = copy_pixels(ctx.doc, false) {
-                    ctx.state.clipboard = Some(Arc::new(clip));
+            cmd("edit.copy", "Copy",
+                "Copy the active layer's selected pixels to the internal clipboard (the whole layer when nothing is selected).", Some("cmd-c"), |ctx| {
+                match copy_pixels(ctx.doc, false) {
+                    Some(clip) => ctx.state.clipboard = Some(Arc::new(clip)),
+                    // Saying nothing while the clipboard kept its previous
+                    // contents read as "copied", and the next paste looked
+                    // like it had pasted the wrong thing.
+                    None => ctx.refuse(NOTHING_TO_COPY),
                 }
             }),
             cmd(
                 "edit.copy_merged",
                 "Copy Merged",
+                "Copy the selection as every visible layer composites it, rather than from the active layer alone.",
                 Some("cmd-shift-c"),
-                |ctx| {
-                    if let Some(clip) = copy_pixels(ctx.doc, true) {
-                        ctx.state.clipboard = Some(Arc::new(clip));
-                    }
+                |ctx| match copy_pixels(ctx.doc, true) {
+                    Some(clip) => ctx.state.clipboard = Some(Arc::new(clip)),
+                    None => ctx.refuse(NOTHING_TO_COPY),
                 },
             ),
-            cmd("edit.cut", "Cut", Some("cmd-x"), |ctx| {
-                if let Some(clip) = copy_pixels(ctx.doc, false) {
-                    ctx.state.clipboard = Some(Arc::new(clip));
-                    clear_selection(ctx);
+            cmd("edit.cut", "Cut",
+                "Copy the selected pixels to the clipboard and erase them from the active layer.", Some("cmd-x"), |ctx| {
+                match copy_pixels(ctx.doc, false) {
+                    Some(clip) => {
+                        ctx.state.clipboard = Some(Arc::new(clip));
+                        clear_selection(ctx);
+                    }
+                    None => ctx.refuse(NOTHING_TO_COPY),
                 }
             }),
-            cmd("edit.paste", "Paste", Some("cmd-v"), |ctx| {
+            cmd("edit.paste", "Paste",
+                "Paste the clipboard into a new layer above the active one, centred on the canvas.", Some("cmd-v"), |ctx| {
                 paste(ctx, false)
             }),
             cmd(
                 "edit.paste_in_place",
                 "Paste in Place",
+                "Paste the clipboard into a new layer at the coordinates it was copied from.",
                 Some("cmd-shift-v"),
                 |ctx| paste(ctx, true),
             ),
             cmd(
                 "edit.fill_foreground",
                 "Fill with Foreground",
+                "Fill the selection (or the whole canvas when nothing is selected) with the foreground colour.",
                 Some("alt-backspace"),
                 |ctx| fill_selection(ctx, false),
             ),
             cmd(
                 "edit.fill_background",
                 "Fill with Background",
+                "Fill the selection (or the whole canvas when nothing is selected) with the background colour.",
                 Some("cmd-backspace"),
                 |ctx| fill_selection(ctx, true),
             ),
             // --- Select ---
-            cmd("select.all", "Select All", Some("cmd-a"), |ctx| {
+            cmd("select.all", "Select All",
+                "Select the entire canvas.", Some("cmd-a"), |ctx| {
                 let mut edit = ctx.doc.begin_edit("Select All");
                 edit.change_selection(|sel, canvas| sel.select_all(canvas));
                 edit.commit();
             }),
-            cmd("select.deselect", "Deselect", Some("cmd-d"), |ctx| {
+            cmd("select.deselect", "Deselect",
+                "Drop the selection, so edits apply to the whole layer again.", Some("cmd-d"), |ctx| {
                 let mut edit = ctx.doc.begin_edit("Deselect");
                 edit.change_selection(|sel, _| sel.deselect());
                 edit.commit();
@@ -477,6 +537,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "select.inverse",
                 "Select Inverse",
+                "Swap selected and unselected areas.",
                 Some("cmd-shift-i"),
                 |ctx| {
                     // Nothing selected means nothing to invert; without
@@ -491,7 +552,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 },
             ),
             // --- Layer ---
-            cmd("layer.new", "New Layer", Some("cmd-shift-n"), |ctx| {
+            cmd("layer.new", "New Layer",
+                "Add an empty raster layer above the active one and make it active.", Some("cmd-shift-n"), |ctx| {
                 let path = insert_path_above_active(ctx.doc);
                 let n = ctx.doc.tree.len() + 1;
                 let mut layer = Layer::new_raster(format!("Layer {n}"));
@@ -502,7 +564,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
                 ctx.doc.active_layer = Some(id);
             }),
-            cmd("layer.duplicate", "Duplicate Layer", Some("cmd-j"), |ctx| {
+            cmd("layer.duplicate", "Duplicate Layer",
+                "Copy the active layer, contents and all, onto a new layer above it.", Some("cmd-j"), |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;
                 };
@@ -522,6 +585,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.smart_object",
                 "Convert to Smart Object",
+                "Wrap the active raster layer's pixels in a smart object, so later transforms and filters resample the untouched source.",
                 None,
                 |ctx| {
                     let Some(id) = ctx.doc.active_layer else {
@@ -545,7 +609,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                     edit.commit();
                 },
             ),
-            cmd("layer.rasterize", "Rasterize Layer", None, |ctx| {
+            cmd("layer.rasterize", "Rasterize Layer",
+                "Bake a shape, text or smart-object layer down to plain pixels.", None, |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;
                 };
@@ -564,7 +629,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.set_smart_object(id, None);
                 edit.commit();
             }),
-            cmd("layer.delete", "Delete Layer", None, |ctx| {
+            cmd("layer.delete", "Delete Layer",
+                "Delete the selected layers.", None, |ctx| {
                 // Deletes the panel's whole multi-selection as one edit.
                 let ids = selection_roots(ctx.doc);
                 if ids.is_empty() {
@@ -580,7 +646,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 }
                 edit.commit();
             }),
-            cmd("layer.group", "Group Layers", Some("cmd-g"), |ctx| {
+            cmd("layer.group", "Group Layers",
+                "Wrap the selected layers in a new group, in place.", Some("cmd-g"), |ctx| {
                 // Wraps the selected layers in a group, which lands where
                 // the topmost of them was.
                 let ids = selection_roots(ctx.doc);
@@ -624,27 +691,34 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.active_layer = Some(group_id);
                 ctx.doc.selected = vec![group_id];
             }),
-            cmd("select.reselect", "Reselect", Some("cmd-shift-d"), |ctx| {
+            cmd("select.reselect", "Reselect",
+                "Bring back the selection that was last dropped.", Some("cmd-shift-d"), |ctx| {
                 let Some(previous) = ctx.doc.last_selection.clone() else {
+                    ctx.refuse("Nothing to reselect");
                     return;
                 };
                 let mut edit = ctx.doc.begin_edit("Reselect");
                 edit.change_selection(|sel, _| *sel = previous);
                 edit.commit();
             }),
-            cmd("select.feather", "Feather Selection", None, |ctx| {
+            cmd("select.feather", "Feather Selection",
+                "Soften the selection's edge by a two-pixel blur, so the next edit fades out across it.", None, |ctx| {
                 let mut edit = ctx.doc.begin_edit("Feather");
                 edit.change_selection(|sel, _| sel.feather(2.0));
                 edit.commit();
             }),
-            cmd("select.grow", "Grow", None, |ctx| {
+            cmd("select.grow", "Grow",
+                "Extend the selection into touching pixels that resemble what is already selected, within the magic wand's tolerance.", None, |ctx| {
                 grow_selection(ctx, true);
             }),
-            cmd("select.similar", "Similar", None, |ctx| {
+            cmd("select.similar", "Similar",
+                "Select every pixel in the layer resembling the selection, touching it or not, within the magic wand's tolerance.", None, |ctx| {
                 grow_selection(ctx, false);
             }),
-            cmd("select.save", "Save Selection", None, |ctx| {
+            cmd("select.save", "Save Selection",
+                "Stash the current selection in the document as a named alpha channel.", None, |ctx| {
                 if ctx.doc.selection.is_empty() {
+                    ctx.refuse("Select something first");
                     return;
                 }
                 let n = ctx.doc.saved_selections.len() + 1;
@@ -652,7 +726,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                 ctx.doc.saved_selections.push((format!("Alpha {n}"), sel));
                 ctx.doc.mark_dirty();
             }),
-            cmd("select.load", "Load Selection", None, |ctx| {
+            cmd("select.load", "Load Selection",
+                "Restore the most recently saved selection.", None, |ctx| {
                 // Loads the most recently saved one; the dialog picks by
                 // name once there is a channels panel to name them in.
                 let Some((_, sel)) = ctx.doc.saved_selections.last().cloned() else {
@@ -663,15 +738,18 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.commit();
             }),
             // --- Layer ordering ---
-            cmd("layer.raise", "Bring Forward", Some("cmd-]"), |ctx| {
+            cmd("layer.raise", "Bring Forward",
+                "Move the active layer one place up its group's stack.", Some("cmd-]"), |ctx| {
                 move_layer_by(ctx, 1);
             }),
-            cmd("layer.lower", "Send Backward", Some("cmd-["), |ctx| {
+            cmd("layer.lower", "Send Backward",
+                "Move the active layer one place down its group's stack.", Some("cmd-["), |ctx| {
                 move_layer_by(ctx, -1);
             }),
             cmd(
                 "layer.to_front",
                 "Bring to Front",
+                "Move the active layer to the top of its group.",
                 Some("cmd-shift-]"),
                 |ctx| {
                     move_layer_to_end(ctx, true);
@@ -680,6 +758,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.to_back",
                 "Send to Back",
+                "Move the active layer to the bottom of its group.",
                 Some("cmd-shift-["),
                 |ctx| {
                     move_layer_to_end(ctx, false);
@@ -688,6 +767,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.clipping_mask",
                 "Create/Release Clipping Mask",
+                "Clip the active layer to the one below it, or release it if it already is; a clipped layer shows only where its base has pixels.",
                 Some("cmd-alt-g"),
                 |ctx| {
                     let Some(id) = ctx.doc.active_layer else {
@@ -708,6 +788,7 @@ impl CommandPlugin for CoreCommandsPlugin {
             cmd(
                 "layer.cut_to_new",
                 "Layer via Cut",
+                "Move the selected pixels out of the active layer and onto a new layer above it.",
                 Some("cmd-shift-j"),
                 |ctx| {
                     let Some(clip) = copy_pixels(ctx.doc, false) else {
@@ -729,7 +810,8 @@ impl CommandPlugin for CoreCommandsPlugin {
                     ctx.doc.active_layer = Some(id);
                 },
             ),
-            cmd("layer.add_mask", "Add Layer Mask", None, |ctx| {
+            cmd("layer.add_mask", "Add Layer Mask",
+                "Add a layer mask to the active layer, revealing only the selection when there is one.", None, |ctx| {
                 let Some(id) = ctx.doc.active_layer else {
                     return;
                 };
@@ -758,13 +840,14 @@ impl CommandPlugin for CoreCommandsPlugin {
                 edit.set_mask(id, Some(mask));
                 edit.commit();
             }),
-            cmd("layer.flatten", "Flatten Image", None, |ctx| {
-                merge_visible(ctx);
-            }),
-            cmd("layer.merge_down", "Merge Down", Some("cmd-e"), merge_down),
+            cmd("layer.flatten", "Flatten Image",
+                "Composite everything visible into one opaque Background layer, discarding hidden layers.", None, flatten_image),
+            cmd("layer.merge_down", "Merge Down",
+                "Composite the active layer into the layer beneath it.", Some("cmd-e"), merge_down),
             cmd(
                 "layer.merge_visible",
                 "Merge Visible",
+                "Composite every visible layer into one, leaving hidden layers alone.",
                 Some("cmd-shift-e"),
                 merge_visible,
             ),
@@ -905,7 +988,11 @@ mod tests {
     }
 
     fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
-        let mut ctx = CommandCtx { doc, state };
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
         (reg.command(id).expect(id).run)(&mut ctx);
     }
 
@@ -971,6 +1058,42 @@ mod tests {
         assert_eq!(
             pasted.as_raster().unwrap().tiles.pixel(15, 15).to_u8(),
             [10, 20, 30, 255]
+        );
+    }
+
+    /// Undoing a paste used to null `active_layer`, and copy, cut and
+    /// every other pixel command then did nothing at all -- while the
+    /// status line still reported them as having run.
+    #[test]
+    fn undoing_a_paste_leaves_a_layer_active() {
+        let reg = registry();
+        let mut doc = doc_with_pixels();
+        let mut state = EditorState::default();
+        let background = doc.tree.layers[0].id;
+        doc.selection
+            .select_rect(IntRect::from_xywh(10, 10, 20, 20), SelectOp::Replace);
+        run(&reg, "edit.copy", &mut doc, &mut state);
+        run(&reg, "edit.paste_in_place", &mut doc, &mut state);
+        run(&reg, "edit.undo", &mut doc, &mut state);
+        assert_eq!(doc.tree.layers.len(), 1);
+        assert_eq!(
+            doc.active_layer,
+            Some(background),
+            "undo left nothing active"
+        );
+
+        state.clipboard = None;
+        run(&reg, "edit.cut", &mut doc, &mut state);
+        assert!(state.clipboard.is_some(), "cut after undo copied nothing");
+        assert_eq!(
+            doc.tree.layers[0]
+                .as_raster()
+                .unwrap()
+                .tiles
+                .pixel(15, 15)
+                .to_u8()[3],
+            0,
+            "cut after undo cleared nothing"
         );
     }
 
@@ -1059,6 +1182,7 @@ mod tests {
         assert_eq!(group.children().unwrap().len(), 1);
         assert_eq!(group.children().unwrap()[0].name, "bg");
     }
+
     #[test]
     fn saving_a_selection_marks_the_document_unsaved() {
         // `select.save` mutates `saved_selections` directly rather than
@@ -1079,6 +1203,143 @@ mod tests {
         assert_eq!(doc.saved_selections.len(), 1, "selection was saved");
         assert!(doc.dirty, "and the document must count as unsaved");
     }
+
+    /// Run a command and return the refusal it recorded, if any.
+    fn run_for_refusal(
+        reg: &PluginRegistry,
+        id: &str,
+        doc: &mut Document,
+        state: &mut EditorState,
+    ) -> Option<String> {
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
+        (reg.command(id).expect(id).run)(&mut ctx);
+        ctx.refusal
+    }
+
+    #[test]
+    fn a_command_that_does_nothing_says_why() {
+        // The command layer is full of bare `return`s and the shell then
+        // set the status line to the command's own title regardless, so
+        // every silent no-op reported itself as having worked.
+        let reg = registry();
+        let mut state = EditorState::default();
+
+        let mut doc = doc_with_pixels();
+        assert_eq!(
+            run_for_refusal(&reg, "select.grow", &mut doc, &mut state).as_deref(),
+            Some("Select something first"),
+            "Grow with no selection"
+        );
+
+        let mut doc = doc_with_pixels();
+        assert_eq!(
+            run_for_refusal(&reg, "select.reselect", &mut doc, &mut state).as_deref(),
+            Some("Nothing to reselect"),
+            "Reselect with no previous selection"
+        );
+
+        let mut doc = doc_with_pixels();
+        state.clipboard = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.paste", &mut doc, &mut state).as_deref(),
+            Some("Nothing on the clipboard"),
+            "Paste with an empty clipboard"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.copy", &mut doc, &mut state).as_deref(),
+            Some(NOTHING_TO_COPY),
+            "Copy with no active layer"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = None;
+        assert_eq!(
+            run_for_refusal(&reg, "edit.cut", &mut doc, &mut state).as_deref(),
+            Some(NOTHING_TO_COPY),
+            "Cut with no active layer"
+        );
+
+        let mut doc = doc_with_pixels();
+        doc.active_layer = Some(doc.tree.layers[0].id);
+        assert_eq!(
+            run_for_refusal(&reg, "layer.merge_down", &mut doc, &mut state).as_deref(),
+            Some("No layer below to merge into"),
+            "Merge Down on the bottom layer"
+        );
+    }
+
+    #[test]
+    fn a_command_that_works_refuses_nothing() {
+        let reg = registry();
+        let mut state = EditorState::default();
+        let mut doc = doc_with_pixels();
+        doc.selection.select_rect(
+            schist_core::IntRect::from_xywh(0, 0, 10, 10),
+            SelectOp::Replace,
+        );
+        assert_eq!(
+            run_for_refusal(&reg, "select.save", &mut doc, &mut state),
+            None,
+            "saving a real selection must not refuse"
+        );
+    }
+
+    #[test]
+    fn flatten_is_not_merge_visible() {
+        // `layer.flatten` called `merge_visible` verbatim, so Flatten
+        // Image left hidden layers in place, kept transparency and named
+        // the result "Merged".
+        let reg = registry();
+        let mut state = EditorState::default();
+
+        let build = || {
+            let mut doc = doc_with_pixels();
+            let mut hidden = Layer::new_raster("hidden");
+            hidden.visible = false;
+            doc.push_layer(hidden);
+            doc
+        };
+
+        let mut doc = build();
+        run(&reg, "layer.merge_visible", &mut doc, &mut state);
+        assert_eq!(doc.tree.len(), 2, "merge visible keeps the hidden layer");
+        assert!(doc.tree.iter().any(|l| l.name == "Merged"));
+
+        let mut doc = build();
+        run(&reg, "layer.flatten", &mut doc, &mut state);
+        assert_eq!(doc.tree.len(), 1, "flatten discards hidden layers");
+        assert_eq!(doc.tree.layers[0].name, "Background");
+    }
+
+    #[test]
+    fn flatten_leaves_no_transparency() {
+        let reg = registry();
+        let mut state = EditorState::default();
+        // A document whose only layer covers part of the canvas, so the
+        // rest is transparent.
+        let mut doc = Document::new("t", 32, 32, Depth::Eight);
+        let mut layer = Layer::new_raster("part");
+        let buf = [10u8, 20, 30, 255].repeat(8 * 8);
+        schist_core::blit_rgba8(
+            &mut layer.as_raster_mut().unwrap().tiles,
+            Depth::Eight,
+            schist_core::IntRect::from_xywh(0, 0, 8, 8),
+            &buf,
+        );
+        doc.push_layer(layer);
+
+        run(&reg, "layer.flatten", &mut doc, &mut state);
+        let px = doc.tree.layers[0].as_raster().unwrap().tiles.pixel(20, 20);
+        assert!(px.a >= 0.99, "flattened pixels must be opaque: {px:?}");
+        assert!(px.r > 0.9, "and matted onto white: {px:?}");
+    }
 }
 
 #[cfg(test)]
@@ -1094,7 +1355,11 @@ mod m11_tests {
     }
 
     fn run(reg: &PluginRegistry, id: &str, doc: &mut Document, state: &mut EditorState) {
-        let mut ctx = CommandCtx { doc, state };
+        let mut ctx = CommandCtx {
+            doc,
+            state,
+            refusal: None,
+        };
         (reg.command(id)
             .unwrap_or_else(|| panic!("missing {id}"))
             .run)(&mut ctx);

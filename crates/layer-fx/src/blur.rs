@@ -5,17 +5,52 @@
 //! the core filters use, specialised here to one channel because every
 //! effect blurs alpha rather than colour.
 
-/// Blur `a` in place. `radius` is the Gaussian radius in pixels.
+/// Blur `a` in place. `radius` is the Gaussian radius in pixels, on the
+/// convention that the standard deviation is `radius / sqrt(3)`.
 pub fn gaussian_alpha(a: &mut [f32], w: usize, h: usize, radius: f32) {
     if radius < 0.5 || w == 0 || h == 0 {
         return;
     }
-    let r = ((radius / 3.0f32.sqrt()).round() as usize).max(1);
+    let sigma = radius / 3.0f32.sqrt();
     let mut tmp = vec![0.0f32; a.len()];
-    for _ in 0..3 {
+    for r in box_radii(sigma) {
         box_pass(a, &mut tmp, w, h, r, false);
         box_pass(&tmp, a, w, h, r, true);
     }
+}
+
+/// The three box radii whose passes come closest to a Gaussian of
+/// `sigma`.
+///
+/// One radius for all three passes quantises badly — the achievable
+/// sigmas are sqrt((2r+1)^2 - 1)/2, which near r = 8 step by a whole
+/// pixel, so a nominal radius can land several percent wide or narrow
+/// and two probes of the same effect then disagree about the scale
+/// factor. Mixing two adjacent widths across the passes (the standard
+/// construction) hits the target sigma to well under a percent instead.
+fn box_radii(sigma: f32) -> [usize; 3] {
+    const N: f32 = 3.0;
+    let ideal = (12.0 * sigma * sigma / N + 1.0).sqrt();
+    let mut lower = ideal.floor();
+    if (lower as i32) % 2 == 0 {
+        lower -= 1.0;
+    }
+    let lower = lower.max(1.0);
+    let upper = lower + 2.0;
+    // How many passes take the narrower box, from matching variances.
+    let m = ((12.0 * sigma * sigma - N * lower * lower - 4.0 * N * lower - 3.0 * N)
+        / (-4.0 * lower - 4.0))
+        .round()
+        .clamp(0.0, N) as usize;
+    let (lo, hi) = (
+        ((lower - 1.0) / 2.0) as usize,
+        ((upper - 1.0) / 2.0) as usize,
+    );
+    let mut out = [hi; 3];
+    for v in out.iter_mut().take(m) {
+        *v = lo;
+    }
+    out
 }
 
 fn box_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, vertical: bool) {

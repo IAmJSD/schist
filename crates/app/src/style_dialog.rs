@@ -29,6 +29,9 @@ pub const EFFECTS: &[(&str, &str)] = &[
     ("gradient_overlay", "Gradient Overlay"),
     ("outer_glow", "Outer Glow"),
     ("drop_shadow", "Drop Shadow"),
+    // Affinity's own, at the bottom of its panel: not a decoration
+    // around the layer but a softening of the layer itself.
+    ("blur", "Gaussian Blur"),
 ];
 
 fn enabled(style: &LayerStyle, key: &str) -> bool {
@@ -42,6 +45,7 @@ fn enabled(style: &LayerStyle, key: &str) -> bool {
         "gradient_overlay" => style.gradient_overlay.enabled,
         "outer_glow" => style.outer_glow.enabled,
         "drop_shadow" => style.drop_shadow.enabled,
+        "blur" => style.blur.enabled,
         _ => false,
     }
 }
@@ -57,6 +61,7 @@ fn set_enabled(style: &mut LayerStyle, key: &str, on: bool) {
         "gradient_overlay" => style.gradient_overlay.enabled = on,
         "outer_glow" => style.outer_glow.enabled = on,
         "drop_shadow" => style.drop_shadow.enabled = on,
+        "blur" => style.blur.enabled = on,
         _ => {}
     }
 }
@@ -126,6 +131,7 @@ fn fields(effect: &str) -> &'static [Field] {
         f("highlight_opacity", "Highlight", 0.0, 100.0, "%"),
         f("shadow_opacity", "Shadow", 0.0, 100.0, "%"),
     ];
+    const BLUR: &[Field] = &[f("radius", "Radius", 0.0, 250.0, " px")];
     match effect {
         "drop_shadow" | "inner_shadow" => SHADOW,
         "outer_glow" | "inner_glow" => GLOW,
@@ -134,6 +140,7 @@ fn fields(effect: &str) -> &'static [Field] {
         "gradient_overlay" => GRADIENT,
         "satin" => SATIN,
         "bevel" => BEVEL,
+        "blur" => BLUR,
         _ => &[],
     }
 }
@@ -166,6 +173,7 @@ fn get(style: &LayerStyle, effect: &str, field: &str) -> f32 {
         ("bevel", "altitude") => style.bevel.settings.altitude,
         ("bevel", "highlight_opacity") => style.bevel.settings.highlight_opacity,
         ("bevel", "shadow_opacity") => style.bevel.settings.shadow_opacity,
+        ("blur", "radius") => style.blur.settings.radius,
         _ => 0.0,
     }
 }
@@ -201,6 +209,11 @@ fn set(style: &mut LayerStyle, effect: &str, field: &str, v: f32) {
             "opacity" => style.stroke.settings.opacity = v,
             _ => {}
         },
+        "blur" => {
+            if field == "radius" {
+                style.blur.settings.radius = v;
+            }
+        }
         "color_overlay" => {
             if field == "opacity" {
                 style.color_overlay.settings.opacity = v;
@@ -433,6 +446,7 @@ pub fn render(
         settings = settings.child(ui::field_row(
             "Blend",
             ui::dropdown(
+                &ws.dropdown,
                 ui::Dropdown {
                     popup: Popup::Field("fx-blend"),
                     is_open: ws.open_popup == Some(Popup::Field("fx-blend")),
@@ -509,6 +523,7 @@ pub fn render(
             settings.child(ui::field_row(
                 "Position",
                 ui::dropdown(
+                    &ws.dropdown,
                     ui::Dropdown {
                         popup: Popup::Field("fx-stroke-pos"),
                         is_open: ws.open_popup == Some(Popup::Field("fx-stroke-pos")),
@@ -543,6 +558,7 @@ pub fn render(
             settings.child(ui::field_row(
                 "Style",
                 ui::dropdown(
+                    &ws.dropdown,
                     ui::Dropdown {
                         popup: Popup::Field("fx-bevel-style"),
                         is_open: ws.open_popup == Some(Popup::Field("fx-bevel-style")),
@@ -581,6 +597,7 @@ pub fn render(
                 .child(ui::field_row(
                     "Shape",
                     ui::dropdown(
+                        &ws.dropdown,
                         ui::Dropdown {
                             popup: Popup::Field("fx-grad-shape"),
                             is_open: ws.open_popup == Some(Popup::Field("fx-grad-shape")),

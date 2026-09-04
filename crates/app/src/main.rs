@@ -1,11 +1,24 @@
 //! Schist — a plugin-first image editor on GPUI.
 
 mod actions;
+// The AI sidebar drives agent CLIs the user has installed; a browser tab
+// can spawn no processes, so the whole subsystem stays off the web build
+// (a stub keeps the bits of state the UI shares compiling).
+#[cfg(not(target_arch = "wasm32"))]
+mod ai;
+#[cfg(target_arch = "wasm32")]
+#[path = "ai_stub.rs"]
+mod ai;
 mod assets;
 mod color_picker;
 mod crash;
 mod curve_editor;
 mod dialogs;
+// Dragging photos out of the window onto the desktop's file manager.
+// Native-only: it is the platforms' own drag protocols, and a browser
+// tab has no file manager to drop on.
+#[cfg(not(target_arch = "wasm32"))]
+mod drag_out;
 mod fonts;
 mod gallery;
 mod keymap;
@@ -13,6 +26,19 @@ mod native_menu;
 mod panels;
 mod style_dialog;
 mod ui;
+#[cfg(not(target_arch = "wasm32"))]
+mod update;
+#[cfg(target_arch = "wasm32")]
+#[path = "update_stub.rs"]
+mod update;
+// Linux renders through Vulkan and panics inside GPUI when there is no
+// driver to render with. Nothing to check on macOS (Metal) or Windows.
+#[cfg(target_os = "linux")]
+mod vulkan;
+// The browser build's shims: the in-memory file system behind open/save,
+// the assets the loading page fetched, and the loading-page handoff.
+#[cfg(target_arch = "wasm32")]
+mod web;
 mod workspace;
 
 use actions::{HideApp, HideOthers, Quit, ShowAll};
@@ -64,29 +90,29 @@ impl PluginManifest for PsdPlugin {
     }
 }
 
-/// Crash reporting stays off unless the user opts in.
-fn crash_reports_enabled() -> bool {
-    if std::env::var("SCHIST_CRASH_REPORTS").is_ok_and(|v| v == "1") {
-        return true;
-    }
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".config"))
-        })
-        .map(|d| d.join("schist/preferences.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|v| v.get("crash_reports").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+/// Whether an opt-in diagnostic is on: the preference, or the environment
+/// variable that overrides it for one run.
+#[cfg(not(target_arch = "wasm32"))]
+fn opted_in(preference: bool, var: &str) -> bool {
+    preference || std::env::var(var).is_ok_and(|v| v == "1")
 }
 
 /// Assemble the first-party plugin set. Every entry here is optional — the
 /// app boots (to an empty shell) with any or all of them removed.
-fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) {
+///
+/// The two third-party hosts need what a browser tab lacks — a JIT for the
+/// sandboxed wasm plugins, subprocesses and dlopen for the Photoshop ones —
+/// so the web build assembles only the first-party registry.
+#[cfg(not(target_arch = "wasm32"))]
+type Hosts = (
+    PluginRegistry,
+    schist_plugin_host_wasm::PluginManager,
+    schist_plugin_host_8bf::manager::PluginManager,
+);
+#[cfg(target_arch = "wasm32")]
+type Hosts = PluginRegistry;
+
+fn build_registry() -> Hosts {
     let mut registry = PluginRegistry::new();
     let manifests: Vec<Box<dyn PluginManifest>> = vec![
         Box::new(schist_tools_basic::BasicToolsPlugin),
@@ -107,12 +133,47 @@ fn build_registry() -> (PluginRegistry, schist_plugin_host_wasm::PluginManager) 
         log::info!("loading plugin {}", manifest.id());
         manifest.register(&mut registry);
     }
-    // Third-party WebAssembly plugins, sandboxed.
-    let manager = match schist_plugin_host_wasm::PluginManager::plugin_dir() {
-        Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
-        None => schist_plugin_host_wasm::PluginManager::default(),
-    };
-    (registry, manager)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Third-party WebAssembly plugins, sandboxed.
+        let manager = match schist_plugin_host_wasm::PluginManager::plugin_dir() {
+            Some(dir) => schist_plugin_host_wasm::PluginManager::load_dir(&dir, &mut registry),
+            None => schist_plugin_host_wasm::PluginManager::default(),
+        };
+        log_8bf_support();
+        // Photoshop plug-ins, each run in a helper process. `Interactive::Yes`
+        // because a `.8bf` carries its own dialog, and in the app there is
+        // someone to answer it — which is the whole of its parameter UI.
+        let photoshop = schist_plugin_host_8bf::manager::PluginManager::load_dirs(
+            &schist_plugin_host_8bf::manager::PluginManager::search_dirs(),
+            &mut registry,
+            schist_plugin_host_8bf::manager::Interactive::Yes,
+        );
+        (registry, manager, photoshop)
+    }
+    #[cfg(target_arch = "wasm32")]
+    registry
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Report which Photoshop plug-in helpers this build carries.
+///
+/// They are binaries for architectures other than this one, so they ride
+/// inside the executable and are unpacked to the cache the first time a
+/// plug-in actually needs one — which for most people is never. Nothing
+/// is written here; this only says what is available, because that is
+/// the first question when a `.8bf` will not load.
+fn log_8bf_support() {
+    use schist_plugin_host_8bf::bundled;
+    let carried: Vec<&str> = bundled::names().collect();
+    if carried.is_empty() {
+        log::info!(
+            "no Photoshop plug-in helpers bundled; .8bf support needs them \
+             installed beside the binary"
+        );
+    } else {
+        log::info!("Photoshop plug-in helpers carried: {}", carried.join(", "));
+    }
 }
 
 /// Documents the platform hands over outside argv, and the window they are
@@ -168,12 +229,70 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 }
 
 fn main() {
+    // `schist --mcp-bridge <addr>` is not a GUI launch at all: it is the
+    // stdio pump an agent harness spawns as its "MCP server", forwarding
+    // into the running app's loopback endpoint. Handled before anything
+    // else so no window, logger or driver probe gets in the way.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some("--mcp-bridge") {
+            let Some(addr) = args.next() else {
+                eprintln!("usage: schist --mcp-bridge <addr>");
+                std::process::exit(2);
+            };
+            ai::endpoint::run_bridge(&addr);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    // Opt-in: SCHIST_CRASH_REPORTS=1, or the preference file's
-    // crash_reports flag once the user enables it in Preferences.
-    crash::install_handler(crash_reports_enabled());
-    workspace::init_compositor_backend(workspace::load_view_options().gpu_compositing);
-    let (registry, plugin_manager) = build_registry();
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Panics land on the browser console instead of the void, and the
+        // loading page is told so it can say something went wrong rather
+        // than sit at a full progress bar forever.
+        std::panic::set_hook(Box::new(|info| {
+            console_error_panic_hook::hook(info);
+            web::loading_failed(&info.to_string());
+        }));
+        console_log::init_with_level(log::Level::Info).ok();
+    }
+    // A Finder/desktop launch gets launchd's bare PATH, not the one the
+    // AI panel's CLIs live on. Start asking the login shell for its PATH
+    // now and collect the answer later: it is a shell startup, and the
+    // window must not wait on it.
+    #[cfg(not(target_arch = "wasm32"))]
+    ai::path::start();
+    // Before anything else: a system with no Vulkan driver cannot open a
+    // window, and saying so plainly beats the panic that follows from
+    // deep inside GPUI's renderer.
+    #[cfg(target_os = "linux")]
+    vulkan::check();
+    // The browser exposes no fonts to scan, so the faces the loading page
+    // fetched have to be registered before anything shapes text — the
+    // text engine's for the type tool here, gpui's own inside `run`.
+    #[cfg(target_arch = "wasm32")]
+    web::install_fonts();
+    let options = workspace::load_view_options();
+    // Both diagnostics are opt-in, and separately so: writing a report to
+    // this machine and sending one to ours are not the same decision.
+    // SCHIST_CRASH_REPORTS=1 and SCHIST_CRASH_UPLOAD=1 turn them on for a
+    // single run without touching preferences.
+    //
+    // Sentry goes first because it installs a panic hook and
+    // `install_handler` chains in front of whichever hook it finds: the
+    // local report is written before the upload is attempted, so a failing
+    // network never costs the user the report on disk. `_reporter` has to
+    // outlive the app -- dropping it is what flushes the queue.
+    #[cfg(not(target_arch = "wasm32"))]
+    let _reporter = crash::start_reporting(opted_in(options.crash_upload, "SCHIST_CRASH_UPLOAD"));
+    #[cfg(not(target_arch = "wasm32"))]
+    crash::install_handler(opted_in(options.crash_reports, "SCHIST_CRASH_REPORTS"));
+    workspace::init_compositor_backend(options.gpu_compositing);
+    #[cfg(not(target_arch = "wasm32"))]
+    let (registry, plugin_manager, photoshop_plugins) = build_registry();
+    #[cfg(target_arch = "wasm32")]
+    let registry = build_registry();
 
     let requests: Rc<RefCell<OpenRequests>> = Rc::default();
     let app = Application::new().with_assets(assets::Assets);
@@ -200,6 +319,19 @@ fn main() {
     });
 
     app.run(move |cx: &mut App| {
+        // gpui's font database starts empty in a browser; feed it the same
+        // faces the text engine got. Its default `.SystemUIFont` resolves
+        // to "IBM Plex Sans" on the web backend, which the loading page
+        // fetches for exactly that reason.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let faces = web::font_faces();
+            if !faces.is_empty() {
+                if let Err(err) = cx.text_system().add_fonts(faces) {
+                    log::error!("failed to register fonts: {err:#}");
+                }
+            }
+        }
         cx.bind_keys(keymap::build_bindings(&registry));
         // The macOS application menu, which is reachable with no window
         // open, so these are global rather than on the workspace.
@@ -214,23 +346,38 @@ fn main() {
                     ..Default::default()
                 },
                 |_window, cx| {
-                    let workspace = cx.new(|cx| {
-                        let mut ws = Workspace::new(registry, plugin_manager, cx);
+                    cx.new(|cx| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let mut ws =
+                            Workspace::new(registry, plugin_manager, photoshop_plugins, cx);
+                        #[cfg(target_arch = "wasm32")]
+                        let ws = Workspace::new(registry, cx);
                         // Recovery runs whatever else is happening: opening
                         // a document from the shell or the file manager is
                         // not a reason to leave a previous session's
                         // unsaved work stranded on disk.
-                        let recoveries = Workspace::pending_recoveries();
-                        if !recoveries.is_empty() {
-                            log::info!("recovering {} snapshot(s)", recoveries.len());
-                            ws.recover_all(recoveries, cx);
-                        }
-                        if let Some(path) = std::env::args().nth(1) {
-                            ws.load_file(path.into(), cx);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let recoveries = Workspace::pending_recoveries();
+                            if !recoveries.is_empty() {
+                                log::info!("recovering {} snapshot(s)", recoveries.len());
+                                ws.recover_all(recoveries, cx);
+                            }
+                            if let Some(path) = std::env::args().nth(1) {
+                                ws.load_file(path.into(), cx);
+                            } else if ws.tab_count() == 0 {
+                                // Picasa boot: a launch with nothing to
+                                // open lands in the gallery, empty or
+                                // not. Recovered tabs win — unsaved
+                                // work is more urgent than browsing.
+                                // Through the toggle so the open does
+                                // everything an interactive open does
+                                // (rescan, camera discovery on macOS).
+                                ws.toggle_gallery(cx);
+                            }
                         }
                         ws
-                    });
-                    workspace
+                    })
                 },
             )
             .expect("failed to open window");
@@ -271,6 +418,10 @@ fn main() {
             std::mem::take(&mut requests.queued)
         };
         open_all(queued, window, cx);
+        // The window is open and will paint on the next animation frame;
+        // fade the loading page out from over it.
+        #[cfg(target_arch = "wasm32")]
+        web::loading_done();
         cx.activate(true);
         // Closing the last window ends the session. The X11, Wayland and
         // Windows backends already stop themselves once no window is left;

@@ -64,6 +64,20 @@ pub struct EditorState {
     /// Colour tolerance, 0..=255. Mirrored from the magic wand, which is
     /// where Photoshop's Grow, Similar and Color Range take theirs from.
     pub tolerance: u8,
+    /// Author stamped on notes as they are placed. Mirrored from the Note
+    /// tool's options bar, and persisted across sessions by the shell --
+    /// a reviewer types their name once, not once per note.
+    pub note_author: String,
+    /// Colour new notes are given, likewise from the options bar.
+    pub note_color: Rgba,
+    /// Index into `Document::notes` of the note the Notes panel is
+    /// showing. Set by the Note tool when a marker is clicked, and by the
+    /// panel's own navigation.
+    ///
+    /// An index rather than an id because notes carry none; anything that
+    /// shortens the list has to clamp or clear this, which is why every
+    /// read goes through `Document::notes.get()`.
+    pub active_note: Option<usize>,
 }
 
 impl Default for EditorState {
@@ -79,6 +93,9 @@ impl Default for EditorState {
             zoom: 1.0,
             resample: schist_core::Filter::Bicubic,
             tolerance: 32,
+            note_author: String::new(),
+            note_color: schist_core::DEFAULT_NOTE_COLOR,
+            active_note: None,
         }
     }
 }
@@ -99,10 +116,24 @@ pub enum Overlay {
     AntsPolygon(Vec<(f32, f32)>),
     /// Solid outline rect (e.g. layer bounds during move).
     Rect(IntRect),
+    /// Translucent selection highlight, drawn above artwork and below
+    /// outline/caret chrome.
+    Highlight(IntRect),
     /// Circle outline (brush cursor), document-space center and radius.
     Circle { cx: f32, cy: f32, r: f32 },
     /// Straight line segment.
     Line { x1: f32, y1: f32, x2: f32, y2: f32 },
+    /// A note's pin, filled in the note's own colour. Drawn at a fixed
+    /// *screen* size like Photoshop's, so a note stays findable and
+    /// clickable whether the document is at 5% or 1600%.
+    NoteMarker {
+        x: f32,
+        y: f32,
+        color: Rgba,
+        /// The note showing in the Notes panel, outlined so the panel and
+        /// the canvas agree on which one is being read.
+        selected: bool,
+    },
 }
 
 /// A canvas tool. One tool is active at a time; the canvas routes pointer
@@ -111,6 +142,14 @@ pub trait ToolPlugin: Send {
     /// Stable identifier, e.g. "brush".
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
+    /// A sentence saying what the tool does and how it is driven, for
+    /// hosts that have no toolbar to point at: the MCP server publishes
+    /// one tool per canvas tool and this is its description. Defaulted
+    /// so a third-party plugin still compiles; it then falls back to
+    /// the name.
+    fn description(&self) -> &'static str {
+        ""
+    }
     /// Icon asset name (the app shell renders `icons/<name>.svg`).
     fn icon(&self) -> &'static str;
     /// Default activation key, e.g. "b". Registered into the keymap.
@@ -342,12 +381,32 @@ pub trait CodecPlugin: Send + Sync {
 pub struct CommandCtx<'a> {
     pub doc: &'a mut Document,
     pub state: &'a mut EditorState,
+    /// Why the command did nothing, when it did nothing.
+    ///
+    /// The command layer had no way to say anything: it is full of bare
+    /// `return`s and the shell then set the status line to the command's
+    /// own title regardless, so Grow with no selection, Clipping Mask on
+    /// the bottom layer, Paste with an empty clipboard and a dozen others
+    /// all reported themselves as having worked.
+    pub refusal: Option<String>,
+}
+
+impl CommandCtx<'_> {
+    /// Decline to act, with a reason the user will see.
+    pub fn refuse(&mut self, why: impl Into<String>) {
+        self.refusal = Some(why.into());
+    }
 }
 
 /// A named, keybindable command. `id` is namespaced like "layer.duplicate".
 pub struct Command {
     pub id: &'static str,
     pub title: &'static str,
+    /// What the command does, in a sentence. The title is a menu label
+    /// ("Grow", "Similar") and says nothing on its own to a caller that
+    /// cannot see the menu it sits in -- the MCP server publishes every
+    /// command as its own tool and this is its description.
+    pub description: &'static str,
     /// Default keybinding in GPUI keystroke syntax, e.g. "cmd-shift-e"
     /// ("cmd" is mapped to ctrl on Linux/Windows by the app shell).
     pub keybind: Option<&'static str>,
@@ -376,6 +435,98 @@ pub struct FilterParam {
     /// difference between a control that reads "Mosaic" and one that
     /// reads "0.00".
     pub choices: &'static [&'static str],
+}
+
+/// An image handed to a filter alongside the layer it is working on.
+///
+/// Straight-alpha RGBA, the same layout as the buffer a filter is given,
+/// but any size: a displacement map is whatever file somebody picked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilterImage {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<f32>,
+}
+
+impl FilterImage {
+    /// Sample at a fraction of the image, stretching it to whatever it is
+    /// being used over. Photoshop calls this Stretch To Fit.
+    pub fn stretched(&self, u: f32, v: f32) -> [f32; 4] {
+        self.texel(u * self.width as f32, v * self.height as f32)
+    }
+
+    /// Sample in the map's own pixels, repeating it. Photoshop calls this
+    /// Tile.
+    pub fn tiled(&self, x: f32, y: f32) -> [f32; 4] {
+        self.texel(
+            x.rem_euclid(self.width.max(1) as f32),
+            y.rem_euclid(self.height.max(1) as f32),
+        )
+    }
+
+    fn texel(&self, x: f32, y: f32) -> [f32; 4] {
+        if self.width == 0 || self.height == 0 {
+            return [0.0; 4];
+        }
+        let x = (x as usize).min(self.width - 1);
+        let y = (y as usize).min(self.height - 1);
+        let i = (y * self.width + x) * 4;
+        [
+            self.pixels[i],
+            self.pixels[i + 1],
+            self.pixels[i + 2],
+            self.pixels[i + 3],
+        ]
+    }
+}
+
+/// Everything a filter can be given beyond its own pixels and numbers.
+///
+/// Photoshop's filters read the toolbox and the open document as freely
+/// as they read the layer: the Sketch group paints in the foreground and
+/// background colours, Clouds renders in them, Displace warps through a
+/// file somebody picked, Flame follows the current path. A filter here is
+/// a plug-in with none of that in reach, so the host gathers whatever
+/// each one asks for and hands it over.
+#[derive(Clone, Copy)]
+pub struct FilterContext<'a> {
+    /// What the document composites to under the layer being filtered.
+    pub backdrop: Option<&'a [f32]>,
+    /// The toolbox's two colours.
+    pub foreground: Rgba,
+    pub background: Rgba,
+    /// The image picked for this run, for filters that take one.
+    pub map: Option<&'a FilterImage>,
+    /// The document's active path, flattened into the filter's own
+    /// coordinates.
+    pub path: Option<&'a [(f32, f32)]>,
+}
+
+impl Default for FilterContext<'_> {
+    fn default() -> Self {
+        FilterContext {
+            backdrop: None,
+            // The swatches a fresh Photoshop opens with, and what every
+            // one of these filters is pictured with.
+            foreground: Rgba::BLACK,
+            background: Rgba::WHITE,
+            map: None,
+            path: None,
+        }
+    }
+}
+
+impl FilterContext<'_> {
+    /// The foreground as a plain array, which is what a filter mixing
+    /// colours wants.
+    pub fn fg(&self) -> [f32; 3] {
+        [self.foreground.r, self.foreground.g, self.foreground.b]
+    }
+
+    /// The background, likewise.
+    pub fn bg(&self) -> [f32; 3] {
+        [self.background.r, self.background.g, self.background.b]
+    }
 }
 
 /// Parameter values keyed by [`FilterParam::key`].
@@ -418,10 +569,76 @@ pub trait FilterPlugin: Send + Sync {
     /// `width * height` pixels.
     fn apply(&self, pixels: &mut [f32], width: usize, height: usize, values: &FilterValues);
 
+    /// Whether this filter wants to see what is underneath the layer.
+    ///
+    /// Most do not: a filter is a function of its own pixels. The ones
+    /// that match one image to another -- Harmonization, Colour
+    /// Transfer -- need something to match *to*, and the nearest thing
+    /// to hand is what the document composites to below. Photoshop's
+    /// Harmonization asks for a layer the same way.
+    fn wants_backdrop(&self) -> bool {
+        false
+    }
+
+    /// The label of the image this filter takes, if it takes one.
+    ///
+    /// Displace warps through a map somebody chose from a file, and
+    /// Photoshop asks for it with a file dialog before the filter runs.
+    /// Returning a label here is what makes the host offer one.
+    fn wants_map(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether this filter wants the document's active path.
+    ///
+    /// Flame draws along one. A filter cannot reach into the document,
+    /// so the host flattens the path and passes the points.
+    fn wants_path(&self) -> bool {
+        false
+    }
+
+    /// Apply with everything the host was able to gather.
+    ///
+    /// The default ignores the context, which is right for every filter
+    /// that asked for nothing -- most of them.
+    fn apply_with(
+        &self,
+        pixels: &mut [f32],
+        width: usize,
+        height: usize,
+        values: &FilterValues,
+        context: &FilterContext,
+    ) {
+        let _ = context;
+        self.apply(pixels, width, height, values);
+    }
+
     /// A line shown in the filter's dialog, for anything the user should
     /// know before running it -- which is mostly whether a neural filter
     /// found its model or is about to use its fallback.
     fn info(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether `apply` blocks on something outside this process — a
+    /// helper, a dialog someone has to answer, a network call. A host
+    /// with a UI thread should run these off it; one without can ignore
+    /// this. Filters that own their pixels return `false` and are run
+    /// inline, which is both faster and what every caller already
+    /// expected.
+    fn runs_out_of_process(&self) -> bool {
+        false
+    }
+
+    /// Why the last [`FilterPlugin::apply`] did nothing, if it did
+    /// nothing. `apply` has no return value because a filter that owns
+    /// its pixels cannot fail -- but one that hands them to a separate
+    /// process can, and a host that recorded "applied" for a run the
+    /// user cancelled would be lying to them.
+    ///
+    /// Checked immediately after `apply`, so an implementation only has
+    /// to remember the most recent run.
+    fn last_error(&self) -> Option<String> {
         None
     }
 }

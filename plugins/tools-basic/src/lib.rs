@@ -108,6 +108,10 @@ impl ToolPlugin for MoveTool {
     fn name(&self) -> &'static str {
         "Move"
     }
+    fn description(&self) -> &'static str {
+        "Drag the active layer's contents to a new position. With Auto-Select on, \
+         the press picks whichever layer -- or whole group -- is under the pointer first."
+    }
     fn icon(&self) -> &'static str {
         "move"
     }
@@ -226,6 +230,11 @@ pub struct EyedropperTool {
     /// Index into `SAMPLE_SIZES`.
     sample: usize,
     current_layer_only: bool,
+    /// True between press and release. The shell forwards every pointer
+    /// move — hovers included — so without this the tool re-sampled as
+    /// the mouse travelled and whatever it crossed last (usually the
+    /// background) silently replaced the colour that was clicked.
+    sampling: bool,
 }
 
 /// Photoshop's sample sizes, and the square each averages over.
@@ -244,6 +253,7 @@ impl EyedropperTool {
         EyedropperTool {
             sample: 0,
             current_layer_only: false,
+            sampling: false,
         }
     }
 
@@ -304,6 +314,10 @@ impl ToolPlugin for EyedropperTool {
     fn name(&self) -> &'static str {
         "Eyedropper"
     }
+    fn description(&self) -> &'static str {
+        "Sample the colour under the pointer into the foreground swatch, or into the \
+         background swatch when alt is held. Dragging keeps sampling."
+    }
     fn icon(&self) -> &'static str {
         "eyedropper"
     }
@@ -332,6 +346,7 @@ impl ToolPlugin for EyedropperTool {
     }
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
+        self.sampling = true;
         let x = input.x.floor() as i32;
         let y = input.y.floor() as i32;
         if !ctx.doc.canvas_rect().contains(x, y) {
@@ -348,16 +363,21 @@ impl ToolPlugin for EyedropperTool {
     }
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
-        // Drag keeps sampling, like Photoshop.
-        self.on_pointer_down(ctx, input);
+        // Drag keeps sampling, like Photoshop; a plain hover must not,
+        // or moving the mouse away discards the colour just picked.
+        if self.sampling {
+            self.on_pointer_down(ctx, input);
+        }
     }
 
-    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {}
+    fn on_pointer_up(&mut self, _ctx: &mut ToolCtx, _input: PointerInput) {
+        self.sampling = false;
+    }
 }
 
 /// Viewport tools — no-ops at the document level (see module docs).
 macro_rules! viewport_tool {
-    ($ty:ident, $id:literal, $name:literal, $icon:literal, $key:literal) => {
+    ($ty:ident, $id:literal, $name:literal, $desc:literal, $icon:literal, $key:literal) => {
         pub struct $ty;
 
         impl ToolPlugin for $ty {
@@ -366,6 +386,9 @@ macro_rules! viewport_tool {
             }
             fn name(&self) -> &'static str {
                 $name
+            }
+            fn description(&self) -> &'static str {
+                $desc
             }
             fn icon(&self) -> &'static str {
                 $icon
@@ -380,8 +403,24 @@ macro_rules! viewport_tool {
     };
 }
 
-viewport_tool!(HandTool, "hand", "Hand", "hand", "h");
-viewport_tool!(ZoomTool, "zoom", "Zoom", "zoom", "z");
+viewport_tool!(
+    HandTool,
+    "hand",
+    "Hand",
+    "Pans the view. The viewport belongs to the window, so headless this tool does nothing \
+     to the document.",
+    "hand",
+    "h"
+);
+viewport_tool!(
+    ZoomTool,
+    "zoom",
+    "Zoom",
+    "Zooms the view. The viewport belongs to the window, so headless this tool does nothing \
+     to the document.",
+    "zoom",
+    "z"
+);
 
 pub struct BasicToolsPlugin;
 
@@ -742,5 +781,38 @@ mod tests {
         };
         tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
         assert_eq!(state.foreground.to_u8(), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_hover_does_not_overwrite_the_picked_colour() {
+        // The reported bug: the shell forwards hover moves too, and the
+        // tool sampled on every one of them, so travelling across the
+        // background after a click silently replaced the pick.
+        let mut doc = red_square_doc();
+        let mut state = EditorState::default();
+        let mut tool = EyedropperTool::new();
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        // Click the red square and release: the pick is made.
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        tool.on_pointer_up(&mut ctx, input(20.0, 20.0));
+        assert_eq!(ctx.state.foreground.to_u8(), [255, 0, 0, 255]);
+        // Hover away over the empty canvas: the pick must survive.
+        tool.on_pointer_move(&mut ctx, input(200.0, 200.0));
+        assert_eq!(
+            ctx.state.foreground.to_u8(),
+            [255, 0, 0, 255],
+            "moving the mouse after release must not re-sample"
+        );
+        // But a drag (no release between) does keep sampling.
+        tool.on_pointer_down(&mut ctx, input(20.0, 20.0));
+        tool.on_pointer_move(&mut ctx, input(200.0, 200.0));
+        assert_ne!(
+            ctx.state.foreground.to_u8(),
+            [255, 0, 0, 255],
+            "a held button samples wherever it goes"
+        );
     }
 }

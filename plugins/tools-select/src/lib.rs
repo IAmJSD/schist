@@ -4,7 +4,9 @@
 //! Modifier convention (Photoshop): Shift = add to selection, Alt =
 //! subtract, Shift+Alt = intersect, no modifier = replace.
 
-use schist_core::{Document, IntRect, LayerKind, SelectOp, Selection, TileCoord, TILE_SIZE};
+use schist_core::{
+    Document, IntRect, LayerKind, SelectOp, Selection, TileCoord, TileMap, TILE_SIZE,
+};
 use schist_plugin_api::{
     EditorState, Modifiers, OptionValue, Overlay, PluginManifest, PluginRegistry, PointerInput,
     ToolCtx, ToolOption, ToolPlugin,
@@ -148,6 +150,25 @@ fn drag_rect(ax: f32, ay: f32, bx: f32, by: f32, square: bool) -> IntRect {
     )
 }
 
+/// The ellipse inscribed in `rect`, as a closed polygon in document
+/// space, for the drag overlay to trace with marching ants.
+///
+/// Segment count follows the rect's size so a small ellipse costs little
+/// and a large one still reads as a curve rather than a polygon.
+fn ellipse_points(rect: IntRect) -> Vec<(f32, f32)> {
+    let rx = rect.width() as f32 / 2.0;
+    let ry = rect.height() as f32 / 2.0;
+    let cx = rect.left as f32 + rx;
+    let cy = rect.top as f32 + ry;
+    let steps = ((rx + ry) as usize).clamp(24, 256);
+    (0..=steps)
+        .map(|i| {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            (cx + rx * a.cos(), cy + ry * a.sin())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarqueeShape {
     Rect,
@@ -188,6 +209,20 @@ impl ToolPlugin for MarqueeTool {
         match self.shape {
             MarqueeShape::Rect => "Rectangular Marquee",
             MarqueeShape::Ellipse => "Elliptical Marquee",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self.shape {
+            MarqueeShape::Rect => {
+                "Drag out a rectangular selection. Shift at the start of the drag adds to \
+                 the selection, alt subtracts, both intersect; shift during the drag squares \
+                 it off. A click with no drag deselects."
+            }
+            MarqueeShape::Ellipse => {
+                "Drag out an elliptical selection, with the same shift/alt combining as the \
+                 rectangular marquee."
+            }
         }
     }
 
@@ -282,9 +317,15 @@ impl ToolPlugin for MarqueeTool {
     }
 
     fn overlays(&self, _doc: &Document, _state: &EditorState) -> Vec<Overlay> {
-        match self.current {
-            Some(rect) => vec![Overlay::AntsRect(rect)],
-            None => Vec::new(),
+        // The overlay shows the shape that will be committed, so the
+        // elliptical marquee traces its ellipse rather than the rect it
+        // was dragged out of.
+        match (self.current, self.shape) {
+            (Some(rect), MarqueeShape::Rect) => vec![Overlay::AntsRect(rect)],
+            (Some(rect), MarqueeShape::Ellipse) if !rect.is_empty() => {
+                vec![Overlay::AntsPolygon(ellipse_points(rect))]
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -422,6 +463,22 @@ impl ToolPlugin for LassoTool {
             LassoKind::Free => "Lasso",
             LassoKind::Polygonal => "Polygonal Lasso",
             LassoKind::Magnetic => "Magnetic Lasso",
+        }
+    }
+    fn description(&self) -> &'static str {
+        match self.kind {
+            LassoKind::Free => {
+                "Drag a freehand outline; the selection closes across the ends when the drag \
+                 finishes. Shift adds, alt subtracts."
+            }
+            LassoKind::Polygonal => {
+                "Click corner after corner to build a straight-edged selection, and click \
+                 near the first point to close it."
+            }
+            LassoKind::Magnetic => {
+                "Trace roughly along an edge and the outline snaps to the strongest contrast \
+                 near the path."
+            }
         }
     }
     fn icon(&self) -> &'static str {
@@ -645,6 +702,10 @@ impl ToolPlugin for WandTool {
     fn name(&self) -> &'static str {
         "Magic Wand"
     }
+    fn description(&self) -> &'static str {
+        "Click to select the connected area of similar colour under the pointer, within \
+         the tolerance option -- the same tolerance Grow, Similar and Color Range read."
+    }
     fn icon(&self) -> &'static str {
         "wand"
     }
@@ -794,6 +855,10 @@ impl ToolPlugin for QuickSelectTool {
     fn name(&self) -> &'static str {
         "Quick Selection"
     }
+    fn description(&self) -> &'static str {
+        "Paint over a region and the selection grows through the similar pixels the brush \
+         passes over."
+    }
     fn icon(&self) -> &'static str {
         "quick-select"
     }
@@ -864,12 +929,20 @@ impl ToolPlugin for QuickSelectTool {
 /// Object Selection: drag a box around something and it finds the object
 /// inside it.
 ///
-/// Photoshop CC 2020 does this with a segmentation model. This does not:
-/// it takes the border of the drawn box as a sample of the background,
-/// then keeps the pixels inside that do not look like it, cleaned up by a
-/// majority filter. That handles a subject against a distinguishable
-/// background, which is most of what the tool is used for, and it degrades
-/// predictably rather than mysteriously when it does not.
+/// Photoshop CC 2020 does this with a segmentation model, and so does
+/// this, when one is installed: U^2-Net separates the subject of a
+/// picture from its background, and a box around an object is a picture
+/// whose subject is that object -- which is why the network is given a
+/// crop rather than the layer. Its answer comes back soft and at the
+/// resolution it thinks in, so the boundary is settled against the
+/// picture's own colours before it becomes a selection.
+///
+/// Without the model it falls back to the older reading: the border of
+/// the drawn box is a sample of the background, and what is kept is
+/// whatever inside does not look like it. That handles a subject against
+/// a distinguishable background, which is most of what the tool is used
+/// for, and it is also what runs when the network looks at the box and
+/// finds nothing in it.
 pub struct ObjectSelectTool {
     anchor: Option<(f32, f32)>,
     current: Option<(f32, f32)>,
@@ -894,10 +967,29 @@ impl ObjectSelectTool {
         let Some(raster) = active_raster(doc) else {
             return Vec::new();
         };
-        let rect = rect.intersect(&doc.canvas_rect());
+        let canvas = doc.canvas_rect();
+        let rect = rect.intersect(&canvas);
         if rect.width() < 3 || rect.height() < 3 {
             return Vec::new();
         }
+        let mask = object_by_model(&raster.tiles, rect, canvas)
+            .unwrap_or_else(|| self.object_by_colour(raster, rect));
+        let w = rect.width() as usize;
+        let mut out = Vec::new();
+        for y in 0..rect.height() as usize {
+            for x in 0..w {
+                if mask[y * w + x] {
+                    out.push((rect.left + x as i32, rect.top + y as i32));
+                }
+            }
+        }
+        out
+    }
+
+    /// The older reading of a box: everything inside it that does not
+    /// look like its border. A mask over `rect`.
+    fn object_by_colour(&self, raster: &schist_core::RasterLayer, rect: IntRect) -> Vec<bool> {
+        let (w, h) = (rect.width() as usize, rect.height() as usize);
         // Sample the box's border as "background".
         let mut bg: Vec<[f32; 3]> = Vec::new();
         for x in rect.left..rect.right {
@@ -913,7 +1005,7 @@ impl ObjectSelectTool {
             }
         }
         if bg.is_empty() {
-            return Vec::new();
+            return vec![false; w * h];
         }
         let tol = self.tolerance / 255.0;
         let looks_like_bg = |c: [f32; 3]| {
@@ -926,7 +1018,6 @@ impl ObjectSelectTool {
             })
         };
 
-        let (w, h) = (rect.width() as usize, rect.height() as usize);
         let mut fg = vec![false; w * h];
         for y in 0..h {
             for x in 0..w {
@@ -936,30 +1027,142 @@ impl ObjectSelectTool {
                 fg[y * w + x] = c.a > 0.0 && !looks_like_bg([c.r, c.g, c.b]);
             }
         }
-        // Majority filter: fills pinholes and drops isolated speckle.
-        let mut clean = fg.clone();
-        for y in 1..h.saturating_sub(1) {
-            for x in 1..w.saturating_sub(1) {
-                let mut on = 0;
-                for dy in -1i32..=1 {
-                    for dx in -1i32..=1 {
-                        let sx = (x as i32 + dx) as usize;
-                        let sy = (y as i32 + dy) as usize;
-                        on += fg[sy * w + sx] as u32;
-                    }
-                }
-                clean[y * w + x] = on >= 5;
-            }
-        }
-        let mut out = Vec::new();
-        for y in 0..h {
-            for x in 0..w {
-                if clean[y * w + x] {
-                    out.push((rect.left + x as i32, rect.top + y as i32));
+        despeckle(&mut fg, w, h);
+        fg
+    }
+}
+
+/// Fills pinholes and drops isolated speckle: a pixel joins the majority
+/// of the nine it sits in the middle of.
+fn despeckle(mask: &mut [bool], w: usize, h: usize) {
+    let was = mask.to_vec();
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            let mut on = 0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let sx = (x as i32 + dx) as usize;
+                    let sy = (y as i32 + dy) as usize;
+                    on += was[sy * w + sx] as u32;
                 }
             }
+            mask[y * w + x] = on >= 5;
         }
-        out
+    }
+}
+
+/// How much bigger than the drawn box the network is shown.
+///
+/// A box is a promise that the object is inside it and says nothing
+/// about what is outside -- and "what is outside" is exactly what a
+/// segmentation network separates an object from, so it is given some.
+const OBJECT_MARGIN: f32 = 0.3;
+
+/// A network's answer for the object inside `rect`, as a mask over
+/// `rect`.
+///
+/// `None` means "no answer": there is no model installed, it failed, or
+/// it looked at the box and found nothing in it. All three want the
+/// colour path instead, and none of them want an empty selection.
+fn object_by_model(tiles: &TileMap, rect: IntRect, canvas: IntRect) -> Option<Vec<bool>> {
+    let model = schist_neural::get("segment")?;
+    let grow = (rect.width().max(rect.height()) as f32 * OBJECT_MARGIN) as i32;
+    let win = IntRect::new(
+        rect.left - grow,
+        rect.top - grow,
+        rect.right + grow,
+        rect.bottom + grow,
+    )
+    .intersect(&canvas);
+    let (ww, wh) = (win.width().max(0) as usize, win.height().max(0) as usize);
+    if ww < 8 || wh < 8 {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(ww * wh * 3);
+    for y in 0..wh {
+        for x in 0..ww {
+            let c = tiles.pixel(win.left + x as i32, win.top + y as i32);
+            rgb.extend_from_slice(&[c.r, c.g, c.b]);
+        }
+    }
+    let map = schist_neural::segment(&model, &rgb, ww, wh)
+        .map_err(|e| log::warn!("object selection: {e:#}"))
+        .ok()?;
+
+    // Confidence is read inside the drawn box only. The margin was for
+    // the network's benefit and may well contain the rest of a subject
+    // the user deliberately did not put in the box.
+    let (w, h) = (rect.width() as usize, rect.height() as usize);
+    let (ox, oy) = (
+        (rect.left - win.left) as usize,
+        (rect.top - win.top) as usize,
+    );
+    let at = |x: usize, y: usize| map[(oy + y) * ww + ox + x];
+    let peak = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .fold(0.0f32, |m, (x, y)| m.max(at(x, y)));
+    if peak < 0.35 {
+        return None;
+    }
+    // Half of what it was willing to commit to, so a confident answer is
+    // cut at the usual half-probability and a hesitant one is still cut
+    // somewhere down its own slope rather than everywhere or nowhere.
+    let cut = (peak * 0.5).clamp(0.2, 0.5);
+
+    // The map is a resample of a 320-pixel grid, so its boundary is
+    // several pixels of ramp wherever the box was bigger than that.
+    // Settle that band against the picture: the two sides of a real
+    // edge are two colours, and each uncertain pixel belongs to the one
+    // it is nearer.
+    let band = 0.2f32;
+    let colour = |x: usize, y: usize| {
+        let c = tiles.pixel(rect.left + x as i32, rect.top + y as i32);
+        [c.r, c.g, c.b]
+    };
+    let (mut inside, mut outside, mut n_in, mut n_out) = ([0f32; 3], [0f32; 3], 0f32, 0f32);
+    for y in 0..h {
+        for x in 0..w {
+            let v = at(x, y);
+            let c = colour(x, y);
+            if v > cut + band {
+                for i in 0..3 {
+                    inside[i] += c[i];
+                }
+                n_in += 1.0;
+            } else if v < cut - band {
+                for i in 0..3 {
+                    outside[i] += c[i];
+                }
+                n_out += 1.0;
+            }
+        }
+    }
+    let refine = n_in > 0.0 && n_out > 0.0;
+    let far =
+        |c: [f32; 3], m: [f32; 3], n: f32| (0..3).map(|i| (c[i] - m[i] / n).powi(2)).sum::<f32>();
+
+    let mut mask = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let v = at(x, y);
+            // Nothing is not an object, whatever the network makes of
+            // the colour it reads under a transparent pixel.
+            let there = tiles.pixel(rect.left + x as i32, rect.top + y as i32).a > 0.0;
+            mask[y * w + x] = there
+                && match refine && (v - cut).abs() <= band {
+                    true => far(colour(x, y), inside, n_in) < far(colour(x, y), outside, n_out),
+                    false => v > cut,
+                };
+        }
+    }
+    despeckle(&mut mask, w, h);
+
+    // A handful of pixels is not an object; it is the network hedging,
+    // and the colour path will do better with the same box.
+    let found = mask.iter().filter(|&&v| v).count();
+    match found * 200 >= w * h {
+        true => Some(mask),
+        false => None,
     }
 }
 
@@ -969,6 +1172,9 @@ impl ToolPlugin for ObjectSelectTool {
     }
     fn name(&self) -> &'static str {
         "Object Selection"
+    }
+    fn description(&self) -> &'static str {
+        "Drag a box around an object and the selection snaps to the object found inside it."
     }
     fn icon(&self) -> &'static str {
         "object-select"
@@ -1470,6 +1676,64 @@ mod new_tool_tests {
             ctx.doc.selection.coverage(100, 60),
             0,
             "spilled past the disc into the background"
+        );
+    }
+
+    #[test]
+    fn the_segmentation_model_cuts_round_the_object_in_the_box() {
+        let Some(_) = schist_neural::get("segment") else {
+            eprintln!("skipping: the segmentation model is not installed");
+            return;
+        };
+        let doc = doc_with_disc();
+        let tiles = &active_raster(&doc).unwrap().tiles;
+        let rect = IntRect::new(55, 55, 145, 145);
+        let mask = object_by_model(tiles, rect, doc.canvas_rect())
+            .expect("the model had something to say about a disc on a field");
+        let w = rect.width() as usize;
+        let (mut hit, mut miss, mut area) = (0usize, 0usize, 0usize);
+        for y in 0..rect.height() as usize {
+            for x in 0..w {
+                let (gx, gy) = (rect.left + x as i32 - 100, rect.top + y as i32 - 100);
+                let inside = gx * gx + gy * gy <= 30 * 30;
+                area += inside as usize;
+                hit += (inside && mask[y * w + x]) as usize;
+                miss += (!inside && mask[y * w + x]) as usize;
+            }
+        }
+        assert!(
+            hit * 10 >= area * 9 && miss * 4 < area,
+            "cut {hit} of {area} disc pixels and {miss} outside it"
+        );
+    }
+
+    #[test]
+    fn object_selection_falls_back_when_the_model_sees_no_object() {
+        // Fine grain with no subject in it. The network has nothing to
+        // say, and what has to happen then is the colour path -- not an
+        // empty selection, and not a selection of noise.
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut layer = Layer::new_raster("bg");
+        {
+            let raster = layer.as_raster_mut().unwrap();
+            let mut seed = 0x1234_5678u32;
+            for y in 0..200i32 {
+                for x in 0..200i32 {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let v = 0.5 + (seed >> 8) as f32 / u32::MAX as f32 * 0.06;
+                    let coord = TileCoord::containing(x, y);
+                    let trect = coord.rect();
+                    let buf = raster.tiles.get_mut_or_insert(coord, Depth::Eight);
+                    let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
+                    buf.set(ix, Rgba::new(v, v, v, 1.0));
+                }
+            }
+        }
+        doc.push_layer(layer);
+        let tiles = &active_raster(&doc).unwrap().tiles;
+        assert!(
+            object_by_model(tiles, IntRect::new(40, 40, 160, 160), doc.canvas_rect()).is_none(),
+            "the model claimed to find an object in grain"
         );
     }
 

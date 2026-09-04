@@ -3,11 +3,12 @@
 //!
 //! These all work on a whole region at once rather than a brush stroke, so
 //! they live apart from the stroke engine in `tools-paint`. What they share
-//! is [`inpaint`], a diffusion fill that grows the surrounding pixels
-//! inwards over a hole. Photoshop's content-aware fill searches the image
-//! for matching patches; diffusion is the honest simple relative -- it is
-//! right for smooth surroundings and visibly blurry over texture, which is
-//! at least a predictable failure.
+//! is [`inpaint`], which is Content-Aware Fill: see [`fill`] for what it
+//! does and why it is three things rather than one.
+
+pub mod fill;
+
+pub use fill::inpaint;
 
 use schist_color::Rgba;
 use schist_core::{Document, IntRect, LayerId, Selection, TileCoord, TileMap, TILE_SIZE};
@@ -63,92 +64,6 @@ fn write_rect(
         }
     }
     edit.commit();
-}
-
-/// Fill the pixels where `hole` is true by diffusing in from the edge.
-///
-/// Jacobi relaxation over the hole: every pass replaces each hole pixel
-/// with the average of its four neighbours, so colour seeps inwards from
-/// the boundary until the patch is smooth. Enough passes to cross the
-/// hole's smaller dimension is plenty.
-pub fn inpaint(tiles: &TileMap, rect: IntRect, hole: &[bool]) -> Vec<Rgba> {
-    let (w, h) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
-    let mut buf: Vec<Rgba> = Vec::with_capacity(w * h);
-    for y in 0..h {
-        for x in 0..w {
-            buf.push(tiles.pixel(rect.left + x as i32, rect.top + y as i32));
-        }
-    }
-    if w == 0 || h == 0 || !hole.iter().any(|&v| v) {
-        return buf;
-    }
-    // Seed the hole with the mean of the boundary so relaxation starts
-    // somewhere sensible instead of from whatever was there.
-    let (mut acc, mut n) = ([0f32; 4], 0f32);
-    for y in 0..h {
-        for x in 0..w {
-            if hole[y * w + x] {
-                continue;
-            }
-            let touching = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)]
-                .iter()
-                .any(|(dx, dy)| {
-                    let (sx, sy) = (x as i32 + dx, y as i32 + dy);
-                    sx >= 0
-                        && sy >= 0
-                        && (sx as usize) < w
-                        && (sy as usize) < h
-                        && hole[sy as usize * w + sx as usize]
-                });
-            if touching {
-                let c = buf[y * w + x];
-                acc[0] += c.r;
-                acc[1] += c.g;
-                acc[2] += c.b;
-                acc[3] += c.a;
-                n += 1.0;
-            }
-        }
-    }
-    if n == 0.0 {
-        return buf;
-    }
-    let seed = Rgba::new(acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
-    for i in 0..buf.len() {
-        if hole[i] {
-            buf[i] = seed;
-        }
-    }
-    let passes = (w.min(h) as u32).clamp(8, 160);
-    let mut next = buf.clone();
-    for _ in 0..passes {
-        for y in 0..h {
-            for x in 0..w {
-                let i = y * w + x;
-                if !hole[i] {
-                    continue;
-                }
-                let (mut acc, mut n) = ([0f32; 4], 0f32);
-                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                    let (sx, sy) = (x as i32 + dx, y as i32 + dy);
-                    if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
-                        continue;
-                    }
-                    let c = buf[sy as usize * w + sx as usize];
-                    acc[0] += c.r;
-                    acc[1] += c.g;
-                    acc[2] += c.b;
-                    acc[3] += c.a;
-                    n += 1.0;
-                }
-                if n > 0.0 {
-                    next[i] = Rgba::new(acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
-                }
-            }
-        }
-        std::mem::swap(&mut buf, &mut next);
-    }
-    buf
 }
 
 /// The selection's coverage as a hole mask over `rect`.
@@ -209,6 +124,11 @@ impl ToolPlugin for PatchTool {
     }
     fn name(&self) -> &'static str {
         "Patch"
+    }
+    fn description(&self) -> &'static str {
+        "Drag an outline around a flaw, then drag that selection onto clean pixels: the \
+         texture there is fitted into the flaw. Patch mode chooses which end of the pair \
+         you drag."
     }
     fn icon(&self) -> &'static str {
         "patch"
@@ -387,6 +307,10 @@ impl ToolPlugin for ContentAwareMoveTool {
     fn name(&self) -> &'static str {
         "Content-Aware Move"
     }
+    fn description(&self) -> &'static str {
+        "Drag a selected object elsewhere and the hole it leaves is filled in from its \
+         surroundings. In Extend mode the object is stretched instead of moved."
+    }
     fn icon(&self) -> &'static str {
         "content-move"
     }
@@ -539,6 +463,9 @@ impl ToolPlugin for RedEyeTool {
     fn name(&self) -> &'static str {
         "Red Eye"
     }
+    fn description(&self) -> &'static str {
+        "Click a pupil to drain the flash red out of it."
+    }
     fn icon(&self) -> &'static str {
         "red-eye"
     }
@@ -684,6 +611,10 @@ impl ToolPlugin for MagicEraserTool {
     }
     fn name(&self) -> &'static str {
         "Magic Eraser"
+    }
+    fn description(&self) -> &'static str {
+        "Click to erase the area of similar colour under the pointer, within the tool's \
+         tolerance -- contiguous with the click, or everywhere in the layer."
     }
     fn icon(&self) -> &'static str {
         "eraser-magic"

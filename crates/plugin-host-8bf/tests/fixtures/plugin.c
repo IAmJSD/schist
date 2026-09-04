@@ -1,0 +1,1123 @@
+/* A minimal Photoshop filter plug-in, used as a test fixture.
+ *
+ * The FilterRecord below is declared independently of the Rust one, from
+ * the same Adobe prose (API Guide table 63). Compiling it and comparing
+ * `offsetof` against Rust's `offset_of!` is what pins down the layout
+ * assumption the host rests on: that the record uses natural alignment
+ * with no packing pragma.
+ *
+ * The filter itself inverts every plane. It exports two entry points so
+ * both host drivers get exercised: `entry_advance` does its work inside
+ * filterSelectorStart via AdvanceState, and `entry_continue` leaves
+ * rectangles behind for the host to service between Continue calls.
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT __attribute__((visibility("default")))
+#endif
+
+typedef int16_t OSErr;
+typedef uint32_t OSType;
+typedef unsigned char MacBoolean;
+typedef int32_t Fixed;
+typedef unsigned char **Handle;
+
+typedef struct { int16_t v, h; } Point;
+typedef struct { int16_t top, left, bottom, right; } Rect;
+typedef struct { uint16_t red, green, blue; } RGBColor;
+typedef unsigned char FilterColor[4];
+typedef struct {
+    Fixed gamma, redX, redY, greenX, greenY, blueX, blueY, whiteX, whiteY, ambient;
+} PlugInMonitor;
+
+/* Buffer suite. Version and count from API Guide chapter 3 ("Current
+ * version: 2; Routines: 5"); the member order is Allocate, Lock, Unlock,
+ * Free, Space, which is NOT the order the guide's prose introduces the
+ * routines in — it was read off a real plug-in's argument registers.
+ * See docs/8bf-abi-provenance.md. */
+typedef void *BufferID;
+typedef struct BufferProcs {
+    int16_t bufferProcsVersion;
+    int16_t numBufferProcs;
+    OSErr (*allocateProc)(int32_t size, BufferID *buffer);
+    void *(*lockProc)(BufferID buffer, MacBoolean moveHigh);
+    void (*unlockProc)(BufferID buffer);
+    void (*freeProc)(BufferID buffer);
+    int32_t (*spaceProc)(void);
+} BufferProcs;
+
+/* Pixel map for displayPixels, from API Guide tables A-1 and A-2.
+ * Declared outside the packed region: like the callback suites, and
+ * unlike FilterRecord, this one is naturally aligned. */
+typedef struct VRect { int32_t top, left, bottom, right; } VRect;
+
+typedef struct PSPixelMask {
+    struct PSPixelMask *next;
+    void *maskData;
+    int32_t rowBytes;
+    int32_t colBytes;
+    int32_t maskDescription;
+} PSPixelMask;
+
+typedef struct PSPixelMap {
+    int32_t version;
+    VRect bounds;
+    int32_t imageMode;
+    int32_t rowBytes;
+    int32_t colBytes;
+    int32_t planeBytes;
+    void *baseAddr;
+    PSPixelMask *mat;
+    PSPixelMask *masks;
+    int32_t maskPhaseRow;
+    int32_t maskPhaseCol;
+} PSPixelMap;
+
+/* colorServices, from API Guide table A-3. Naturally aligned, like the
+ * other non-FilterRecord structures. */
+typedef struct PropertyProcs {
+    int16_t propertyProcsVersion;
+    int16_t numPropertyProcs;
+    OSErr (*getPropertyProc)(OSType signature, OSType key, int32_t index,
+                             int32_t *simpleProperty, Handle *complexProperty);
+    OSErr (*setPropertyProc)(OSType signature, OSType key, int32_t index,
+                             int32_t simpleProperty, Handle complexProperty);
+} PropertyProcs;
+
+typedef struct ColorServicesInfo {
+    int32_t infoSize;
+    int16_t selector;
+    int16_t sourceSpace;
+    int16_t resultSpace;
+    MacBoolean resultGamutInfoValid;
+    MacBoolean resultInGamut;
+    void *reservedSourceSpaceInfo;
+    void *reservedResultSpaceInfo;
+    int16_t colorComponents[4];
+    void *reserved;
+    uintptr_t selectorParameter;
+} ColorServicesInfo;
+
+typedef struct VRect32 { int32_t top, left, bottom, right; } VRect32;
+typedef struct VPoint32 { int32_t v, h; } VPoint32;
+typedef struct BigDocumentStruct {
+    int32_t PluginUsing32BitCoordinates;
+    VPoint32 imageSize32;
+    VRect32 filterRect32;
+    VRect32 inRect32;
+    VRect32 outRect32;
+    VRect32 maskRect32;
+    VPoint32 floatCoord32;
+    VPoint32 wholeSize32;
+} BigDocumentStruct;
+
+typedef struct PlatformData {
+    void *hwnd;
+} PlatformData;
+
+typedef struct HandleProcs {
+    int16_t handleProcsVersion;
+    int16_t numHandleProcs;
+    Handle (*newProc)(int32_t size);
+    void (*disposeProc)(Handle h);
+    int32_t (*getSizeProc)(Handle h);
+    OSErr (*setSizeProc)(Handle h, int32_t size);
+    void *(*lockProc)(Handle h, MacBoolean moveHigh);
+    void (*unlockProc)(Handle h);
+    void (*recoverSpaceProc)(int32_t size);
+    void (*disposeRegularHandleProc)(Handle h);
+} HandleProcs;
+
+/* FilterRecord — and only FilterRecord — is packed to four bytes, so a
+ * pointer follows an int32 with no hole. Natural alignment makes the
+ * record eight bytes longer by `platformData`, far enough that a real
+ * plug-in reads a pointer out of the middle of the monitor record. The
+ * callback suites below are *not* packed. Both halves of that were
+ * established against shipping plug-ins; see docs/8bf-abi-provenance.md. */
+#pragma pack(push, 4)
+typedef struct FilterRecord {
+    int32_t serialNumber;
+    MacBoolean (*abortProc)(void);
+    void (*progressProc)(int32_t done, int32_t total);
+    Handle parameters;
+    Point imageSize;
+    int16_t planes;
+    Rect filterRect;
+    RGBColor background;
+    RGBColor foreground;
+    int32_t maxSpace;
+    int32_t bufferSpace;
+    Rect inRect;
+    int16_t inLoPlane;
+    int16_t inHiPlane;
+    Rect outRect;
+    int16_t outLoPlane;
+    int16_t outHiPlane;
+    void *inData;
+    int32_t inRowBytes;
+    void *outData;
+    int32_t outRowBytes;
+    MacBoolean isFloating;
+    MacBoolean haveMask;
+    MacBoolean autoMask;
+    Rect maskRect;
+    void *maskData;
+    int32_t maskRowBytes;
+    FilterColor backColor;
+    FilterColor foreColor;
+    OSType hostSig;
+    void (*hostProc)(int16_t selector, void *data);
+    int16_t imageMode;
+    Fixed imageHRes;
+    Fixed imageVRes;
+    Point floatCoord;
+    Point wholeSize;
+    PlugInMonitor monitor;
+    PlatformData *platformData;
+    BufferProcs *bufferProcs;
+    void *resourceProcs;
+    void *processEvent;
+    OSErr (*displayPixels)(const PSPixelMap *source, const VRect *srcRect,
+                           int32_t dstRow, int32_t dstCol, uintptr_t platformContext);
+    HandleProcs *handleProcs;
+
+    /* new in 3.0 */
+    MacBoolean supportsDummyPlanes;
+    MacBoolean supportsAlternateLayouts;
+    int16_t wantLayout;
+    int16_t filterCase;
+    int16_t dummyPlaneValue;
+    void *premiereHook;
+    OSErr (*advanceState)(void);
+    MacBoolean supportsAbsolute;
+    MacBoolean wantsAbsolute;
+    void *getProperty;
+    MacBoolean cannotUndo;
+    MacBoolean supportsPadding;
+    int16_t inputPadding;
+    int16_t outputPadding;
+    int16_t maskPadding;
+    char samplingSupport;
+    char reservedByte;
+    Fixed inputRate;
+    Fixed maskRate;
+    OSErr (*colorServices)(ColorServicesInfo *info);
+    int16_t inLayerPlanes;
+    int16_t inTransparencyMask;
+    int16_t inLayerMasks;
+    int16_t inInvertedLayerMasks;
+    int16_t inNonLayerPlanes;
+    int16_t outLayerPlanes;
+    int16_t outTransparencyMask;
+    int16_t outLayerMasks;
+    int16_t outInvertedLayerMasks;
+    int16_t outNonLayerPlanes;
+    int16_t absLayerPlanes;
+    int16_t absTransparencyMask;
+    int16_t absLayerMasks;
+    int16_t absInvertedLayerMasks;
+    int16_t absNonLayerPlanes;
+    int16_t inPreDummyPlanes;
+    int16_t inPostDummyPlanes;
+    int16_t outPreDummyPlanes;
+    int16_t outPostDummyPlanes;
+    int32_t inColumnBytes;
+    int32_t inPlaneBytes;
+    int32_t outColumnBytes;
+    int32_t outPlaneBytes;
+
+    /* new in 3.0.4 */
+    void *imageServicesProcs;
+    PropertyProcs *propertyProcs;
+    int16_t inTileHeight;
+    int16_t inTileWidth;
+    Point inTileOrigin;
+    int16_t absTileHeight;
+    int16_t absTileWidth;
+    Point absTileOrigin;
+    int16_t outTileHeight;
+    int16_t outTileWidth;
+    Point outTileOrigin;
+    int16_t maskTileHeight;
+    int16_t maskTileWidth;
+    Point maskTileOrigin;
+
+    /* new in 4.0 */
+    void *descriptorParameters;
+    unsigned char *errorString;
+    void *channelPortProcs;
+    void *documentInfo;
+
+    /* new in 5.0 */
+    void *sSPBasic;
+    void *plugInRef;
+    int32_t depth;
+
+    /* new in 6.0 */
+    Handle iCCprofileData;
+    int32_t iCCprofileSize;
+    int32_t canUseICCProfiles;
+
+    /* new in 7.0 */
+    int32_t hasImageScrap;
+
+    /* new in CS */
+    void *bigDocumentData;
+    char reserved[46];
+} FilterRecord;
+#pragma pack(pop)
+
+/* ---- layout probe ---------------------------------------------------- */
+
+EXPORT size_t probe_sizeof(void) { return sizeof(FilterRecord); }
+
+/* Keep in step with FIELDS in tests/layout.rs. */
+EXPORT size_t probe_offsets(size_t *out, size_t n) {
+    static const size_t offs[] = {
+        offsetof(FilterRecord, serialNumber),
+        offsetof(FilterRecord, abortProc),
+        offsetof(FilterRecord, parameters),
+        offsetof(FilterRecord, imageSize),
+        offsetof(FilterRecord, planes),
+        offsetof(FilterRecord, filterRect),
+        offsetof(FilterRecord, background),
+        offsetof(FilterRecord, maxSpace),
+        offsetof(FilterRecord, inRect),
+        offsetof(FilterRecord, inData),
+        offsetof(FilterRecord, outData),
+        offsetof(FilterRecord, isFloating),
+        offsetof(FilterRecord, maskRect),
+        offsetof(FilterRecord, maskData),
+        offsetof(FilterRecord, backColor),
+        offsetof(FilterRecord, hostSig),
+        offsetof(FilterRecord, imageMode),
+        offsetof(FilterRecord, monitor),
+        offsetof(FilterRecord, platformData),
+        offsetof(FilterRecord, handleProcs),
+        offsetof(FilterRecord, filterCase),
+        offsetof(FilterRecord, advanceState),
+        offsetof(FilterRecord, samplingSupport),
+        offsetof(FilterRecord, inputRate),
+        offsetof(FilterRecord, inLayerPlanes),
+        offsetof(FilterRecord, inColumnBytes),
+        offsetof(FilterRecord, imageServicesProcs),
+        offsetof(FilterRecord, maskTileOrigin),
+        offsetof(FilterRecord, descriptorParameters),
+        offsetof(FilterRecord, errorString),
+        offsetof(FilterRecord, sSPBasic),
+        offsetof(FilterRecord, depth),
+        offsetof(FilterRecord, iCCprofileData),
+        offsetof(FilterRecord, hasImageScrap),
+        offsetof(FilterRecord, bigDocumentData),
+        offsetof(FilterRecord, reserved),
+    };
+    size_t count = sizeof(offs) / sizeof(offs[0]);
+    if (n < count) return 0;
+    memcpy(out, offs, sizeof(offs));
+    return count;
+}
+
+/* ---- the filter ------------------------------------------------------ */
+
+#define selectorAbout       0
+#define selectorParameters  1
+#define selectorPrepare     2
+#define selectorStart       3
+#define selectorContinue    4
+#define selectorFinish      5
+
+#define filterBadParameters (-30100)
+#define filterBadMode       (-30101)
+
+#define PARAM_SIG 0x53434831u  /* 'SCH1' */
+#define TILE 32
+
+typedef struct { uint32_t sig; int32_t amount; } Params;
+
+/* Iteration state, kept in the host-provided `data` slot. */
+typedef struct { int16_t nextTop, nextLeft; } Progress;
+
+static void invert_tile(FilterRecord *fr, int32_t amount) {
+    int planes = fr->inHiPlane - fr->inLoPlane + 1;
+    int w = fr->inRect.right - fr->inRect.left;
+    int h = fr->inRect.bottom - fr->inRect.top;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *src = (const unsigned char *)fr->inData + (size_t)y * fr->inRowBytes;
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        for (int i = 0; i < w * planes; i++) {
+            int v = amount - src[i];
+            dst[i] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+}
+
+/* invert_tile's wide twin, reading its extent from the 32-bit rects. */
+static void invert_tile_wide(FilterRecord *fr, void *bigv, int32_t amount) {
+    BigDocumentStruct *big = (BigDocumentStruct *)bigv;
+    int planes = fr->inHiPlane - fr->inLoPlane + 1;
+    int32_t w = big->inRect32.right - big->inRect32.left;
+    int32_t h = big->inRect32.bottom - big->inRect32.top;
+    for (int32_t y = 0; y < h; y++) {
+        const unsigned char *src = (const unsigned char *)fr->inData + (size_t)y * fr->inRowBytes;
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        for (int32_t i = 0; i < w * planes; i++) {
+            int v = amount - src[i];
+            dst[i] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+}
+
+/* Point the record at the next tile, or empty the rectangles when the
+ * whole filterRect has been covered. Returns 1 while there is work. */
+static int next_tile(FilterRecord *fr, Progress *p) {
+    if (p->nextTop >= fr->filterRect.bottom) {
+        fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+        fr->outRect = fr->inRect;
+        fr->maskRect = fr->inRect;
+        return 0;
+    }
+    int16_t bottom = p->nextTop + TILE;
+    int16_t right = p->nextLeft + TILE;
+    if (bottom > fr->filterRect.bottom) bottom = fr->filterRect.bottom;
+    if (right > fr->filterRect.right) right = fr->filterRect.right;
+
+    fr->inRect.top = p->nextTop;
+    fr->inRect.left = p->nextLeft;
+    fr->inRect.bottom = bottom;
+    fr->inRect.right = right;
+    fr->outRect = fr->inRect;
+    fr->inLoPlane = fr->outLoPlane = 0;
+    fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+
+    p->nextLeft = right;
+    if (p->nextLeft >= fr->filterRect.right) {
+        p->nextLeft = fr->filterRect.left;
+        p->nextTop = bottom;
+    }
+    return 1;
+}
+
+static OSErr ensure_params(FilterRecord *fr) {
+    if (fr->parameters == NULL) {
+        if (fr->handleProcs == NULL || fr->handleProcs->newProc == NULL)
+            return filterBadParameters;
+        fr->parameters = fr->handleProcs->newProc((int32_t)sizeof(Params));
+        if (fr->parameters == NULL) return filterBadParameters;
+        Params *p = (Params *)*fr->parameters;
+        p->sig = PARAM_SIG;
+        p->amount = 255;
+    }
+    return 0;
+}
+
+static int32_t param_amount(FilterRecord *fr) {
+    if (fr->parameters == NULL) return 255;
+    Params *p = (Params *)*fr->parameters;
+    return p->sig == PARAM_SIG ? p->amount : 255;
+}
+
+/* Modes for `run`. */
+#define RUN_ADVANCE  1
+#define RUN_CONTINUE 0
+#define RUN_FAIL     2
+
+static void run(int16_t selector, FilterRecord *fr, intptr_t *data,
+                int16_t *result, int use_advance) {
+    *result = 0;
+    switch (selector) {
+    case selectorAbout:
+        return;
+    case selectorParameters:
+        *result = ensure_params(fr);
+        return;
+    case selectorPrepare:
+        fr->bufferSpace = 0;
+        fr->maxSpace = 0;
+        return;
+    case selectorStart: {
+        if (fr->imageMode != 3 /* RGBColor */ && fr->imageMode != 1 /* GrayScale */) {
+            *result = filterBadMode;
+            return;
+        }
+        if (fr->depth != 8) { *result = filterBadMode; return; }
+        /* platformData points at a PlatformData, and is never the raw
+         * window handle. Following it must be safe even when the host
+         * has no window to offer. */
+        if (fr->platformData == NULL) { *result = filterBadParameters; return; }
+        (void)fr->platformData->hwnd;
+        if (fr->parameters != NULL && ((Params *)*fr->parameters)->sig != PARAM_SIG) {
+            *result = filterBadParameters;
+            return;
+        }
+        Progress *p = (Progress *)data;
+        p->nextTop = fr->filterRect.top;
+        p->nextLeft = fr->filterRect.left;
+        int32_t amount = param_amount(fr);
+
+        if (use_advance == RUN_FAIL) {
+            /* Filter two tiles, then give up — so the host has really
+             * committed something by the time the run fails. */
+            for (int i = 0; i < 2 && next_tile(fr, p); i++) {
+                OSErr e = fr->advanceState();
+                if (e != 0) { *result = e; return; }
+                invert_tile(fr, amount);
+            }
+            *result = filterBadParameters;
+            return;
+        }
+        if (use_advance) {
+            if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+            int32_t total = fr->filterRect.bottom - fr->filterRect.top;
+            while (next_tile(fr, p)) {
+                if (fr->abortProc && fr->abortProc()) { *result = -128; return; }
+                OSErr e = fr->advanceState();
+                if (e != 0) { *result = e; return; }
+                invert_tile(fr, amount);
+                if (fr->progressProc)
+                    fr->progressProc(p->nextTop - fr->filterRect.top, total);
+            }
+        } else {
+            next_tile(fr, p);
+        }
+        return;
+    }
+    case selectorContinue: {
+        Progress *p = (Progress *)data;
+        invert_tile(fr, param_amount(fr));
+        next_tile(fr, p);
+        return;
+    }
+    case selectorFinish:
+        return;
+    default:
+        return;
+    }
+}
+
+EXPORT void entry_advance(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run(selector, (FilterRecord *)pb, data, result, RUN_ADVANCE);
+}
+
+EXPORT void entry_continue(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run(selector, (FilterRecord *)pb, data, result, RUN_CONTINUE);
+}
+
+/* ---- scripting -------------------------------------------------------
+ *
+ * Record a parameter on the way out, and expect it back on the way in.
+ * This is what Last Filter and actions are made of.
+ */
+typedef void *PIReadDescriptor;
+typedef void *PIWriteDescriptor;
+
+typedef struct ReadDescriptorProcs {
+    int16_t readDescriptorProcsVersion;
+    int16_t numReadDescriptorProcs;
+    PIReadDescriptor (*openReadDescriptorProc)(Handle, void *);
+    OSErr (*closeReadDescriptorProc)(PIReadDescriptor);
+    OSErr (*getAliasProc)(PIReadDescriptor, Handle *);
+    OSErr (*getBooleanProc)(PIReadDescriptor, MacBoolean *);
+    OSErr (*getClassProc)(PIReadDescriptor, OSType *);
+    OSErr (*getCountProc)(PIReadDescriptor, uint32_t *);
+    OSErr (*getEnumeratedProc)(PIReadDescriptor, OSType *, OSType *);
+    OSErr (*getFloatProc)(PIReadDescriptor, double *);
+    OSErr (*getIntegerProc)(PIReadDescriptor, int32_t *);
+    MacBoolean (*getKeyProc)(PIReadDescriptor, OSType *, OSType *, int16_t *);
+    OSErr (*getSimpleReferenceProc)(PIReadDescriptor, void *);
+    OSErr (*getObjectProc)(PIReadDescriptor, OSType *, Handle *);
+    OSErr (*getPinnedFloatProc)(PIReadDescriptor, const double *, const double *, double *);
+    OSErr (*getPinnedIntegerProc)(PIReadDescriptor, int32_t, int32_t, int32_t *);
+    OSErr (*getPinnedUnitFloatProc)(PIReadDescriptor, const double *, const double *,
+                                    OSType *, double *);
+    OSErr (*getStringProc)(PIReadDescriptor, unsigned char *);
+    OSErr (*getTextProc)(PIReadDescriptor, Handle *);
+    OSErr (*getUnitFloatProc)(PIReadDescriptor, OSType *, double *);
+} ReadDescriptorProcs;
+
+typedef struct WriteDescriptorProcs {
+    int16_t writeDescriptorProcsVersion;
+    int16_t numWriteDescriptorProcs;
+    PIWriteDescriptor (*openWriteDescriptorProc)(void);
+    OSErr (*closeWriteDescriptorProc)(PIWriteDescriptor, Handle *);
+    OSErr (*putAliasProc)(PIWriteDescriptor, OSType, Handle);
+    OSErr (*putBooleanProc)(PIWriteDescriptor, OSType, MacBoolean);
+    OSErr (*putClassProc)(PIWriteDescriptor, OSType, OSType);
+    OSErr (*putCountProc)(PIWriteDescriptor, OSType, uint32_t);
+    OSErr (*putEnumeratedProc)(PIWriteDescriptor, OSType, OSType, OSType);
+    OSErr (*putFloatProc)(PIWriteDescriptor, OSType, const double *);
+    OSErr (*putIntegerProc)(PIWriteDescriptor, OSType, int32_t);
+    OSErr (*putSimpleReferenceProc)(PIWriteDescriptor, OSType, const void *);
+    OSErr (*putObjectProc)(PIWriteDescriptor, OSType, OSType, Handle);
+    OSErr (*putStringProc)(PIWriteDescriptor, OSType, const unsigned char *);
+    OSErr (*putTextProc)(PIWriteDescriptor, OSType, Handle);
+    OSErr (*undocumented[3])(void);
+} WriteDescriptorProcs;
+
+typedef struct PIDescriptorParameters {
+    int16_t descriptorParametersVersion;
+    int16_t playInfo;
+    int16_t recordInfo;
+    Handle descriptor;
+    WriteDescriptorProcs *writeDescriptorProcs;
+    ReadDescriptorProcs *readDescriptorProcs;
+} PIDescriptorParameters;
+
+#define scriptNoSuite   (-30180)
+#define scriptBadRead   (-30181)
+#define scriptBadWrite  (-30182)
+#define scriptWrongBack (-30183)
+
+#define KEY_RADIUS 0x52647320u /* 'Rds ' */
+
+EXPORT void entry_script(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    PIDescriptorParameters *dp = (PIDescriptorParameters *)fr->descriptorParameters;
+    /* The block itself must always be there — plug-ins write to it
+     * without checking. The sub-suites may not be, and a plug-in that
+     * cannot record simply does not. */
+    if (dp == NULL) { *result = scriptNoSuite; return; }
+    if (dp->readDescriptorProcs == NULL || dp->writeDescriptorProcs == NULL) return;
+    if (dp->readDescriptorProcs->numReadDescriptorProcs < 18 ||
+        dp->writeDescriptorProcs->numWriteDescriptorProcs < 16) {
+        *result = scriptNoSuite; return;
+    }
+
+    if (selector == selectorStart) {
+        /* Read back whatever a previous run recorded, if anything. */
+        if (dp->descriptor != NULL) {
+            ReadDescriptorProcs *r = dp->readDescriptorProcs;
+            PIReadDescriptor rd = r->openReadDescriptorProc(dp->descriptor, NULL);
+            if (rd == NULL) { *result = scriptBadRead; return; }
+            OSType key = 0, type = 0; int16_t flags = 0;
+            int found = 0;
+            while (r->getKeyProc(rd, &key, &type, &flags)) {
+                if (key == KEY_RADIUS) {
+                    int32_t v = 0;
+                    if (r->getIntegerProc(rd, &v) != 0) { *result = scriptBadRead; break; }
+                    if (v != 25) { *result = scriptWrongBack; break; }
+                    found = 1;
+                }
+            }
+            r->closeReadDescriptorProc(rd);
+            if (*result != 0) return;
+            if (!found) { *result = scriptWrongBack; return; }
+        }
+        return;
+    }
+
+    if (selector == selectorFinish) {
+        WriteDescriptorProcs *w = dp->writeDescriptorProcs;
+        PIWriteDescriptor wd = w->openWriteDescriptorProc();
+        if (wd == NULL) { *result = scriptBadWrite; return; }
+        if (w->putIntegerProc(wd, KEY_RADIUS, 25) != 0) { *result = scriptBadWrite; return; }
+        if (w->closeWriteDescriptorProc(wd, &dp->descriptor) != 0) {
+            *result = scriptBadWrite; return;
+        }
+    }
+}
+
+/* ---- big documents ----------------------------------------------------
+ *
+ * Past 32767 pixels the 16-bit rectangles cannot say where anything is,
+ * and the host leaves them empty. A plug-in that wants such a document
+ * claims BigDocumentStruct's wide ones and works from those.
+ */
+#define bigMissing (-30170)
+
+EXPORT void entry_big(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    BigDocumentStruct *big = (BigDocumentStruct *)fr->bigDocumentData;
+    if (big == NULL) { *result = bigMissing; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+    big->PluginUsing32BitCoordinates = 1;
+
+    /* A strip at a time, in 32-bit coordinates throughout. */
+    int32_t rows = 64;
+    for (int32_t top = big->filterRect32.top; top < big->filterRect32.bottom; top += rows) {
+        int32_t bottom = top + rows;
+        if (bottom > big->filterRect32.bottom) bottom = big->filterRect32.bottom;
+        big->inRect32.top = top;
+        big->inRect32.left = big->filterRect32.left;
+        big->inRect32.bottom = bottom;
+        big->inRect32.right = big->filterRect32.right;
+        big->outRect32 = big->inRect32;
+        fr->inLoPlane = fr->outLoPlane = 0;
+        fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+        OSErr e = fr->advanceState();
+        if (e != 0) { *result = e; return; }
+        invert_tile_wide(fr, big, 255);
+    }
+    big->inRect32.top = big->inRect32.left = 0;
+    big->inRect32.bottom = big->inRect32.right = 0;
+    big->outRect32 = big->inRect32;
+    big->maskRect32 = big->inRect32;
+}
+
+/* ---- layers and selections -------------------------------------------- */
+
+#define layerBadCase   (-30160)
+#define layerBadPlanes (-30161)
+#define maskMissing    (-30162)
+#define maskBadData    (-30163)
+
+/* A layer: colour planes followed by transparency, in one of the two
+ * editable-transparency cases. */
+EXPORT void entry_layer(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    /* 4 and 5 are the editable-transparency cases. */
+    if (fr->filterCase != 4 && fr->filterCase != 5) { *result = layerBadCase; return; }
+    if (fr->inTransparencyMask != 1) { *result = layerBadPlanes; return; }
+    if (fr->inLayerPlanes != fr->planes - 1) { *result = layerBadPlanes; return; }
+    if (fr->outTransparencyMask != 1) { *result = layerBadPlanes; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    while (next_tile(fr, p)) {
+        OSErr e = fr->advanceState();
+        if (e != 0) { *result = e; return; }
+        invert_tile(fr, 255);
+    }
+}
+
+/* A selection: the host has to hand over the mask when asked. */
+EXPORT void entry_masked(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (!fr->haveMask) { *result = maskMissing; return; }
+    /* 2, 5 and 7 are the with-selection cases. */
+    if (fr->filterCase != 2 && fr->filterCase != 5 && fr->filterCase != 7) {
+        *result = layerBadCase; return;
+    }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    if (!next_tile(fr, p)) return;
+    fr->maskRect = fr->inRect;
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+    if (fr->maskData == NULL || fr->maskRowBytes <= 0) { *result = maskBadData; return; }
+
+    /* The top-left of every mask these tests build is fully selected,
+     * so this says the host served the rectangle asked for and lined it
+     * up. What the values mean is the caller's business, not this
+     * fixture's. */
+    const unsigned char *m = (const unsigned char *)fr->maskData;
+    int w = fr->maskRect.right - fr->maskRect.left;
+    if (fr->maskRowBytes < w) { *result = maskBadData; return; }
+    if (m[0] != 255) { *result = maskBadData; return; }
+    invert_tile(fr, 255);
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+/* ---- deep images ------------------------------------------------------
+ *
+ * Photoshop's 16-bit range is 0..32768, not 0..65535 — a host that gets
+ * that wrong hands over colours twice as bright as intended across the
+ * whole top half. Inverting about 32768 is how that shows.
+ */
+#define deepBadDepth (-30150)
+#define deepBadMode  (-30151)
+
+EXPORT void entry_deep(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    if (fr->depth != 16) { *result = deepBadDepth; return; }
+    /* RGB48 is mode 11, Gray16 is 10. */
+    if (fr->imageMode != 11 && fr->imageMode != 10) { *result = deepBadMode; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    while (next_tile(fr, p)) {
+        OSErr e = fr->advanceState();
+        if (e != 0) { *result = e; return; }
+        /* Strides are in bytes and samples are two, so the host having
+         * scaled colBytes and planeBytes is what makes this work. */
+        if (fr->inColumnBytes != fr->planes * 2 || fr->inPlaneBytes != 2) {
+            *result = deepBadDepth; return;
+        }
+        int planes = fr->planes;
+        int w = fr->inRect.right - fr->inRect.left;
+        int h = fr->inRect.bottom - fr->inRect.top;
+        for (int y = 0; y < h; y++) {
+            const uint16_t *src = (const uint16_t *)((const unsigned char *)fr->inData
+                                                     + (size_t)y * fr->inRowBytes);
+            uint16_t *dst = (uint16_t *)((unsigned char *)fr->outData
+                                         + (size_t)y * fr->outRowBytes);
+            for (int i = 0; i < w * planes; i++) {
+                int v = 32768 - src[i];
+                dst[i] = (uint16_t)(v < 0 ? 0 : (v > 32768 ? 32768 : v));
+            }
+        }
+    }
+}
+
+/* ---- padding ---------------------------------------------------------
+ *
+ * Ask for a rectangle that overhangs the image on every side, then copy
+ * the padded buffer straight through. Whatever the host put in the
+ * margin ends up in the output, where the test can check it.
+ */
+#define PAD 8
+
+static void run_padding(int16_t selector, FilterRecord *fr, intptr_t *data,
+                        int16_t *result, int16_t padval) {
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+    fr->inputPadding = padval;
+    fr->inRect.top = (int16_t)(fr->filterRect.top - PAD);
+    fr->inRect.left = (int16_t)(fr->filterRect.left - PAD);
+    fr->inRect.bottom = (int16_t)(fr->filterRect.bottom + PAD);
+    fr->inRect.right = (int16_t)(fr->filterRect.right + PAD);
+    fr->outRect = fr->filterRect;
+    fr->inLoPlane = fr->outLoPlane = 0;
+    fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+
+    int planes = fr->planes;
+    int w = fr->outRect.right - fr->outRect.left;
+    int h = fr->outRect.bottom - fr->outRect.top;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *src = (const unsigned char *)fr->inData + (size_t)y * fr->inRowBytes;
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        memcpy(dst, src, (size_t)w * planes);
+    }
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+/* Ask for an output rectangle that overhangs the top-left corner. The
+ * host has to serve the buffer at the size asked for and commit only
+ * the part that lands inside the image. */
+EXPORT void entry_out_of_bounds(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    fr->inRect.top = (int16_t)(fr->filterRect.top - 4);
+    fr->inRect.left = (int16_t)(fr->filterRect.left - 4);
+    fr->inRect.bottom = fr->filterRect.bottom;
+    fr->inRect.right = fr->filterRect.right;
+    fr->outRect = fr->inRect;
+    fr->inLoPlane = fr->outLoPlane = 0;
+    fr->inHiPlane = fr->outHiPlane = (int16_t)(fr->planes - 1);
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+    if (fr->outData == NULL) { *result = filterBadParameters; return; }
+
+    int planes = fr->planes;
+    int w = fr->outRect.right - fr->outRect.left;
+    int h = fr->outRect.bottom - fr->outRect.top;
+    for (int y = 0; y < h; y++) {
+        unsigned char *dst = (unsigned char *)fr->outData + (size_t)y * fr->outRowBytes;
+        for (int i = 0; i < w * planes; i++) dst[i] = 42;
+    }
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+EXPORT void entry_pad_replicate(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run_padding(selector, (FilterRecord *)pb, data, result, -1);
+}
+
+EXPORT void entry_pad_fill(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run_padding(selector, (FilterRecord *)pb, data, result, 200);
+}
+
+/* An undocumented negative: the host must still return usable pixels
+ * rather than whatever the buffer happened to contain. */
+EXPORT void entry_pad_unknown(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run_padding(selector, (FilterRecord *)pb, data, result, -77);
+}
+
+/* ---- buffer suite ---------------------------------------------------- */
+
+#define bufferBadVersion (-30110)
+#define bufferBadRoutine (-30111)
+#define bufferBadData    (-30112)
+
+EXPORT void entry_buffers(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+
+    BufferProcs *bp = fr->bufferProcs;
+    if (bp == NULL) { *result = bufferBadRoutine; return; }
+    if (bp->bufferProcsVersion != 2) { *result = bufferBadVersion; return; }
+    if (bp->numBufferProcs < 5) { *result = bufferBadVersion; return; }
+    if (!bp->spaceProc || !bp->allocateProc || !bp->freeProc ||
+        !bp->lockProc || !bp->unlockProc) { *result = bufferBadRoutine; return; }
+
+    if (bp->spaceProc() <= 0) { *result = bufferBadData; return; }
+
+    BufferID b = NULL;
+    if (bp->allocateProc(4096, &b) != 0 || b == NULL) { *result = bufferBadData; return; }
+    unsigned char *p = (unsigned char *)bp->lockProc(b, 0);
+    if (p == NULL) { *result = bufferBadData; return; }
+    memset(p, 0x5a, 4096);
+    for (int i = 0; i < 4096; i++)
+        if (p[i] != 0x5a) { *result = bufferBadData; return; }
+    bp->unlockProc(b);
+    bp->freeProc(b);
+
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+/* ---- displayPixels ---------------------------------------------------
+ *
+ * Hand the host a pixel map over the input buffer and ask it to draw.
+ * Every FilterMeister-built plug-in refuses to run without this
+ * callback, so a host that means to run real filters has to have it.
+ */
+
+#define displayBadCallback  (-30120)
+#define displayRefused      (-30121)
+#define displayAcceptedJunk (-30122)
+
+EXPORT void entry_display(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    Progress *p = (Progress *)data;
+    *result = 0;
+    if (selector != selectorStart) {
+        if (selector == selectorContinue) {
+            fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+            fr->outRect = fr->inRect;
+        }
+        return;
+    }
+    if (fr->displayPixels == NULL) { *result = displayBadCallback; return; }
+    if (fr->advanceState == NULL) { *result = filterBadParameters; return; }
+
+    p->nextTop = fr->filterRect.top;
+    p->nextLeft = fr->filterRect.left;
+    if (!next_tile(fr, p)) return;
+    OSErr e = fr->advanceState();
+    if (e != 0) { *result = e; return; }
+
+    int planes = fr->inHiPlane - fr->inLoPlane + 1;
+    int w = fr->inRect.right - fr->inRect.left;
+    int h = fr->inRect.bottom - fr->inRect.top;
+    PSPixelMap map;
+    memset(&map, 0, sizeof(map));
+    map.version = 1;
+    map.bounds.top = 0; map.bounds.left = 0;
+    map.bounds.bottom = h; map.bounds.right = w;
+    map.imageMode = fr->imageMode;
+    map.rowBytes = fr->inRowBytes;
+    map.colBytes = planes;
+    map.planeBytes = 1;
+    map.baseAddr = fr->inData;
+    VRect rect; rect.top = 0; rect.left = 0; rect.bottom = h; rect.right = w;
+
+    if (fr->displayPixels(&map, &rect, 0, 0, 0) != 0) { *result = displayRefused; return; }
+
+    /* A mode the host cannot draw must be refused, not drawn wrong. */
+    map.imageMode = 4; /* CMYK */
+    if (fr->displayPixels(&map, &rect, 0, 0, 0) == 0) { *result = displayAcceptedJunk; return; }
+
+    fr->inRect.top = fr->inRect.left = fr->inRect.bottom = fr->inRect.right = 0;
+    fr->outRect = fr->inRect;
+    fr->maskRect = fr->inRect;
+}
+
+/* ---- colorServices ----------------------------------------------------
+ *
+ * Convert a known colour, ask for the foreground, and sample a pixel.
+ * Each has its own failure code so a break says which part broke.
+ */
+
+#define colorNoCallback   (-30130)
+#define colorConvertFail  (-30131)
+#define colorConvertWrong (-30132)
+#define colorSpecialFail  (-30133)
+#define colorSampleFail   (-30134)
+#define colorAcceptedJunk (-30135)
+
+EXPORT void entry_color(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (fr->colorServices == NULL) { *result = colorNoCallback; return; }
+
+    ColorServicesInfo info;
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+
+    /* Pure red to HSB is hue 0, full saturation, full brightness. */
+    info.selector = 1; /* convertColor */
+    info.sourceSpace = 0; /* RGB */
+    info.resultSpace = 1; /* HSB */
+    info.colorComponents[0] = 255;
+    info.colorComponents[1] = 0;
+    info.colorComponents[2] = 0;
+    if (fr->colorServices(&info) != 0) { *result = colorConvertFail; return; }
+    if (info.colorComponents[0] != 0 || info.colorComponents[1] != 255 ||
+        info.colorComponents[2] != 255) { *result = colorConvertWrong; return; }
+
+    /* Foreground, back in RGB. */
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+    info.selector = 3; /* getSpecialColor */
+    info.resultSpace = 0;
+    info.selectorParameter = 0; /* foreground */
+    if (fr->colorServices(&info) != 0) { *result = colorSpecialFail; return; }
+
+    /* The pixel at (1,0), which the test knows the value of. */
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+    info.selector = 2; /* samplePoint */
+    info.resultSpace = 0;
+    Point pt; pt.h = 1; pt.v = 0;
+    info.selectorParameter = (uintptr_t)&pt;
+    if (fr->colorServices(&info) != 0) { *result = colorSampleFail; return; }
+    if (info.colorComponents[0] != 7) { *result = colorSampleFail; return; }
+
+    /* A reserved field left non-null must be refused. */
+    memset(&info, 0, sizeof(info));
+    info.infoSize = (int32_t)sizeof(info);
+    info.selector = 1;
+    info.sourceSpace = 0; info.resultSpace = 4;
+    info.reserved = (void *)fr;
+    if (fr->colorServices(&info) == 0) { *result = colorAcceptedJunk; return; }
+}
+
+/* ---- property suite --------------------------------------------------- */
+
+#define propNoSuite     (-30140)
+#define propBadVersion  (-30141)
+#define propWrongCount  (-30142)
+#define propWrongName   (-30143)
+#define propAcceptedJunk (-30144)
+#define propWatchFailed (-30145)
+
+#define SIG_8BIM 0x3842494DU
+
+EXPORT void entry_property(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+
+    PropertyProcs *pp = fr->propertyProcs;
+    if (pp == NULL || pp->getPropertyProc == NULL || pp->setPropertyProc == NULL) {
+        *result = propNoSuite; return;
+    }
+    if (pp->propertyProcsVersion != 1) { *result = propBadVersion; return; }
+    if (pp->numPropertyProcs < 2) { *result = propBadVersion; return; }
+
+    /* Channel count must agree with what the record already says. */
+    int32_t n = 0;
+    if (pp->getPropertyProc(SIG_8BIM, 0x6E756368 /* nuch */, 0, &n, NULL) != 0) {
+        *result = propNoSuite; return;
+    }
+    if (n != fr->planes) { *result = propWrongCount; return; }
+
+    /* Channel 1 of an RGB document is Green. The string comes back in a
+     * handle with no terminator, so its length is the handle's size. */
+    Handle h = NULL;
+    if (pp->getPropertyProc(SIG_8BIM, 0x6E6D6368 /* nmch */, 1, NULL, &h) != 0 || h == NULL) {
+        *result = propWrongName; return;
+    }
+    int32_t len = fr->handleProcs->getSizeProc(h);
+    const char *name = (const char *)*h;
+    if (len != 5 || memcmp(name, "Green", 5) != 0) { *result = propWrongName; return; }
+    fr->handleProcs->disposeProc(h);
+
+    /* A property the host cannot know must be refused, not guessed. */
+    int32_t junk = 12345;
+    if (pp->getPropertyProc(SIG_8BIM, 0x73737472 /* sstr */, 0, &junk, NULL) == 0) {
+        *result = propAcceptedJunk; return;
+    }
+
+    /* Watch suspension is settable and reads back. */
+    if (pp->setPropertyProc(SIG_8BIM, 0x77746368 /* wtch */, 0, 1, NULL) != 0) {
+        *result = propWatchFailed; return;
+    }
+    int32_t watch = 0;
+    if (pp->getPropertyProc(SIG_8BIM, 0x77746368, 0, &watch, NULL) != 0 || watch != 1) {
+        *result = propWatchFailed; return;
+    }
+}
+
+/* ---- a plug-in that crashes ------------------------------------------
+ *
+ * The reason the plug-in lives in another process. Twenty-year-old
+ * binaries fault; when this one does, Schist should lose a filter and
+ * not a document.
+ */
+EXPORT void entry_crash(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    (void)pb; (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    *(volatile int *)0 = 1;
+}
+
+/* ---- error reporting -------------------------------------------------- */
+
+EXPORT void entry_error_string(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    FilterRecord *fr = (FilterRecord *)pb;
+    (void)data;
+    *result = 0;
+    if (selector != selectorStart) return;
+    if (fr->errorString == NULL) { *result = filterBadParameters; return; }
+    static const char msg[] = "the fixture declined on purpose";
+    unsigned char len = (unsigned char)(sizeof(msg) - 1);
+    fr->errorString[0] = len;
+    memcpy(&fr->errorString[1], msg, len);
+    *result = -30902; /* errReportString, whatever its real value */
+}
+
+EXPORT void entry_fail_midway(int16_t selector, void *pb, intptr_t *data, int16_t *result) {
+    run(selector, (FilterRecord *)pb, data, result, RUN_FAIL);
+}

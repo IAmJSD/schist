@@ -114,6 +114,34 @@ impl AdjustmentKind {
         })
     }
 
+    /// The 4-char PSD block key for this kind, the inverse of
+    /// [`Self::from_psd_key`].
+    pub fn psd_key(&self) -> [u8; 4] {
+        use AdjustmentKind::*;
+        match self {
+            Levels => *b"levl",
+            Curves => *b"curv",
+            HueSaturation => *b"hue2",
+            BrightnessContrast => *b"brit",
+            BlackWhite => *b"blwh",
+            SolidColor => *b"SoCo",
+            GradientFill => *b"GdFl",
+            PatternFill => *b"PtFl",
+            Invert => *b"nvrt",
+            Posterize => *b"post",
+            Threshold => *b"thrs",
+            ColorBalance => *b"blnc",
+            Vibrance => *b"vibA",
+            Exposure => *b"expA",
+            PhotoFilter => *b"phfl",
+            GradientMap => *b"grdm",
+            SelectiveColor => *b"selc",
+            ChannelMixer => *b"mixr",
+            // A kind we do not model, carrying the key it arrived with.
+            Other(key) => *key,
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         use AdjustmentKind::*;
         match self {
@@ -209,6 +237,13 @@ pub struct Layer {
     pub kind: LayerKind,
     /// Preserved PSD blocks (text engine data, effects, smart object refs…).
     pub extras: Vec<RawBlock>,
+    /// The layer's PSD blending-ranges block, verbatim.
+    ///
+    /// Photoshop's "Blend If" sliders live here. The reader skipped the
+    /// block and the writer emitted a zero length, so a file with custom
+    /// ranges lost them on the first save. Nothing in Schist interprets
+    /// them yet; they ride through so the round trip is honest.
+    pub blending_ranges: Vec<u8>,
     /// Layer effects. Empty by default, so a layer costs nothing extra.
     pub style: crate::style::LayerStyle,
     /// Set when this layer is a vector shape: its pixels are generated
@@ -223,6 +258,10 @@ pub struct Layer {
     /// rendered pixels, but they are derived from here and are re-rendered
     /// from the source whenever the transform changes.
     pub smart: Option<Box<crate::smart::SmartObject>>,
+    /// Set when this raster is a development of an original camera capture.
+    /// The pixels are a render cache; Camera Raw can rebuild them from this
+    /// immutable source without compounding earlier adjustments.
+    pub raw: Option<Box<crate::raw::RawDevelopment>>,
     /// The layer's pixels with `style` rasterized around them, rebuilt by
     /// `schist-layer-fx` whenever the pixels or the style change. This
     /// is a derived cache: never saved, never compared, and dropped as
@@ -251,11 +290,13 @@ impl Layer {
             mask: None,
             kind: LayerKind::Raster(RasterLayer::default()),
             extras: Vec::new(),
+            blending_ranges: Vec::new(),
             style: crate::style::LayerStyle::default(),
             shape: None,
             shape_key: 0,
             is_frame: false,
             smart: None,
+            raw: None,
             styled: None,
             render_offset: (0, 0),
         }
@@ -430,6 +471,26 @@ impl LayerTree {
             Some(vec.remove(ix))
         } else {
             None
+        }
+    }
+
+    /// Which layer to select once whatever sat at `path` is gone.
+    ///
+    /// Call it *after* the removal: the sibling below the hole, or the
+    /// layer that fell into it when the hole was at the bottom, or the
+    /// group that held it once it holds nothing else.
+    pub fn neighbour_of(&self, path: &LayerPath) -> Option<LayerId> {
+        let (&ix, parents) = path.0.split_last()?;
+        let mut layers: &[Layer] = &self.layers;
+        let mut parent: Option<&Layer> = None;
+        for &p in parents {
+            let layer = layers.get(p)?;
+            layers = layer.children()?;
+            parent = Some(layer);
+        }
+        match layers.is_empty() {
+            true => parent.map(|l| l.id),
+            false => Some(layers[ix.saturating_sub(1).min(layers.len() - 1)].id),
         }
     }
 

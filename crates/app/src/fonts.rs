@@ -20,7 +20,9 @@
 use schist_core::Document;
 
 /// Where the licence check and the font files come from.
+#[cfg(not(target_arch = "wasm32"))]
 const GF_RAW: &str = "https://raw.githubusercontent.com/google/fonts/main";
+#[cfg(not(target_arch = "wasm32"))]
 const GF_CSS: &str = "https://fonts.googleapis.com/css2";
 
 /// A family the document names that this system does not have.
@@ -76,6 +78,7 @@ fn base_name(family: &str) -> &str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn slug(family: &str) -> String {
     family
         .chars()
@@ -113,6 +116,7 @@ pub fn missing_in(doc: &Document) -> Vec<MissingFont> {
 }
 
 /// One downloaded face: the file name to store it under and its bytes.
+#[cfg(not(target_arch = "wasm32"))]
 pub type Face = (String, Vec<u8>);
 
 /// Fetch the regular and bold faces of a family. Blocking — call it off
@@ -120,6 +124,7 @@ pub type Face = (String, Vec<u8>);
 ///
 /// This and the update check are the only network requests Schist makes,
 /// and both only when the user asks.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_family(family: &str) -> Result<Vec<Face>, String> {
     let licence =
         licence_dir(family).ok_or_else(|| format!("{family} is not in the open font catalogue"))?;
@@ -157,6 +162,7 @@ pub fn fetch_family(family: &str) -> Result<Vec<Face>, String> {
 
 /// The licence directory google/fonts keeps a family in, if any. Its
 /// presence there is the licence check.
+#[cfg(not(target_arch = "wasm32"))]
 fn licence_dir(family: &str) -> Option<&'static str> {
     let slug = slug(family);
     ["ofl", "apache", "ufl"].into_iter().find(|dir| {
@@ -169,6 +175,7 @@ fn licence_dir(family: &str) -> Option<&'static str> {
 }
 
 /// The first `src: url(...)` in a CSS sheet.
+#[cfg(not(target_arch = "wasm32"))]
 fn first_font_url(sheet: &str) -> Option<String> {
     let at = sheet.find("src: url(")? + "src: url(".len();
     let rest = &sheet[at..];
@@ -176,6 +183,7 @@ fn first_font_url(sheet: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get_text(url: &str) -> Result<String, String> {
     ureq::get(url)
         // Without a browser agent the CSS API answers with the legacy
@@ -188,6 +196,7 @@ fn get_text(url: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
     use std::io::Read as _;
     // A font is a few hundred kilobytes; the cap guards against a
@@ -207,6 +216,7 @@ fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
 
 #[cfg(test)]

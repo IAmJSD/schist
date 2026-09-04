@@ -13,6 +13,7 @@
 //! them, which is the inverse of what the reader folds up.
 
 use crate::error::PsdError;
+use crate::PSB_U64_KEYS;
 use schist_color::{ColorMode, Depth};
 use schist_core::{
     Document, IntRect, Layer, LayerKind, LayerMask, MaskTileMap, TileCoord, TileMap, TILE_SIZE,
@@ -62,6 +63,17 @@ pub fn write_psd_with(doc: &Document, psb: bool) -> Result<Vec<u8>, PsdError> {
             doc.width,
             doc.height,
             if psb { "PSB" } else { "PSD" }
+        )));
+    }
+    if let Some(raw) = doc
+        .tree
+        .iter()
+        .filter_map(|layer| layer.raw.as_deref())
+        .find(|raw| raw.source.is_empty() || raw.source.len() > crate::raw::MAX_SOURCE_BYTES)
+    {
+        return Err(PsdError::Unsupported(format!(
+            "camera-raw source of {} bytes cannot be embedded",
+            raw.source.len()
         )));
     }
 
@@ -233,6 +245,8 @@ struct Prepared {
     name: String,
     /// Additional layer info blocks: (key, payload).
     extras: Vec<([u8; 4], Vec<u8>)>,
+    /// The layer's blending-ranges block, verbatim.
+    blending_ranges: Vec<u8>,
 }
 
 struct MaskOut {
@@ -260,6 +274,17 @@ fn write_layer_and_mask_info(b: &mut Buf, doc: &Document, psb: bool) -> Result<(
     let layer_info_at = b.reserve_len(psb);
     // A negative count declares that the merged image's alpha channel is
     // real transparency rather than a spot/alpha channel.
+    //
+    // `prepared` includes two extra records per group, so past 32767
+    // entries this cast wrapped and the file declared a nonsense layer
+    // count. Refuse instead of writing something unreadable.
+    if prepared.len() > i16::MAX as usize {
+        return Err(PsdError::Unsupported(format!(
+            "{} layer records exceeds the {} the format can declare",
+            prepared.len(),
+            i16::MAX
+        )));
+    }
     b.i16(-(prepared.len() as i16));
     for p in &prepared {
         write_layer_record(b, p, psb);
@@ -272,8 +297,47 @@ fn write_layer_and_mask_info(b: &mut Buf, doc: &Document, psb: bool) -> Result<(
     b.pad_to(2);
     b.patch_len(layer_info_at, psb);
 
-    // --- Global layer mask info (none) ---
-    b.u32(0);
+    // --- Global layer mask info ---
+    // Preserved verbatim; a zero length here dropped the block from
+    // every file that had one.
+    b.u32(doc.global_layer_mask.len() as u32);
+    b.bytes(&doc.global_layer_mask);
+
+    // --- Document-level additional layer information ---
+    // Pattern definitions, linked smart objects and the rest, exactly as
+    // they arrived. `Lr16`/`Lr32`/`Layr` are not in here: the layer tree
+    // above is regenerated, so echoing the old copy back would write it
+    // twice. Spec quirk: these pad to 4 bytes, not 2.
+    for block in &doc.preserved_layer_info {
+        // 8B64 marks a block whose length is u64 whatever the key, so a
+        // block that arrived that way has to go back out that way: an
+        // 8B64 block with a key outside `PSB_U64_KEYS` would otherwise be
+        // read as u64 and rewritten as u32, and `as u32` would silently
+        // truncate anything over 4 GiB.
+        let wide =
+            block.data.len() > u32::MAX as usize || (psb && PSB_U64_KEYS.contains(&block.key));
+        b.bytes(if wide && !PSB_U64_KEYS.contains(&block.key) {
+            b"8B64"
+        } else {
+            b"8BIM"
+        });
+        b.bytes(&block.key);
+        if wide {
+            b.u64(block.data.len() as u64);
+        } else {
+            b.u32(block.data.len() as u32);
+        }
+        b.bytes(&block.data);
+        // Pad relative to the payload length, not to the absolute file
+        // offset. `pad_to(4)` disagreed with the reader, which skips
+        // `(4 - len % 4) % 4`, whenever a block did not happen to start
+        // 4-aligned -- which depends on layer name lengths and channel
+        // sizes, so real files hit it constantly and everything after the
+        // first misaligned block was silently dropped.
+        for _ in 0..(4 - block.data.len() % 4) % 4 {
+            b.u8(0);
+        }
+    }
     b.patch_len(section_at, psb);
     Ok(())
 }
@@ -310,8 +374,10 @@ fn write_layer_record(b: &mut Buf, p: &Prepared, psb: bool) {
         }
         None => b.u32(0),
     }
-    // Layer blending ranges: regenerated as "none".
-    b.u32(0);
+    // Layer blending ranges, verbatim. Emitting a zero length here lost
+    // any "Blend If" the file arrived with.
+    b.u32(p.blending_ranges.len() as u32);
+    b.bytes(&p.blending_ranges);
     b.pascal(&p.name, 4);
     for (key, payload) in &p.extras {
         b.bytes(b"8BIM");
@@ -346,6 +412,7 @@ fn prepare_entry(entry: &Entry<'_>, doc: &Document, psb: bool) -> Result<Prepare
             mask: None,
             name: "</Layer group>".into(),
             extras: vec![(*b"lsct", lsct_payload(3, None))],
+            blending_ranges: Vec::new(),
         }),
         Entry::GroupHeader(layer, open) => {
             let mut p = prepare_common(layer, doc, psb, empty_channels(doc), IntRect::EMPTY);
@@ -368,8 +435,8 @@ fn prepare_entry(entry: &Entry<'_>, doc: &Document, psb: bool) -> Result<Prepare
                         (bounds, encode_color_channels(&r.tiles, bounds, doc, psb))
                     }
                 }
-                // Adjustment layers carry no pixels; their parameters ride
-                // along in `extras` (preserved verbatim by the reader).
+                // Adjustment layers carry no pixels; their parameters are
+                // written as a settings block by `build_extras`.
                 _ => (IntRect::EMPTY, empty_channels(doc)),
             };
             Ok(prepare_common(layer, doc, psb, channels, bounds))
@@ -409,12 +476,23 @@ fn prepare_common(
         mask,
         name: layer.name.clone(),
         extras: build_extras(layer, doc),
+        blending_ranges: layer.blending_ranges.clone(),
     }
 }
 
 /// Preserved blocks plus a regenerated unicode name.
 fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
     let mut out = vec![(*b"luni", unicode_name_payload(&layer.name))];
+    // An adjustment layer's settings live in its own block. Layers created
+    // in Schist carry them only in `params_json`, which no PSD reader
+    // understands, so without re-encoding here the layer was written as an
+    // empty raster and every adjustment the user made was lost on save.
+    // A preserved block is stale once the parameters have been edited, so
+    // the encoded form wins and the old one is dropped below.
+    let adjustment = match &layer.kind {
+        LayerKind::Adjustment(data) => encode_adjustment(data),
+        _ => None,
+    };
     // Effects are re-encoded from the layer's own style, so any preserved
     // block is stale by definition. 'lrFX' is the pre-CS legacy form,
     // which we never write.
@@ -429,16 +507,72 @@ fn build_extras(layer: &Layer, doc: &Document) -> Vec<([u8; 4], Vec<u8>)> {
         if &block.key == b"lfx2" || &block.key == b"lrFX" {
             continue;
         }
+        // Regenerated from `Layer::smart` below.
+        if block.key == crate::smart::SMART_BLOCK_KEY {
+            continue;
+        }
+        // Regenerated from `Layer::raw` below. Keeping an old copy would
+        // resurrect stale settings after the layer was edited.
+        if block.key == crate::raw::RAW_BLOCK_KEY {
+            continue;
+        }
+        // Fill opacity is regenerated from the layer below, so a
+        // preserved copy is stale: echoing it back wrote the file's
+        // original value over whatever the user set in Schist.
+        if &block.key == b"iOpa" {
+            continue;
+        }
         if vector && (&block.key == b"vmsk" || &block.key == b"vsms" || &block.key == b"SoCo") {
             continue;
         }
+        // Drop the stale settings block when we have re-encoded it.
+        if let Some((key, _)) = &adjustment {
+            if &block.key == key {
+                continue;
+            }
+        }
         out.push((block.key, block.data.clone()));
+    }
+    if let Some(entry) = adjustment {
+        out.push(entry);
     }
     if let Some(payload) = encoded {
         out.push((*b"lfx2", payload));
     }
+    // The smart object's source pixels. Photoshop's own `SoLd`/`PlLd`
+    // descriptors point at pixels held elsewhere in the file, which we
+    // preserve but do not author; this is our own block, ignored by
+    // readers that do not know it.
+    if let Some(payload) = crate::smart::write_smart(layer) {
+        out.push((crate::smart::SMART_BLOCK_KEY, payload));
+    }
+    // The immutable camera capture and its editable development settings.
+    // Other PSD readers ignore this private block and use the raster pixels.
+    if let Some(payload) = crate::raw::write_raw(layer) {
+        out.push((crate::raw::RAW_BLOCK_KEY, payload));
+    }
+    // 'iOpa' is one byte of fill opacity plus three of padding. Photoshop
+    // omits the block at 100%, which is what a reader assumes when it is
+    // absent, so only write it when it says something.
+    let fill = (layer.fill_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if fill != 255 {
+        out.push((*b"iOpa", vec![fill, 0, 0, 0]));
+    }
     out.extend(shape_blocks(layer, doc));
     out
+}
+
+/// The settings block for an adjustment layer, preferring the live
+/// parameters over whatever the file arrived with.
+///
+/// Returns `None` when the parameters cannot be encoded, so the caller
+/// keeps the preserved bytes rather than writing a block that would be
+/// read back as something else.
+fn encode_adjustment(data: &schist_core::AdjustmentData) -> Option<([u8; 4], Vec<u8>)> {
+    let json = data.params_json.as_deref()?;
+    let params: schist_adjustments::Params = serde_json::from_str(json).ok()?;
+    let payload = schist_adjustments::encode_psd(data.kind, &params)?;
+    Some((data.kind.psd_key(), payload))
 }
 
 /// Vector mask and fill blocks for a shape layer, so the shape survives as

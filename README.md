@@ -25,13 +25,37 @@ sudo apt-get install build-essential pkg-config libfontconfig-dev \
 cargo run --release -p schist-app -- [file.psd|file.png|…]
 ```
 
-`cargo test --workspace` runs everything. Packaging scripts for macOS,
+Those are the packages to *build* against. Running also needs a Vulkan
+**driver** installed — GPUI renders through it, and the loader above is
+only the part that finds one. On Debian and Fedora that is
+`mesa-vulkan-drivers`; on Arch it is `vulkan-driver` (any of
+`vulkan-radeon`, `vulkan-intel`, `nvidia-utils`, …), or `vulkan-swrast`
+on a virtual machine with no GPU driver of its own. With no driver
+installed Schist stops at startup and says which package is missing.
+
+Schist also runs in the browser: `make web` assembles a static
+deployment (WebGPU, chunked wasm, a loading page) into `dist/web/` —
+see [docs/web.md](docs/web.md) for what's included and what isn't.
+
+`cargo test --workspace` runs everything. `make helpers` cross-compiles
+the Photoshop plug-in helpers, which are separate binaries for the
+architectures a `.8bf` plug-in might be built for — see
+[docs/8bf-host.md](docs/8bf-host.md#building-the-helpers). Packaging scripts for macOS,
 Windows and Linux live in [packaging/](packaging); tagging `vX.Y.Z` builds
 them all in CI, signing and notarizing the macOS bundle when the
 [signing secrets](docs/versioning.md#signing-secrets) are set. All three
 register `.psd`, `.psb`, `.afphoto`, `.afdesign`, `.afpub` and `.af` as
 openable, never as the default handler: an installed Schist joins the
 "Open with" menu rather than taking files off Photoshop or Affinity.
+
+On macOS the bundle also carries two Quick Look app extensions, so
+Finder draws real thumbnails for those files and the space bar opens a
+real preview of them — layers, masks, blend modes and effects composited
+by Schist itself, or the writing app's own embedded preview when that is
+already big enough for the size asked for. Nothing needs enabling: the
+extensions register when the app is first opened, and
+`schist-quicklook --render file.afphoto out.png` shows what Quick Look
+would show. See [docs/quicklook.md](docs/quicklook.md).
 
 The logo is generated, not drawn: [`tools/logo.py`](tools/logo.py) holds the
 geometry and `python3 tools/logo.py` re-emits the SVGs and every `.icns`,
@@ -46,12 +70,25 @@ all 27 blend modes, adjustment layers, layer effects, vector shapes,
 channels. Every block Schist doesn't understand is preserved
 byte-for-byte, so a round trip never loses work. **Smart objects** keep
 their source pixels, so transforming one repeatedly costs no more quality
-than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos).
-HEIC decodes through libheif loaded at runtime: the system's copy if
-installed, otherwise Schist offers to download a hash-pinned,
-decode-only build (with its LGPL license texts) from
-[libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) — nothing
-links at build time and the build stays pure Rust. Affinity files
+than transforming it once. Also PNG, JPEG, WebP and TIFF, plus HEIC/HEIF import (iPhone photos)
+and camera raw import: NEF, ARW, CR2, DNG, RAF, ORF, RW2, PEF, SRW and the
+rest. A capture opens in Camera Raw with sensor-domain white balance and
+exposure, live fast-demosaic previews and a best-quality render on Apply;
+the original capture and all 15 development settings stay attached to the
+layer and survive PSD/PSB save and reopen, so adjustments never compound on
+the previously developed pixels. The rendered document remains 16-bit sRGB. Raws
+decode through Schist's own clean-room `schist-codec-raw` crate (pure
+Rust, written from the public specifications and verified sample for
+sample against LibRaw across some 250 camera files), covering every
+vendor's codecs including Canon's CR3 and sRAW, Fuji's compressed RAF and
+SuperCCD, Sigma's Foveon and GoPro's VC-5; nothing links at build time
+and there is no fallback library to install, on the desktop or in the
+browser. The one thing it refuses is Nikon's licensed High Efficiency
+NEF, which no decoder reads without the vendor's SDK. HEIC decodes through libheif the
+same way: the system's copy if installed, otherwise Schist offers to
+download a hash-pinned, decode-only build (with its LGPL license texts)
+from [libheif-prebuilt](https://github.com/IAmJSD/libheif-prebuilt) —
+nothing links at build time and the build stays pure Rust. Affinity files
 (`.af`/`.afphoto`/`.afdesign`/`.afpub` — Affinity 1, 2 and the unified Canva-era format) open through a
 natively reverse-engineered reader
 ([docs/affinity-format.md](docs/affinity-format.md)): pixel layers,
@@ -73,17 +110,26 @@ pixels for now.
 
 **Selecting.** Rectangular and elliptical marquee; free, polygonal and
 magnetic lassos; magic wand with tolerance and contiguity; quick selection
-that grows to match what you paint over; object selection that finds a
-subject inside a drawn box. Then Modify (expand, contract, border, smooth,
-feather), Grow, Similar, Colour Range, and save/load. Marching ants trace
-the selection's real boundary — holes and all.
+that grows to match what you paint over; object selection that runs a
+segmentation network — U^2-Net, from Filter ▸ Neural Filters ▸ Manage
+Models — over the box you drew and cuts round what it finds, settling the
+boundary against the picture's own colours, and falls back to reading the
+box's border as background when there is no model or nothing in the box.
+Then Modify (expand, contract, border, smooth, feather), Grow, Similar,
+Colour Range, and save/load. Marching ants trace the selection's real
+boundary — holes and all.
 
 **Painting and retouching.** Brush, pencil, eraser, background eraser,
 magic eraser, clone stamp, history brush, gradient, paint bucket,
 dodge/burn/sponge, blur, sharpen, smudge; spot healing and healing brushes,
 patch, content-aware move and red eye. Healing takes texture from the
 source and colour from around the edge, so patching a blemish gives you
-skin rather than a blurred blemish.
+skin rather than a blurred blemish. Content-Aware Fill is a network and
+a patch search working together — the network, trained here and shipped
+in the binary, says what should be behind the hole, and the search finds
+that in the photograph and copies it in, so what lands there is real
+texture arranged the right way rather than either one's idea of an
+average.
 
 **Vector.** Pen, freeform pen and curvature pen draw paths that are
 *stored*, so Path Selection and Direct Selection can edit them and Layer ▸
@@ -105,11 +151,39 @@ glow, satin, colour overlay, gradient overlay, outer glow and drop shadow,
 with Photoshop's Fill-vs-Opacity semantics so "Fill 0% plus a drop shadow"
 does what you expect.
 
-**Filters.** Fifty-seven across ten categories — Blur, Distort, Noise,
-Pixelate, Render, Sharpen, Stylize, Other, Camera Raw and Neural Filters
-— all previewing live on the canvas inside the selection, with Cancel
-restoring exactly. The **Filter Gallery** stacks several and previews the
-result of the lot.
+**Filters.** A hundred and thirty-four, which is Photoshop's Filter menu
+with nothing left out: 3D, Artistic, Blur, Blur Gallery, Brush Strokes,
+Distort, Noise, Pixelate, Render, Sharpen, Sketch, Stylize, Texture,
+Video, Other, Camera Raw and Neural Filters, plus Lens Correction and
+Adaptive Wide Angle. All preview live on the canvas inside the selection,
+with Cancel restoring exactly. The count includes the forty-six effects
+Photoshop keeps *inside* the Filter Gallery — Watercolor, Sumi-e, Chrome,
+Stained Glass, Craquelure and the rest — which are ordinary filters here
+too, so each can be run from the menu on its own or stacked in the
+**Filter Gallery**, which previews the result of the lot.
+
+Their dialogs match as well, which is most of what makes a filter feel
+like the one you know: Mezzotint's ten screens, Lens Blur's iris shapes,
+Smart Sharpen's choice of which blur it is undoing, Wave's several
+generators, Diffuse's anisotropic mode, Extrude's pyramids, Wind's blast
+and stagger.
+
+And they read the same things Photoshop's read. The Sketch group draws in
+the **foreground and background colours**, as do Clouds, Fibers, Tiles,
+Neon Glow, Colored Pencil's paper and Diffuse Glow's glow — set the
+swatches to sepia and Stamp comes out as a sepia print. **Displace**
+warps through a map you pick from a file, red for horizontal and green
+for vertical, stretched or tiled. **Flame** burns along the active path
+when the document has one. **Lens Blur** can take its depth from the
+layer's transparency or from what is underneath it, so part of the
+picture stays sharp. Harmonization, Colour Transfer and Landscape Mixer
+match against the layer below. Everything a filter needs beyond its own
+pixels is gathered by the host and handed over, which is what
+`FilterPlugin::wants_map`, `wants_path` and `wants_backdrop` are for.
+
+What is left is ergonomic rather than functional: Photoshop puts blur
+pins, light gizmos and flame paths on the canvas, and here they are
+position sliders and the path you already drew.
 
 **Warping.** Liquify with all seven brushes, Puppet Warp (Moving Least
 Squares, so pins hold and nothing shears), Content-Aware Scale (seam
@@ -204,30 +278,6 @@ Remap anything in `~/.config/schist/keymap.json`:
 
 ## Not there yet
 
-- **Tablet pressure has never met a tablet.** The pipeline carries
-  pressure end to end and all four backends now feed it — macOS
-  (`NSEvent`), X11 (the XInput2 pressure valuator), Windows (pen pointer
-  messages) and Wayland (`zwp_tablet_v2`) — but every one of those paths
-  was written against the platform documentation rather than a physical
-  stylus. Wayland is the one to be most suspicious of: tablet input there
-  is a protocol of its own rather than an axis on the pointer, so binding
-  it means synthesising the whole mouse event stream from the tool, tip
-  and barrel buttons included. Reports from real hardware welcome.
-- **Only two Neural Filters run a network.** Super Zoom uses a small
-  residual CNN trained for this application (`tools/train/detail.py`,
-  39k parameters and 153 KB, shipped in the binary); Style Transfer uses
-  the fast neural-style networks from the ONNX Model Zoo, downloaded on demand
-  from Filter ▸ Neural Filters ▸ Manage Models. Inference is
-  [`tract`](https://github.com/sonos/tract) — pure Rust, nothing to
-  install. The rest are signal processing: Skin Smoothing does not know
-  what a face is, it does frequency separation on pixels whose colour
-  falls in the skin-tone range. Each filter says in its own dialog which
-  path it took, and the model-backed ones fall back to the classical one
-  rather than failing.
-- **Object Selection and Content-Aware Fill are heuristics**, not the
-  models Photoshop uses — background sampling and diffusion inpainting
-  respectively. They degrade predictably (blurry over texture) rather
-  than mysteriously.
 - **CMYK and Lab edit in RGB.** Files open, edit and save in their own
   mode, converting at the boundaries; the editing in between is RGB, so
   individual ink channels are not separately editable.
@@ -241,6 +291,25 @@ Remap anything in `~/.config/schist/keymap.json`:
   in the gigabytes and never reach it. The carve also stays on the CPU
   below a couple of megapixels, where its row-by-row scan costs more in
   dispatches than it saves.
+
+## Diagnostics
+
+Schist does not phone home. There are three things it can send over the
+network and each is off until you turn it on: **Check for Updates**, the
+on-demand font and model downloads, and crash reporting.
+
+Crash reporting is two separate ticks in **Preferences ▸ Diagnostics**.
+The first writes a report next to the crash-recovery snapshot in
+`~/.local/state/schist/crashes/` and sends nothing anywhere. The second
+also uploads it to the project's Sentry, and only appears on the official
+releases — a build from source is given no DSN, so the code that would
+report has nowhere to report to and never starts. Uploads carry no
+personal data, no hostname and no breadcrumbs, and the panic message has
+your home directory rewritten to `~` before it leaves, because a panic
+tends to quote the path it choked on and that path is your work.
+
+Set `SCHIST_CRASH_REPORTS=1` or `SCHIST_CRASH_UPLOAD=1` to turn either on
+for a single run without changing preferences.
 
 ## Plugins
 
@@ -266,14 +335,24 @@ and a format example: [docs/plugin-guide.md](docs/plugin-guide.md).
 
 `schist-mcp` is a [Model Context
 Protocol](https://modelcontextprotocol.io) server that drives Schist
-headless — sessions instead of windows, with every tool, command, filter
-and codec reachable through the same registry the app uses, plus inline
-PNG rendering. It ships with every release; `cargo build --release -p
+headless — sessions instead of windows. Every canvas tool, menu command,
+filter and adjustment in the registry the app uses is published as its
+own MCP tool, with its own parameters described, plus inline PNG
+rendering. It ships with every release; `cargo build --release -p
 schist-mcp` builds it from source. See [docs/mcp.md](docs/mcp.md).
+
+The same tool surface also powers the in-app **AI panel** (View ▸ AI
+Panel): a sidebar that drives your installed `claude` or `codex` CLI
+against the document you have open, edits streaming onto the canvas as
+undoable history entries. No API keys — it uses the agent CLI you are
+already logged into. See [docs/ai-panel.md](docs/ai-panel.md).
 
 ## Documentation
 
 * [docs/architecture.md](docs/architecture.md) — how the pieces fit
+* [docs/gallery.md](docs/gallery.md) — the Picasa-style photo gallery
 * [docs/plugin-guide.md](docs/plugin-guide.md) — writing plugins
 * [docs/mcp.md](docs/mcp.md) — the MCP server
+* [docs/ai-panel.md](docs/ai-panel.md) — the in-app AI sidebar
+* [docs/quicklook.md](docs/quicklook.md) — the macOS Quick Look extensions
 * [docs/versioning.md](docs/versioning.md) — compatibility and releases

@@ -1,6 +1,27 @@
 //! The built-in model has to load, run, and actually help.
 
-use schist_neural as neural;
+use schist_neural::{self as neural, Input};
+
+/// Serialises the test that repoints the model directory against the two
+/// that read it.
+///
+/// `SCHIST_MODEL_DIR` is process-wide and the test harness runs these on
+/// threads, so without this the install test can move the directory out
+/// from under a model that another test has already decided is
+/// installed -- which fails, rarely, and only under load.
+fn model_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The tile a tiled model works in, for a test that needs to line up with
+/// it.
+fn tiling(model: &neural::Model) -> (usize, usize) {
+    match model.spec.input {
+        Input::Tiles { size, overlap, .. } => (size, overlap),
+        other => panic!("{} is {other:?}, not tiled", model.spec.id),
+    }
+}
 
 /// A test image with photograph-like statistics: a multi-octave noise
 /// field with roughly a 1/f spectrum, plus hard-edged shapes over it.
@@ -154,7 +175,7 @@ fn the_built_in_model_is_always_available() {
 #[test]
 fn a_tile_runs_and_stays_in_range() {
     let model = neural::get("detail").expect("model");
-    let t = model.spec.tile;
+    let (t, _) = tiling(&model);
     let out = model.run_tile(&photo_like(t, t)).expect("runs");
     assert_eq!(out.len(), t * t * 3);
     for (i, v) in out.iter().enumerate() {
@@ -205,7 +226,7 @@ fn tiling_leaves_no_seams() {
         .collect();
     let mut out = flat.clone();
     let model = neural::get("detail").expect("model");
-    let tile = model.spec.tile;
+    let (tile, overlap) = tiling(&model);
     neural::run_tiled(&model, &mut out, w, h, 1.0);
 
     let column_step = |x: usize| -> f32 {
@@ -218,7 +239,7 @@ fn tiling_leaves_no_seams() {
             .sum::<f32>()
             / h as f32
     };
-    let step = tile - model.spec.overlap * 2;
+    let step = tile - overlap * 2;
     let mut worst_seam = 0.0f32;
     let mut x = step;
     while x < w {
@@ -269,12 +290,16 @@ fn a_corrupt_model_is_rejected() {
 
 #[test]
 fn install_checks_the_hash() {
+    let _guard = model_dir_lock();
     let dir = std::env::temp_dir().join(format!("schist-model-test-{}", std::process::id()));
-    // SAFETY: single-threaded test setup, before any model is loaded.
+    // SAFETY: no other test reads the model directory while the lock is
+    // held, and it is put back before the lock is released.
     unsafe { std::env::set_var("SCHIST_MODEL_DIR", &dir) };
     let mut spec = neural::spec("style-mosaic").expect("catalogued").clone();
     spec.sha256 = Some("0000000000000000000000000000000000000000000000000000000000000000");
     let err = neural::install(&spec, b"whatever").unwrap_err().to_string();
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("SCHIST_MODEL_DIR") };
     assert!(err.contains("checksum"), "unexpected error: {err}");
     assert!(!dir.join(spec.file).exists(), "a bad download was kept");
     let _ = std::fs::remove_dir_all(&dir);
@@ -292,7 +317,11 @@ const OPSET9: &[u8] = include_bytes!("fixtures/opset9.onnx");
 #[test]
 fn a_pre_opset_10_graph_is_rewritten_and_runs() {
     let mut spec = neural::spec("detail").expect("catalogued").clone();
-    spec.tile = 8;
+    spec.input = Input::Tiles {
+        size: 8,
+        overlap: 0,
+        scale: 1,
+    };
     spec.range = neural::Range::Unit;
     let spec: &'static neural::ModelSpec = Box::leak(Box::new(spec));
 
@@ -318,4 +347,458 @@ fn a_pre_opset_10_graph_is_rewritten_and_runs() {
             }
         }
     }
+}
+
+#[test]
+fn every_built_in_model_loads() {
+    // The catalogue and the binary have to agree: a spec with no URL is
+    // a promise that the bytes are compiled in.
+    for spec in neural::CATALOG.iter().filter(|s| s.built_in()) {
+        assert!(neural::installed(spec.id), "{} is not installed", spec.id);
+        assert!(
+            neural::get(spec.id).is_some(),
+            "{} did not load from the binary",
+            spec.id
+        );
+    }
+}
+
+/// The same 128x128 photograph, through JPEG at quality 20. Made with
+/// Pillow -- `Image.fromarray(photo).save(buf, "JPEG", quality=20)` --
+/// and stored decoded, so the test needs no JPEG decoder to reproduce
+/// what the filter is pointed at.
+const JPEG: &[u8] = include_bytes!("fixtures/photo-q20.rgb");
+
+#[test]
+fn the_deblocker_undoes_some_of_a_jpeg() {
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let squashed: Vec<f32> = JPEG.iter().map(|&b| b as f32 / 255.0).collect();
+    let mut cleaned = squashed.clone();
+    let model = neural::get("dejpeg").expect("model");
+    neural::run_tiled(&model, &mut cleaned, w, h, 1.0);
+
+    let before = psnr(&squashed, &truth);
+    let after = psnr(&cleaned, &truth);
+    assert!(
+        after > before,
+        "the model made it worse: {before:.2} dB -> {after:.2} dB"
+    );
+    println!(
+        "jpeg {before:.2} dB -> model {after:.2} dB (+{:.2})",
+        after - before
+    );
+}
+
+/// Box-halve an image, the degradation the upscaler is asked to undo.
+fn halve(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut small = vec![0.0f32; hw * hh * 3];
+    for y in 0..hh {
+        for x in 0..hw {
+            for c in 0..3 {
+                let mut acc = 0.0;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        acc += src[((y * 2 + dy) * w + x * 2 + dx) * 3 + c];
+                    }
+                }
+                small[(y * hw + x) * 3 + c] = acc / 4.0;
+            }
+        }
+    }
+    small
+}
+
+#[test]
+fn waifu2x_doubles_a_photograph_better_than_interpolation() {
+    // Halve the photograph and ask for it back at size. The claim the
+    // model earns its megabytes with is beating the classical upscale,
+    // so that -- `degrade`, which is the same halving followed by a
+    // bilinear return trip -- is the bar, not merely "ran".
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let small = halve(&truth, w, h);
+    let model = neural::get("waifu2x-photo").expect("model");
+    let doubled = neural::run_scaled(&model, &small, w / 2, h / 2).expect("runs");
+
+    assert_eq!(doubled.len(), w * h * 3);
+    assert!(doubled.iter().all(|v| (0.0..=1.0).contains(v)));
+    let bilinear = degrade(&truth, w, h);
+    let (base, ours) = (psnr(&bilinear, &truth), psnr(&doubled, &truth));
+    println!(
+        "bilinear {base:.2} dB -> waifu2x {ours:.2} dB (+{:.2})",
+        ours - base
+    );
+    assert!(
+        ours > base,
+        "the model lost to bilinear: {base:.2} dB -> {ours:.2} dB"
+    );
+}
+
+#[test]
+fn waifu2x_handles_odd_sizes_and_tiny_images() {
+    let model = neural::get("waifu2x-art").expect("model");
+    for (w, h) in [(1usize, 1usize), (5, 5), (131, 3)] {
+        let px = photo_like(w, h);
+        let out = neural::run_scaled(&model, &px, w, h).expect("runs");
+        assert_eq!(out.len(), w * 2 * h * 2 * 3, "{w}x{h}");
+        assert!(out.iter().all(|v| v.is_finite()), "{w}x{h} produced NaN");
+    }
+}
+
+/// Luminance, the way the filters and the training script both compute
+/// it.
+fn grey_of(rgb: &[f32]) -> Vec<f32> {
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|p| {
+            let y = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+            [y, y, y]
+        })
+        .collect()
+}
+
+#[test]
+fn colour_is_put_back_into_a_photograph_that_lost_it() {
+    // Take the colour out of a photograph the model has never seen and
+    // ask for it back.
+    //
+    // What is checked is *correlation*, not error. A colouriser that
+    // hedges -- predicting a faint brown everywhere, which is what a
+    // network trained to minimise error does -- scores better on error
+    // than one that commits, because the average photograph is not very
+    // colourful and being timid is never very wrong. It also looks
+    // obviously broken. So: does the colour it invents go up where the
+    // real colour goes up, and does it use about as much of it as the
+    // photograph did?
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let grey = grey_of(&truth);
+    let model = neural::get("colorize").expect("model");
+    let predicted = neural::chroma(&model, &grey, w, h).expect("runs");
+    assert_eq!(predicted.len(), w * h * 2);
+    assert!(predicted.iter().all(|v| v.is_finite()));
+
+    let real = chroma_of(&truth);
+    let r = correlation(&predicted, &real);
+    let ours: f32 = predicted.iter().map(|v| v.abs()).sum::<f32>() / predicted.len() as f32;
+    let theirs: f32 = real.iter().map(|v| v.abs()).sum::<f32>() / real.len() as f32;
+    println!(
+        "chroma correlation {r:.3}, colourfulness {:.2}x",
+        ours / theirs
+    );
+    assert!(
+        r > 0.25,
+        "the colour it chose has nothing to do with the photograph: {r:.3}"
+    );
+    // A wide band on purpose. Over 200 held-out photographs this model
+    // averages 1.1x, but this is one 128-pixel crop of a very colourful
+    // bird, and being twice as bold as one crop is not a defect -- being
+    // grey, or being ten times as bold, would be.
+    assert!(
+        (0.4..3.0).contains(&(ours / theirs)),
+        "colourfulness {:.2} of the real thing",
+        ours / theirs
+    );
+
+    // And recombining has to leave the luminance exactly where it was,
+    // wherever the colour asked for is one the RGB cube can hold at that
+    // brightness. Where it cannot, the answer is clipped, which moves the
+    // luminance -- that is the one thing allowed to.
+    let mut checked = 0;
+    for (i, p) in grey.as_chunks::<3>().0.iter().enumerate() {
+        let (ca, cb) = (predicted[i * 2], predicted[i * 2 + 1]);
+        let before = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        let (r, b) = (before + ca, before + cb);
+        let g = (before - 0.299 * r - 0.114 * b) / 0.587;
+        if [r, g, b].iter().any(|v| !(0.0..=1.0).contains(v)) {
+            continue;
+        }
+        let out = neural::recolour(p, [ca, cb]);
+        let after = 0.299 * out[0] + 0.587 * out[1] + 0.114 * out[2];
+        assert!(
+            (after - before).abs() < 1e-4,
+            "pixel {i}: {before} -> {after}"
+        );
+        checked += 1;
+    }
+    assert!(checked > w * h / 2, "only {checked} pixels fitted the cube");
+}
+
+/// The chroma of an image: `R - Y` then `B - Y`, two floats a pixel.
+fn chroma_of(rgb: &[f32]) -> Vec<f32> {
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|p| {
+            let y = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+            [p[0] - y, p[2] - y]
+        })
+        .collect()
+}
+
+/// Pearson correlation, over both chroma channels at once.
+fn correlation(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut cov, mut va, mut vb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        cov += (x - ma) * (y - mb);
+        va += (x - ma) * (x - ma);
+        vb += (y - mb) * (y - mb);
+    }
+    cov / (va.sqrt() * vb.sqrt()).max(1e-9)
+}
+
+#[test]
+fn depth_comes_back_as_a_map_of_the_image() {
+    // Downloaded rather than built in, so this is a no-op on a machine
+    // that has not fetched it -- including CI.
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("depth") else {
+        eprintln!("skipping: the depth model is not installed");
+        return;
+    };
+    let (w, h) = (128usize, 128usize);
+    let photo: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let map = neural::depth_map(&model, &photo, w, h).expect("runs");
+
+    assert_eq!(map.len(), w * h);
+    assert!(map.iter().all(|v| (0.0..=1.0).contains(v)), "out of range");
+    // Normalised over its own range, so both ends have to be reached.
+    let lo = map.iter().cloned().fold(f32::INFINITY, f32::min);
+    let hi = map.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    assert!(lo < 0.01 && hi > 0.99, "not normalised: {lo}..{hi}");
+    // Depth is a property of the scene, not of the texture on it, so
+    // neighbouring pixels are nearly always at nearly the same distance.
+    let step: f32 = (0..h)
+        .flat_map(|y| (1..w).map(move |x| (y, x)))
+        .map(|(y, x)| (map[y * w + x] - map[y * w + x - 1]).abs())
+        .sum::<f32>()
+        / ((w - 1) * h) as f32;
+    assert!(step < 0.05, "the map is not smooth: mean step {step:.4}");
+}
+
+#[test]
+fn the_face_detector_finds_no_faces_in_a_photograph_with_none() {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("face") else {
+        eprintln!("skipping: the face model is not installed");
+        return;
+    };
+    let (w, h) = (128usize, 128usize);
+    let photo: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    // A false positive here is the failure that matters: Skin Smoothing
+    // gates on this, and a detector that sees a face in foliage would
+    // smooth the foliage.
+    let found = neural::faces(&model, &photo, w, h).expect("runs");
+    assert!(
+        found.is_empty(),
+        "invented {} faces: {found:?}",
+        found.len()
+    );
+
+    // Flat grey is not a photograph at all, and must not crash or find
+    // anything either.
+    let flat = vec![0.5f32; w * h * 3];
+    assert!(neural::faces(&model, &flat, w, h).expect("runs").is_empty());
+}
+
+#[test]
+fn the_portrait_model_fills_a_sketch_back_in() {
+    // The network is trained to invert Photo to Sketch, so the check is
+    // the round trip: sketch a photograph the way the filter does, hand
+    // the sketch back, and see how much of the photograph returns.
+    //
+    // This is also what pins the two together. If the filter's sketch
+    // operator is ever changed without retraining the network against
+    // the new one, the reconstruction gets worse and this fails, which
+    // is the only warning anybody would get.
+    let (w, h) = (128usize, 128usize);
+    let truth: Vec<f32> = PHOTO.iter().map(|&b| b as f32 / 255.0).collect();
+    let sketch = sketch_of(&truth, w, h);
+    let model = neural::get("portrait").expect("model");
+    let filled = neural::run_framed(&model, &sketch, w, h).expect("runs");
+
+    assert_eq!(filled.len(), w * h * 3);
+    assert!(filled.iter().all(|v| (0.0..=1.0).contains(v)));
+    // Closer to the photograph than the sketch was, which is the whole
+    // claim and is not something an untrained network manages: filling
+    // a drawing in with the wrong tones scores worse than leaving it
+    // white.
+    let error = |px: &[f32]| {
+        px.iter()
+            .zip(&truth)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / px.len() as f32
+    };
+    let (before, after) = (error(&sketch), error(&filled));
+    println!("error against the photograph: sketch {before:.4} -> filled {after:.4}");
+    // The shipped model comes in around a third of the sketch's error;
+    // half is loose enough not to be brittle and tight enough that a
+    // model that had stopped learning could not pass.
+    assert!(
+        after < before * 0.5,
+        "the sketch did not come back as a photograph: {before:.4} -> {after:.4}"
+    );
+}
+
+/// Photo to Sketch, as the filter does it -- the operator the portrait
+/// model was trained to invert.
+fn sketch_of(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let plane: Vec<f32> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2])
+        .collect();
+    // A box blur of the inverted plane, twice, which is close enough to
+    // the Gaussian the filter uses for the network to recognise it.
+    let mut soft: Vec<f32> = plane.iter().map(|l| 1.0 - l).collect();
+    for _ in 0..2 {
+        let src = soft.clone();
+        let r = 4i32;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let (mut sum, mut n) = (0.0f32, 0.0f32);
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let sx = (x + dx).clamp(0, w as i32 - 1) as usize;
+                        let sy = (y + dy).clamp(0, h as i32 - 1) as usize;
+                        sum += src[sy * w + sx];
+                        n += 1.0;
+                    }
+                }
+                soft[y as usize * w + x as usize] = sum / n;
+            }
+        }
+    }
+    let mut out = vec![0.0f32; w * h * 3];
+    for i in 0..w * h {
+        let dodge = (plane[i] / (1.0 - soft[i]).max(1e-3)).min(1.0);
+        let line = 1.0 - ((1.0 - dodge) * 2.0).min(1.0);
+        let v = (line - (1.0 - plane[i]) * 0.24).clamp(0.0, 1.0);
+        out[i * 3..i * 3 + 3].copy_from_slice(&[v, v, v]);
+    }
+    out
+}
+
+#[test]
+fn the_segmentation_model_cuts_round_a_subject() {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("segment") else {
+        eprintln!("skipping: the segmentation model is not installed");
+        return;
+    };
+    // One object on one background is the whole question the network was
+    // trained to answer, so a disc on a field is a fair -- if easy --
+    // statement of it, and it needs no photograph in the repository.
+    let (w, h) = (320usize, 240usize);
+    let (cx, cy, radius) = (160.0f32, 120.0, 70.0);
+    let mut rgb = vec![0.35f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            if (x as f32 - cx).hypot(y as f32 - cy) < radius {
+                rgb[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&[0.85, 0.15, 0.1]);
+            }
+        }
+    }
+    let map = neural::segment(&model, &rgb, w, h).expect("runs");
+    assert_eq!(map.len(), w * h);
+    let (mut hit, mut miss, mut area) = (0usize, 0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            let inside = (x as f32 - cx).hypot(y as f32 - cy) < radius;
+            let said = map[y * w + x] > 0.5;
+            area += inside as usize;
+            hit += (inside && said) as usize;
+            miss += (!inside && said) as usize;
+        }
+    }
+    assert!(
+        hit * 10 >= area * 9 && miss * 5 < area,
+        "cut {hit} of {area} disc pixels and {miss} outside it"
+    );
+}
+
+#[test]
+fn the_segmentation_model_finds_nothing_in_a_picture_of_nothing() {
+    let _guard = model_dir_lock();
+    let Some(model) = neural::get("segment") else {
+        eprintln!("skipping: the segmentation model is not installed");
+        return;
+    };
+    // This is the answer the tool needs in order to fall back rather
+    // than select noise: fine grain with no subject in it has to come
+    // back as a map of nothing, which is why the map is left as the
+    // probability the network emitted rather than stretched over its own
+    // range the way the reference implementation stretches it.
+    let (w, h) = (320usize, 240usize);
+    let mut seed = 0x1234_5678u32;
+    let noise: Vec<f32> = (0..w * h * 3)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            0.5 + (seed >> 8) as f32 / u32::MAX as f32 * 0.06
+        })
+        .collect();
+    let map = neural::segment(&model, &noise, w, h).expect("runs");
+    let claimed = map.iter().filter(|&&v| v > 0.5).count();
+    assert!(
+        claimed * 20 < w * h,
+        "found a subject in {claimed} of {} noise pixels",
+        w * h
+    );
+}
+
+#[test]
+fn the_inpainting_model_fills_a_hole_with_the_right_kind_of_thing() {
+    let _guard = model_dir_lock();
+    let model = neural::get("inpaint").expect("built in");
+    assert_eq!(model.channels(), 4, "the mask is the fourth plane");
+    // A picture in two halves, and a hole in one of them. Getting this
+    // right needs nothing clever -- but it does need the mask to have
+    // arrived, because the punched-out hole is black and the answer is
+    // not, and a network that ignored the fourth plane would say black.
+    let (w, h) = (192usize, 128usize);
+    let mut rgb = vec![0.0f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let c = match y < h / 2 {
+                true => [0.2, 0.4, 0.8],
+                false => [0.3, 0.6, 0.2],
+            };
+            rgb[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&c);
+        }
+    }
+    let hole: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            (60..130).contains(&x) && (70..110).contains(&y)
+        })
+        .collect();
+    let filled = neural::inpaint(&model, &rgb, w, h, &hole).expect("runs");
+    assert_eq!(filled.len(), w * h * 3);
+    assert!(filled.iter().all(|v| (0.0..=1.0).contains(v)));
+
+    // The hole is entirely in the lower half, so the answer is the lower
+    // half's colour -- nearer to it, at least, than to the black it was
+    // handed or to the colour of the other half.
+    let (mut mine, mut n) = ([0f32; 3], 0f32);
+    for (i, &gone) in hole.iter().enumerate() {
+        if gone {
+            for c in 0..3 {
+                mine[c] += filled[i * 3 + c];
+            }
+            n += 1.0;
+        }
+    }
+    let got = [mine[0] / n, mine[1] / n, mine[2] / n];
+    let away = |want: [f32; 3]| (0..3).map(|c| (got[c] - want[c]).abs()).sum::<f32>();
+    assert!(
+        away([0.3, 0.6, 0.2]) < away([0.2, 0.4, 0.8]) && away([0.3, 0.6, 0.2]) < away([0.0; 3]),
+        "filled the grass with {got:?}"
+    );
 }

@@ -252,6 +252,10 @@ impl ToolPlugin for PuppetWarpTool {
     fn name(&self) -> &'static str {
         "Puppet Warp"
     }
+    fn description(&self) -> &'static str {
+        "Click to pin the layer at a few points, then drag one: the mesh bends around the \
+         pins, stiffly or loosely as the Stiffness option says. Commit applies it."
+    }
     fn icon(&self) -> &'static str {
         "puppet"
     }

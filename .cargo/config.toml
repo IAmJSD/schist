@@ -1,3 +1,21 @@
+# --build-id: the note that ties a shipped binary to the debug info uploaded
+# for it. The Linux release is stripped before it is packaged, so without a
+# build id in both halves nothing on the Sentry side can be symbolicated.
+# It is pinned rather than left to the toolchain: mold writes one by default
+# and Ubuntu's GNU ld does not, and the two Linux jobs use one linker each.
+
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags = ["-C", "link-arg=-fuse-ld=mold", "-C", "link-arg=-Wl,--build-id=sha1"]
+
+# The aarch64 runner links with the default cc, not mold -- only the flag
+# that has to be there either way is set here.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--build-id=sha1"]
+
+# getrandom 0.3 requires the backend to be selected explicitly on
+# wasm32-unknown-unknown; "wasm_js" uses the browser's crypto API (this is
+# what gpui's own .cargo/config.toml sets, restated here because rustflags
+# don't travel with dependencies).
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

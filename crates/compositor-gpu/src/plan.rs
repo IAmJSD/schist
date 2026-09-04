@@ -429,6 +429,10 @@ fn emit_adjust<'a>(
 /// the shader has no branch for.
 fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
     match params {
+        // Per-range HSL tweaks need six trapezoids' worth of
+        // coefficients, which don't fit the direct row — those
+        // adjustments composite on the CPU.
+        Params::HueSaturation { ranges, .. } if !ranges.is_empty() => None,
         Params::HueSaturation {
             hue,
             saturation,
@@ -436,6 +440,7 @@ fn direct_coeffs(params: &Params) -> Option<(u32, [f32; DIRECT_STRIDE])> {
             colorize,
             lightness_desaturates,
             reciprocal_saturation,
+            ranges: _,
         } => Some((
             D_HUE_SATURATION,
             [

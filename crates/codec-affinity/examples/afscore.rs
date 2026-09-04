@@ -27,12 +27,20 @@ fn main() {
     let region = schist_core::IntRect::from_size(doc.width, doc.height);
     let pixels = schist_compositor::composite_region_rgba8(&doc, region);
     let ours = image::RgbaImage::from_raw(doc.width, doc.height, pixels).expect("buffer");
-    let ours = image::imageops::resize(
-        &ours,
-        thumb.width(),
-        thumb.height(),
-        image::imageops::Triangle,
-    );
+    // `resize` is a convolution even at the same size, which
+    // smears a probe card of hard colour edges into a blur the
+    // comparison then blames on the importer; only resample when
+    // the thumbnail really is a different size.
+    let ours = if ours.dimensions() == thumb.dimensions() {
+        ours
+    } else {
+        image::imageops::resize(
+            &ours,
+            thumb.width(),
+            thumb.height(),
+            image::imageops::Triangle,
+        )
+    };
     let mut sum = 0.0f64;
     let mut n = 0u64;
     for (a, b) in ours.pixels().zip(thumb.pixels()) {
