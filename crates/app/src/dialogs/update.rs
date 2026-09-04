@@ -38,7 +38,7 @@ pub(super) fn update_available(
         (_, Some(UpdateProgress::Installing)) => body
             .child("Installing the update\u{2026}".to_string())
             .child(progress_bar(1.0)),
-        (Some(_), None) => body.child(format!(
+        (Some(installer), None) => body.child(format!(
             "Schist can download it ({}) and install it over this copy.",
             megabytes(installer.size)
         )),
