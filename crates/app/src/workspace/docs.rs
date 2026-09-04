@@ -165,6 +165,10 @@ impl Workspace {
     /// Park the active document, view transform and all, back into the
     /// tab list at its current position.
     pub(super) fn stash_active_tab(&mut self) {
+        // Finish the tool against the document it belongs to before that
+        // document leaves the canvas. Live-preview tools retain layer ids;
+        // carrying one into another tab strands unrecorded preview pixels.
+        self.deactivate_tool();
         if let Some(doc) = self.doc.take() {
             let at = self.active_tab.min(self.background_tabs.len());
             self.background_tabs.insert(
@@ -187,6 +191,7 @@ impl Workspace {
         self.offset = tab.offset;
         self.rotation = tab.rotation;
         self.reset_per_document_caches();
+        self.activate_tool_for_current_doc();
     }
 
     /// Drop every cache keyed by document state. Revision and selection

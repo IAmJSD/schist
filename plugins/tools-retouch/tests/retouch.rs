@@ -287,3 +287,42 @@ fn content_aware_fill_puts_texture_back_rather_than_an_average() {
         mean(2, 2)
     );
 }
+
+#[test]
+fn red_eye_stays_inside_the_selection() {
+    // Every sibling tool in this file gates on `sel.coverage`; red eye
+    // did not, so it recoloured matching pixels outside the selection.
+    let mut doc = doc_with(|doc, id| {
+        for y in 40..80 {
+            for x in 20..100 {
+                set(doc, id, x, y, Rgba::new(0.9, 0.1, 0.1, 1.0));
+            }
+        }
+    });
+    // Select only the left half of the red band.
+    doc.selection
+        .select_rect(IntRect::from_xywh(0, 0, 60, 120), SelectOp::Replace);
+
+    let mut state = EditorState::default();
+    let mut tool = RedEyeTool::default_tool();
+    {
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 40.0));
+        tool.on_pointer_move(&mut ctx, input(100.0, 80.0));
+        tool.on_pointer_up(&mut ctx, input(100.0, 80.0));
+    }
+
+    let inside = get(&doc, 40, 60);
+    let outside = get(&doc, 80, 60);
+    assert!(
+        inside.r < 0.5,
+        "inside the selection must be corrected: {inside:?}"
+    );
+    assert!(
+        (outside.r - 0.9).abs() < 0.05,
+        "outside must be untouched: {outside:?}"
+    );
+}

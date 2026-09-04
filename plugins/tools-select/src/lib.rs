@@ -17,7 +17,10 @@ use schist_plugin_api::{
 /// Shared by every tool that produces a pixel set rather than a shape:
 /// the wand, quick selection and object selection.
 fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &str) {
-    if pixels.is_empty() {
+    // An empty result in Replace mode still clears what was there, the way
+    // clicking with a marquee does. Returning early left the old selection
+    // in place, so wanding an empty area looked like nothing happened.
+    if pixels.is_empty() && (op != SelectOp::Replace || ctx.doc.selection.is_empty()) {
         return;
     }
     let mut edit = ctx.doc.begin_edit(name.to_string());
@@ -59,7 +62,14 @@ fn commit_pixels(ctx: &mut ToolCtx, pixels: &[(i32, i32)], op: SelectOp, name: &
                 }
             }
         }
-        sel.activate();
+        // An empty Replace means "no selection", not "a selection of
+        // nothing": `is_empty()` is just `!active`, so activating an
+        // all-zero mask made every paint, fill, gradient and retouch tool
+        // silently do nothing document-wide until the user deselected by
+        // hand.
+        if !pixels.is_empty() {
+            sel.activate();
+        }
         sel.recompute_bounds();
     });
     edit.commit();
@@ -133,20 +143,28 @@ fn commit_shape(
     sel.apply_shape(bounds, op, |x, y| shape.coverage(x, y));
 }
 
-fn drag_rect(ax: f32, ay: f32, bx: f32, by: f32, square: bool) -> IntRect {
+/// The rectangle a drag from `(ax, ay)` to `(bx, by)` describes.
+///
+/// `square` constrains it; `from_centre` treats the press point as the
+/// centre rather than a corner, which is what Alt-drag means everywhere
+/// else and was not implemented anywhere here.
+fn drag_rect_from(ax: f32, ay: f32, bx: f32, by: f32, square: bool, from_centre: bool) -> IntRect {
     let (mut w, mut h) = (bx - ax, by - ay);
     if square {
         let m = w.abs().max(h.abs());
         w = m * w.signum();
         h = m * h.signum();
     }
-    let (x1, x2) = if w < 0.0 { (ax + w, ax) } else { (ax, ax + w) };
-    let (y1, y2) = if h < 0.0 { (ay + h, ay) } else { (ay, ay + h) };
+    let (x1, x2, y1, y2) = if from_centre {
+        (ax - w, ax + w, ay - h, ay + h)
+    } else {
+        (ax, ax + w, ay, ay + h)
+    };
     IntRect::new(
-        x1.round() as i32,
-        y1.round() as i32,
-        x2.round() as i32,
-        y2.round() as i32,
+        x1.min(x2).round() as i32,
+        y1.min(y2).round() as i32,
+        x1.max(x2).round() as i32,
+        y1.max(y2).round() as i32,
     )
 }
 
@@ -255,7 +273,10 @@ impl ToolPlugin for MarqueeTool {
             // constraint during drag) — use press-time modifiers for the op
             // and live shift for the constraint, like Photoshop.
             let square = input.modifiers.shift && !m.shift;
-            self.current = Some(drag_rect(ax, ay, input.x, input.y, square));
+            // Alt is overloaded exactly as Shift is: subtract-from-
+            // selection at press time, draw-from-centre during the drag.
+            let centre = input.modifiers.alt && !m.alt;
+            self.current = Some(drag_rect_from(ax, ay, input.x, input.y, square, centre));
         }
     }
 
@@ -263,10 +284,16 @@ impl ToolPlugin for MarqueeTool {
         let Some((ax, ay, m)) = self.anchor.take() else {
             return;
         };
-        let rect = self
-            .current
-            .take()
-            .unwrap_or_else(|| drag_rect(ax, ay, input.x, input.y, false));
+        let rect = self.current.take().unwrap_or_else(|| {
+            drag_rect_from(
+                ax,
+                ay,
+                input.x,
+                input.y,
+                input.modifiers.shift && !m.shift,
+                input.modifiers.alt && !m.alt,
+            )
+        });
         let op = op_from(m, self.mode);
         if rect.is_empty() {
             // Click without drag: deselect (Photoshop behavior).
@@ -279,12 +306,28 @@ impl ToolPlugin for MarqueeTool {
         }
         let shape = self.shape;
         let feather = self.feather;
+        // The *shape* comes from the full drag; only the resulting mask
+        // is clipped to the canvas. Clipping the generating rect first
+        // inscribed the ellipse in the clipped box, so a partly
+        // off-canvas drag committed a different ellipse than the preview
+        // had drawn.
+        let canvas = ctx.doc.canvas_rect();
+        if rect.intersect(&canvas).is_empty() {
+            return;
+        }
         let mut edit = ctx.doc.begin_edit("Select");
         edit.change_selection(|sel, _| {
             commit_shape(sel, feather, op, |target, op| match shape {
                 MarqueeShape::Rect => target.select_rect(rect, op),
                 MarqueeShape::Ellipse => target.select_ellipse(rect, op),
-            })
+            });
+            sel.clip_to(canvas);
+            // The clipped rect can touch the canvas while the ellipse
+            // itself does not. Do not leave an active all-zero mask that
+            // silently blocks every subsequent pixel tool.
+            if sel.bounds().is_empty() {
+                sel.deselect();
+            }
         });
         edit.commit();
     }
@@ -585,6 +628,25 @@ impl ToolPlugin for LassoTool {
 
     fn on_commit(&mut self, ctx: &mut ToolCtx) {
         self.commit(ctx);
+    }
+
+    fn on_key(
+        &mut self,
+        _ctx: &mut ToolCtx,
+        key: &str,
+        _text: Option<&str>,
+        _modifiers: Modifiers,
+    ) -> bool {
+        // Backspace drops the last anchor. Without it one misplaced click
+        // in a long polygonal selection meant starting over: escape
+        // discards the whole path and nothing else was handled.
+        if self.kind == LassoKind::Free {
+            return false;
+        }
+        match key {
+            "backspace" | "delete" => self.points.pop().is_some(),
+            _ => false,
+        }
     }
 
     fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
@@ -1325,6 +1387,37 @@ mod tests {
     }
 
     #[test]
+    fn a_half_offscreen_ellipse_keeps_the_shape_it_previewed() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Ellipse);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        // A circle centred on the canvas edge: the drag runs from x=100
+        // out to x=300, so only its left half lands on the document.
+        drag(
+            &mut tool,
+            &mut ctx,
+            (100.0, 0.0),
+            (300.0, 200.0),
+            Modifiers::default(),
+        );
+
+        // The widest row of that circle is y=100, and it runs off the
+        // right edge.
+        assert_eq!(ctx.doc.selection.coverage(199, 100), 255);
+        // Near the bottom the circle has narrowed to x=157..243. Clipping
+        // the drag rect first would have inscribed a half-width ellipse
+        // spanning x=128..172 there instead, which gets both of these
+        // backwards.
+        assert_eq!(ctx.doc.selection.coverage(180, 190), 255);
+        assert_eq!(ctx.doc.selection.coverage(135, 190), 0);
+    }
+
+    #[test]
     fn a_modifier_still_overrides_the_mode() {
         let mut doc = Document::new("t", 200, 200, Depth::Eight);
         let mut state = EditorState::default();
@@ -1519,6 +1612,90 @@ mod tests {
             ctx.doc.selection.coverage(40, 30),
             0,
             "blue side not selected"
+        );
+    }
+    #[test]
+    fn a_marquee_dragged_off_canvas_stays_inside_it() {
+        // `apply_shape` takes no canvas, so a drag starting outside put
+        // the selection's bounds off-document. Transform Selection then
+        // framed that, and `coverage_ratio` over-reported.
+        let mut doc = Document::new("t", 64, 64, Depth::Eight);
+        doc.push_layer(Layer::new_raster("bg"));
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Rect);
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            drag(
+                &mut tool,
+                &mut ctx,
+                (-40.0, -40.0),
+                (30.0, 30.0),
+                Modifiers::default(),
+            );
+        }
+        let b = doc.selection.bounds();
+        assert!(
+            b.left >= 0 && b.top >= 0 && b.right <= 64 && b.bottom <= 64,
+            "selection escaped the canvas: {b:?}"
+        );
+    }
+
+    #[test]
+    fn an_ellipse_that_only_touches_a_canvas_corner_deselects() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        doc.selection
+            .select_rect(IntRect::from_xywh(10, 10, 30, 30), SelectOp::Replace);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Ellipse);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        // The bounding box clips the canvas at its corner, but the ellipse
+        // inscribed in that box has no coverage there.
+        drag(
+            &mut tool,
+            &mut ctx,
+            (190.0, 190.0),
+            (400.0, 400.0),
+            Modifiers::default(),
+        );
+
+        assert!(
+            ctx.doc.selection.is_empty(),
+            "an all-zero mask must not remain active"
+        );
+    }
+
+    /// Alt-drag draws from the centre, which nothing here implemented —
+    /// alt was consumed entirely by subtract-from-selection with no
+    /// fallback for the geometry.
+    #[test]
+    fn alt_draws_a_marquee_from_its_centre() {
+        // Corner drag: the press point is one corner.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 140.0, 130.0, false, false),
+            IntRect::new(100, 100, 140, 130)
+        );
+        // From centre: the press point is the middle, and the rect grows
+        // both ways.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 140.0, 130.0, false, true),
+            IntRect::new(60, 70, 140, 130)
+        );
+        // Dragging up and left from the centre gives the same rect.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 60.0, 70.0, false, true),
+            IntRect::new(60, 70, 140, 130)
+        );
+        // Square plus from-centre compose.
+        assert_eq!(
+            drag_rect_from(100.0, 100.0, 140.0, 130.0, true, true),
+            IntRect::new(60, 60, 140, 140)
         );
     }
 }
@@ -1815,5 +1992,72 @@ mod new_tool_tests {
             tool.on_pointer_down(&mut ctx, input(20.0, 20.0, Modifiers::default()));
         }
         assert_eq!(doc.selection.coverage(80, 80), 255, "missed the far square");
+    }
+    #[test]
+    fn the_elliptical_marquee_previews_an_ellipse() {
+        // Both shapes emitted `AntsRect`, so an elliptical drag showed a
+        // rectangle right up until the mouse went up.
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = MarqueeTool::new(MarqueeShape::Ellipse);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(20.0, 40.0, Modifiers::default()));
+        tool.on_pointer_move(&mut ctx, input(120.0, 100.0, Modifiers::default()));
+
+        let overlays = tool.overlays(ctx.doc, ctx.state);
+        let Some(Overlay::AntsPolygon(points)) = overlays.first() else {
+            panic!("expected an ellipse outline, got {overlays:?}");
+        };
+        // Every point sits on the ellipse inscribed in the drag rect.
+        let (cx, cy, rx, ry) = (70.0f32, 70.0f32, 50.0f32, 30.0f32);
+        for &(x, y) in points {
+            let d = ((x - cx) / rx).powi(2) + ((y - cy) / ry).powi(2);
+            assert!((d - 1.0).abs() < 1e-3, "({x}, {y}) is not on the ellipse");
+        }
+        // ... and it is a curve, not four corners.
+        assert!(points.len() > 16);
+    }
+
+    #[test]
+    fn backspace_drops_the_last_polygonal_anchor() {
+        // Without this, one misplaced click in a long polygonal selection
+        // meant restarting: escape discards the whole path, and nothing
+        // else was handled.
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = LassoTool::new(LassoKind::Polygonal);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        for p in [(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (11.0, 91.0)] {
+            tool.on_pointer_down(&mut ctx, input(p.0, p.1, Modifiers::default()));
+            tool.on_pointer_up(&mut ctx, input(p.0, p.1, Modifiers::default()));
+        }
+        assert_eq!(tool.points.len(), 4);
+        assert!(tool.on_key(&mut ctx, "backspace", None, Modifiers::default()));
+        assert_eq!(tool.points.len(), 3);
+
+        // An empty path has nothing to drop, and the key is not claimed.
+        tool.points.clear();
+        assert!(!tool.on_key(&mut ctx, "backspace", None, Modifiers::default()));
+    }
+
+    /// The freehand lasso has no anchors to drop; it must leave backspace
+    /// to whatever else wants it.
+    #[test]
+    fn the_freehand_lasso_does_not_claim_backspace() {
+        let mut doc = Document::new("t", 200, 200, Depth::Eight);
+        let mut state = EditorState::default();
+        let mut tool = LassoTool::new(LassoKind::Free);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+        tool.on_pointer_down(&mut ctx, input(10.0, 10.0, Modifiers::default()));
+        assert!(!tool.on_key(&mut ctx, "backspace", None, Modifiers::default()));
     }
 }

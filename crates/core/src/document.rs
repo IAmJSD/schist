@@ -5,7 +5,7 @@ use crate::history::{Edit, EditOp, History, LayerProps};
 use crate::layer::{Layer, LayerId, LayerMask, LayerPath, LayerTree, RawBlock};
 use crate::selection::Selection;
 use crate::tile::{TileBuf, TileCoord, TileMap, TILE_PIXELS};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use schist_color::{ColorMode, Depth};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -212,6 +212,18 @@ impl Document {
         self.dirty = true;
     }
 
+    /// Snapshot the document-level geometry that moves with the canvas.
+    pub fn geometry(&self) -> crate::history::DocGeometry {
+        crate::history::DocGeometry {
+            guides: self.guides.clone(),
+            artboards: self.artboards.clone(),
+            slices: self.slices.clone(),
+            notes: self.notes.clone(),
+            counts: self.counts.clone(),
+            paths: self.paths.clone(),
+        }
+    }
+
     pub fn take_damage(&mut self) -> Vec<IntRect> {
         std::mem::take(&mut self.damage)
     }
@@ -297,9 +309,12 @@ impl Document {
                     if let Some(mask) = &mut l.mask {
                         match target {
                             Some(buf) => mask.tiles.insert(*coord, buf.clone()),
-                            None => {
-                                mask.tiles.prune_blank();
-                            }
+                            // The tile did not exist before, so undo has
+                            // to drop it. `prune_blank` could not: it only
+                            // removes all-zero tiles, so anything the
+                            // stroke left with coverage survived the undo
+                            // while unrelated blank tiles were deleted.
+                            None => mask.tiles.remove(*coord),
                         }
                     }
                 }
@@ -489,6 +504,20 @@ impl Document {
                 };
                 self.selection = (**target).clone();
                 self.revision += 1;
+            }
+            EditOp::GeometrySet { before, after } => {
+                let g = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                self.guides = g.guides.clone();
+                self.artboards = g.artboards.clone();
+                self.slices = g.slices.clone();
+                self.notes = g.notes.clone();
+                self.counts = g.counts.clone();
+                self.paths = g.paths.clone();
+                self.damage_all();
             }
             EditOp::IccProfileSet { before, after } => {
                 let target = if dir == Direction::Undo {
@@ -707,9 +736,14 @@ impl<'a> EditBuilder<'a> {
         let Some(raster) = layer.as_raster() else {
             return;
         };
-        let mut coords: Vec<TileCoord> = raster.tiles.coords().collect();
+        // A set, not a linear scan: this ran `Vec::contains` per tile, so
+        // every transform, filter and Image Size on a large document paid
+        // a quadratic sweep -- a 12000x12000 document has ~2200 tiles, so
+        // roughly five million comparisons per call.
+        let mut seen: FxHashSet<TileCoord> = raster.tiles.coords().collect();
+        let mut coords: Vec<TileCoord> = seen.iter().copied().collect();
         for coord in new_tiles.coords() {
-            if !coords.contains(&coord) {
+            if seen.insert(coord) {
                 coords.push(coord);
             }
         }
@@ -960,6 +994,66 @@ impl<'a> EditBuilder<'a> {
         });
     }
 
+    /// Move every piece of document-level geometry with the canvas.
+    ///
+    /// Guides, artboards, slices, notes, counts and stored paths are not
+    /// layer content, so no layer op touches them: crop, canvas size,
+    /// image size and the rotate/flip commands moved the pixels and left
+    /// all of it at the old coordinates. `map` takes a document-space
+    /// point and returns where it lands.
+    pub fn map_geometry(&mut self, map: impl Fn(f32, f32) -> (f32, f32), swap_guide_axes: bool) {
+        let before = self.doc.geometry();
+        for guide in &mut self.doc.guides {
+            let (x, y) = if guide.horizontal {
+                map(0.0, guide.position)
+            } else {
+                map(guide.position, 0.0)
+            };
+            if swap_guide_axes {
+                guide.horizontal = !guide.horizontal;
+            }
+            guide.position = if guide.horizontal { y } else { x };
+        }
+        let map_rect = |r: IntRect| {
+            let (x0, y0) = map(r.left as f32, r.top as f32);
+            let (x1, y1) = map(r.right as f32, r.bottom as f32);
+            IntRect::new(
+                x0.min(x1).round() as i32,
+                y0.min(y1).round() as i32,
+                x0.max(x1).round() as i32,
+                y0.max(y1).round() as i32,
+            )
+        };
+        for a in &mut self.doc.artboards {
+            a.rect = map_rect(a.rect);
+        }
+        for sl in &mut self.doc.slices {
+            sl.rect = map_rect(sl.rect);
+        }
+        for n in &mut self.doc.notes {
+            n.at = map(n.at.0, n.at.1);
+        }
+        for c in &mut self.doc.counts {
+            for p in &mut c.points {
+                *p = map(p.0, p.1);
+            }
+        }
+        for path in &mut self.doc.paths {
+            for sub in &mut path.subpaths {
+                for anchor in &mut sub.anchors {
+                    anchor.point = map(anchor.point.0, anchor.point.1);
+                }
+            }
+        }
+        let after = self.doc.geometry();
+        if before != after {
+            self.ops.push(EditOp::GeometrySet {
+                before: Box::new(before),
+                after: Box::new(after),
+            });
+        }
+    }
+
     /// Replace the selection via closure; captures before/after.
     pub fn change_selection(&mut self, f: impl FnOnce(&mut Selection, IntRect)) {
         let canvas = self.doc.canvas_rect();
@@ -1191,8 +1285,12 @@ impl StrokeEdit {
         for ((layer, coord), before) in self.mask_befores {
             if let Some(l) = doc.tree.find_mut(layer) {
                 if let Some(m) = &mut l.mask {
-                    if let Some(buf) = before {
-                        m.tiles.insert(coord, buf);
+                    // Mirrors the raster branch above: `None` means the
+                    // tile did not exist, so rolling back removes it
+                    // rather than leaving the cancelled paint behind.
+                    match before {
+                        Some(buf) => m.tiles.insert(coord, buf),
+                        None => m.tiles.remove(coord),
                     }
                 }
             }
@@ -1667,5 +1765,98 @@ mod tests {
         assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&original));
         assert_eq!(doc.redo().as_deref(), Some("Camera Raw Development"));
         assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&changed));
+    }
+
+    #[test]
+    fn undoing_a_mask_write_removes_a_tile_it_created() {
+        // `prune_blank` could not remove a tile the stroke created with
+        // any coverage, so the paint survived the undo, and it deleted
+        // unrelated blank tiles as collateral.
+        use crate::layer::LayerMask;
+        let mut doc = Document::new("t", 64, 64, Depth::Eight);
+        let mut layer = Layer::new_raster("l");
+        layer.mask = Some(LayerMask::new_revealing());
+        let id = layer.id;
+        doc.push_layer(layer);
+
+        let coord = TileCoord::containing(0, 0);
+        assert!(doc
+            .tree
+            .find(id)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .tiles
+            .get(coord)
+            .is_none());
+
+        let mut edit = doc.begin_edit("Paint Mask");
+        if let Some(buf) = edit.writable_mask_tile(id, coord) {
+            buf[0] = 200;
+        }
+        edit.commit();
+        assert!(
+            doc.tree
+                .find(id)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .tiles
+                .get(coord)
+                .is_some(),
+            "the stroke created a tile"
+        );
+
+        doc.undo();
+        assert!(
+            doc.tree
+                .find(id)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .tiles
+                .get(coord)
+                .is_none(),
+            "undo must remove a tile that did not exist before"
+        );
+    }
+
+    #[test]
+    fn quarter_turns_swap_guide_orientation_and_undo() {
+        let mut doc = Document::new("t", 200, 100, Depth::Eight);
+        doc.guides = vec![
+            Guide {
+                horizontal: true,
+                position: 30.0,
+            },
+            Guide {
+                horizontal: false,
+                position: 40.0,
+            },
+        ];
+        let before = doc.guides.clone();
+
+        let mut edit = doc.begin_edit("Rotate 90");
+        edit.map_geometry(|x, y| (100.0 - y, x), true);
+        assert!(edit.commit());
+
+        assert_eq!(
+            doc.guides,
+            vec![
+                Guide {
+                    horizontal: false,
+                    position: 70.0,
+                },
+                Guide {
+                    horizontal: true,
+                    position: 40.0,
+                },
+            ]
+        );
+        doc.undo().unwrap();
+        assert_eq!(doc.guides, before);
     }
 }

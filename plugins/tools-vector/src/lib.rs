@@ -137,7 +137,10 @@ pub(crate) fn commit_layer(doc: &mut Document, layer: Layer, path: LayerPath, ed
 /// Insert a live shape layer.
 pub(crate) fn commit_shape_layer(doc: &mut Document, shape: schist_core::VectorShape, name: &str) {
     let layer = shape_layer(doc, shape, name);
-    let path = insert_path(doc, false);
+    // Keep a new shape beside the active layer, including inside its group.
+    // Sending live shapes to the root top made drawing inside a group jump
+    // the result out of that group and above the rest of the document.
+    let path = insert_path(doc, true);
     commit_layer(doc, layer, path, &format!("{name} Layer"));
 }
 

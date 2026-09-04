@@ -84,14 +84,64 @@ enum Tone {
     Sponge,
 }
 
+/// Which part of the tonal range dodge and burn act on.
+///
+/// Photoshop's Range menu. The tools had none: they always used the
+/// midtone weighting below, so there was no way to lift only the
+/// shadows or hold back only the highlights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneRange {
+    Shadows,
+    Midtones,
+    Highlights,
+}
+
+pub const TONE_RANGES: &[&str] = &["Shadows", "Midtones", "Highlights"];
+
+impl ToneRange {
+    fn from_index(i: usize) -> ToneRange {
+        match i {
+            0 => ToneRange::Shadows,
+            2 => ToneRange::Highlights,
+            _ => ToneRange::Midtones,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            ToneRange::Shadows => 0,
+            ToneRange::Midtones => 1,
+            ToneRange::Highlights => 2,
+        }
+    }
+
+    /// How strongly a pixel of this luminance is affected, 0..=1.
+    fn weight(self, lum: f32) -> f32 {
+        match self {
+            // The midtone bell this always used, unchanged, so the
+            // default behaviour is exactly what it was.
+            ToneRange::Midtones => 1.0 - (lum - 0.5).abs() * 0.8,
+            // Falling off away from black / white respectively.
+            ToneRange::Shadows => (1.0 - lum * 1.6).clamp(0.0, 1.0),
+            ToneRange::Highlights => ((lum - 0.375) * 1.6).clamp(0.0, 1.0),
+        }
+    }
+}
+
 /// Photoshop-style dodge/burn: scale toward white or black, weighted so
 /// midtones move more than the extremes; sponge pulls colour toward or away
 /// from its own luminance.
-fn apply_tone(tone: Tone, px: Rgba, amount: f32) -> Rgba {
+fn apply_tone(tone: Tone, range: ToneRange, px: Rgba, amount: f32) -> Rgba {
+    // Exposure runs to 100%, and the dab doubles it so that the slider's
+    // midpoint is a full-strength pass. Past that the blends run off the
+    // end of their range: Burn wrote negative channels and Dodge wrote
+    // over 1.0, both of which come back as garbage once the tile is
+    // stored.
+    let amount = amount.clamp(0.0, 1.0);
     let lum = 0.3 * px.r + 0.59 * px.g + 0.11 * px.b;
     match tone {
         Tone::Dodge => {
-            let w = amount * (1.0 - (lum - 0.5).abs() * 0.8);
+            let w = amount * range.weight(lum);
             Rgba {
                 r: px.r + (1.0 - px.r) * w,
                 g: px.g + (1.0 - px.g) * w,
@@ -100,7 +150,7 @@ fn apply_tone(tone: Tone, px: Rgba, amount: f32) -> Rgba {
             }
         }
         Tone::Burn => {
-            let w = amount * (1.0 - (lum - 0.5).abs() * 0.8);
+            let w = amount * range.weight(lum);
             Rgba {
                 r: px.r * (1.0 - w),
                 g: px.g * (1.0 - w),
@@ -130,6 +180,7 @@ struct Stroke {
     opacity: f32,
     size: f32,
     hardness: f32,
+    dynamics: Dynamics,
     mode: PaintMode,
     /// The layer as it was when the stroke began. Tile maps are
     /// copy-on-write, so this is a handful of Arc clones, not a copy.
@@ -151,6 +202,7 @@ impl Stroke {
         mode: PaintMode,
         ink: Ink,
         heal_offset: (i32, i32),
+        dynamics: Dynamics,
     ) -> Option<Stroke> {
         let layer = paintable_layer(ctx.doc)?;
         let mut stroke = Stroke {
@@ -175,6 +227,7 @@ impl Stroke {
             last: (input.x, input.y),
             spacing_debt: 0.0,
             ink,
+            dynamics,
             opacity: ctx.state.tool_opacity,
             size: ctx.state.brush_size,
             hardness: if mode == PaintMode::Pencil {
@@ -200,7 +253,7 @@ impl Stroke {
     }
 
     fn spacing(&self) -> f32 {
-        (self.size * 0.15).max(1.0)
+        (self.size * self.dynamics.spacing).max(1.0)
     }
 
     fn extend(&mut self, doc: &mut Document, x: f32, y: f32, pressure: f32) {
@@ -226,6 +279,15 @@ impl Stroke {
     /// from their pre-stroke values.
     fn dab(&mut self, doc: &mut Document, cx: f32, cy: f32, pressure: f32) {
         let radius = (self.size / 2.0 * pressure.max(0.05)).max(0.5);
+        let flow = self.dynamics.flow;
+        // Pen pressure changed the dab's size only; with this on it
+        // changes how much ink lands too, which is what a pressure-
+        // sensitive brush is for.
+        let ink_scale = if self.dynamics.pressure_opacity {
+            pressure.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         let bounds = IntRect::new(
             (cx - radius).floor() as i32,
             (cy - radius).floor() as i32,
@@ -272,12 +334,23 @@ impl Stroke {
                         a = if a >= 0.5 { 1.0 } else { 0.0 };
                     }
                     a *= selection.coverage(x, y) as f32 / 255.0;
+                    a *= ink_scale;
                     if a <= 0.0 {
                         continue;
                     }
                     let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
-                    if a > cov[ix] {
-                        cov[ix] = a;
+                    // At full flow the dabs of one stroke take the
+                    // maximum, so scribbling over the same spot at 50%
+                    // opacity stays 50%. Below full flow they accumulate
+                    // toward the same ceiling, which is what makes a low
+                    // flow build up as you go over an area again.
+                    let next = if flow >= 1.0 {
+                        a.max(cov[ix])
+                    } else {
+                        (cov[ix] + a * flow).min(1.0)
+                    };
+                    if next > cov[ix] {
+                        cov[ix] = next;
                         touched = true;
                     }
                 }
@@ -290,6 +363,11 @@ impl Stroke {
             // Ensure before-capture happens (and get write access).
             let cov = self.coverage.get(&coord).unwrap();
             let (ink, opacity) = (self.ink.clone(), self.opacity);
+            let (range, exposure, strength) = (
+                self.dynamics.range,
+                self.dynamics.exposure,
+                self.dynamics.strength,
+            );
             let carried = self.carried;
             let (heal, heal_rect) = (&self.heal, self.heal_rect);
             let Some(tile) = self.edit.writable_tile(doc, self.layer, coord) else {
@@ -325,11 +403,15 @@ impl Stroke {
                             if orig.a <= 0.0 {
                                 orig
                             } else {
-                                apply_tone(*tone, orig, a)
+                                apply_tone(*tone, range, orig, a * exposure * 2.0)
                             }
                         }
                         Ink::Convolve { snapshot, sharpen } => {
                             let out = convolve_at(snapshot, x, y, *sharpen);
+                            // Same doubling, same clamp: a blend factor
+                            // above 1 extrapolates past the filtered
+                            // pixel instead of reaching it.
+                            let a = (a * strength * 2.0).clamp(0.0, 1.0);
                             Rgba {
                                 r: orig.r + (out.r - orig.r) * a,
                                 g: orig.g + (out.g - orig.g) * a,
@@ -551,6 +633,7 @@ impl Stroke {
         if n == 0.0 {
             return;
         }
+        let mix = self.dynamics.smudge_mix;
         let here = Rgba {
             r: acc[0] / n,
             g: acc[1] / n,
@@ -560,10 +643,10 @@ impl Stroke {
         self.carried = Some(match self.carried {
             None => here,
             Some(c) => Rgba {
-                r: c.r + (here.r - c.r) * 0.35,
-                g: c.g + (here.g - c.g) * 0.35,
-                b: c.b + (here.b - c.b) * 0.35,
-                a: c.a + (here.a - c.a) * 0.35,
+                r: c.r + (here.r - c.r) * mix,
+                g: c.g + (here.g - c.g) * mix,
+                b: c.b + (here.b - c.b) * mix,
+                a: c.a + (here.a - c.a) * mix,
             },
         });
     }
@@ -578,33 +661,83 @@ impl Stroke {
     }
 }
 
-/// Topmost paintable (raster, unlocked, visible) layer if the active layer
-/// isn't paintable.
+/// The active layer, if it can be painted on.
+///
+/// This used to fall back to the topmost other raster layer when the
+/// active one was a group, an adjustment layer or locked, so a brush
+/// stroke silently landed somewhere else entirely. The fallback also
+/// ignored `visible`, despite the doc comment claiming otherwise, so paint
+/// could go onto a hidden layer and appear to do nothing at all.
+///
+/// Photoshop refuses and says why. Refusing is the half that belongs
+/// here; there is no channel from a tool back to the status bar yet, so
+/// the stroke simply does nothing.
 fn paintable_layer(doc: &Document) -> Option<LayerId> {
-    if let Some(id) = doc.active_layer {
-        if let Some(l) = doc.tree.find(id) {
-            if matches!(l.kind, LayerKind::Raster(_)) && !l.locked {
-                return Some(id);
-            }
-        }
-    }
-    doc.tree
-        .iter()
-        .filter(|l| matches!(l.kind, LayerKind::Raster(_)) && !l.locked)
-        .map(|l| l.id)
-        .last()
+    let id = doc.active_layer?;
+    let layer = doc.tree.find(id)?;
+    (matches!(layer.kind, LayerKind::Raster(_)) && !layer.locked && layer.visible).then_some(id)
 }
 
 pub struct PaintTool {
     mode: PaintMode,
     stroke: Option<Stroke>,
+    /// Where the brush cursor sits, and the pressure it was last drawn
+    /// with, so the preview circle matches the dab it would leave.
     cursor: Option<(f32, f32)>,
+    cursor_pressure: f32,
     /// Clone stamp: the alt-clicked source point, and the offset locked in
     /// when the first stroke after it begins.
     clone_source: Option<(f32, f32)>,
     clone_offset: Option<(i32, i32)>,
     /// Background eraser colour tolerance, 0..=1.
     tolerance: f32,
+    /// Brush dynamics. The brush had no Flow, no adjustable spacing and
+    /// pen pressure only changed the dab's *size*, never how much ink it
+    /// laid down.
+    dynamics: Dynamics,
+}
+
+/// Per-stroke brush dynamics.
+#[derive(Debug, Clone, Copy)]
+struct Dynamics {
+    /// How much coverage one dab lays down, 0..=1. At 1 the dabs of a
+    /// stroke take the maximum, which is Photoshop's opacity model and
+    /// what this always did; below 1 they build up toward the tool
+    /// opacity instead, which is what Flow means.
+    flow: f32,
+    /// Dab spacing as a fraction of the brush diameter.
+    spacing: f32,
+    /// Pen pressure scales coverage as well as radius.
+    pressure_opacity: bool,
+    /// Dodge / burn: which part of the tonal range to act on.
+    range: ToneRange,
+    /// Dodge / burn / sponge strength, 0..=1. Photoshop calls it
+    /// Exposure; there was no control at all, so how hard the tool hit
+    /// was whatever the tool opacity happened to be.
+    exposure: f32,
+    /// Blur / sharpen strength, 0..=1.
+    strength: f32,
+    /// How much colour the smudge brush picks up per dab, 0..=1. Was
+    /// hard-coded to 0.35.
+    smudge_mix: f32,
+}
+
+impl Default for Dynamics {
+    fn default() -> Self {
+        Dynamics {
+            flow: 1.0,
+            // The 15% this was hard-coded to.
+            spacing: 0.15,
+            pressure_opacity: false,
+            range: ToneRange::Midtones,
+            // Half strength, so the default doubles to the 1.0 the
+            // tools used to apply and nothing changes until it is moved.
+            exposure: 0.5,
+            strength: 0.5,
+            // The 0.35 this was hard-coded to.
+            smudge_mix: 0.35,
+        }
+    }
 }
 
 impl PaintTool {
@@ -613,9 +746,11 @@ impl PaintTool {
             mode,
             stroke: None,
             cursor: None,
+            cursor_pressure: 1.0,
             clone_source: None,
             clone_offset: None,
             tolerance: 0.12,
+            dynamics: Dynamics::default(),
         }
     }
 
@@ -826,20 +961,119 @@ impl ToolPlugin for PaintTool {
     }
 
     fn options(&self) -> Vec<ToolOption> {
-        match self.mode {
-            PaintMode::BackgroundEraser => vec![ToolOption::slider(
+        let mut out = Vec::new();
+        if self.mode == PaintMode::BackgroundEraser {
+            out.push(ToolOption::slider(
                 "bge-tolerance",
                 "Tolerance",
                 self.tolerance * 100.0,
                 1.0,
                 100.0,
                 "%",
-            )],
-            _ => Vec::new(),
+            ));
         }
+        // Dodge and burn act on a chosen part of the tonal range at a
+        // chosen strength; sponge takes the strength. None of these had
+        // any control at all.
+        if matches!(self.mode, PaintMode::Dodge | PaintMode::Burn) {
+            out.push(ToolOption::choice(
+                "tone-range",
+                "Range",
+                TONE_RANGES,
+                self.dynamics.range.index(),
+            ));
+        }
+        if matches!(
+            self.mode,
+            PaintMode::Dodge | PaintMode::Burn | PaintMode::Sponge
+        ) {
+            out.push(ToolOption::slider(
+                "tone-exposure",
+                "Exposure",
+                self.dynamics.exposure * 100.0,
+                1.0,
+                100.0,
+                "%",
+            ));
+        }
+        if matches!(self.mode, PaintMode::Blur | PaintMode::Sharpen) {
+            out.push(ToolOption::slider(
+                "convolve-strength",
+                "Strength",
+                self.dynamics.strength * 100.0,
+                1.0,
+                100.0,
+                "%",
+            ));
+        }
+        if self.mode == PaintMode::Smudge {
+            out.push(ToolOption::slider(
+                "smudge-mix",
+                "Strength",
+                self.dynamics.smudge_mix * 100.0,
+                1.0,
+                100.0,
+                "%",
+            ));
+        }
+        // Dynamics belong to anything that stamps dabs, which is every
+        // mode here.
+        out.push(ToolOption::slider(
+            "brush-flow",
+            "Flow",
+            self.dynamics.flow * 100.0,
+            1.0,
+            100.0,
+            "%",
+        ));
+        out.push(ToolOption::slider(
+            "brush-spacing",
+            "Spacing",
+            self.dynamics.spacing * 100.0,
+            1.0,
+            200.0,
+            "%",
+        ));
+        out.push(ToolOption::toggle(
+            "brush-pressure-opacity",
+            "Pressure \u{2192} Opacity",
+            self.dynamics.pressure_opacity,
+        ));
+        out
     }
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
+        match key {
+            "brush-flow" => {
+                self.dynamics.flow = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            "brush-spacing" => {
+                self.dynamics.spacing = (value.num() / 100.0).clamp(0.01, 2.0);
+                return;
+            }
+            "brush-pressure-opacity" => {
+                self.dynamics.pressure_opacity = value.bool();
+                return;
+            }
+            "tone-range" => {
+                self.dynamics.range = ToneRange::from_index(value.index());
+                return;
+            }
+            "tone-exposure" => {
+                self.dynamics.exposure = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            "convolve-strength" => {
+                self.dynamics.strength = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            "smudge-mix" => {
+                self.dynamics.smudge_mix = (value.num() / 100.0).clamp(0.01, 1.0);
+                return;
+            }
+            _ => {}
+        }
         if key == "bge-tolerance" {
             self.tolerance = (value.num() / 100.0).clamp(0.01, 1.0);
         }
@@ -847,6 +1081,7 @@ impl ToolPlugin for PaintTool {
 
     fn on_pointer_down(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         self.cursor = Some((input.x, input.y));
+        self.cursor_pressure = input.pressure;
         // Alt-click sets the clone stamp's source point.
         if matches!(self.mode, PaintMode::Clone | PaintMode::Heal) && input.modifiers.alt {
             self.clone_source = Some((input.x, input.y));
@@ -857,11 +1092,12 @@ impl ToolPlugin for PaintTool {
             return;
         };
         let heal_offset = self.clone_offset.unwrap_or((0, 0));
-        self.stroke = Stroke::begin(ctx, input, self.mode, ink, heal_offset);
+        self.stroke = Stroke::begin(ctx, input, self.mode, ink, heal_offset, self.dynamics);
     }
 
     fn on_pointer_move(&mut self, ctx: &mut ToolCtx, input: PointerInput) {
         self.cursor = Some((input.x, input.y));
+        self.cursor_pressure = input.pressure;
         if let Some(stroke) = &mut self.stroke {
             stroke.extend(ctx.doc, input.x, input.y, input.pressure);
         }
@@ -879,13 +1115,35 @@ impl ToolPlugin for PaintTool {
         }
     }
 
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        // A stroke in progress is real pixels the user already painted,
+        // so it is committed rather than rolled back: switching tools
+        // mid-drag should not throw the stroke away, and `finish` records
+        // it as one undoable edit.
+        if let Some(stroke) = self.stroke.take() {
+            stroke.finish(ctx.doc);
+        }
+        // The clone source is a point in *this* document. The tool lives
+        // for the whole session, so keeping it meant alt-clicking a source
+        // in one document and then cloning in another sampled the new
+        // document at the old coordinates. The brush-cursor circle is
+        // dropped for the same reason: a stale one from a previous
+        // document reappeared the moment the tool was picked again.
+        self.clone_source = None;
+        self.clone_offset = None;
+        self.cursor = None;
+    }
+
     fn overlays(&self, _doc: &Document, state: &EditorState) -> Vec<Overlay> {
         match self.cursor {
             Some((cx, cy)) => {
+                // The dab's own radius: `size / 2 * pressure`, matching
+                // `Stroke::dab`. Drawing the unscaled half-size promised a
+                // stroke wider than the one a stylus would leave.
                 vec![Overlay::Circle {
                     cx,
                     cy,
-                    r: state.brush_size / 2.0,
+                    r: (state.brush_size / 2.0 * self.cursor_pressure.max(0.05)).max(0.5),
                 }]
             }
             None => Vec::new(),
@@ -915,7 +1173,118 @@ pub enum GradientStyle {
 }
 
 const GRADIENT_STYLES: &[&str] = &["Linear", "Radial", "Angle", "Reflected", "Diamond"];
-const GRADIENT_FILLS: &[&str] = &["Foreground to Background", "Foreground to Transparent"];
+/// The ramps offered in the options bar.
+///
+/// The first two are built from the current foreground and background;
+/// the rest are fixed multi-stop presets. The ramp used to be exactly two
+/// colours interpolated end to end -- five *styles* but no way to put a
+/// third colour anywhere, and no per-stop opacity.
+const GRADIENT_FILLS: &[&str] = &[
+    "Foreground to Background",
+    "Foreground to Transparent",
+    "Black, White",
+    "Spectrum",
+    "Sunset",
+    "Transparent to Foreground to Transparent",
+];
+
+/// One colour stop on a gradient ramp.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    /// Where it sits, 0..=1 along the ramp.
+    pub at: f32,
+    pub color: Rgba,
+}
+
+/// The colour a ramp shows at `t`, interpolating between the two stops
+/// that bracket it. Stops must be sorted; a ramp with none is
+/// transparent, and one with a single stop is that colour throughout.
+pub fn ramp_at(stops: &[GradientStop], t: f32) -> Rgba {
+    let Some(first) = stops.first() else {
+        return Rgba::new(0.0, 0.0, 0.0, 0.0);
+    };
+    if t <= first.at {
+        return first.color;
+    }
+    let last = stops[stops.len() - 1];
+    if t >= last.at {
+        return last.color;
+    }
+    for pair in stops.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if t > b.at {
+            continue;
+        }
+        let span = b.at - a.at;
+        // Two stops in the same place are a hard edge; take the later.
+        let f = if span <= f32::EPSILON {
+            1.0
+        } else {
+            (t - a.at) / span
+        };
+        return Rgba {
+            r: a.color.r + (b.color.r - a.color.r) * f,
+            g: a.color.g + (b.color.g - a.color.g) * f,
+            b: a.color.b + (b.color.b - a.color.b) * f,
+            a: a.color.a + (b.color.a - a.color.a) * f,
+        };
+    }
+    last.color
+}
+
+/// The stops for the fill at `index`, given the current swatches.
+pub fn gradient_stops(index: usize, foreground: Rgba, background: Rgba) -> Vec<GradientStop> {
+    let stop = |at: f32, color: Rgba| GradientStop { at, color };
+    let rgb = |r: f32, g: f32, b: f32| Rgba::new(r, g, b, 1.0);
+    match index {
+        1 => vec![
+            stop(0.0, foreground),
+            stop(
+                1.0,
+                Rgba {
+                    a: 0.0,
+                    ..foreground
+                },
+            ),
+        ],
+        2 => vec![stop(0.0, rgb(0.0, 0.0, 0.0)), stop(1.0, rgb(1.0, 1.0, 1.0))],
+        3 => vec![
+            stop(0.0, rgb(1.0, 0.0, 0.0)),
+            stop(0.17, rgb(1.0, 1.0, 0.0)),
+            stop(0.33, rgb(0.0, 1.0, 0.0)),
+            stop(0.5, rgb(0.0, 1.0, 1.0)),
+            stop(0.67, rgb(0.0, 0.0, 1.0)),
+            stop(0.83, rgb(1.0, 0.0, 1.0)),
+            stop(1.0, rgb(1.0, 0.0, 0.0)),
+        ],
+        4 => vec![
+            stop(0.0, rgb(0.13, 0.10, 0.30)),
+            stop(0.45, rgb(0.85, 0.35, 0.30)),
+            stop(0.75, rgb(0.98, 0.70, 0.30)),
+            stop(1.0, rgb(1.0, 0.94, 0.72)),
+        ],
+        // Per-stop opacity, which the two-colour ramp could not express:
+        // opaque in the middle, transparent at both ends.
+        5 => vec![
+            stop(
+                0.0,
+                Rgba {
+                    a: 0.0,
+                    ..foreground
+                },
+            ),
+            stop(0.5, foreground),
+            stop(
+                1.0,
+                Rgba {
+                    a: 0.0,
+                    ..foreground
+                },
+            ),
+        ],
+        _ => vec![stop(0.0, foreground), stop(1.0, background)],
+    }
+}
 
 impl GradientStyle {
     fn from_index(i: usize) -> GradientStyle {
@@ -942,7 +1311,8 @@ impl GradientStyle {
 pub struct GradientTool {
     pub kind: GradientKind,
     /// Fade the foreground out instead of ending on the background colour.
-    pub to_transparent: bool,
+    /// Index into [`GRADIENT_FILLS`].
+    pub fill: usize,
     /// The shape drawn. Starts at whichever one this tool was registered
     /// as, and follows the options bar after that.
     style: GradientStyle,
@@ -958,7 +1328,7 @@ impl GradientTool {
     fn new(kind: GradientKind) -> GradientTool {
         GradientTool {
             kind,
-            to_transparent: false,
+            fill: 0,
             style: match kind {
                 GradientKind::Linear => GradientStyle::Linear,
                 GradientKind::Radial => GradientStyle::Radial,
@@ -1032,7 +1402,7 @@ impl ToolPlugin for GradientTool {
             ctx,
             GradientFill {
                 style: self.style,
-                to_transparent: self.to_transparent,
+                fill: self.fill,
                 reverse: self.reverse,
                 dither: self.dither,
             },
@@ -1048,12 +1418,7 @@ impl ToolPlugin for GradientTool {
 
     fn options(&self) -> Vec<ToolOption> {
         vec![
-            ToolOption::choice(
-                "gradient-fill",
-                "Gradient",
-                GRADIENT_FILLS,
-                usize::from(self.to_transparent),
-            ),
+            ToolOption::choice("gradient-fill", "Gradient", GRADIENT_FILLS, self.fill),
             ToolOption::choice(
                 "gradient-style",
                 "Style",
@@ -1067,7 +1432,7 @@ impl ToolPlugin for GradientTool {
 
     fn set_option(&mut self, key: &str, value: OptionValue) {
         match key {
-            "gradient-fill" => self.to_transparent = value.index() == 1,
+            "gradient-fill" => self.fill = value.index().min(GRADIENT_FILLS.len() - 1),
             "gradient-style" => self.style = GradientStyle::from_index(value.index()),
             "gradient-reverse" => self.reverse = value.bool(),
             "gradient-dither" => self.dither = value.bool(),
@@ -1091,7 +1456,7 @@ impl ToolPlugin for GradientTool {
 /// Everything the options bar contributes to one gradient.
 struct GradientFill {
     style: GradientStyle,
-    to_transparent: bool,
+    fill: usize,
     reverse: bool,
     dither: bool,
 }
@@ -1099,22 +1464,14 @@ struct GradientFill {
 fn fill_gradient(ctx: &mut ToolCtx, fill: GradientFill, from: (f32, f32), to: (f32, f32)) {
     let GradientFill {
         style,
-        to_transparent,
+        fill,
         reverse,
         dither,
     } = fill;
     let Some(layer) = paintable_layer(ctx.doc) else {
         return;
     };
-    let start = ctx.state.foreground;
-    let end = if to_transparent {
-        Rgba {
-            a: 0.0,
-            ..ctx.state.foreground
-        }
-    } else {
-        ctx.state.background
-    };
+    let stops = gradient_stops(fill, ctx.state.foreground, ctx.state.background);
     let opacity = ctx.state.tool_opacity;
     let canvas = ctx.doc.canvas_rect();
     let region = if ctx.doc.selection.is_empty() {
@@ -1174,11 +1531,10 @@ fn fill_gradient(ctx: &mut ToolCtx, fill: GradientFill, from: (f32, f32), to: (f
                     let n = (((x * 7 + y * 13) & 7) as f32 / 8.0 - 0.5) / 255.0;
                     t = (t + n).clamp(0.0, 1.0);
                 }
+                let ramp = ramp_at(&stops, t);
                 let src = Rgba {
-                    r: start.r + (end.r - start.r) * t,
-                    g: start.g + (end.g - start.g) * t,
-                    b: start.b + (end.b - start.b) * t,
-                    a: (start.a + (end.a - start.a) * t) * opacity * sel,
+                    a: ramp.a * opacity * sel,
+                    ..ramp
                 };
                 let ix = ((y - trect.top) * TILE_SIZE + (x - trect.left)) as usize;
                 tile.set(ix, src.over(tile.get(ix)));
@@ -1435,6 +1791,28 @@ mod tests {
         let mut doc = Document::new("t", 128, 128, Depth::Eight);
         doc.push_layer(Layer::new_raster("paint"));
         doc
+    }
+
+    #[test]
+    fn a_full_exposure_burn_stops_at_black() {
+        // Exposure is doubled inside the dab, so 100% asked for twice the
+        // blend the formula has room for: Burn went past black into
+        // negative channels and Dodge past white.
+        let px = Rgba {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let burn = apply_tone(Tone::Burn, ToneRange::Midtones, px, 2.0);
+        assert!(burn.r >= 0.0, "burn wrote {}", burn.r);
+        assert!(burn.r <= 0.5);
+        let dodge = apply_tone(Tone::Dodge, ToneRange::Midtones, px, 2.0);
+        assert!(dodge.r <= 1.0, "dodge wrote {}", dodge.r);
+        assert!(dodge.r >= 0.5);
+        // A sponge cannot overshoot the luminance it is pulling towards.
+        let sponge = apply_tone(Tone::Sponge, ToneRange::Midtones, px, 2.0);
+        assert!((0.0..=1.0).contains(&sponge.r));
     }
 
     fn input(x: f32, y: f32) -> PointerInput {
@@ -1733,6 +2111,312 @@ mod tests {
         tool.on_cancel(&mut ctx);
         assert_eq!(pixel(&doc, 50, 50)[3], 0);
         assert!(!doc.history.can_undo());
+    }
+
+    #[test]
+    fn leaving_the_clone_tool_forgets_its_source() {
+        // The registry owns the tool for the whole session, so a source
+        // alt-clicked in one document was still set when another document
+        // came to the front: cloning there sampled the new document at the
+        // old coordinates.
+        let mut doc = doc_with_layer();
+        let mut state = EditorState::default();
+        let mut tool = PaintTool::new(PaintMode::Clone);
+        {
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            // Alt-click sets the source.
+            tool.on_pointer_down(
+                &mut ctx,
+                PointerInput {
+                    x: 20.0,
+                    y: 20.0,
+                    pressure: 1.0,
+                    modifiers: Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                },
+            );
+            assert!(tool.clone_source.is_some(), "alt-click sets a source");
+
+            tool.on_deactivate(&mut ctx);
+        }
+        assert!(
+            tool.clone_source.is_none() && tool.clone_offset.is_none(),
+            "the source belongs to the document it was picked in"
+        );
+        assert!(tool.cursor.is_none(), "and the cursor circle goes with it");
+    }
+
+    #[test]
+    fn the_brush_cursor_tracks_pressure_and_clears_on_deactivate() {
+        // The circle was always `brush_size / 2` even though a dab is
+        // `size / 2 * pressure`, so the preview promised a wider stroke
+        // than a stylus would leave -- and nothing ever cleared it, so
+        // the circle from the last document reappeared as soon as the
+        // brush was picked up again.
+        let mut doc = doc_with_layer();
+        let mut state = EditorState {
+            brush_size: 40.0,
+            ..Default::default()
+        };
+        let mut tool = PaintTool::new(PaintMode::Brush);
+        let mut ctx = ToolCtx {
+            doc: &mut doc,
+            state: &mut state,
+        };
+
+        let light = PointerInput {
+            x: 20.0,
+            y: 20.0,
+            pressure: 0.25,
+            modifiers: Modifiers::default(),
+        };
+        tool.on_pointer_down(&mut ctx, light);
+        let overlays = tool.overlays(ctx.doc, ctx.state);
+        let Some(&Overlay::Circle { r, .. }) = overlays.first() else {
+            panic!("no brush cursor: {overlays:?}");
+        };
+        assert!((r - 5.0).abs() < 1e-3, "radius {r} ignores pressure");
+
+        tool.on_pointer_up(&mut ctx, light);
+        tool.on_pointer_move(&mut ctx, input(30.0, 30.0));
+        let overlays = tool.overlays(ctx.doc, ctx.state);
+        let Some(&Overlay::Circle { r, .. }) = overlays.first() else {
+            panic!("no brush cursor: {overlays:?}");
+        };
+        assert!((r - 20.0).abs() < 1e-3, "full pressure should be half size");
+
+        tool.on_deactivate(&mut ctx);
+        assert!(
+            tool.overlays(ctx.doc, ctx.state).is_empty(),
+            "a stale cursor survived the tool switch"
+        );
+    }
+
+    /// Flow is how much ink one dab lays down. The brush had none: every
+    /// dab laid down full coverage and the dabs of a stroke took the
+    /// maximum, so there was no way to build a tone up gradually.
+    #[test]
+    fn flow_scales_what_one_dab_lays_down() {
+        let one_dab = |flow: f32| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 24.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-flow", OptionValue::Num(flow * 100.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(40.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(40.0, 40.0));
+            pixel(&doc, 40, 40)[3]
+        };
+
+        assert_eq!(one_dab(1.0), 255, "full flow should be opaque");
+        let quarter = one_dab(0.25);
+        assert!(
+            (quarter as i32 - 64).abs() <= 4,
+            "a quarter flow dab came out at {quarter}, expected about 64"
+        );
+        assert!(one_dab(0.5) > quarter);
+    }
+
+    /// And within one stroke, low-flow dabs accumulate toward the tool
+    /// opacity rather than each replacing the last.
+    #[test]
+    fn low_flow_dabs_accumulate_along_a_stroke() {
+        let along = |flow: f32| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 24.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-flow", OptionValue::Num(flow * 100.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(40.0, 40.0));
+            tool.on_pointer_move(&mut ctx, input(48.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(48.0, 40.0));
+            pixel(&doc, 44, 40)[3]
+        };
+        // A short drag stamps several overlapping dabs over the midpoint,
+        // so even a low flow builds past what one dab alone leaves.
+        let single = {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 24.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-flow", OptionValue::Num(10.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(44.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(44.0, 40.0));
+            pixel(&doc, 44, 40)[3]
+        };
+        assert!(
+            along(0.1) > single,
+            "dabs did not accumulate: {} vs one dab's {single}",
+            along(0.1)
+        );
+    }
+
+    /// Spacing was hard-coded at 15% of the brush size.
+    #[test]
+    fn spacing_controls_how_far_apart_the_dabs_land() {
+        let gaps = |spacing: f32| {
+            let mut doc = doc_with_layer();
+            let mut state = EditorState {
+                foreground: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                brush_size: 4.0,
+                ..Default::default()
+            };
+            let mut tool = PaintTool::new(PaintMode::Brush);
+            tool.set_option("brush-spacing", OptionValue::Num(spacing * 100.0));
+            let mut ctx = ToolCtx {
+                doc: &mut doc,
+                state: &mut state,
+            };
+            tool.on_pointer_down(&mut ctx, input(10.0, 40.0));
+            tool.on_pointer_move(&mut ctx, input(110.0, 40.0));
+            tool.on_pointer_up(&mut ctx, input(110.0, 40.0));
+            // How many pixels along the stroke are untouched.
+            (10..110).filter(|&x| pixel(&doc, x, 40)[3] == 0).count()
+        };
+        // A tight spacing leaves a continuous line; a very wide one
+        // leaves gaps between the dabs.
+        assert_eq!(gaps(0.15), 0);
+        assert!(gaps(2.0) > 0, "a 200% spacing should leave gaps");
+    }
+
+    /// The ramp was two colours interpolated end to end: five styles but
+    /// no way to put a third colour anywhere, and no per-stop opacity.
+    #[test]
+    fn a_ramp_interpolates_through_every_stop() {
+        let red = Rgba::new(1.0, 0.0, 0.0, 1.0);
+        let green = Rgba::new(0.0, 1.0, 0.0, 1.0);
+        let blue = Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let stops = vec![
+            GradientStop {
+                at: 0.0,
+                color: red,
+            },
+            GradientStop {
+                at: 0.5,
+                color: green,
+            },
+            GradientStop {
+                at: 1.0,
+                color: blue,
+            },
+        ];
+
+        assert_eq!(ramp_at(&stops, 0.0), red);
+        assert_eq!(ramp_at(&stops, 0.5), green);
+        assert_eq!(ramp_at(&stops, 1.0), blue);
+        // A quarter of the way is halfway between the first two, which a
+        // two-colour ramp could never produce.
+        let quarter = ramp_at(&stops, 0.25);
+        assert!((quarter.r - 0.5).abs() < 1e-5, "{quarter:?}");
+        assert!((quarter.g - 0.5).abs() < 1e-5, "{quarter:?}");
+        assert!(quarter.b.abs() < 1e-5, "{quarter:?}");
+        // Past the ends it holds, rather than extrapolating.
+        assert_eq!(ramp_at(&stops, -1.0), red);
+        assert_eq!(ramp_at(&stops, 2.0), blue);
+    }
+
+    /// Per-stop opacity: transparent at both ends, opaque in the middle.
+    #[test]
+    fn a_preset_can_vary_opacity_along_the_ramp() {
+        let fg = Rgba::new(0.2, 0.4, 0.8, 1.0);
+        let stops = gradient_stops(5, fg, Rgba::new(0.0, 0.0, 0.0, 1.0));
+        assert!(ramp_at(&stops, 0.0).a < 0.01);
+        assert!((ramp_at(&stops, 0.5).a - 1.0).abs() < 1e-5);
+        assert!(ramp_at(&stops, 1.0).a < 0.01);
+        // And the colour is the foreground all the way along.
+        assert!((ramp_at(&stops, 0.25).r - fg.r).abs() < 1e-5);
+    }
+
+    /// The two swatch-driven fills still behave exactly as they did.
+    #[test]
+    fn the_swatch_fills_are_unchanged() {
+        let fg = Rgba::new(1.0, 0.0, 0.0, 1.0);
+        let bg = Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let fg_to_bg = gradient_stops(0, fg, bg);
+        assert_eq!(ramp_at(&fg_to_bg, 0.0), fg);
+        assert_eq!(ramp_at(&fg_to_bg, 1.0), bg);
+
+        let fg_to_clear = gradient_stops(1, fg, bg);
+        assert_eq!(ramp_at(&fg_to_clear, 0.0), fg);
+        assert!(ramp_at(&fg_to_clear, 1.0).a < 1e-5);
+    }
+
+    /// Dodge and burn always used the midtone weighting, so there was no
+    /// way to lift only the shadows or hold back only the highlights.
+    #[test]
+    fn the_tone_range_decides_which_pixels_move() {
+        // The weighting is the thing that differs; the visible change
+        // also depends on how much headroom a pixel has, which is why
+        // this checks the weight rather than the result.
+        assert!(ToneRange::Shadows.weight(0.05) > ToneRange::Shadows.weight(0.5));
+        assert_eq!(
+            ToneRange::Shadows.weight(0.9),
+            0.0,
+            "shadows leave highlights alone"
+        );
+
+        assert!(ToneRange::Highlights.weight(0.95) > ToneRange::Highlights.weight(0.5));
+        assert_eq!(
+            ToneRange::Highlights.weight(0.1),
+            0.0,
+            "highlights leave shadows alone"
+        );
+
+        // Midtones is the bell the tools always used, unchanged.
+        let mid = ToneRange::Midtones;
+        assert!(mid.weight(0.5) > mid.weight(0.05));
+        assert!(mid.weight(0.5) > mid.weight(0.95));
+        assert!((mid.weight(0.5) - 1.0).abs() < 1e-6);
+    }
+
+    /// And a range that excludes a pixel leaves it completely alone.
+    #[test]
+    fn a_pixel_outside_the_range_is_untouched() {
+        let bright = Rgba::new(0.95, 0.95, 0.95, 1.0);
+        let out = apply_tone(Tone::Burn, ToneRange::Shadows, bright, 1.0);
+        assert_eq!(out, bright);
+
+        let dark = Rgba::new(0.05, 0.05, 0.05, 1.0);
+        let out = apply_tone(Tone::Dodge, ToneRange::Highlights, dark, 1.0);
+        assert_eq!(out, dark);
+    }
+
+    /// Exposure scales how hard dodge and burn hit; there was no control
+    /// at all, so the strength was whatever the tool opacity happened to
+    /// be. The default doubles to the 1.0 the tools used to apply.
+    #[test]
+    fn exposure_scales_the_tone_change() {
+        let px = Rgba::new(0.5, 0.5, 0.5, 1.0);
+        let light = apply_tone(Tone::Dodge, ToneRange::Midtones, px, 0.2);
+        let heavy = apply_tone(Tone::Dodge, ToneRange::Midtones, px, 1.0);
+        assert!(heavy.r > light.r);
+        assert!(light.r > px.r);
     }
 }
 

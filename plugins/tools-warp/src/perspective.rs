@@ -133,6 +133,10 @@ fn sample(src: &TileMap, fx: f32, fy: f32) -> Rgba {
 /// That step in plane space is the whole trick -- an offset of half a unit
 /// along a receding wall is a shorter distance in pixels at the far end
 /// than at the near end, so the copy foreshortens with the wall.
+///
+/// `coverage` is the active selection sampled over `region`, row-major:
+/// the stamp was the one clone tool that painted straight through a
+/// selection.
 #[allow(clippy::too_many_arguments)]
 pub fn perspective_clone(
     src: &TileMap,
@@ -143,6 +147,7 @@ pub fn perspective_clone(
     radius: f32,
     centre: (f32, f32),
     depth: schist_color::Depth,
+    coverage: &[u8],
 ) {
     let Some(inv) = plane.invert() else { return };
     for coord in TileCoord::covering(&region) {
@@ -159,8 +164,16 @@ pub fn perspective_clone(
                 if d >= radius {
                     continue;
                 }
+                let sel = coverage
+                    .get(((y - region.top) * region.width() + (x - region.left)) as usize)
+                    .copied()
+                    .unwrap_or(255) as f32
+                    / 255.0;
+                if sel <= 0.0 {
+                    continue;
+                }
                 let t = 1.0 - d / radius;
-                let w = t * t * (3.0 - 2.0 * t);
+                let w = t * t * (3.0 - 2.0 * t) * sel;
                 // Image -> plane -> shifted -> image.
                 let (u, v) = inv.apply(fx, fy);
                 let (sx, sy) = plane.apply(u + offset.0, v + offset.1);
@@ -205,6 +218,32 @@ pub struct VanishingPointTool {
 }
 
 impl VanishingPointTool {
+    /// End an in-flight stroke, recording it as one history entry.
+    ///
+    /// Both a release and a tool switch need this; the tool has no
+    /// `on_commit` of its own, so calling that dispatched to the trait's
+    /// empty default and switching tools mid-stroke baked the preview
+    /// pixels in with no way to undo them.
+    fn finish_stroke(&mut self, ctx: &mut ToolCtx) {
+        let Some((id, snapshot)) = self.stroke.take() else {
+            return;
+        };
+        let after = ctx
+            .doc
+            .tree
+            .find(id)
+            .and_then(|l| l.as_raster())
+            .map(|r| r.tiles.clone());
+        if let Some(after) = after {
+            if let Some(raster) = ctx.doc.tree.find_mut(id).and_then(|l| l.as_raster_mut()) {
+                raster.tiles = snapshot;
+            }
+            let mut edit = ctx.doc.begin_edit("Vanishing Point");
+            edit.replace_layer_tiles(id, after);
+            edit.commit();
+        }
+    }
+
     pub fn new() -> Self {
         VanishingPointTool {
             corners: [(0.0, 0.0); 4],
@@ -326,7 +365,15 @@ impl ToolPlugin for VanishingPointTool {
         let Some(id) = ctx.doc.active_layer else {
             return;
         };
-        let Some(raster) = ctx.doc.tree.find(id).and_then(|l| l.as_raster()) else {
+        let Some(layer) = ctx.doc.tree.find(id) else {
+            return;
+        };
+        // A locked or hidden layer is not paintable, the same rule the
+        // brush follows. The stamp used to clone onto it regardless.
+        if layer.locked || !layer.visible {
+            return;
+        }
+        let Some(raster) = layer.as_raster() else {
             return;
         };
         self.stroke = Some((id, raster.tiles.clone()));
@@ -355,6 +402,14 @@ impl ToolPlugin for VanishingPointTool {
             (input.y + radius).ceil() as i32 + 1,
         )
         .intersect(&ctx.doc.canvas_rect());
+        // Sampled before the layer is borrowed mutably; the dab is brush
+        // sized, so this is a few hundred bytes.
+        let mut coverage = Vec::with_capacity((region.width() * region.height()) as usize);
+        for y in region.top..region.bottom {
+            for x in region.left..region.right {
+                coverage.push(ctx.doc.selection.coverage(x, y));
+            }
+        }
         let Some(raster) = ctx.doc.tree.find_mut(id).and_then(|l| l.as_raster_mut()) else {
             return;
         };
@@ -368,6 +423,7 @@ impl ToolPlugin for VanishingPointTool {
             radius,
             (input.x, input.y),
             depth,
+            &coverage,
         );
         raster.tiles = tiles;
         ctx.doc.add_damage(region);
@@ -375,28 +431,38 @@ impl ToolPlugin for VanishingPointTool {
 
     fn on_pointer_up(&mut self, ctx: &mut ToolCtx, _input: PointerInput) {
         self.grabbed = None;
-        // Record the whole stroke as one entry.
-        if let Some((id, snapshot)) = self.stroke.take() {
-            let after = ctx
-                .doc
-                .tree
-                .find(id)
-                .and_then(|l| l.as_raster())
-                .map(|r| r.tiles.clone());
-            if let Some(after) = after {
-                if let Some(raster) = ctx.doc.tree.find_mut(id).and_then(|l| l.as_raster_mut()) {
-                    raster.tiles = snapshot;
-                }
-                let mut edit = ctx.doc.begin_edit("Vanishing Point");
-                edit.replace_layer_tiles(id, after);
-                edit.commit();
-            }
-        }
+        self.finish_stroke(ctx);
     }
 
-    fn on_cancel(&mut self, _ctx: &mut ToolCtx) {
+    fn on_cancel(&mut self, ctx: &mut ToolCtx) {
+        // Put the pixels back, the way Liquify's cancel does. Dropping the
+        // snapshot without restoring left the cloned pixels on the layer
+        // with no history entry and `dirty` never set, so escape during a
+        // stroke baked an edit the user could neither see nor undo, and
+        // closing the document would not even prompt.
+        if let Some((id, original)) = self.stroke.take() {
+            if let Some(raster) = ctx.doc.tree.find_mut(id).and_then(|l| l.as_raster_mut()) {
+                let damage = raster
+                    .tiles
+                    .content_bounds()
+                    .union(&original.content_bounds());
+                raster.tiles = original;
+                ctx.doc.add_damage(damage);
+            }
+        }
         self.grabbed = None;
-        self.stroke = None;
+        self.source = None;
+        self.offset = None;
+    }
+
+    fn on_deactivate(&mut self, ctx: &mut ToolCtx) {
+        // Strokes here commit in `on_pointer_up`, and this tool has no
+        // `on_commit` of its own -- calling it dispatched to the trait's
+        // empty default, so switching tools mid-stroke still baked the
+        // preview pixels in with no history entry. End the stroke the
+        // same way a release does.
+        self.finish_stroke(ctx);
+        self.grabbed = None;
         self.source = None;
         self.offset = None;
     }

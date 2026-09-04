@@ -116,6 +116,17 @@ pub fn store(doc: &mut Document, path: VectorPath) {
     doc.active_path = Some(doc.paths.len() - 1);
 }
 
+/// The opposite handle for a smooth point: `dragged`'s direction reversed,
+/// at `other`'s own length.
+fn mirror(dragged: (f32, f32), other: (f32, f32)) -> (f32, f32) {
+    let len = (dragged.0 * dragged.0 + dragged.1 * dragged.1).sqrt();
+    if len <= 1e-6 {
+        return other;
+    }
+    let keep = (other.0 * other.0 + other.1 * other.1).sqrt();
+    (-dragged.0 / len * keep, -dragged.1 / len * keep)
+}
+
 // ------------------------------------------------------ path selection
 
 /// Whether an arrow moves whole paths or individual anchors.
@@ -195,8 +206,12 @@ impl ToolPlugin for PathSelectTool {
                 .paths
                 .iter()
                 .position(|p| p.hit_anchor(input.x, input.y, r * 4.0).is_some());
-            if hit.is_some() {
-                ctx.doc.active_path = hit;
+            match hit {
+                Some(_) => ctx.doc.active_path = hit,
+                // A click that hit nothing must not drag whatever path
+                // happened to be active, possibly off-screen or belonging
+                // to a shape layer.
+                None => self.last = None,
             }
             return;
         }
@@ -252,16 +267,23 @@ impl ToolPlugin for PathSelectTool {
                             Grab::Point => *an = an.translated(dx, dy),
                             // Dragging one handle swings the other with it,
                             // which is what keeps a smooth point smooth.
+                            // A smooth point mirrors the opposite
+                            // handle's *direction* and keeps its own
+                            // length. Negating outright forced both to the
+                            // same magnitude, so dragging one handle
+                            // rescaled the curve on the other side and
+                            // asymmetric smooth points could not exist.
+                            // Alt breaks the pair into a corner point.
                             Grab::HandleOut => {
                                 an.handle_out = (an.handle_out.0 + dx, an.handle_out.1 + dy);
-                                if an.handle_in != (0.0, 0.0) {
-                                    an.handle_in = (-an.handle_out.0, -an.handle_out.1);
+                                if !input.modifiers.alt && an.handle_in != (0.0, 0.0) {
+                                    an.handle_in = mirror(an.handle_out, an.handle_in);
                                 }
                             }
                             Grab::HandleIn => {
                                 an.handle_in = (an.handle_in.0 + dx, an.handle_in.1 + dy);
-                                if an.handle_out != (0.0, 0.0) {
-                                    an.handle_out = (-an.handle_in.0, -an.handle_in.1);
+                                if !input.modifiers.alt && an.handle_out != (0.0, 0.0) {
+                                    an.handle_out = mirror(an.handle_in, an.handle_out);
                                 }
                             }
                         }
