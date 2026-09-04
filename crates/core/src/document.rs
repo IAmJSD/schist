@@ -418,6 +418,21 @@ impl Document {
                 }
                 self.structure_changed();
             }
+            EditOp::RawDevelopmentSet {
+                layer,
+                before,
+                after,
+            } => {
+                let want = if dir == Direction::Undo {
+                    before
+                } else {
+                    after
+                };
+                if let Some(l) = self.tree.find_mut(*layer) {
+                    l.raw = want.clone();
+                }
+                self.structure_changed();
+            }
             EditOp::LayerStyleSet {
                 layer,
                 before,
@@ -751,6 +766,27 @@ impl<'a> EditBuilder<'a> {
             l.smart = after.clone();
         }
         self.ops.push(EditOp::SmartObjectSet {
+            layer,
+            before,
+            after,
+        });
+    }
+
+    /// Attach, replace or clear the original capture and settings behind a
+    /// camera-raw layer.
+    pub fn set_raw_development(
+        &mut self,
+        layer: LayerId,
+        after: Option<Box<crate::raw::RawDevelopment>>,
+    ) {
+        let before = self.doc.tree.find(layer).and_then(|l| l.raw.clone());
+        if before == after {
+            return;
+        }
+        if let Some(l) = self.doc.tree.find_mut(layer) {
+            l.raw = after.clone();
+        }
+        self.ops.push(EditOp::RawDevelopmentSet {
             layer,
             before,
             after,
@@ -1519,5 +1555,28 @@ mod tests {
             doc.dirty,
             "the document holds b and the disk holds a, so it is not saved"
         );
+    }
+
+    #[test]
+    fn raw_development_settings_undo_and_redo() {
+        let mut doc = Document::new("raw", 8, 8, Depth::Sixteen);
+        let id = doc.push_layer(Layer::new_raster("capture"));
+        let original = crate::RawDevelopment {
+            source: std::sync::Arc::from(&b"original capture"[..]),
+            settings: crate::RawSettings::default(),
+        };
+        doc.tree.find_mut(id).unwrap().raw = Some(Box::new(original.clone()));
+        let mut changed = original.clone();
+        changed.settings.exposure = 1.25;
+
+        let mut edit = doc.begin_edit("Camera Raw Development");
+        edit.set_raw_development(id, Some(Box::new(changed.clone())));
+        assert!(edit.commit());
+        assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&changed));
+
+        assert_eq!(doc.undo().as_deref(), Some("Camera Raw Development"));
+        assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&original));
+        assert_eq!(doc.redo().as_deref(), Some("Camera Raw Development"));
+        assert_eq!(doc.tree.find(id).unwrap().raw.as_deref(), Some(&changed));
     }
 }

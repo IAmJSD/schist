@@ -893,6 +893,82 @@ fn an_ordinary_layer_gains_no_smart_object_block() {
     assert!(read_psd(&bytes).unwrap().tree.layers[0].smart.is_none());
 }
 
+#[test]
+fn round_trips_original_raw_and_development_settings() {
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "editable capture",
+        IntRect::from_xywh(0, 0, 64, 48),
+        [30, 40, 50, 255],
+        Depth::Eight,
+    );
+    let settings = schist_core::RawSettings {
+        temperature: 24.0,
+        tint: -8.0,
+        exposure: 1.5,
+        highlights: -35.0,
+        shadows: 42.0,
+        sharpening: 55.0,
+        ..schist_core::RawSettings::default()
+    };
+    layer.raw = Some(Box::new(schist_core::RawDevelopment {
+        source: std::sync::Arc::from(&b"complete original camera capture"[..]),
+        settings,
+    }));
+    doc.push_layer(layer);
+
+    let bytes = write_psd(&doc).unwrap();
+    assert!(bytes.windows(4).any(|window| window == b"ScRw"));
+    let back = read_psd(&bytes).unwrap();
+    let raw = back.tree.layers[0]
+        .raw
+        .as_deref()
+        .expect("RAW backing should survive save and reopen");
+    assert_eq!(raw.source.as_ref(), b"complete original camera capture");
+    assert_eq!(raw.settings, settings);
+    assert!(
+        back.tree.layers[0]
+            .extras
+            .iter()
+            .all(|block| &block.key != b"ScRw"),
+        "the decoded source should not also remain duplicated in extras"
+    );
+}
+
+#[test]
+fn an_ordinary_layer_gains_no_raw_block() {
+    let mut doc = base_doc();
+    doc.push_layer(solid_layer(
+        "plain",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    ));
+    let bytes = write_psd(&doc).unwrap();
+    assert!(!bytes.windows(4).any(|window| window == b"ScRw"));
+    assert!(read_psd(&bytes).unwrap().tree.layers[0].raw.is_none());
+}
+
+#[test]
+fn an_invalid_raw_source_is_not_silently_dropped() {
+    let mut doc = base_doc();
+    let mut layer = solid_layer(
+        "capture",
+        IntRect::from_xywh(0, 0, 8, 8),
+        [10, 20, 30, 255],
+        Depth::Eight,
+    );
+    layer.raw = Some(Box::new(schist_core::RawDevelopment {
+        source: std::sync::Arc::from(&b""[..]),
+        settings: schist_core::RawSettings::default(),
+    }));
+    doc.push_layer(layer);
+    assert!(
+        write_psd(&doc).is_err(),
+        "saving must fail instead of losing the original capture"
+    );
+}
+
 /// Fill opacity is what makes "Fill 0% plus a drop shadow" show only the
 /// shadow. The reader hard-coded it to 1.0 and left the 'iOpa' block in
 /// `extras`, so a Photoshop file with Fill 0% opened fully opaque; the

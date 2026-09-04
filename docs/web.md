@@ -116,7 +116,11 @@ rather than left to fail.
 
 Camera raws open through the pure-Rust `schist-codec-raw` decoder, the
 same code the desktop runs; there is no library to load and nothing is
-refused on the web that the desktop would open.
+refused on the web that the desktop would open. Camera Raw development is
+the same too: the original capture and its settings stay with the layer and
+round-trip through downloaded PSD/PSB files. Browser previews cannot leave
+the main thread, so they use the fast demosaic path but can still pause the
+interface longer than their desktop equivalents on a large capture.
 
 - Text layers can only use the fonts the page ships (IBM Plex Sans
   Regular today — add more in `web/fonts/` and they are picked up by the

@@ -12,12 +12,16 @@ pub(super) fn filter_dialog(
     map: Option<std::sync::Arc<schist_plugin_api::FilterImage>>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let (name, specs) = ws
+    let raw_development = ws.is_raw_redevelopment(id);
+    let (mut name, specs) = ws
         .registry
         .filters()
         .find(|f| f.id() == id)
         .map(|f| (f.name().to_string(), f.params()))
         .unwrap_or_else(|| (id.to_string(), Vec::new()));
+    if raw_development {
+        name = "Camera Raw Development".to_string();
+    }
 
     // Scrolls, because Custom is a five-by-five kernel and Lighting
     // Effects has a dozen sliders: a filter dialog is a list of whatever
@@ -49,6 +53,34 @@ pub(super) fn filter_dialog(
                     } = m
                     {
                         values.set(key, v);
+                        if *preview {
+                            next = Some(values.clone());
+                        }
+                    }
+                });
+                if let Some(values) = next {
+                    ws.preview_filter(id, Some(&values), cx);
+                }
+            },
+            cx,
+        ));
+    }
+    if raw_development {
+        body = body.child(ui::button(
+            "Reset to As Shot",
+            false,
+            move |ws, _window, cx| {
+                let Some(filter) = ws.registry.filters().find(|filter| filter.id() == id) else {
+                    return;
+                };
+                let defaults = schist_plugin_api::FilterValues::defaults(&filter.params());
+                let mut next = None;
+                ws.update_modal(|modal| {
+                    if let Modal::Filter {
+                        values, preview, ..
+                    } = modal
+                    {
+                        *values = defaults.clone();
                         if *preview {
                             next = Some(values.clone());
                         }
@@ -149,7 +181,11 @@ pub(super) fn filter_dialog(
             div()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(ui::palette().text_dim))
-                .child("Applies to the active layer, inside the selection."),
+                .child(if raw_development {
+                    "Re-develops the active layer from its original sensor data."
+                } else {
+                    "Applies to the active layer, inside the selection."
+                }),
         );
 
     let apply_values = values.clone();
@@ -167,8 +203,17 @@ pub(super) fn filter_dialog(
             "OK",
             true,
             move |ws, _w, cx| {
-                ws.apply_filter(id, &apply_values, cx);
-                ws.close_modal(cx);
+                // A RAW-backed layer renders asynchronously. Close its
+                // preview dialog first, then let `apply_filter` replace it
+                // with a progress modal; the ordinary pixel-filter path
+                // remains synchronous and closes afterwards.
+                if ws.is_raw_redevelopment(id) {
+                    ws.close_modal(cx);
+                    ws.apply_filter(id, &apply_values, cx);
+                } else {
+                    ws.apply_filter(id, &apply_values, cx);
+                    ws.close_modal(cx);
+                }
             },
             cx,
         ));

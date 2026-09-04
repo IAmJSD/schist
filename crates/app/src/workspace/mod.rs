@@ -282,6 +282,9 @@ pub struct Workspace {
     /// Which colour control is being dragged, if any.
     pub picker_drag: Option<PickerDrag>,
     pub filter_preview: Option<FilterPreview>,
+    /// Generation of the most recently requested sensor-data preview.
+    /// Slow results from an older slider position are discarded on arrival.
+    raw_preview_seq: u64,
     /// Live bounds of slider tracks, recorded each frame by their canvases.
     slider_bounds: FxHashMap<&'static str, Bounds<Pixels>>,
     /// Slider drag in progress: (slider id, value before the drag) — used
@@ -658,6 +661,9 @@ pub struct FilterPreview {
     pub layer: schist_core::LayerId,
     pub region: IntRect,
     pub original: Vec<f32>,
+    /// RAW development always covers the capture, independent of a pixel
+    /// selection. Ordinary filters leave this false.
+    pub whole_layer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1304,6 +1310,7 @@ impl Workspace {
             curve_drag: None,
             picker_drag: None,
             filter_preview: None,
+            raw_preview_seq: 0,
             slider_bounds: FxHashMap::default(),
             active_slider: None,
             thumbs: FxHashMap::default(),
@@ -1510,13 +1517,13 @@ fn blend_region_tile(
     region: IntRect,
     original: &[f32],
     filtered: &[f32],
-    selection: &schist_core::Selection,
+    selection: Option<&schist_core::Selection>,
 ) {
     let trect = coord.rect();
     let w = region.width() as usize;
     for y in clip.top..clip.bottom {
         for x in clip.left..clip.right {
-            let cov = selection.coverage(x, y) as f32 / 255.0;
+            let cov = selection.map_or(1.0, |selection| selection.coverage(x, y) as f32 / 255.0);
             if cov <= 0.0 {
                 continue;
             }

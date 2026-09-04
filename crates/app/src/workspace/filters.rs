@@ -3,8 +3,113 @@
 
 use super::*;
 
+const CAMERA_RAW_FILTER: &str = "filter.camera_raw";
+const RAW_PREVIEW_DEBOUNCE_MS: u64 = 120;
+
+fn settings_from_values(values: &schist_plugin_api::FilterValues) -> schist_core::RawSettings {
+    schist_core::RawSettings {
+        temperature: values.get("temperature"),
+        tint: values.get("tint"),
+        exposure: values.get("exposure"),
+        contrast: values.get("contrast"),
+        highlights: values.get("highlights"),
+        shadows: values.get("shadows"),
+        whites: values.get("whites"),
+        blacks: values.get("blacks"),
+        clarity: values.get("clarity"),
+        dehaze: values.get("dehaze"),
+        vibrance: values.get("vibrance"),
+        saturation: values.get("saturation"),
+        sharpening: values.get("sharpening"),
+        noise: values.get("noise"),
+        vignette: values.get("vignette"),
+    }
+    .sanitized()
+}
+
+fn values_from_settings(
+    settings: schist_core::RawSettings,
+    values: &mut schist_plugin_api::FilterValues,
+) {
+    let settings = settings.sanitized();
+    for (key, value) in [
+        ("temperature", settings.temperature),
+        ("tint", settings.tint),
+        ("exposure", settings.exposure),
+        ("contrast", settings.contrast),
+        ("highlights", settings.highlights),
+        ("shadows", settings.shadows),
+        ("whites", settings.whites),
+        ("blacks", settings.blacks),
+        ("clarity", settings.clarity),
+        ("dehaze", settings.dehaze),
+        ("vibrance", settings.vibrance),
+        ("saturation", settings.saturation),
+        ("sharpening", settings.sharpening),
+        ("noise", settings.noise),
+        ("vignette", settings.vignette),
+    ] {
+        values.set(key, value);
+    }
+}
+
+/// Develop the sensor-domain controls and then run the remaining Camera Raw
+/// controls over that fresh render. The three controls already consumed by
+/// the RAW pipeline are zeroed so they are not applied twice.
+fn render_raw_capture(
+    source: Arc<[u8]>,
+    settings: schist_core::RawSettings,
+    quality: schist_codecs_common::raw::RawQuality,
+    filter: Arc<dyn schist_plugin_api::FilterPlugin>,
+    mut values: schist_plugin_api::FilterValues,
+) -> anyhow::Result<schist_codecs_common::raw::DevelopedRaw> {
+    let mut developed = schist_codecs_common::raw::develop_rgba(&source, settings, quality)?;
+    values.set("temperature", 0.0);
+    values.set("tint", 0.0);
+    values.set("exposure", 0.0);
+    filter.apply(
+        &mut developed.rgba,
+        developed.width,
+        developed.height,
+        &values,
+    );
+    Ok(developed)
+}
+
 impl Workspace {
     // ----- filters and adjustments -----
+
+    /// Fill Camera Raw controls from the development attached to the active
+    /// layer. Ordinary pixel layers retain the filter's declared defaults.
+    pub(super) fn seed_raw_filter_values(
+        &self,
+        id: &str,
+        values: &mut schist_plugin_api::FilterValues,
+    ) {
+        if id != CAMERA_RAW_FILTER {
+            return;
+        }
+        let settings = self
+            .doc
+            .as_ref()
+            .and_then(|doc| doc.active_layer.and_then(|id| doc.tree.find(id)))
+            .and_then(|layer| layer.raw.as_deref())
+            .map(|raw| raw.settings);
+        if let Some(settings) = settings {
+            values_from_settings(settings, values);
+        }
+    }
+
+    /// Whether Camera Raw means re-developing the active layer's original
+    /// capture rather than destructively filtering its current pixels.
+    pub(crate) fn is_raw_redevelopment(&self, id: &str) -> bool {
+        id == CAMERA_RAW_FILTER
+            && self
+                .doc
+                .as_ref()
+                .and_then(|doc| doc.active_layer.and_then(|id| doc.tree.find(id)))
+                .is_some_and(|layer| layer.raw.is_some())
+    }
 
     /// Run a registered filter over the active layer, confined to the
     /// selection, as one undoable edit.
@@ -247,8 +352,22 @@ impl Workspace {
         label: &str,
         record: bool,
     ) {
+        self.write_region_inner(layer_id, region, original, filtered, label, record, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_region_inner(
+        &mut self,
+        layer_id: schist_core::LayerId,
+        region: IntRect,
+        original: &[f32],
+        filtered: &[f32],
+        label: &str,
+        record: bool,
+        respect_selection: bool,
+    ) {
         let Some(doc) = self.doc.as_mut() else { return };
-        let selection = doc.selection.clone();
+        let selection = respect_selection.then(|| doc.selection.clone());
         let depth = doc.depth;
         let coords: Vec<TileCoord> = TileCoord::covering(&region).collect();
 
@@ -262,7 +381,15 @@ impl Workspace {
                 let Some(tile) = edit.writable_tile(layer_id, coord) else {
                     break;
                 };
-                blend_region_tile(tile, coord, clip, region, original, filtered, &selection);
+                blend_region_tile(
+                    tile,
+                    coord,
+                    clip,
+                    region,
+                    original,
+                    filtered,
+                    selection.as_ref(),
+                );
             }
             edit.commit();
         } else {
@@ -275,7 +402,15 @@ impl Workspace {
                     continue;
                 }
                 let tile = raster.tiles.get_mut_or_insert(coord, depth);
-                blend_region_tile(tile, coord, clip, region, original, filtered, &selection);
+                blend_region_tile(
+                    tile,
+                    coord,
+                    clip,
+                    region,
+                    original,
+                    filtered,
+                    selection.as_ref(),
+                );
             }
             doc.add_damage(region);
         }
@@ -285,6 +420,14 @@ impl Workspace {
     /// be re-run from the original on every slider tick and undone on
     /// cancel. Returns false when there is nothing to filter.
     pub fn begin_filter_preview(&mut self) -> bool {
+        self.begin_filter_preview_for(false)
+    }
+
+    pub(super) fn begin_raw_filter_preview(&mut self) -> bool {
+        self.begin_filter_preview_for(true)
+    }
+
+    fn begin_filter_preview_for(&mut self, whole_layer: bool) -> bool {
         self.filter_preview = None;
         let Some(layer_id) = self.doc.as_ref().and_then(|d| d.active_layer) else {
             self.status = "Select a layer first".into();
@@ -300,7 +443,14 @@ impl Workspace {
             self.status = "Filters need a pixel layer".into();
             return false;
         }
-        let region = self.filter_region(layer_id);
+        // A RAW development is the whole capture. A selection still applies
+        // when Camera Raw is used as an ordinary destructive pixel filter,
+        // but cannot sensibly crop the sensor pipeline itself.
+        let region = if whole_layer {
+            self.doc.as_ref().unwrap().canvas_rect()
+        } else {
+            self.filter_region(layer_id)
+        };
         if region.is_empty() {
             self.status = "Nothing to filter".into();
             return false;
@@ -312,8 +462,113 @@ impl Workspace {
             layer: layer_id,
             region,
             original,
+            whole_layer,
         });
         true
+    }
+
+    fn preview_raw_filter(
+        &mut self,
+        values: &schist_plugin_api::FilterValues,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = self.filter_preview.clone() else {
+            return;
+        };
+        let Some(raw) = self
+            .doc
+            .as_ref()
+            .and_then(|doc| doc.tree.find(preview.layer))
+            .and_then(|layer| layer.raw.as_deref())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(filter) = self.registry.shared_filter(CAMERA_RAW_FILTER) else {
+            return;
+        };
+        let settings = settings_from_values(values);
+        let values = values.clone();
+        self.raw_preview_seq = self.raw_preview_seq.wrapping_add(1);
+        let sequence = self.raw_preview_seq;
+        self.status = "Developing RAW preview…".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            // Slider drags emit many positions. Only start the expensive
+            // sensor decode once a position has remained current briefly.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(RAW_PREVIEW_DEBOUNCE_MS))
+                .await;
+            let current = this
+                .update(cx, |ws, _cx| {
+                    ws.raw_preview_seq == sequence
+                        && ws
+                            .filter_preview
+                            .as_ref()
+                            .is_some_and(|p| p.layer == preview.layer)
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+
+            let rendered = cx
+                .background_executor()
+                .spawn(async move {
+                    render_raw_capture(
+                        raw.source,
+                        settings,
+                        schist_codecs_common::raw::RawQuality::Fast,
+                        filter,
+                        values,
+                    )
+                })
+                .await;
+            this.update(cx, |ws, cx| {
+                if ws.raw_preview_seq != sequence {
+                    return;
+                }
+                let Some(current) = ws.filter_preview.clone() else {
+                    return;
+                };
+                if current.layer != preview.layer {
+                    return;
+                }
+                match rendered {
+                    Ok(developed)
+                        if developed.width == current.region.width() as usize
+                            && developed.height == current.region.height() as usize =>
+                    {
+                        ws.write_region_inner(
+                            current.layer,
+                            current.region,
+                            &current.original,
+                            &developed.rgba,
+                            "",
+                            false,
+                            false,
+                        );
+                        ws.status = "RAW preview (fast demosaic)".into();
+                        ws.after_change(cx);
+                    }
+                    Ok(developed) => {
+                        ws.status = format!(
+                            "RAW preview size changed: {} × {}",
+                            developed.width, developed.height
+                        )
+                        .into();
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        ws.status = format!("RAW preview failed: {err}").into();
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Re-run the filter on the canvas from the snapshot, without touching
@@ -327,6 +582,18 @@ impl Workspace {
         let Some(preview) = self.filter_preview.clone() else {
             return;
         };
+        if let Some(values) = values {
+            if id == CAMERA_RAW_FILTER
+                && self
+                    .doc
+                    .as_ref()
+                    .and_then(|doc| doc.tree.find(preview.layer))
+                    .is_some_and(|layer| layer.raw.is_some())
+            {
+                self.preview_raw_filter(values, cx);
+                return;
+            }
+        }
         let mut buf = preview.original.clone();
         if let Some(values) = values {
             let (w, h) = (
@@ -348,19 +615,21 @@ impl Workspace {
             );
             filter.apply_with(&mut buf, w, h, values, &context);
         }
-        self.write_region(
+        self.write_region_inner(
             preview.layer,
             preview.region,
             &preview.original,
             &buf,
             "",
             false,
+            !preview.whole_layer,
         );
         self.after_change(cx);
     }
 
     /// Drop a preview, restoring the pixels it was drawn over.
     pub fn cancel_filter_preview(&mut self, cx: &mut Context<Self>) {
+        self.raw_preview_seq = self.raw_preview_seq.wrapping_add(1);
         if self.filter_preview.is_none() {
             return;
         }
@@ -374,6 +643,14 @@ impl Workspace {
         values: &schist_plugin_api::FilterValues,
         cx: &mut Context<Self>,
     ) {
+        if self.is_raw_redevelopment(id) {
+            // Calls outside the dialog may still have a live preview. Put
+            // its pixels back and invalidate every in-flight preview before
+            // the Best-quality render starts.
+            self.cancel_filter_preview(cx);
+            self.apply_raw_development(values, cx);
+            return;
+        }
         // A live preview has already changed these pixels; put them back so
         // the recorded edit has the right "before".
         if self.filter_preview.is_some() {
@@ -489,6 +766,112 @@ impl Workspace {
         self.write_region(layer_id, region, &original, &buf, &name, true);
         self.status = name.into();
         self.after_change(cx);
+    }
+
+    fn apply_raw_development(
+        &mut self,
+        values: &schist_plugin_api::FilterValues,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let Some(layer_id) = doc.active_layer else {
+            return;
+        };
+        let Some(raw) = doc
+            .tree
+            .find(layer_id)
+            .and_then(|layer| layer.raw.as_deref())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(filter) = self.registry.shared_filter(CAMERA_RAW_FILTER) else {
+            return;
+        };
+        let document_id = doc.id;
+        let settings = settings_from_values(values);
+        let values = values.clone();
+        let source = raw.source.clone();
+        self.raw_preview_seq = self.raw_preview_seq.wrapping_add(1);
+        self.open_modal(
+            Modal::Busy {
+                title: "Camera Raw".into(),
+                what: "Developing the original capture…".into(),
+                note: "Using the best demosaic path. The original RAW and these settings remain editable after saving as PSD or PSB."
+                    .into(),
+            },
+            cx,
+        );
+
+        cx.spawn(async move |this, cx| {
+            let rendered = cx
+                .background_executor()
+                .spawn(async move {
+                    render_raw_capture(
+                        source,
+                        settings,
+                        schist_codecs_common::raw::RawQuality::Best,
+                        filter,
+                        values,
+                    )
+                })
+                .await;
+            this.update(cx, |ws, cx| {
+                ws.modal = None;
+                let Some(doc) = ws.doc.as_mut() else {
+                    return;
+                };
+                if doc.id != document_id || doc.tree.find(layer_id).is_none() {
+                    ws.status = "RAW development finished after its document changed".into();
+                    cx.notify();
+                    return;
+                }
+                let developed = match rendered {
+                    Ok(developed) => developed,
+                    Err(err) => {
+                        ws.status = format!("RAW development failed: {err}").into();
+                        cx.notify();
+                        return;
+                    }
+                };
+                let Ok(width) = u32::try_from(developed.width) else {
+                    ws.status = "RAW development is too wide".into();
+                    cx.notify();
+                    return;
+                };
+                let Ok(height) = u32::try_from(developed.height) else {
+                    ws.status = "RAW development is too tall".into();
+                    cx.notify();
+                    return;
+                };
+                if (width, height) != (doc.width, doc.height) {
+                    ws.status = format!(
+                        "RAW development size changed to {width} × {height}; keeping the current layer"
+                    )
+                    .into();
+                    cx.notify();
+                    return;
+                }
+
+                let mut tiles = schist_core::TileMap::default();
+                schist_core::blit_rgba_f32(
+                    &mut tiles,
+                    doc.depth,
+                    IntRect::from_size(width, height),
+                    &developed.rgba,
+                );
+                let mut after = raw;
+                after.settings = settings;
+                let mut edit = doc.begin_edit("Camera Raw Development");
+                edit.replace_layer_tiles(layer_id, tiles);
+                edit.set_raw_development(layer_id, Some(Box::new(after)));
+                edit.commit();
+                ws.status = "Camera Raw development applied (best demosaic)".into();
+                ws.after_change(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Image Size through a neural upscaler.

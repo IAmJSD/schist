@@ -659,6 +659,30 @@ fn make_layer(
         .find(|b| b.key == crate::smart::SMART_BLOCK_KEY)
         .and_then(|b| crate::smart::read_smart(&b.data, header.depth))
         .map(Box::new);
+    let raw = rec
+        .extras
+        .iter()
+        .find(|b| b.key == crate::raw::RAW_BLOCK_KEY)
+        .and_then(|b| crate::raw::read_raw(&b.data))
+        .map(Box::new);
+    let style = rec
+        .extras
+        .iter()
+        .find(|b| &b.key == b"lfx2")
+        .and_then(|b| crate::effects::read_lfx2(&b.data))
+        .unwrap_or_default();
+    // A valid ScRw payload can be very large and is now represented by
+    // `raw.source`; retaining the encoded block too would double memory for
+    // every reopened capture. Keep malformed or newer blocks verbatim so
+    // an unedited file still round-trips data this version cannot read.
+    let extras = if raw.is_some() {
+        rec.extras
+            .into_iter()
+            .filter(|block| block.key != crate::raw::RAW_BLOCK_KEY)
+            .collect()
+    } else {
+        rec.extras
+    };
 
     Layer {
         id: LayerId::next(),
@@ -674,13 +698,8 @@ fn make_layer(
         kind,
         // Effects: decoded so they render, and kept in `extras` too so a
         // file we never touch still round-trips byte-for-byte.
-        style: rec
-            .extras
-            .iter()
-            .find(|b| &b.key == b"lfx2")
-            .and_then(|b| crate::effects::read_lfx2(&b.data))
-            .unwrap_or_default(),
-        extras: rec.extras,
+        style,
+        extras,
         // A shape layer's path, so the shape stays editable rather than
         // arriving as a flat picture of itself. The fill colour comes from
         // its 'SoCo' payload where there is one, and defaults to black.
@@ -692,6 +711,7 @@ fn make_layer(
         // rasterization, and every further transform degraded it -- the
         // opposite of what smart objects are for.
         smart,
+        raw,
         styled: None,
         render_offset: (0, 0),
     }
