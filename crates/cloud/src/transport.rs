@@ -60,6 +60,7 @@ struct Pending {
     reply: Option<mpsc::Sender<Reply>>,
 }
 enum Command {
+    FrameLimit(usize),
     Watch(String, WatchQuery),
     Unwatch(String),
     Request {
@@ -97,6 +98,9 @@ impl Drop for Client {
     }
 }
 impl Handle {
+    pub fn set_frame_limit(&self, limit: usize) {
+        let _ = self.tx.send(Command::FrameLimit(limit.min(MAX_FRAME)));
+    }
     pub fn watch(&self, id: &str, query: WatchQuery) {
         let _ = self.tx.send(Command::Watch(id.into(), query));
     }
@@ -184,6 +188,7 @@ fn offline(
     events: &mpsc::Sender<Event>,
 ) -> bool {
     match cmd {
+        Command::FrameLimit(_) => {}
         Command::Watch(id, q) => {
             watches.insert(id, q);
         }
@@ -290,6 +295,7 @@ enum Outcome {
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 struct Session<'a> {
+    frame_limit: usize,
     socket: Socket,
     watches: &'a mut HashMap<String, WatchQuery>,
     events: &'a mpsc::Sender<Event>,
@@ -329,6 +335,7 @@ async fn connected(
     .await??;
     let now = Instant::now();
     let mut session = Session {
+        frame_limit: MAX_FRAME,
         socket,
         watches,
         events,
@@ -363,7 +370,7 @@ async fn connected(
 }
 impl Session<'_> {
     async fn send(&mut self, value: Value) -> Result<()> {
-        let bytes = encode(&value)?;
+        let bytes = encode_with_limit(&value, self.frame_limit)?;
         tokio::time::timeout(
             Duration::from_secs(10),
             self.socket.send(Message::Binary(bytes.into())),
@@ -409,6 +416,7 @@ impl Session<'_> {
     }
     async fn command(&mut self, command: Option<Command>) -> Result<Option<Outcome>> {
         match command {
+            Some(Command::FrameLimit(limit)) => self.frame_limit = limit,
             None | Some(Command::Stop) => {
                 let _ = self.socket.close(None).await;
                 return Ok(Some(Outcome::Stop));
@@ -451,7 +459,7 @@ impl Session<'_> {
                     ("method", method.into()),
                     ("params", params),
                 ]);
-                if let Err(error) = encode(&value) {
+                if let Err(error) = encode_with_limit(&value, self.frame_limit) {
                     finish(self.events, id, pending, Err(error.to_string()));
                     return Ok(None);
                 }
@@ -488,6 +496,10 @@ impl Session<'_> {
             }
             _ => return Err(anyhow!("Cloud requires binary MessagePack frames")),
         };
+        ensure!(
+            bytes.len() <= self.frame_limit,
+            "Incoming workspace frame exceeds the negotiated limit"
+        );
         self.received = Instant::now();
         let message = decode(&bytes)?;
         if !self.ready {
@@ -720,6 +732,53 @@ mod tests {
             }
         }
         assert!(failed);
+        drop(client);
+        server.join().unwrap();
+    }
+    #[test]
+    fn advertised_frame_limit_rejects_oversize_request_without_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut ws = accept(stream).unwrap();
+            assert_eq!(string(&read(&mut ws), "type").unwrap(), "hello");
+            send(
+                &mut ws,
+                map([("type", "ready".into()), ("protocol", 1.into())]),
+            );
+            let request = read(&mut ws);
+            assert_eq!(string(&request, "method").unwrap(), "small");
+            send(
+                &mut ws,
+                map([
+                    ("type", "result".into()),
+                    ("id", string(&request, "id").unwrap().into()),
+                    ("value", Value::Nil),
+                ]),
+            );
+            assert!(matches!(ws.read(), Ok(Message::Close(_))));
+        });
+        let client = Client::start(account(url));
+        assert!(matches!(
+            client.events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected
+        ));
+        client.handle.set_frame_limit(128);
+        let large = client
+            .handle
+            .call("large", map([("data", Value::Binary(vec![0; 128]))]));
+        match client.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Reply { id, result } => {
+                assert_eq!(id, large);
+                assert!(result.unwrap_err().contains("128 byte"));
+            }
+            _ => panic!("Expected local size rejection"),
+        }
+        assert_eq!(client.handle.request("small", map([])).unwrap(), Value::Nil);
         drop(client);
         server.join().unwrap();
     }

@@ -223,4 +223,5 @@ FORCE:
 .PHONY: check-cloud
 check-cloud:
 	$(CARGO) test -p schist-cloud
+	$(CARGO) test -p schist-app cloud_lifecycle_tests
 	$(CARGO) check -p schist-app

@@ -11,6 +11,8 @@ The provider must serve `https://<domain>/.schist/auth-urls.json` and implement
 the [Rust protocol types](../crates/cloud/src/protocol.rs) and
 [transport contract](../crates/cloud/src/transport.rs) described below. This is a native client
 implementation; it does not deploy the provider service or provision accounts.
+The [provider specification](https://gist.github.com/IAmJSD/f2d639079c5437424e693686490621c0)
+describes capability discovery and native download behavior in sections 8.6–8.9.
 
 ## Gallery and documents
 
@@ -37,10 +39,22 @@ associates it with a folder.** Opening does not create or relocate an asset.
 Uploads set `folder_id` before the returned asset is bound to the editor.
 Bucket membership is independent of folder placement.
 
+Select one cloud photo and choose **Download selected…** to save the current
+editable document, its original imported file, or an export format advertised by
+the provider. Import-only codecs are excluded from export choices. Providers
+without capability discovery still support downloading the current document.
+Downloads preserve the ticket revision and HTTP content metadata. The suggested
+filename follows Content-Disposition, with Content-Type used as a fallback;
+opening always identifies the actual file format by its bytes. A revision conflict
+(HTTP 409) obtains a fresh ticket, with at most three download attempts.
+
 Collaborative edits sync automatically. Save waits for acknowledgement; a tab is
 marked saved only when its latest local edits have been acknowledged. Undo/redo
 tracks the local participant's changes. Reconnect joins with a Yjs state vector
 and exchanges missing updates. Closing a tab leaves its document room.
+A provider's `document_error` permanently stops that binding and ignores late
+updates and acknowledgements while retaining local edits. Reconnect does not
+restart it; explicitly reopen the asset from the cloud gallery to try again.
 
 Credentials use the operating system credential store. Crash recovery stores
 MessagePack checkpoints under Schist's cloud state directory, including edits
@@ -55,6 +69,14 @@ queries, mutations and all open collaborative documents. Messages are MessagePac
 maps; binary updates and state vectors use MessagePack `bin`, never Base64 or
 numeric arrays. Ordinary asset transfers use signed HTTPS URLs obtained through
 that socket. Credentials are not forwarded to those transfer URLs.
+
+After connecting, the client requests `workspace.capabilities` before joining
+documents. It checks support for `schist.image.v1`, applies the advertised frame
+ceiling to whole encoded envelopes, and checks the merged local Yjs state against
+the document ceiling before sending edits. The server remains authoritative for
+limits after merging concurrent edits. Only `method_not_found` enables fallback
+to the original protocol without capability discovery; other discovery errors
+are reported. Explicit download formats require advertised support.
 
 The client restores subscriptions after reconnecting, rejects obsolete query
 snapshots, refreshes credentials and detects dead connections. Unacknowledged
@@ -103,7 +125,8 @@ downloads, thumbnails, search indexes and other clients, the provider must
 materialize this image model or use a compatible exporter. A generic opaque-Yjs
 relay alone cannot produce those image exports.
 
-Workspace messages are capped at 256 MiB.
+Workspace messages are capped at 256 MiB, or the provider's lower advertised limit.
+Schist Cloud currently advertises a separate 128 MiB merged-document ceiling.
 Oversized updates remain local and show an error; larger documents need protocol
 chunking before they can sync. Asset downloads are capped at 512 MiB. Generation
 limits are 128 slots, 64 MiB per image and 256 MiB of retained result bytes.
@@ -111,7 +134,9 @@ limits are 128 slots, 64 MiB per image and 256 MiB of retained result bytes.
 ## Checks
 
 `make check-cloud` runs protocol, authentication validation, real local-WebSocket
-reconnect/multiplexing, collaborative merge, local-only undo, recovery and tile
-round-trip tests, then checks the desktop app. `make app PROFILE=debug` builds
+reconnect/multiplexing and limit checks, local HTTP download-conflict and metadata
+tests, collaborative merge, local-only undo, recovery and tile round trips. It
+also tests terminated document bindings in the app, then checks the desktop app.
+`make app PROFILE=debug` builds
 the desktop binary. Live provider authentication and server-side persistence
 require a running compatible service and account.

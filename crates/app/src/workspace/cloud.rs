@@ -2,9 +2,10 @@
 //! in schist-cloud; this module translates its events into GPUI state changes.
 use super::*;
 use anyhow::{anyhow, Result};
+use remote::transfer::DownloadedAsset;
 use schist_cloud::{
     self as remote,
-    protocol::{bytes, map, parse, string, value},
+    protocol::{bytes, map, parse, value},
     Account, Asset, AssetQuery, Bucket, CatalogueQuery, Client, Event, Filters, Folder, Scope,
     Value, WatchQuery,
 };
@@ -26,6 +27,7 @@ pub(crate) struct RemoteDocument {
     pub asset: Asset,
     pub shared: remote::document::SharedDocument,
     pub joined: bool,
+    pub detached: bool,
     pub vector: Vec<u8>,
     pub sending: bool,
     pub changed: bool,
@@ -34,6 +36,7 @@ pub(crate) struct RemoteDocument {
     pub render: bool,
 }
 enum Pending {
+    Capabilities,
     Join(DocumentId),
     Update {
         doc: DocumentId,
@@ -41,6 +44,19 @@ enum Pending {
         generation: u64,
     },
     Mutation,
+}
+impl Pending {
+    fn belongs_to(&self, id: DocumentId) -> bool {
+        matches!(self, Self::Join(doc) | Self::Update { doc, .. } if *doc == id)
+    }
+}
+impl RemoteDocument {
+    fn detach(&mut self) {
+        self.detached = true;
+        self.joined = false;
+        self.sending = false;
+        self.render = false;
+    }
 }
 enum RecoveryTask {
     Write {
@@ -71,7 +87,12 @@ enum Job {
     Opened {
         epoch: u64,
         asset: Asset,
-        data: Vec<u8>,
+        download: DownloadedAsset,
+    },
+    Downloaded {
+        epoch: u64,
+        name: String,
+        download: DownloadedAsset,
     },
     Uploaded {
         epoch: u64,
@@ -88,6 +109,9 @@ pub(crate) struct CloudState {
     pub account: Option<Account>,
     pub client: Option<Client>,
     pub connected: bool,
+    pub capabilities: Option<remote::Capabilities>,
+    pub capabilities_ready: bool,
+    pub download_target: Option<Asset>,
     pub show: bool,
     pub message: String,
     pub thumbnails: HashMap<String, (u64, Arc<RenderImage>)>,
@@ -148,6 +172,9 @@ impl Default for CloudState {
             account: None,
             client: None,
             connected: false,
+            capabilities: None,
+            capabilities_ready: false,
+            download_target: None,
             show: false,
             message: "Not signed in".into(),
             thumbnails: HashMap::new(),
@@ -184,6 +211,51 @@ impl Default for CloudState {
 impl Drop for CloudState {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+impl CloudState {
+    fn joinable_documents(&self) -> Vec<DocumentId> {
+        self.docs
+            .iter()
+            .filter(|(_, doc)| !doc.detached)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+    fn disconnect(&mut self) {
+        self.connected = false;
+        self.capabilities_ready = false;
+        for document in self.docs.values_mut() {
+            document.joined = false;
+            document.sending = false;
+        }
+        self.pending.clear();
+    }
+    fn detach_document(&mut self, asset: &str) -> Option<DocumentId> {
+        let id = self
+            .docs
+            .iter()
+            .find(|(_, document)| document.asset.id == asset)
+            .map(|(id, _)| *id)?;
+        self.docs.get_mut(&id)?.detach();
+        self.pending.retain(|_, pending| !pending.belongs_to(id));
+        Some(id)
+    }
+    fn apply_document_update(&mut self, asset: &str, update: &[u8]) -> Result<()> {
+        if let Some(document) = self
+            .docs
+            .values_mut()
+            .find(|doc| doc.asset.id == asset && !doc.detached)
+        {
+            document.shared.apply(update)?;
+            document.render = true;
+        }
+        Ok(())
+    }
+    fn reopen_document(&mut self, id: DocumentId) -> bool {
+        let Some(document) = self.docs.get_mut(&id) else {
+            return false;
+        };
+        std::mem::replace(&mut document.detached, false)
     }
 }
 impl Workspace {
@@ -298,6 +370,9 @@ impl Workspace {
         let account = self.cloud.account.take();
         self.cloud.client = None;
         self.cloud.connected = false;
+        self.cloud.capabilities = None;
+        self.cloud.capabilities_ready = false;
+        self.cloud.download_target = None;
         self.cloud.show = false;
         self.cloud.pending.clear();
         self.cloud.docs.clear();
@@ -472,21 +547,39 @@ impl Workspace {
                     self.status = message.clone().into();
                     self.cloud.message = message;
                 }
-                Job::Opened { epoch, asset, data } if epoch == self.cloud.epoch => {
-                    if let Err(e) = self.cloud_install(asset, data, cx) {
+                Job::Opened {
+                    epoch,
+                    mut asset,
+                    download,
+                } if epoch == self.cloud.epoch => {
+                    asset.name = download.suggested_name(&asset.name);
+                    asset.revision = download.revision;
+                    if let Some(mime) = &download.content_type {
+                        asset.mime_type = mime.clone();
+                    }
+                    if let Err(e) = self.cloud_install(asset, download.bytes, cx) {
                         self.cloud_error(format!("Open cloud document: {e}"));
                     }
+                }
+                Job::Downloaded {
+                    epoch,
+                    name,
+                    download,
+                } if epoch == self.cloud.epoch => {
+                    self.cloud_save_download(name, download, cx);
                 }
                 Job::Uploaded { epoch, doc, asset } if epoch == self.cloud.epoch => {
                     if let Some(source) = self.cloud_doc(doc) {
                         match remote::document::SharedDocument::unseeded(source) {
                             Ok(shared) => {
+                                self.cloud_close_document(doc);
                                 self.cloud.docs.insert(
                                     doc,
                                     RemoteDocument {
                                         asset,
                                         shared,
                                         joined: false,
+                                        detached: false,
                                         vector: vec![0],
                                         sending: false,
                                         changed: true,
@@ -578,20 +671,17 @@ impl Workspace {
         match event {
             Event::Connected => {
                 self.cloud.connected = true;
+                self.cloud.capabilities = None;
+                self.cloud.capabilities_ready = false;
                 self.cloud.message = "Connected to Schist Cloud".into();
-                let ids: Vec<_> = self.cloud.docs.keys().copied().collect();
-                for id in ids {
-                    self.cloud_join(id);
+                if let Some(client) = &self.cloud.client {
+                    let id = client.handle.call("workspace.capabilities", map([]));
+                    self.cloud.pending.insert(id, Pending::Capabilities);
                 }
             }
             Event::Disconnected(error) => {
-                self.cloud.connected = false;
+                self.cloud.disconnect();
                 self.cloud.message = error;
-                for d in self.cloud.docs.values_mut() {
-                    d.joined = false;
-                    d.sending = false;
-                }
-                self.cloud.pending.clear();
             }
             Event::Credentials(account) => {
                 self.cloud.account = Some(account.clone());
@@ -640,25 +730,14 @@ impl Workspace {
                 self.cloud_error(error);
             }
             Event::DocumentUpdate { asset_id, bytes } => {
-                if let Some(d) = self
-                    .cloud
-                    .docs
-                    .values_mut()
-                    .find(|d| d.asset.id == asset_id)
-                {
-                    d.shared.apply(&bytes)?;
-                    d.render = true;
-                }
+                self.cloud.apply_document_update(&asset_id, &bytes)?;
             }
             Event::DocumentError { asset_id, error } => {
-                if let Some(d) = self
-                    .cloud
-                    .docs
-                    .values_mut()
-                    .find(|d| d.asset.id == asset_id)
-                {
-                    d.joined = false;
-                    d.sending = false;
+                if let Some(id) = self.cloud.detach_document(&asset_id) {
+                    if self.close_after_save == Some(id) {
+                        self.close_after_save = None;
+                        self.cancel_quit();
+                    }
                 }
                 self.cloud_error(error);
             }
@@ -667,6 +746,22 @@ impl Workspace {
                     return Ok(());
                 };
                 match (p, result) {
+                    (Pending::Capabilities, result) => {
+                        let capabilities = remote::Capabilities::from_reply(result)?;
+                        if let Some(client) = &self.cloud.client {
+                            client.handle.set_frame_limit(
+                                capabilities
+                                    .as_ref()
+                                    .map_or(remote::MAX_FRAME, |c| c.frame_limit()),
+                            );
+                        }
+                        self.cloud.capabilities = capabilities;
+                        self.cloud.capabilities_ready = true;
+                        let ids = self.cloud.joinable_documents();
+                        for id in ids {
+                            self.cloud_join(id);
+                        }
+                    }
                     (Pending::Join(id), Ok(result)) => {
                         if let Some(d) = self.cloud.docs.get_mut(&id) {
                             d.shared.apply(&bytes(&result, "update")?)?;
@@ -769,6 +864,7 @@ impl Workspace {
                 asset,
                 shared,
                 joined: false,
+                detached: false,
                 vector: vec![0],
                 sending: false,
                 changed: true,
@@ -789,6 +885,9 @@ impl Workspace {
             .find(|(_, d)| d.asset.id == asset.id)
             .map(|(id, _)| *id)
         {
+            if self.cloud.reopen_document(id) {
+                self.cloud_join(id);
+            }
             if self.doc.as_ref().is_some_and(|d| d.id == id) {
                 self.library.open = false;
             } else if let Some(i) = self.background_tabs.iter().position(|t| t.doc.id == id) {
@@ -807,13 +906,13 @@ impl Workspace {
         let epoch = self.cloud.epoch;
         self.cloud.message = format!("Opening {}…", asset.name);
         std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<u8>> {
-                let reply =
-                    handle.request("asset.download", map([("id", asset.id.clone().into())]))?;
-                remote::auth::download(&string(&reply, "url")?)
-            })();
+            let result = handle.download_asset(&asset.id, None, None);
             let job = match result {
-                Ok(data) => Job::Opened { epoch, asset, data },
+                Ok(download) => Job::Opened {
+                    epoch,
+                    asset,
+                    download,
+                },
                 Err(e) => Job::Error {
                     epoch,
                     error: e.to_string(),
@@ -824,12 +923,24 @@ impl Workspace {
         cx.notify();
     }
     fn cloud_join(&mut self, id: DocumentId) {
-        if !self.cloud.connected {
+        if !self.cloud.connected || !self.cloud.capabilities_ready {
+            return;
+        }
+        if self
+            .cloud
+            .capabilities
+            .as_ref()
+            .is_some_and(|c| !c.supports_image_model())
+        {
+            self.cloud_error("This provider does not support collaborative image editing");
             return;
         }
         let Some(d) = self.cloud.docs.get_mut(&id) else {
             return;
         };
+        if d.detached {
+            return;
+        }
         if self
             .cloud
             .pending
@@ -901,8 +1012,15 @@ impl Workspace {
         let Some(d) = self.cloud.docs.get_mut(&id) else {
             return;
         };
-        if !d.joined || d.sending || !d.changed {
+        if d.detached || !d.joined || d.sending || !d.changed {
             return;
+        }
+        if let Some(capabilities) = &self.cloud.capabilities {
+            if let Err(error) = capabilities.check_document(d.shared.full_state().len()) {
+                d.joined = false;
+                self.cloud_error(error.to_string());
+                return;
+            }
         }
         let update = match d.shared.diff(&d.vector) {
             Ok(b) => b,
@@ -912,13 +1030,6 @@ impl Workspace {
                 return;
             }
         };
-        if update.len() > remote::MAX_FRAME - 1024 {
-            d.joined = false;
-            self.cloud_error(
-                "Cloud update exceeds the provider's 256 MiB frame limit; edits remain local",
-            );
-            return;
-        }
         if let Some(c) = &self.cloud.client {
             let vector = d.shared.state_vector();
             let generation = d.generation;
@@ -990,8 +1101,23 @@ impl Workspace {
         if !self.cloud.docs.contains_key(&id) {
             return false;
         }
+        if self
+            .cloud
+            .capabilities
+            .as_ref()
+            .is_some_and(|c| !c.supports_image_model())
+        {
+            self.cloud_error("This provider does not support collaborative image editing; save a local copy instead");
+            cx.notify();
+            return true;
+        }
         self.cloud_capture_edit();
         let remote = &self.cloud.docs[&id];
+        if remote.detached {
+            self.cloud_error("Cloud sync has stopped for this document. Reopen it from the cloud gallery to reconnect; edits remain local.");
+            cx.notify();
+            return true;
+        }
         if remote.joined && !remote.sending && !remote.changed && remote.saved == remote.generation
         {
             if let Some(doc) = self.cloud_doc_mut(id) {
@@ -1034,6 +1160,9 @@ impl Workspace {
         }
     }
     pub(crate) fn cloud_close_document(&mut self, id: DocumentId) {
+        self.cloud
+            .pending
+            .retain(|_, pending| !pending.belongs_to(id));
         if let Some(d) = self.cloud.docs.remove(&id) {
             let _ = self
                 .cloud
@@ -1182,6 +1311,96 @@ impl Workspace {
             cx,
         );
     }
+    pub(crate) fn cloud_download_selected(&mut self, cx: &mut Context<Self>) {
+        if !self.cloud.connected || !self.cloud.capabilities_ready {
+            self.cloud_error("Wait for the cloud connection before downloading");
+            cx.notify();
+            return;
+        }
+        if self.cloud.selected.len() != 1 {
+            self.cloud_error("Select one cloud photo to download");
+            cx.notify();
+            return;
+        }
+        self.cloud.download_target = self
+            .cloud
+            .assets
+            .iter()
+            .find(|asset| self.cloud.selected.contains(&asset.id))
+            .cloned();
+        self.open_modal(
+            Modal::Cloud {
+                kind: "download",
+                fields: vec![("cloud-download-format", "Format".into(), String::new())],
+            },
+            cx,
+        );
+    }
+    fn cloud_start_download(&mut self, format: Option<String>) -> Result<()> {
+        let asset = self
+            .cloud
+            .download_target
+            .clone()
+            .ok_or_else(|| anyhow!("Select a cloud photo first"))?;
+        let handle = self
+            .cloud
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Sign in first"))?
+            .handle
+            .clone();
+        let capabilities = self.cloud.capabilities.clone();
+        let epoch = self.cloud.epoch;
+        let sender = self.cloud.sender.clone();
+        self.cloud.message = format!("Downloading {}…", asset.name);
+        std::thread::spawn(move || {
+            let job =
+                match handle.download_asset(&asset.id, format.as_deref(), capabilities.as_ref()) {
+                    Ok(download) => Job::Downloaded {
+                        epoch,
+                        name: download.suggested_name(&asset.name),
+                        download,
+                    },
+                    Err(error) => Job::Error {
+                        epoch,
+                        error: format!("Cloud download failed: {error}"),
+                    },
+                };
+            let _ = sender.send(job);
+        });
+        Ok(())
+    }
+    fn cloud_save_download(
+        &mut self,
+        name: String,
+        download: DownloadedAsset,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&directory, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = prompt.await else {
+                return;
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(&path, download.bytes).map(|()| path) })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                match result {
+                    Ok(path) => {
+                        ws.cloud.message = format!("Downloaded {}", path.display());
+                        ws.status = ws.cloud.message.clone().into();
+                    }
+                    Err(error) => ws.cloud_error(format!("Could not save download: {error}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn cloud_upload_current(&mut self, folder: Option<String>) -> Result<()> {
         let doc = self
             .doc
@@ -1237,6 +1456,10 @@ impl Workspace {
                 .unwrap_or_default()
         };
         match kind {
+            "download" => {
+                let format = get("cloud-download-format");
+                self.cloud_start_download((!format.is_empty()).then_some(format))?;
+            }
             "sign-in" => {
                 let domain = remote::auth::domain(&get("cloud-domain"))?;
                 self.cloud_login(domain, cx);
@@ -1470,4 +1693,77 @@ fn parse_filters(fields: &[(&'static str, String, String)]) -> Result<Filters> {
         captured_after,
         captured_before,
     })
+}
+
+#[cfg(test)]
+mod cloud_lifecycle_tests {
+    use super::*;
+    fn binding(asset: &str) -> RemoteDocument {
+        let mut source = Document::new("Original", 1, 1, schist_color::Depth::Eight);
+        let mut shared = remote::document::SharedDocument::new(&source).unwrap();
+        source.title = "Unsynced local edit".into();
+        shared.local_changes(&source).unwrap();
+        RemoteDocument {
+            asset: Asset {
+                id: asset.into(),
+                folder_id: None,
+                name: "Original".into(),
+                mime_type: "image/png".into(),
+                revision: 1,
+                size: 1,
+                edited: false,
+                tags: vec![],
+                rating: 0,
+                captured_at: None,
+                modified_at: 0,
+                thumbnail_url: None,
+            },
+            shared,
+            joined: true,
+            detached: false,
+            vector: vec![0],
+            sending: true,
+            changed: true,
+            generation: 1,
+            saved: 0,
+            render: true,
+        }
+    }
+    #[test]
+    fn terminated_document_keeps_edits_ignores_late_events_and_requires_explicit_reopen() {
+        let mut state = CloudState::default();
+        let id = DocumentId(41);
+        let other = DocumentId(42);
+        state.docs.insert(id, binding("revoked"));
+        state.docs.insert(other, binding("other"));
+        let before = state.docs[&id].shared.full_state();
+        state.pending.insert("late-join".into(), Pending::Join(id));
+        state.pending.insert(
+            "late-update".into(),
+            Pending::Update {
+                doc: id,
+                vector: vec![0],
+                generation: 1,
+            },
+        );
+        state
+            .pending
+            .insert("other-join".into(), Pending::Join(other));
+        assert_eq!(state.detach_document("revoked"), Some(id));
+        assert!(!state.pending.contains_key("late-join"));
+        assert!(!state.pending.contains_key("late-update"));
+        assert!(state.pending.contains_key("other-join"));
+        // Even a malformed late push is discarded before touching the detached CRDT.
+        state.apply_document_update("revoked", &[255]).unwrap();
+        state.disconnect();
+        assert_eq!(state.joinable_documents(), vec![other]);
+        let document = &state.docs[&id];
+        assert_eq!(document.shared.full_state(), before);
+        assert_eq!((document.generation, document.saved), (1, 0));
+        assert!(!document.joined && !document.sending && !document.render);
+        assert!(state.reopen_document(id));
+        assert!(!state.reopen_document(id));
+        assert!(state.joinable_documents().contains(&id));
+        assert!(state.apply_document_update("revoked", &[255]).is_err());
+    }
 }

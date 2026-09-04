@@ -222,14 +222,42 @@ pub fn download(url: &str) -> Result<Vec<u8>> {
     download_limited(url, 512 * 1024 * 1024)
 }
 pub fn download_limited(url: &str, limit: u64) -> Result<Vec<u8>> {
+    Ok(download_response(url, limit)?.bytes)
+}
+pub struct DownloadResponse {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+    pub content_disposition: Option<String>,
+}
+pub fn download_response(url: &str, limit: u64) -> Result<DownloadResponse> {
+    #[cfg(test)]
+    if url.starts_with("http://127.0.0.1:") {
+        return read_download(url, limit);
+    }
     secure_url(url, "https")?;
-    Ok(agent()
-        .get(url)
-        .call()?
+    read_download(url, limit)
+}
+fn read_download(url: &str, limit: u64) -> Result<DownloadResponse> {
+    let mut response = agent().get(url).call()?;
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = header("content-type");
+    let content_disposition = header("content-disposition");
+    let bytes = response
         .body_mut()
         .with_config()
         .limit(limit)
-        .read_to_vec()?)
+        .read_to_vec()?;
+    Ok(DownloadResponse {
+        bytes,
+        content_type,
+        content_disposition,
+    })
 }
 pub fn upload(url: &str, mime: &str, bytes: &[u8]) -> Result<()> {
     secure_url(url, "https")?;

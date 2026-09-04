@@ -4,6 +4,55 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DOMAIN: &str = "schist.app";
 pub const MAX_FRAME: usize = 256 * 1024 * 1024;
+pub const IMAGE_MODEL: &str = "schist.image.v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Capabilities {
+    pub document_models: Vec<String>,
+    pub formats: Vec<Format>,
+    pub max_frame_bytes: u64,
+    pub max_document_bytes: u64,
+    pub default_edited_export: String,
+    pub original_download: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Format {
+    pub id: String,
+    pub name: String,
+    pub extensions: Vec<String>,
+    pub can_export: bool,
+    pub runtime_requirement: Option<String>,
+}
+impl Capabilities {
+    pub fn from_reply(reply: std::result::Result<Value, String>) -> Result<Option<Self>> {
+        match reply {
+            Ok(value) => Ok(Some(parse(value)?)),
+            Err(error) if error.starts_with("method_not_found:") => Ok(None),
+            Err(error) => bail!(error),
+        }
+    }
+    pub fn frame_limit(&self) -> usize {
+        self.max_frame_bytes.min(MAX_FRAME as u64) as usize
+    }
+    pub fn supports_image_model(&self) -> bool {
+        self.document_models
+            .iter()
+            .any(|model| model == IMAGE_MODEL)
+    }
+    pub fn supports_export(&self, extension: &str) -> bool {
+        self.formats
+            .iter()
+            .any(|format| format.can_export && format.extensions.iter().any(|ext| ext == extension))
+    }
+    pub fn check_document(&self, bytes: usize) -> Result<()> {
+        ensure!(
+            bytes as u64 <= self.max_document_bytes,
+            "Shared document exceeds the provider's {} byte limit; edits remain local",
+            self.max_document_bytes
+        );
+        Ok(())
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
@@ -217,8 +266,15 @@ pub fn string(v: &Value, name: &str) -> Result<String> {
         .into())
 }
 pub fn encode(v: &Value) -> Result<Vec<u8>> {
+    encode_with_limit(v, MAX_FRAME)
+}
+pub fn encode_with_limit(v: &Value, limit: usize) -> Result<Vec<u8>> {
     let b = rmp_serde::to_vec_named(v)?;
-    ensure!(b.len() <= MAX_FRAME, "Message exceeds 256 MiB");
+    ensure!(
+        b.len() <= limit.min(MAX_FRAME),
+        "Message exceeds the {} byte workspace frame limit",
+        limit.min(MAX_FRAME)
+    );
     Ok(b)
 }
 pub fn decode(b: &[u8]) -> Result<ServerMessage> {
@@ -261,6 +317,52 @@ pub fn format_date(t: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub(super) fn capabilities() -> Capabilities {
+        Capabilities {
+            document_models: vec![IMAGE_MODEL.into()],
+            formats: vec![Format {
+                id: "codec.png".into(),
+                name: "PNG".into(),
+                extensions: vec!["png".into()],
+                can_export: true,
+                runtime_requirement: None,
+            }],
+            max_frame_bytes: MAX_FRAME as u64,
+            max_document_bytes: 128 * 1024 * 1024,
+            default_edited_export: "psd".into(),
+            original_download: true,
+        }
+    }
+    #[test]
+    fn capabilities_fallback_only_for_unknown_method() {
+        assert!(
+            Capabilities::from_reply(Err("method_not_found: older provider".into()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(Capabilities::from_reply(Err("forbidden: permission denied".into())).is_err());
+        assert!(Capabilities::from_reply(Err("Cloud disconnected".into())).is_err());
+        let caps = Capabilities::from_reply(Ok(value(capabilities())))
+            .unwrap()
+            .unwrap();
+        assert!(caps.supports_image_model());
+        assert!(caps.supports_export("png"));
+        assert!(!caps.supports_export("heic"));
+    }
+    #[test]
+    fn document_limit_is_independent_of_frame_limit() {
+        let caps = capabilities();
+        assert!(caps.check_document(128 * 1024 * 1024).is_ok());
+        assert!(caps.check_document(128 * 1024 * 1024 + 1).is_err());
+        let message = map([("update", Value::Binary(vec![0; 24]))]);
+        let size = encode(&message).unwrap().len();
+        assert!(size > 24);
+        assert!(encode_with_limit(&message, size).is_ok());
+        assert!(encode_with_limit(&message, size - 1).is_err());
+        let mut caps = caps;
+        caps.max_frame_bytes = u64::MAX;
+        assert_eq!(caps.frame_limit(), MAX_FRAME);
+    }
     #[test]
     fn binary_round_trip_and_trailing_data() {
         let b: Vec<u8> = (0..=255).collect();

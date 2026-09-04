@@ -513,6 +513,12 @@ pub(crate) fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::Any
                     cx,
                 ))
                 .child(ui::button(
+                    "Download selected…",
+                    false,
+                    |ws, _, cx| ws.cloud_download_selected(cx),
+                    cx,
+                ))
+                .child(ui::button(
                     "Upload files…",
                     false,
                     |ws, _window, cx| {
@@ -635,6 +641,7 @@ pub(crate) fn dialog(
         "delete-folder" => "Delete cloud folder?",
         "delete-bucket" => "Delete cloud bucket?",
         "upload-document" => "Upload document to Schist Cloud",
+        "download" => "Download cloud photo",
         _ => "Schist Cloud",
     };
     let mut body = div().flex().flex_col().gap_2();
@@ -651,6 +658,61 @@ pub(crate) fn dialog(
         ));
     }
     for (key, label, committed) in fields {
+        if key == "cloud-download-format" {
+            let mut options = vec![(String::new(), "Current editable document".to_string())];
+            if let Some(capabilities) = &ws.cloud.capabilities {
+                if capabilities.original_download {
+                    options.push(("original".into(), "Original file".into()));
+                }
+                let mut seen = std::collections::HashSet::new();
+                for format in &capabilities.formats {
+                    if !format.can_export {
+                        continue;
+                    }
+                    for extension in &format.extensions {
+                        if extension != "original"
+                            && schist_cloud::transfer::valid_format(extension)
+                            && seen.insert(extension.clone())
+                        {
+                            options.push((
+                                extension.clone(),
+                                format!("{} (.{})", format.name, extension),
+                            ));
+                        }
+                    }
+                }
+            }
+            let mut choices = div()
+                .id("cloud-download-formats")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .max_h(px(320.0))
+                .overflow_y_scroll();
+            for (id, name) in options {
+                let display = format!("{} {}", if id == committed { "●" } else { "○" }, name);
+                choices = choices.child(ui::button(
+                    display,
+                    false,
+                    move |ws, _, cx| {
+                        ws.update_modal(|modal| {
+                            if let Modal::Cloud { fields, .. } = modal {
+                                if let Some((_, _, selected)) = fields
+                                    .iter_mut()
+                                    .find(|(key, _, _)| *key == "cloud-download-format")
+                                {
+                                    *selected = id.clone();
+                                }
+                            }
+                        });
+                        cx.notify();
+                    },
+                    cx,
+                ));
+            }
+            body = body.child(ui::field_row("Format", choices));
+            continue;
+        }
         if key == "cloud-folder" {
             let mut choices = div().flex().flex_col().gap_1();
             for (id, name) in std::iter::once((String::new(), "Unfiled".to_string())).chain(
@@ -734,6 +796,8 @@ pub(crate) fn dialog(
         .child(ui::button(
             if kind == "sign-in" {
                 "Continue in browser"
+            } else if kind == "download" {
+                "Download…"
             } else if kind.starts_with("delete-") {
                 "Delete"
             } else {
