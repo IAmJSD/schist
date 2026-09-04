@@ -38,11 +38,10 @@ pub(super) fn update_available(
         (_, Some(UpdateProgress::Installing)) => body
             .child("Installing the update\u{2026}".to_string())
             .child(progress_bar(1.0)),
-        (Some(installer), None) => body.child(format!(
+        (Some(_), None) => body.child(format!(
             "Schist can download it ({}) and install it over this copy.",
             megabytes(installer.size)
         )),
-        (Some(_), None) => body,
         (None, None) => body.child(
             "This copy came from somewhere that owns it \u{2014} a package \
              manager, an AppImage, a build of your own \u{2014} so it updates \
