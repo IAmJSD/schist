@@ -1,6 +1,6 @@
 # Maintainer: Infrawrench LLC <astrid@infrawrench.com>
 pkgname=schist-bin
-pkgver=0.10.0
+pkgver=0.11.0
 pkgrel=1
 # Upstream's own package release, embedded in the asset name. It is
 # packages.sh's "release=" and only moves when the packaging changes under
@@ -31,8 +31,8 @@ options=(!strip !debug)
 # script.
 source_x86_64=("$url/releases/download/v$pkgver/schist-$pkgver-$_relver-x86_64.pkg.tar.zst")
 source_aarch64=("$url/releases/download/v$pkgver/schist-$pkgver-$_relver-aarch64.pkg.tar.zst")
-sha256sums_x86_64=('b6aa47e77e96b9dfc1f8acfebbfefdb901807cc70d4c3e0fe2f8aef259401d9c')
-sha256sums_aarch64=('41aa8f6d908496d245dbfc617da6c37b20a8e00c466029734b25a3db62c49bd8')
+sha256sums_x86_64=('0fb0a13e579a9bd74880bf49dd69690cc6a5f830db3423f1e448fef516c1bc5f')
+sha256sums_aarch64=('1dedd50295ac251206dcc271ce59a918258975a7e87facde2dcee1b03fef265b')
 
 package() {
   # makepkg has already extracted the payload into srcdir; its .PKGINFO
