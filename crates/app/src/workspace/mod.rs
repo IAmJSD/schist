@@ -1496,6 +1496,9 @@ pub struct PaintJob {
     highlights: Vec<Bounds<Pixels>>,
     outlines: Vec<(Bounds<Pixels>, gpui::Hsla)>,
     polylines: Vec<(Vec<Point<Pixels>>, gpui::Hsla)>,
+    /// Text carets, painted as a dark stroke under a light one so either
+    /// half contrasts with the artwork below it.
+    carets: Vec<Vec<Point<Pixels>>>,
     /// Marching-ants dashes.
     ants: Ants,
     circles: Vec<Bounds<Pixels>>,
