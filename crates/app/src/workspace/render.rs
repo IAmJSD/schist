@@ -267,6 +267,9 @@ impl Workspace {
                         gpui::rgb(0xFFFFFF).into(),
                     ));
                 }
+                Overlay::Caret { x1, y1, x2, y2 } => {
+                    job.carets.push(vec![to_screen(x1, y1), to_screen(x2, y2)]);
+                }
                 Overlay::Circle { cx: ccx, cy, r } => {
                     let d = r * 2.0 * zoom;
                     job.circles.push(Bounds {
@@ -491,6 +494,24 @@ impl Workspace {
                             }
                             if let Ok(path) = pb.build() {
                                 window.paint_path(path, color);
+                            }
+                        }
+                        // A white hairline disappears on white text or a
+                        // pale photograph. The dark three-pixel underlay
+                        // leaves a one-pixel rim around the white centre,
+                        // giving the insertion caret contrast everywhere.
+                        for pts in job.carets {
+                            for (width, color) in
+                                [(3.0, gpui::rgb(0x000000)), (1.0, gpui::rgb(0xFFFFFF))]
+                            {
+                                let mut pb = PathBuilder::stroke(px(width));
+                                pb.move_to(pts[0]);
+                                for p in &pts[1..] {
+                                    pb.line_to(*p);
+                                }
+                                if let Ok(path) = pb.build() {
+                                    window.paint_path(path, color);
+                                }
                             }
                         }
                         for bounds in job.circles {
@@ -806,6 +827,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &NextTab, _w, cx| ws.cycle_tab(1, cx)))
             .on_action(cx.listener(|ws, _: &PrevTab, _w, cx| ws.cycle_tab(-1, cx)))
+            // With AppKit's title bar transparent, this row occupies the
+            // native drag/traffic-light area and follows the app theme.
+            // Other platforms retain their native window decorations.
+            .children((chrome && cfg!(target_os = "macos")).then(|| panels::title_bar(self)))
             .children(in_window_menus.then(|| panels::menu_bar(self, cx)))
             .children(editor_chrome.then(|| panels::tool_options_bar(self, cx)))
             .children(editor_chrome.then(|| panels::tab_bar(self, cx)))

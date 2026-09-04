@@ -87,6 +87,15 @@ fn run(
     // The bridge command and its token, as codex config: the value side of
     // each `-c` is TOML.
     builder = builder
+        // A canvas conversation is deliberately self-contained. The
+        // user's Codex memories belong to their coding work, and feeding
+        // them into this embedded assistant both confuses its role and
+        // can disclose context from an unrelated project. Do not consume
+        // those memories, and do not turn photo-editing conversations into
+        // inputs for future global memories either.
+        .config_override("features.memories", "false")
+        .config_override("memories.use_memories", "false")
+        .config_override("memories.generate_memories", "false")
         .config_override(
             "mcp_servers.schist.command",
             toml_string(&exe.display().to_string()),

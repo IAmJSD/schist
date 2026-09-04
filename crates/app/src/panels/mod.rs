@@ -35,6 +35,7 @@ mod rulers;
 mod sliders;
 mod status;
 mod tabs;
+mod titlebar;
 mod toolbar;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,6 +60,7 @@ pub use rulers::*;
 pub use sliders::*;
 pub use status::*;
 pub use tabs::*;
+pub use titlebar::*;
 pub use toolbar::*;
 
 fn swatch_hex(c: Rgba) -> gpui::Rgba {

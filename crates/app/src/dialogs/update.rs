@@ -39,9 +39,7 @@ pub(super) fn update_available(
             .child("Installing the update\u{2026}".to_string())
             .child(progress_bar(1.0)),
         (Some(installer), None) => body.child(format!(
-            "Schist can download it ({}) and install it over this copy. It \
-             restarts once the update is in place, and asks about any \
-             unsaved documents on the way.",
+            "Schist can download it ({}) and install it over this copy.",
             megabytes(installer.size)
         )),
         (None, None) => body.child(

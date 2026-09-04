@@ -857,7 +857,7 @@ impl ToolPlugin for TypeTool {
         if let Some(caret) = schist_text_engine::caret_at(spec, session.caret) {
             let x = ox + caret.x;
             let y = oy + caret.top;
-            out.push(Overlay::Line {
+            out.push(Overlay::Caret {
                 x1: x,
                 y1: y,
                 x2: x,

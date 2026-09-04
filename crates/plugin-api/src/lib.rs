@@ -123,6 +123,9 @@ pub enum Overlay {
     Circle { cx: f32, cy: f32, r: f32 },
     /// Straight line segment.
     Line { x1: f32, y1: f32, x2: f32, y2: f32 },
+    /// Text insertion caret. The host gives this a contrasting outline so
+    /// it stays visible over both light and dark artwork.
+    Caret { x1: f32, y1: f32, x2: f32, y2: f32 },
     /// A note's pin, filled in the note's own colour. Drawn at a fixed
     /// *screen* size like Photoshop's, so a note stays findable and
     /// clickable whether the document is at 5% or 1600%.
