@@ -38,12 +38,10 @@ pub(super) fn update_available(
         (_, Some(UpdateProgress::Installing)) => body
             .child("Installing the update\u{2026}".to_string())
             .child(progress_bar(1.0)),
-        (Some(installer), None) => body.child(format!(
-            "Schist can download it ({}) and install it over this copy. It \
-             restarts once the update is in place, and asks about any \
-             unsaved documents on the way.",
-            megabytes(installer.size)
-        )),
+        // The buttons already make the available choices clear. Details
+        // about replacing the executable and restarting are implementation
+        // noise in what should be a quick update prompt.
+        (Some(_), None) => body,
         (None, None) => body.child(
             "This copy came from somewhere that owns it \u{2014} a package \
              manager, an AppImage, a build of your own \u{2014} so it updates \
