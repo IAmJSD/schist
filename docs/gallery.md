@@ -59,6 +59,23 @@ content filter applies whatever the grouping. Capture time, position
 and city are read in one EXIF pass per photo and cached beside the
 thumbnail (`.meta`).
 
+The sidebar's **World Map** view plots photos with EXIF GPS locations
+on a worldwide OpenStreetMap, with a small photo preview inside each
+pin. The full-world overview keeps map tiles and labels proportional;
+the map repeats horizontally to fill wider panels without cropping continents. Drag to pan, scroll
+or use **− / +** to zoom, and **Reset view** to restore the starting view.
+Nearby photos share a pin with a count; clicking it
+opens a strip of all its photos, including photos taken at exactly the
+same spot. Right-click a marker to add all its photos to an existing
+bucket or a new named bucket; this uses the marker’s photos regardless
+of the current selection. Double-click a photo to edit it. **Photos** returns to the
+grid. Both views follow the same folder, bucket, search, map and content
+filters. Exactly **0,0** is treated as missing GPS, including in cached metadata.
+Photos without GPS are counted above the map; locations appear
+as background indexing finishes. Map tiles use the existing disk cache
+and need an internet connection when first viewed. This map keeps its
+own camera, independent of the import and map-filter boundary.
+
 **Map filter** (sidebar, or Gallery ▸ Map Filter…) opens the same
 navigable map as the import dialog: draw a boundary (or jump to a
 preset) and Apply, and the grid shows only photos whose EXIF position

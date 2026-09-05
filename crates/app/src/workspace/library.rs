@@ -114,6 +114,8 @@ impl Bucket {
 #[derive(Clone)]
 pub enum GalleryContext {
     Photo(PathBuf),
+    /// Freeze the clicked marker's members independently of selection or zoom.
+    MapCluster(Vec<PathBuf>),
     Bucket(usize),
 }
 
@@ -200,6 +202,10 @@ pub struct Library {
     /// The import dialog's navigable map: view, tiles, and the drawn
     /// boundary (kept here so it survives closing the dialog).
     pub map: library_geo::MapState,
+    /// The photo map has its own camera, independent of import boundaries.
+    pub world_map: library_geo::MapState,
+    pub map_view: bool,
+    pub map_photos: Vec<PathBuf>,
     /// Photos the content filter flagged as explicit, filled by the
     /// thumbnail loader. Only consulted while the preference is on.
     flagged: FxHashMap<PathBuf, bool>,
@@ -210,7 +216,7 @@ pub struct Library {
     /// Where each probed photo was taken, from its EXIF, so a place
     /// named in the search can pull its photos in. `None` = probed and
     /// positionless, which is most photos off most cameras.
-    positions: FxHashMap<PathBuf, Option<(f64, f64)>>,
+    pub(super) positions: FxHashMap<PathBuf, Option<(f64, f64)>>,
     /// Capture times as sortable text, and the city each positioned
     /// photo groups under — the other two readings of the same EXIF.
     taken: FxHashMap<PathBuf, String>,
@@ -388,6 +394,9 @@ impl Library {
             pending_backing: Vec::new(),
             edit_backings: FxHashMap::default(),
             map: library_geo::MapState::default(),
+            world_map: library_geo::MapState::world(),
+            map_view: false,
+            map_photos: Vec::new(),
             flagged: FxHashMap::default(),
             embeddings: FxHashMap::default(),
             positions: FxHashMap::default(),
@@ -1623,6 +1632,10 @@ impl Workspace {
     /// running. Called from the gallery render, the same way the canvas
     /// kicks tile prefetch from paint.
     pub(super) fn kick_thumb_loader(&mut self, cx: &mut Context<Self>) {
+        // The map can open before any grid cell has queued a thumbnail.
+        if self.library.map_view && !self.library.ticker && self.library.queue.is_empty() {
+            self.library.refill_index_queue();
+        }
         if !self.library.wants_thumbs() {
             return;
         }
@@ -3349,6 +3362,33 @@ mod tests {
         jpeg.extend_from_slice(&tiff);
         jpeg.extend_from_slice(&[0xFF, 0xD9]);
         jpeg
+    }
+
+    #[test]
+    fn exif_zero_fix_is_missing_but_either_axis_can_be_zero() {
+        let path =
+            std::env::temp_dir().join(format!("schist-zero-gps-test-{}.jpg", std::process::id()));
+        for (zero_lat, zero_lon) in [(true, true), (true, false), (false, true)] {
+            let mut jpeg = times_square_jpeg();
+            // TIFF starts at byte 12; latitude and longitude each have
+            // three rationals. Zero numerators, retain the denominators.
+            for start in [zero_lat.then_some(92), zero_lon.then_some(116)]
+                .into_iter()
+                .flatten()
+            {
+                for offset in (start..start + 24).step_by(8) {
+                    jpeg[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+                }
+            }
+            std::fs::write(&path, jpeg).unwrap();
+            let gps = photo_gps(&path);
+            assert_eq!(gps.is_none(), zero_lat && zero_lon);
+            if let Some((lat, lon)) = gps {
+                assert_eq!(lat == 0.0, zero_lat);
+                assert_eq!(lon == 0.0, zero_lon);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

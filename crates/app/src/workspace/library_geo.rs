@@ -56,7 +56,7 @@ pub const PLACES: &[Place] = &[
 const TILE: f64 = 256.0;
 /// Web-Mercator's poles: beyond this latitude there are no tiles.
 const MAX_LAT: f64 = 85.05;
-const MIN_ZOOM: i32 = 2;
+const MIN_ZOOM: i32 = 0;
 const MAX_ZOOM: i32 = 19;
 /// Wheel travel per zoom step, so touchpads don't fly through levels.
 const WHEEL_STEP: f32 = 40.0;
@@ -191,6 +191,12 @@ pub struct MapState {
     /// Latitude/longitude at the middle of the view.
     pub center: (f64, f64),
     pub zoom: i32,
+    /// Keep the map filling its viewport until the user pans or zooms.
+    pub fill_viewport: bool,
+    /// Uniform display scale: map labels and geography retain their proportions.
+    tile_scale: f64,
+    /// Repeat longitude in the photo map; boundary editors stay finite.
+    wrap_world: bool,
     /// The drawn boundary, if any. `None` imports everything.
     pub selection: Option<GeoBounds>,
     /// The preset's name when the boundary came from a jump chip;
@@ -221,7 +227,10 @@ impl Default for MapState {
             // The Atlantic from far out: most of the inhabited world in
             // one glance, pick your continent and dive.
             center: (30.0, -20.0),
-            zoom: MIN_ZOOM,
+            zoom: 2,
+            fill_viewport: false,
+            tile_scale: 1.0,
+            wrap_world: false,
             selection: None,
             selection_name: None,
             draw_mode: false,
@@ -239,10 +248,76 @@ impl Default for MapState {
 }
 
 impl MapState {
+    pub fn world() -> Self {
+        Self {
+            center: (0.0, 0.0),
+            zoom: 0,
+            fill_viewport: true,
+            wrap_world: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn show_world(&mut self) {
+        self.center = (0.0, 0.0);
+        self.fill_viewport = true;
+        self.end_drag();
+    }
+
+    fn set_viewport(&mut self, bounds: Bounds<Pixels>, scale: f32) {
+        self.scale = scale;
+        self.origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        self.size = (
+            f32::from(bounds.size.width).max(1.0),
+            f32::from(bounds.size.height).max(1.0),
+        );
+        if self.fill_viewport {
+            self.center = (0.0, 0.0);
+            self.zoom = ((self.size.0.min(self.size.1) as f64 / TILE).log2().ceil() as i32)
+                .clamp(MIN_ZOOM, MAX_ZOOM);
+            let world = TILE * 2f64.powi(self.zoom);
+            self.tile_scale = self.size.0.min(self.size.1) as f64 / world;
+        }
+    }
+
+    fn tile_size(&self) -> (f64, f64) {
+        (TILE * self.tile_scale, TILE * self.tile_scale)
+    }
+
+    fn lat_lon_at_tile(&self, x: f64, y: f64, zoom: i32) -> (f64, f64) {
+        let (lat, lon) = coords_to_lat_lon(x, y, zoom);
+        // Keep a continuous longitude internally, so zooming on a repeated
+        // copy and panning across the date line do not jump to another copy.
+        (
+            lat,
+            if self.wrap_world {
+                x / 2f64.powi(zoom) * 360.0 - 180.0
+            } else {
+                lon
+            },
+        )
+    }
+
+    /// All visible copies of a photo, matching the repeated map tiles.
+    pub(super) fn marker_copies(&self, lat: f64, lon: f64) -> Vec<(f32, f32)> {
+        let (x, y) = self.window_at(lat, lon);
+        if !self.wrap_world {
+            return vec![(x, y)];
+        }
+        let width = self.tile_size().0 * 2f64.powi(self.zoom);
+        let first = ((self.origin.0 as f64 - 34.0 - x as f64) / width).ceil() as i64;
+        let last =
+            ((self.origin.0 as f64 + self.size.0 as f64 + 34.0 - x as f64) / width).floor() as i64;
+        (first..=last)
+            .map(|copy| ((x as f64 + copy as f64 * width) as f32, y))
+            .collect()
+    }
+
     /// The view centre in global pixels at the current zoom.
     fn center_px(&self) -> (f64, f64) {
         let (x, y) = tile_coords(self.center.0, self.center.1, self.zoom);
-        (x * TILE, y * TILE)
+        let (tw, th) = self.tile_size();
+        (x * tw, y * th)
     }
 
     /// A window position as latitude/longitude under the map.
@@ -250,13 +325,13 @@ impl MapState {
         let (cx, cy) = self.center_px();
         let gx = cx - self.size.0 as f64 / 2.0 + (window.0 - self.origin.0) as f64;
         let gy = cy - self.size.1 as f64 / 2.0 + (window.1 - self.origin.1) as f64;
-        coords_to_lat_lon(gx / TILE, gy / TILE, self.zoom)
+        let (tw, th) = self.tile_size();
+        self.lat_lon_at_tile(gx / tw, gy / th, self.zoom)
     }
 
     /// Where global pixel (0, 0) lands in the window, snapped to whole
-    /// device pixels: tiles are placed at whole multiples of 256 from
-    /// here, so their shared edges never fall between device pixels —
-    /// a half-pixel edge at 2× draws as a hairline seam between tiles.
+    /// device pixels. The tile painter also snaps each shared edge to
+    /// avoid hairline seams when the world overview scales the tiles.
     fn view_offset(&self) -> (f64, f64) {
         let (cx, cy) = self.center_px();
         let s = if self.scale > 0.0 {
@@ -272,15 +347,17 @@ impl MapState {
     }
 
     /// A latitude/longitude as a window position.
-    fn window_at(&self, lat: f64, lon: f64) -> (f32, f32) {
+    pub(super) fn window_at(&self, lat: f64, lon: f64) -> (f32, f32) {
         let (ox, oy) = self.view_offset();
         let (x, y) = tile_coords(lat, lon, self.zoom);
-        ((x * TILE + ox) as f32, (y * TILE + oy) as f32)
+        let (tw, th) = self.tile_size();
+        ((x * tw + ox) as f32, (y * th + oy) as f32)
     }
 
     /// Start a drag: drawing when asked (Shift or draw mode), panning
     /// otherwise.
     pub fn begin_drag(&mut self, window: (f32, f32), draw: bool) {
+        self.fill_viewport = false;
         self.drag = Some(if draw {
             let anchor = self.geo_at(window);
             self.selection = Some(GeoBounds::from_corners(anchor, anchor));
@@ -296,11 +373,14 @@ impl MapState {
     pub fn drag_to(&mut self, window: (f32, f32)) -> bool {
         match &mut self.drag {
             Some(MapDrag::Pan { last }) => {
-                let (dx, dy) = (window.0 - last.0, window.1 - last.1);
+                let (dx, dy) = (
+                    window.0 as f64 - last.0 as f64,
+                    window.1 as f64 - last.1 as f64,
+                );
                 *last = window;
                 let (cx, cy) = self.center_px();
-                self.center =
-                    coords_to_lat_lon((cx - dx as f64) / TILE, (cy - dy as f64) / TILE, self.zoom);
+                let (tw, th) = self.tile_size();
+                self.center = self.lat_lon_at_tile((cx - dx) / tw, (cy - dy) / th, self.zoom);
                 self.center.0 = self.center.0.clamp(-MAX_LAT, MAX_LAT);
                 true
             }
@@ -343,6 +423,7 @@ impl MapState {
 
     /// One zoom step keeping the point under `window` fixed.
     pub fn zoom_step(&mut self, step: i32, window: (f32, f32)) {
+        self.fill_viewport = false;
         let anchor = self.geo_at(window);
         let zoom = (self.zoom + step).clamp(MIN_ZOOM, MAX_ZOOM);
         if zoom == self.zoom {
@@ -356,9 +437,10 @@ impl MapState {
             (window.0 - self.origin.0) as f64,
             (window.1 - self.origin.1) as f64,
         );
-        let cx = ax * TILE - local.0 + self.size.0 as f64 / 2.0;
-        let cy = ay * TILE - local.1 + self.size.1 as f64 / 2.0;
-        self.center = coords_to_lat_lon(cx / TILE, cy / TILE, zoom);
+        let (tw, th) = self.tile_size();
+        let cx = ax * tw - local.0 + self.size.0 as f64 / 2.0;
+        let cy = ay * th - local.1 + self.size.1 as f64 / 2.0;
+        self.center = self.lat_lon_at_tile(cx / tw, cy / th, zoom);
         self.center.0 = self.center.0.clamp(-MAX_LAT, MAX_LAT);
     }
 
@@ -375,6 +457,7 @@ impl MapState {
     /// Centre on a point at a zoom: what the info panel does for the
     /// spot a photo was taken. Street scale is 15; a city is 11.
     pub fn look_at(&mut self, lat: f64, lon: f64, zoom: i32) {
+        self.fill_viewport = false;
         self.center = (lat, lon);
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.scroll_debt = 0.0;
@@ -393,6 +476,41 @@ impl MapState {
     }
 }
 
+pub(super) use schist_gallery::valid_gps_position as valid_position;
+
+/// Nearby thumbnails share a pin. A spatial grid keeps dense libraries
+/// linear in their photo count; cluster members retain their input order.
+pub(super) fn cluster_markers(points: &[(usize, f32, f32)]) -> Vec<Vec<(usize, f32, f32)>> {
+    const WIDTH: f32 = 72.0;
+    const HEIGHT: f32 = 80.0;
+    let mut cells: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
+    let mut clusters: Vec<Vec<(usize, f32, f32)>> = Vec::new();
+    for &(index, x, y) in points {
+        let cell = ((x / WIDTH).floor() as i32, (y / HEIGHT).floor() as i32);
+        let mut nearby = None;
+        'neighbors: for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(ids) = cells.get(&(cell.0 + dx, cell.1 + dy)) {
+                    for &id in ids {
+                        let (_, cx, cy) = clusters[id][0];
+                        if (x - cx).abs() < WIDTH && (y - cy).abs() < HEIGHT {
+                            nearby = Some(id);
+                            break 'neighbors;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(id) = nearby {
+            clusters[id].push((index, x, y));
+        } else {
+            cells.entry(cell).or_default().push(clusters.len());
+            clusters.push(vec![(index, x, y)]);
+        }
+    }
+    clusters
+}
+
 /// Everything one frame of the map paints.
 pub struct MapPaint {
     pub tiles: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
@@ -404,11 +522,12 @@ pub struct MapPaint {
     pub markers: Vec<Point<Pixels>>,
 }
 
-/// Which map a call is about: the gallery's (import and map filter)
-/// or the editor's info panel, which shows where a photo was taken.
+/// Independent cameras for import/filter, the world photo view, and
+/// the editor's info panel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MapSlot {
     Gallery,
+    World,
     Info,
 }
 
@@ -420,6 +539,7 @@ impl Workspace {
     pub(super) fn map_mut(&mut self, slot: MapSlot) -> &mut MapState {
         match slot {
             MapSlot::Gallery => &mut self.library.map,
+            MapSlot::World => &mut self.library.world_map,
             MapSlot::Info => &mut self.info_map,
         }
     }
@@ -431,19 +551,15 @@ impl Workspace {
         scale: f32,
     ) -> MapPaint {
         let map = self.map_mut(slot);
-        map.scale = scale;
-        map.origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        map.size = (
-            f32::from(bounds.size.width).max(1.0),
-            f32::from(bounds.size.height).max(1.0),
-        );
+        map.set_viewport(bounds, scale);
         let (cx, cy) = map.center_px();
         let (w, h) = (map.size.0 as f64, map.size.1 as f64);
         let n = 1i64 << map.zoom;
-        let left = ((cx - w / 2.0) / TILE).floor() as i64;
-        let right = ((cx + w / 2.0) / TILE).floor() as i64;
-        let top = ((cy - h / 2.0) / TILE).floor() as i64;
-        let bottom = ((cy + h / 2.0) / TILE).floor() as i64;
+        let (tw, th) = map.tile_size();
+        let left = ((cx - w / 2.0) / tw).floor() as i64;
+        let right = ((cx + w / 2.0) / tw).floor() as i64;
+        let top = ((cy - h / 2.0) / th).floor() as i64;
+        let bottom = ((cy + h / 2.0) / th).floor() as i64;
         let mut paint = MapPaint {
             tiles: Vec::new(),
             missing: Vec::new(),
@@ -452,21 +568,31 @@ impl Workspace {
         };
         let zoom = map.zoom;
         let (ox, oy) = map.view_offset();
+        let columns = if map.wrap_world {
+            left..=right
+        } else {
+            left.max(0)..=right.min(n - 1)
+        };
         for ty in top.max(0)..=bottom.min(n - 1) {
-            for tx in left.max(0)..=right.min(n - 1) {
+            for tx in columns.clone() {
+                // Snap each shared edge, including fractional tile sizes, so
+                // the overview has neither seams nor overlapping pixels.
+                let snap = |v: f64| ((v * scale as f64).round() / scale as f64) as f32;
+                let x0 = snap(tx as f64 * tw + ox);
+                let y0 = snap(ty as f64 * th + oy);
+                let x1 = snap((tx + 1) as f64 * tw + ox);
+                let y1 = snap((ty + 1) as f64 * th + oy);
                 let rect = Bounds {
-                    origin: point(
-                        px((tx as f64 * TILE + ox) as f32),
-                        px((ty as f64 * TILE + oy) as f32),
-                    ),
-                    size: size(px(TILE as f32), px(TILE as f32)),
+                    origin: point(px(x0), px(y0)),
+                    size: size(px(x1 - x0), px(y1 - y0)),
                 };
-                match map.tiles.get(&(zoom, tx, ty)) {
+                let key = (zoom, tx.rem_euclid(n), ty);
+                match map.tiles.get(&key) {
                     Some(MapTile::Ready(img)) => paint.tiles.push((rect, img.clone())),
                     Some(_) => paint.missing.push(rect),
                     None => {
-                        map.tiles.insert((zoom, tx, ty), MapTile::Pending);
-                        map.queue.push((zoom, tx, ty));
+                        map.tiles.insert(key, MapTile::Pending);
+                        map.queue.push(key);
                         paint.missing.push(rect);
                     }
                 }
@@ -552,6 +678,171 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_overview_shows_all_regions_without_bars_or_cropping() {
+        for (width, height, zoom) in [
+            (1000.0, 700.0, 2),
+            (400.0, 300.0, 1),
+            (1200.0, 1100.0, 3),
+            (400.0, 900.0, 1),
+        ] {
+            let mut map = MapState::world();
+            let bounds = Bounds {
+                origin: point(px(210.0), px(80.0)),
+                size: size(px(width), px(height)),
+            };
+            // GPUI can prepaint at provisional dimensions before the final layout.
+            map.set_viewport(
+                Bounds {
+                    origin: point(px(0.0), px(0.0)),
+                    size: size(px(1.0), px(1.0)),
+                },
+                1.0,
+            );
+            map.set_viewport(bounds, 2.0);
+            assert_eq!(map.zoom, zoom);
+            let (west, _) = map.window_at(0.0, -180.0);
+            let (east, _) = map.window_at(0.0, 180.0);
+            assert!(west >= 210.0 && east <= 210.0 + width);
+            assert!((east - west - width.min(height)).abs() < 0.1);
+            let (tw, th) = map.tile_size();
+            assert_eq!(tw, th, "map tiles and labels must not stretch");
+            let (_, north) = map.window_at(MAX_LAT, 0.0);
+            let (_, south) = map.window_at(-MAX_LAT, 0.0);
+            assert!(north >= 80.0 && south <= 80.0 + height);
+            assert!((south - north - width.min(height)).abs() < 0.1);
+            for (lat, lon) in [
+                (51.5, -0.1),
+                (35.7, 139.7),
+                (-33.86, 151.21),
+                (40.7, -74.0),
+                (80.0, -170.0),
+            ] {
+                let (x, y) = map.window_at(lat, lon);
+                assert!(bounds.contains(&point(px(x), px(y))));
+            }
+            map.look_at(35.0, 139.0, 15);
+            map.show_world();
+            map.set_viewport(bounds, 1.0);
+            assert_eq!(map.zoom, zoom);
+            assert_eq!(map.center, (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn fitted_world_keeps_coordinates_under_the_pointer_when_zooming_and_panning() {
+        let mut map = MapState::world();
+        map.set_viewport(
+            Bounds {
+                origin: point(px(210.0), px(80.0)),
+                size: size(px(1230.0), px(730.0)),
+            },
+            2.0,
+        );
+        let cursor = (950.0, 410.0);
+        let anchor = map.geo_at(cursor);
+        map.zoom_step(1, cursor);
+        let after = map.geo_at(cursor);
+        assert!((anchor.0 - after.0).abs() < 1e-6);
+        assert!((anchor.1 - after.1).abs() < 1e-6);
+        map.begin_drag(cursor, false);
+        let dragged = (cursor.0 + 75.0, cursor.1 + 40.0);
+        map.drag_to(dragged);
+        let after = map.geo_at(dragged);
+        assert!((anchor.0 - after.0).abs() < 1e-6);
+        assert!((anchor.1 - after.1).abs() < 1e-6);
+        assert!(!map.fill_viewport);
+    }
+
+    #[test]
+    fn wrapped_world_keeps_markers_and_zoom_on_the_same_copy() {
+        let mut map = MapState::world();
+        map.set_viewport(
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(1200.0), px(600.0)),
+            },
+            2.0,
+        );
+        let copies = map.marker_copies(35.7, 139.7);
+        assert_eq!(copies.len(), 2);
+        assert!((copies[1].0 - copies[0].0 - 600.0).abs() < 0.1);
+        for &(x, y) in &copies {
+            let (lat, lon) = map.geo_at((x, y));
+            assert!((lat - 35.7).abs() < 1e-4);
+            assert!(((lon - 139.7 + 180.0).rem_euclid(360.0) - 180.0).abs() < 1e-4);
+        }
+        let cursor = copies[0];
+        let anchor = map.geo_at(cursor);
+        map.zoom_step(1, cursor);
+        let after = map.geo_at(cursor);
+        assert!((anchor.0 - after.0).abs() < 1e-6);
+        assert!((anchor.1 - after.1).abs() < 1e-6);
+        assert!(map
+            .marker_copies(35.7, 139.7)
+            .iter()
+            .any(|(x, y)| (x - cursor.0).abs() < 1.0 && (y - cursor.1).abs() < 1.0));
+        map.begin_drag(cursor, false);
+        let dragged = (cursor.0 + 1500.0, cursor.1);
+        map.drag_to(dragged);
+        let after = map.geo_at(dragged);
+        assert!((anchor.0 - after.0).abs() < 1e-6);
+        assert!((anchor.1 - after.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pins_cluster_across_cell_edges_and_keep_every_photo() {
+        let points = [
+            (0, 71.0, 79.0),
+            (1, 73.0, 81.0),
+            (2, 71.0, 79.0),
+            (3, 220.0, 79.0),
+            (4, -1.0, -1.0),
+            (5, -2.0, -2.0),
+        ];
+        let clusters = cluster_markers(&points);
+        assert_eq!(clusters.len(), 3);
+        assert_eq!(
+            clusters[0].iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(clusters[1][0].0, 3);
+        assert_eq!(clusters[2].len(), 2);
+        assert_eq!(clusters.iter().map(Vec::len).sum::<usize>(), points.len());
+        assert!(cluster_markers(&[]).is_empty());
+    }
+
+    #[test]
+    fn zooming_separates_nearby_photos_but_keeps_identical_locations_accessible() {
+        let project = |zoom| {
+            [(0, 51.5, -0.1), (1, 51.5, -0.1), (2, 51.5, 0.1)].map(|(id, lat, lon)| {
+                let (x, y) = tile_coords(lat, lon, zoom);
+                (id, (x * TILE) as f32, (y * TILE) as f32)
+            })
+        };
+        assert_eq!(cluster_markers(&project(1)).len(), 1);
+        let close = cluster_markers(&project(15));
+        assert_eq!(close.len(), 2);
+        assert_eq!(close[0].len(), 2);
+    }
+
+    #[test]
+    fn gps_validation_rejects_zero_fix_but_keeps_zero_axes() {
+        assert!(!valid_position(0.0, 0.0));
+        assert!(!valid_position(-0.0, 0.0));
+        assert!(valid_position(0.0, 0.000001));
+        assert!(valid_position(-0.000001, 0.0));
+        assert!(valid_position(-90.0, 180.0));
+        for (lat, lon) in [
+            (91.0, 0.0),
+            (0.0, -181.0),
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+        ] {
+            assert!(!valid_position(lat, lon));
+        }
+    }
 
     #[test]
     fn mercator_puts_null_island_in_the_middle() {

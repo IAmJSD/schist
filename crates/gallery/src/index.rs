@@ -145,7 +145,8 @@ pub fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
         };
         let gps = if flags & 2 != 0 {
             Some(if flags & 4 != 0 {
-                Some((get_f64(&mut at)?, get_f64(&mut at)?))
+                let (lat, lon) = (get_f64(&mut at)?, get_f64(&mut at)?);
+                crate::meta::valid_gps_position(lat, lon).then_some((lat, lon))
             } else {
                 None
             })
@@ -205,6 +206,15 @@ mod tests {
                 place: Some(None),
                 flagged: Some(false),
             },
+            IndexRow {
+                path: PathBuf::from("/p/zero.jpg"),
+                mtime: 10,
+                embed: None,
+                gps: Some(Some((0.0, -0.0))),
+                taken: Some("2026-09-02 12:00:00".into()),
+                place: Some(None),
+                flagged: Some(false),
+            },
         ];
         let dir = std::env::temp_dir().join(format!("schist-idx-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -213,7 +223,7 @@ mod tests {
         let bytes = std::fs::read(&file).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let back = parse_index_snapshot(&bytes).expect("parses");
-        assert_eq!(back.len(), 2);
+        assert_eq!(back.len(), 3);
         assert_eq!(back[0].path, rows[0].path);
         assert_eq!(back[0].mtime, 7);
         assert_eq!(back[0].embed.as_deref(), Some(&vec![0.25f32, -1.0, 3.5]));
@@ -225,6 +235,9 @@ mod tests {
         assert_eq!(back[1].place, Some(None));
         assert_eq!(back[1].flagged, Some(false));
         assert_eq!(back[1].embed, None);
+        // Still probed, so the loader will not keep re-indexing this photo.
+        assert_eq!(back[2].gps, Some(None));
+        assert_eq!(back[2].taken.as_deref(), Some("2026-09-02 12:00:00"));
         assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
         assert!(parse_index_snapshot(b"not an index").is_none());
     }

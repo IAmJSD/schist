@@ -12,6 +12,16 @@ pub struct PhotoMeta {
     pub place: Option<String>,
 }
 
+/// A usable GPS fix. Cameras commonly write exactly (0, 0) when no fix
+/// was available; points elsewhere on either zero axis remain valid.
+pub fn valid_gps_position(lat: f64, lon: f64) -> bool {
+    lat.is_finite()
+        && lon.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+        && (lat != 0.0 || lon != 0.0)
+}
+
 /// One EXIF pass per photo, cached beside its thumbnail.
 pub fn photo_meta(cache: &Option<PathBuf>, original: &Path) -> PhotoMeta {
     let meta_cache = cache.as_ref().map(|p| p.with_extension("meta"));
@@ -23,7 +33,7 @@ pub fn photo_meta(cache: &Option<PathBuf>, original: &Path) -> PhotoMeta {
         let gps = lines.next().and_then(|l| {
             let mut parts = l.split_whitespace().filter_map(|v| v.parse::<f64>().ok());
             match (parts.next(), parts.next()) {
-                (Some(lat), Some(lon)) => Some((lat, lon)),
+                (Some(lat), Some(lon)) if valid_gps_position(lat, lon) => Some((lat, lon)),
                 _ => None,
             }
         });
@@ -119,7 +129,7 @@ pub fn gps_from(data: &exif::Exif) -> Option<(f64, f64)> {
     };
     let lat = axis(exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef, 'S')?;
     let lon = axis(exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef, 'W')?;
-    Some((lat, lon))
+    valid_gps_position(lat, lon).then_some((lat, lon))
 }
 
 /// The capture time as sortable text, from DateTimeOriginal (else
@@ -174,6 +184,29 @@ pub fn ymd_from_unix(secs: u64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_zero_fix_is_missing_but_single_zero_axes_are_valid() {
+        let dir = std::env::temp_dir().join(format!("schist-meta-zero-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("thumb.png");
+        for (coords, expected) in [
+            ("0 0", None),
+            ("-0 0", None),
+            ("0 0.000001", Some((0.0, 0.000001))),
+            ("-0.000001 0", Some((-0.000001, 0.0))),
+        ] {
+            std::fs::write(
+                cache.with_extension("meta"),
+                format!("{coords}\n2026-09-01 12:00:00\nnone"),
+            )
+            .unwrap();
+            let meta = photo_meta(&Some(cache.clone()), &dir.join("missing.jpg"));
+            assert_eq!(meta.gps, expected);
+            assert_eq!(meta.taken.as_deref(), Some("2026-09-01 12:00:00"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_bytes_parser_agrees_with_the_path_parser() {

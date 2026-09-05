@@ -10,7 +10,10 @@
 //! gallery from a dark editor is not a flashbang.
 
 use super::*;
-use gpui::{img, AppContext as _, StatefulInteractiveElement as _};
+use gpui::{
+    img, prelude::FluentBuilder as _, AppContext as _, StatefulInteractiveElement as _,
+    StyledImage as _,
+};
 
 /// The gallery's chrome colours for one theme.
 struct GalleryPalette {
@@ -96,7 +99,11 @@ impl Workspace {
                 .flex_grow()
                 .min_h(px(0.0))
                 .child(sidebar(self, cx))
-                .child(grid(self, cx))
+                .child(if self.library.map_view {
+                    world_map(self, cx).into_any_element()
+                } else {
+                    grid(self, cx).into_any_element()
+                })
                 // The same AI panel the editor has, on its own switch
                 // (View ▸ AI Panel here too): the conversation, harness
                 // and model carry over, the prompt says which room.
@@ -683,6 +690,43 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 .pb_1()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(pal().text_dim))
+                .child("VIEW"),
+        )
+        .children(
+            [(false, "Photos"), (true, "World Map")]
+                .into_iter()
+                .map(|(map, label)| {
+                    let active = ws.library.map_view == map;
+                    div()
+                        .px_2()
+                        .h(px(26.0))
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.0))
+                        .cursor_pointer()
+                        .bg(gpui::rgb(if active {
+                            pal().sidebar_selected
+                        } else {
+                            pal().chrome_bg
+                        }))
+                        .hover(|s| s.bg(gpui::rgb(pal().sidebar_selected)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, _, _, cx| {
+                                ws.library.map_view = map;
+                                cx.notify();
+                            }),
+                        )
+                        .child(label)
+                }),
+        )
+        .child(
+            div()
+                .px_2()
+                .pt_2()
+                .pb_1()
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(pal().text_dim))
                 .child("GROUP BY"),
         )
         .child({
@@ -980,10 +1024,8 @@ fn sidebar_row(
     row
 }
 
-/// The grid: folder headers with a rule, then wrapped thumbnails.
-fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let cell = ws.library.thumb_px;
-    let selected: Vec<PathBuf> = ws.library.selected.clone();
+/// One filtered snapshot for both gallery views.
+fn gallery_sections(ws: &Workspace) -> Vec<(String, String, Vec<super::library::Entry>)> {
     let hide_flagged = ws.view.gallery_hide_nsfw;
     // Owned snapshot: the cells below borrow the workspace mutably to
     // fetch thumbnails, so they cannot also iterate `sections` in place.
@@ -1028,6 +1070,327 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         entries.retain(|e| !(hide_flagged && ws.library.is_flagged(&e.path)));
     }
     sections.retain(|(_, _, entries)| !entries.is_empty());
+    sections
+}
+
+/// Browse the current gallery on a world map; the strip opens every photo
+/// in a cluster, including photos with identical coordinates at maximum zoom.
+fn world_map(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    use super::library_geo::MapSlot;
+    let entries: Vec<_> = gallery_sections(ws)
+        .into_iter()
+        .flat_map(|(_, _, entries)| entries)
+        .collect();
+    let located = entries
+        .iter()
+        .filter(|e| photo_position(ws, &e.path).is_some())
+        .count();
+    let pending = entries
+        .iter()
+        .filter(|e| !ws.library.positions.contains_key(&e.path))
+        .count();
+    let unlocated = entries.len() - located - pending;
+    let selected_paths: FxHashSet<_> = ws.library.map_photos.iter().collect();
+    let details: Vec<_> = entries
+        .into_iter()
+        .filter(|e| selected_paths.contains(&e.path) && photo_position(ws, &e.path).is_some())
+        .collect();
+    let mut status = format!("{located} photos on map · {unlocated} without location");
+    if pending > 0 {
+        status.push_str(&format!(" · Reading locations: {pending} remaining"));
+    }
+    let mut view = div().flex().flex_col().flex_grow().min_w(px(0.0)).min_h(px(0.0))
+        .child(div().flex().items_center().gap_2().p_2().flex_wrap()
+            .child(div().text_size(px(12.0)).child("World Map"))
+            .child(map_tool_button("−", false, |ws, cx| {
+                ws.library.world_map.zoom_center(-1); cx.notify();
+            }, cx))
+            .child(map_tool_button("+", false, |ws, cx| {
+                ws.library.world_map.zoom_center(1); cx.notify();
+            }, cx))
+            .child(map_tool_button("Reset view", false, |ws, cx| {
+                ws.library.world_map.show_world(); cx.notify();
+            }, cx))
+            .child(div().text_size(px(11.0)).text_color(gpui::rgb(pal().text_dim)).child(status)))
+        .child(div().px_2().pb_2().text_size(px(11.0)).text_color(gpui::rgb(pal().text_dim))
+            .child(if located == 0 && pending == 0 {
+                "No photos with GPS locations in this view. Add geotagged photos or change the gallery filters."
+            } else {
+                "Drag to pan · Scroll to zoom · Click a marker to see its photos · Double-click a photo to edit"
+            }))
+        .child(div().relative().flex_grow().min_h(px(0.0)).overflow_hidden()
+            .child(div().absolute().size_full().child(map_element(ws, MapSlot::World, 0.0, cx))));
+    if !details.is_empty() {
+        let count = details.len();
+        let mut strip = div()
+            .id("map-photo-strip")
+            .flex()
+            .gap_2()
+            .p_2()
+            .overflow_x_scroll();
+        for entry in details {
+            let selected = ws.library.is_selected(&entry.path);
+            let path = entry.path.clone();
+            let preview = photo_preview(ws, &entry, 86.0, 62.0, cx);
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w(px(98.0))
+                    .flex_none()
+                    .p_1()
+                    .rounded_sm()
+                    .border_2()
+                    .border_color(gpui::rgb(if selected {
+                        pal().select_border
+                    } else {
+                        pal().cell_edge
+                    }))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                            ws.library.select_single(path.clone());
+                            if ev.click_count >= 2 {
+                                ws.open_from_gallery(path.clone(), cx);
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(preview)
+                    .child(
+                        div().text_size(px(10.0)).truncate().child(
+                            entry
+                                .path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ),
+                    ),
+            );
+        }
+        view = view
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .pt_2()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .child(format!("{count} photos at this marker")),
+                    )
+                    .child(map_tool_button(
+                        "Close",
+                        false,
+                        |ws, cx| {
+                            ws.library.map_photos.clear();
+                            cx.notify();
+                        },
+                        cx,
+                    )),
+            )
+            .child(strip);
+    }
+    view
+}
+
+fn photo_position(ws: &Workspace, path: &PathBuf) -> Option<(f64, f64)> {
+    let (lat, lon) = ws.library.positions.get(path).copied().flatten()?;
+    super::library_geo::valid_position(lat, lon).then_some((lat, lon))
+}
+
+/// Only painted previews claim decoded pixels, just like grid cells.
+fn photo_preview(
+    ws: &Workspace,
+    entry: &super::library::Entry,
+    width: f32,
+    height: f32,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let thumb = ws.library.thumb(entry);
+    let entry = entry.clone();
+    let entity = cx.entity();
+    div()
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .flex_none()
+        .overflow_hidden()
+        .bg(gpui::rgb(pal().chrome_bg))
+        .child(
+            canvas(
+                move |bounds, window, cx| {
+                    if !bounds.intersects(&window.content_mask().bounds) {
+                        return;
+                    }
+                    entity.update(cx, |ws, cx| {
+                        if ws.library.note_visible(&entry) {
+                            ws.kick_thumb_loader(cx);
+                        }
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(match thumb {
+            Some(image) => img(image)
+                .size_full()
+                .object_fit(gpui::ObjectFit::Contain)
+                .into_any_element(),
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child("Photo")
+                .into_any_element(),
+        })
+}
+
+/// Build marker elements during prepaint so their hitboxes and thumbnails
+/// use this frame's projection, including during a drag or a resize.
+fn prepare_photo_markers(
+    ws: &mut Workspace,
+    bounds: Bounds<Pixels>,
+    cx: &mut Context<Workspace>,
+) -> Vec<(Point<Pixels>, gpui::AnyElement)> {
+    let entries: Vec<_> = gallery_sections(ws)
+        .into_iter()
+        .flat_map(|(_, _, entries)| entries)
+        .filter_map(|e| photo_position(ws, &e.path).map(|pos| (e, pos)))
+        .collect();
+    let points: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .flat_map(|(i, (_, (lat, lon)))| {
+            ws.library
+                .world_map
+                .marker_copies(*lat, *lon)
+                .into_iter()
+                .filter_map(move |(x, y)| {
+                    let rect = Bounds {
+                        origin: point(px(x - 34.0), px(y - 64.0)),
+                        size: size(px(68.0), px(70.0)),
+                    };
+                    rect.intersects(&bounds).then_some((i, x, y))
+                })
+        })
+        .collect();
+    let clusters = super::library_geo::cluster_markers(&points);
+    let mut markers = Vec::new();
+    for (cluster_index, cluster) in clusters.into_iter().enumerate() {
+        let (i, x, y) = cluster[0];
+        let entry = &entries[i].0;
+        let mut seen = FxHashSet::default();
+        let paths: Vec<_> = cluster
+            .iter()
+            .map(|(i, _, _)| entries[*i].0.path.clone())
+            .filter(|path| seen.insert(path.clone()))
+            .collect();
+        let context_paths = paths.clone();
+        let count = paths.len();
+        let active = paths.iter().any(|p| ws.library.is_selected(p));
+        let preview = photo_preview(ws, entry, 56.0, 42.0, cx);
+        let label = if count > 1 {
+            format!("{count} photos")
+        } else {
+            entry
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let marker = div()
+            .id(SharedString::from(format!(
+                "map-pin-{}-{cluster_index}",
+                entry.path.display()
+            )))
+            .flex()
+            .flex_col()
+            .items_center()
+            .w(px(68.0))
+            .cursor_pointer()
+            .tooltip(crate::ui::tip(label, None))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    ws.library.world_map.end_drag();
+                    ws.library.map_photos = paths.clone();
+                    ws.library.select_single(paths[0].clone());
+                    if count == 1 && ev.click_count >= 2 {
+                        ws.open_from_gallery(paths[0].clone(), cx);
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    ws.library.world_map.end_drag();
+                    ws.library.context = Some((
+                        ev.position,
+                        super::library::GalleryContext::MapCluster(context_paths.clone()),
+                    ));
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .relative()
+                    .p_1()
+                    .rounded_md()
+                    .border_2()
+                    .border_color(gpui::rgb(if active {
+                        pal().select_border
+                    } else {
+                        0xFFFFFF
+                    }))
+                    .bg(gpui::rgb(pal().chrome_bg))
+                    .child(preview)
+                    .children((count > 1).then(|| {
+                        div()
+                            .absolute()
+                            .right(px(0.0))
+                            .bottom(px(0.0))
+                            .px_1()
+                            .rounded_sm()
+                            .bg(gpui::rgb(pal().select_border))
+                            .text_color(gpui::rgb(0xFFFFFF))
+                            .text_size(px(10.0))
+                            .child(count.to_string())
+                    })),
+            )
+            .child(div().w(px(3.0)).h(px(5.0)).bg(gpui::rgb(0xFFFFFF)))
+            .child(
+                div()
+                    .w(px(10.0))
+                    .h(px(10.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(gpui::rgb(0xFFFFFF))
+                    .bg(gpui::rgb(pal().select_border)),
+            )
+            .into_any_element();
+        markers.push((point(px(x - 34.0), px(y - 64.0)), marker));
+    }
+    markers
+}
+
+/// The grid: folder headers with a rule, then wrapped thumbnails.
+fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let cell = ws.library.thumb_px;
+    let selected: Vec<PathBuf> = ws.library.selected.clone();
+    let sections = gallery_sections(ws);
     let scanning = ws.library.scanning;
     let grid_entity = cx.entity();
     let mut column = div()
@@ -2044,11 +2407,15 @@ pub(crate) fn map_element(
     div()
         .id(match slot {
             super::library_geo::MapSlot::Gallery => "gallery-map",
+            super::library_geo::MapSlot::World => "world-map",
             super::library_geo::MapSlot::Info => "info-map",
         })
         .relative()
         .w_full()
-        .h(px(height))
+        .when(slot == super::library_geo::MapSlot::World, |el| el.h_full())
+        .when(slot != super::library_geo::MapSlot::World, |el| {
+            el.h(px(height))
+        })
         .flex_none()
         .overflow_hidden()
         .rounded_sm()
@@ -2064,7 +2431,8 @@ pub(crate) fn map_element(
             cx.listener(move |ws, ev: &MouseDownEvent, _w, cx| {
                 let pos = (f32::from(ev.position.x), f32::from(ev.position.y));
                 let map = ws.map_mut(slot);
-                let drawing = ev.modifiers.shift || map.draw_mode;
+                let drawing = slot != super::library_geo::MapSlot::World
+                    && (ev.modifiers.shift || map.draw_mode);
                 map.begin_drag(pos, drawing);
                 cx.notify();
             }),
@@ -2098,14 +2466,44 @@ pub(crate) fn map_element(
             canvas(
                 move |bounds, window, cx| {
                     let scale = window.scale_factor();
-                    entity.update(cx, |ws, cx| {
+                    let (paint, markers) = entity.update(cx, |ws, cx| {
                         let paint = ws.prepare_map_paint(slot, bounds, scale);
                         // Whatever this frame queued starts fetching.
                         ws.kick_map_tiles(slot, cx);
-                        paint
-                    })
+                        let markers = if slot == super::library_geo::MapSlot::World {
+                            prepare_photo_markers(ws, bounds, cx)
+                        } else {
+                            Vec::new()
+                        };
+                        (paint, markers)
+                    });
+                    let markers = markers
+                        .into_iter()
+                        .map(|(origin, mut marker)| {
+                            marker.prepaint_as_root(
+                                origin,
+                                size(
+                                    gpui::AvailableSpace::MinContent,
+                                    gpui::AvailableSpace::MinContent,
+                                ),
+                                window,
+                                cx,
+                            );
+                            marker
+                        })
+                        .collect();
+                    (paint, markers)
                 },
-                move |_bounds, paint: super::library_geo::MapPaint, window, _cx| {
+                move |bounds,
+                      (paint, mut markers): (
+                    super::library_geo::MapPaint,
+                    Vec<gpui::AnyElement>,
+                ),
+                      window,
+                      cx| {
+                    if slot == super::library_geo::MapSlot::World {
+                        window.paint_quad(gpui::fill(bounds, gpui::rgb(0xF2EFE9)));
+                    }
                     // Sea-grey where a tile has not arrived, so loading
                     // reads as loading rather than as a hole.
                     for rect in paint.missing {
@@ -2114,13 +2512,16 @@ pub(crate) fn map_element(
                     // Each tile image carries a one-pixel gutter: draw it
                     // that much larger and clip to the true tile, so the
                     // bilinear filter never reaches past the tile's edge.
-                    let gutter = px(super::library_geo::TILE_GUTTER as f32);
                     for (rect, img) in paint.tiles {
+                        let gutter_x =
+                            rect.size.width * (super::library_geo::TILE_GUTTER as f32 / 256.0);
+                        let gutter_y =
+                            rect.size.height * (super::library_geo::TILE_GUTTER as f32 / 256.0);
                         let padded = gpui::Bounds {
-                            origin: gpui::point(rect.origin.x - gutter, rect.origin.y - gutter),
+                            origin: gpui::point(rect.origin.x - gutter_x, rect.origin.y - gutter_y),
                             size: gpui::size(
-                                rect.size.width + gutter * 2.0,
-                                rect.size.height + gutter * 2.0,
+                                rect.size.width + gutter_x * 2.0,
+                                rect.size.height + gutter_y * 2.0,
                             ),
                         };
                         window.with_content_mask(
@@ -2160,6 +2561,9 @@ pub(crate) fn map_element(
                         };
                         window.paint_quad(dot(9.0, gpui::rgba(0xFFFFFFE0)));
                         window.paint_quad(dot(6.5, gpui::rgb(0xE0362B)));
+                    }
+                    for marker in &mut markers {
+                        marker.paint(window, cx);
                     }
                 },
             )
@@ -2624,7 +3028,8 @@ pub(crate) fn bucket_name_dialog(
 }
 
 /// The gallery's right-click menu: on a photo it acts on the whole
-/// selection, on a bucket it acts on the bucket.
+/// selection, on a map marker it acts on that marker's captured members,
+/// and on a bucket it acts on the bucket.
 fn gallery_context_menu(
     ws: &mut Workspace,
     cx: &mut Context<Workspace>,
@@ -2672,6 +3077,39 @@ fn gallery_context_menu(
         );
     };
     match target {
+        GalleryContext::MapCluster(photos) => {
+            rows.push(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(crate::ui::palette().text_dim))
+                    .child(format!("{} photos in this marker", photos.len()))
+                    .into_any_element(),
+            );
+            for (i, bucket) in ws.library.buckets.iter().enumerate() {
+                let add = photos.clone();
+                row(
+                    format!("Add all to {}", bucket.name),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, _cx| {
+                        ws.library.add_to_bucket(i, &add);
+                    }),
+                );
+            }
+            row(
+                "Add all to new bucket…".into(),
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, cx| {
+                    // This bucket starts with the clicked photos. An old
+                    // import/filter boundary must not add a smart rule.
+                    ws.library.map.clear_selection();
+                    ws.gallery_new_bucket(photos.clone(), cx);
+                }),
+            );
+        }
         GalleryContext::Photo(path) => {
             // The right-click handler put this photo in the selection,
             // so the selection is what every action takes.
