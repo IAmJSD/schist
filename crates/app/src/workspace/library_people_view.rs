@@ -205,7 +205,9 @@ pub(super) fn people_rows(
             .child(label)
             .into_any_element()
     };
-    if !detector {
+    if people_models_downloading(ws) {
+        rows.push(people_download_progress(ws).into_any_element());
+    } else if !detector {
         rows.push(link("+ Find faces\u{2026}", cx));
     } else if !recogniser {
         rows.push(link("+ Recognise faces\u{2026}", cx));
@@ -226,6 +228,72 @@ pub(super) fn people_rows(
         );
     }
     rows
+}
+
+/// Whether either People model is on its way down.
+pub(super) fn people_models_downloading(ws: &Workspace) -> bool {
+    ws.model_downloads
+        .iter()
+        .any(|d| PEOPLE_MODELS.contains(&d.id))
+}
+
+/// The People models' download as a bar in the sidebar, the search
+/// bar's twin: the two files counted as one, an installed one wholly
+/// got, so the bar runs once from nothing to done.
+fn people_download_progress(ws: &Workspace) -> impl IntoElement {
+    let mut got = 0u64;
+    let mut total = 0u64;
+    for id in PEOPLE_MODELS {
+        let Some(spec) = schist_neural::spec(id) else {
+            continue;
+        };
+        total += spec.bytes as u64;
+        got += if schist_neural::installed(id) {
+            spec.bytes as u64
+        } else {
+            ws.model_downloads
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.got.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0)
+        };
+    }
+    let mb = |bytes: u64| bytes as f64 / (1 << 20) as f64;
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        (got as f64 / total as f64).clamp(0.0, 1.0) as f32
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(gpui::rgb(pal().text_dim))
+                .child(SharedString::from(format!(
+                    "Downloading face models\u{2026} {:.0} of {:.0} MB",
+                    mb(got),
+                    mb(total)
+                ))),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(4.0))
+                .rounded_sm()
+                .bg(gpui::rgb(pal().chrome_edge))
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(ratio))
+                        .rounded_sm()
+                        .bg(gpui::rgb(pal().select_border)),
+                ),
+        )
 }
 
 /// The viewer: one photo, big, its faces boxed, and the people panel
@@ -547,7 +615,9 @@ fn people_panel(
                 .text_color(gpui::rgb(pal().text_dim))
                 .child("PEOPLE IN THIS PHOTO"),
         );
-    if !detector {
+    if people_models_downloading(ws) {
+        col = col.child(people_download_progress(ws));
+    } else if !detector {
         col = col
             .child(
                 div()
