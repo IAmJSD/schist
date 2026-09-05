@@ -198,9 +198,10 @@ can look), `gallery_select`, `gallery_bucket_create` (optionally with
 a smart query), `gallery_bucket_add`, `gallery_group_by`,
 `gallery_content_filter` (read or switch the content filter, with
 counts of flagged, clean and not-yet-scored photos; switching it on
-needs the model), `gallery_flagged` (photos by verdict, paged), and
-`gallery_open`, which takes a photo into the editor where the document
-tools then apply.
+needs the model), `gallery_flagged` (photos by verdict, paged),
+`gallery_people` (the People album, or one person's photos by name —
+which also shows them in the grid), and `gallery_open`, which takes a
+photo into the editor where the document tools then apply.
 
 The headless server has the gallery too. `schist-mcp`, the stdio
 server other agents drive, publishes the same `gallery_*` family over
@@ -432,9 +433,81 @@ optional `bucket` — the in-app one views the bucket as it searches,
 so the user sees what the agent saw; the headless one sees only the
 hand-added photos, as its `gallery_list` does.
 
+## People
+
+The People album, the way Picasa did it. Two models under Manage
+Models do the work, both downloaded once and run locally: **Faces
+(Detection)** — UltraFace, the same 1.2 MB detector Skin Smoothing
+uses — finds the faces in each photo as its thumbnail goes through the
+loader, and **Faces (Recognition)** — SFace from the OpenCV Zoo,
+38.7 MB, Apache-2.0 — turns each one into 128 numbers whose cosine says
+whether two faces are the same person. Detection runs on the thumbnail
+(the detector's own frame is 320×240, so a thumbnail is already more
+than it looks at); the recogniser crops big faces from the thumbnail
+and small ones — a group photo's — from a 1024 px decode: the one kept
+from rendering the thumbnail when the models were already installed,
+otherwise one more decode of the original, once. A face the recogniser
+cannot embed is recorded as tried, so no photo is asked again on every
+pass; a recogniser file that is installed but will not load switches
+recognition off for the session rather than leaving every face owed. Until the
+models are installed the sidebar's PEOPLE section offers "+ Find
+faces…", which opens one licence dialog for both.
+
+Boxes are stored as fractions of the photo, not pixels, so a tag is the
+same box in the thumbnail, the viewer and the original. Detections are
+cached beside the thumbnail (`.faces`, with the vectors) and ride in
+the index snapshot; the names are the user's and live in
+`library.json`.
+
+Naming happens in the **viewer**: Space on a selected photo, the tray's
+**View** button, or "View & name people" in the right-click menu shows
+the photo big with every face boxed, and a PEOPLE IN THIS PHOTO panel
+beside it with a crop per face. Click a face (in either place), type a
+name, Enter. Names already known complete as you type; a face the
+detector missed is added by dragging a box round it on the photo; a
+detection that is not a face — or not anyone worth naming — is waved
+away with "Not a face". Naming a face teaches the recogniser: every
+unnamed face in the library that lands above a 0.5 cosine of the
+person's mean vector is put with them at once, as an *automatic* tag
+(the tray says how many followed), and photos indexed later get the
+same treatment as their faces arrive. Between 0.45 and 0.5 a face is
+only offered — "Is this Ann?" with a Yes button — rather than taken
+(SFace's authors use 0.363 on aligned crops; ours are plain squares
+round the detector's box, which spreads the scores, so the bars sit
+above where different people landed in testing). Automatic tags are
+marked "auto" in the panel and on their box, with a "Not them" button;
+saying no remembers that this face is not that person, so the
+recogniser does not put it back — and only hand-named faces feed a
+person's mean vector, so one wrong guess cannot steer the next. A
+face drawn by hand gets its vector from the viewer's decode on the
+spot, so it counts too. Arrows
+walk to the next photo, Escape leaves the name field, then the viewer;
+Enter with nothing focused opens the photo in the editor, as it does in
+the grid. Double-click on a thumbnail still goes straight to the
+editor.
+
+The sidebar lists each person with an avatar, their name and photo
+count; clicking one shows their photos under a "People · Ann" header.
+With a bucket (or folder) on show the People rows work inside it: the
+counts are the person's photos in that bucket, the grid shows only
+those, and the header says so ("People · Ann · in Trip"). Clicking the
+person again lifts the person filter and the bucket is back as it was;
+right-click offers Rename… (renaming to a name somebody else already
+has merges the two) and Forget person (the faces go back to unnamed;
+nothing is deleted). An "Unnamed faces" row gathers every photo with a
+detected face nobody has named or dismissed — Picasa's Unnamed album,
+where the naming gets done. A person's name in the search box pulls
+their photos in ahead of anything the towers rank ("ann at the beach"
+finds Ann's beach photos first), and the results header says "· with
+Ann"; a name alone needs no search models at all. The `gallery_people`
+tool lists the album for the AI panel and the headless server, or one
+person's photos by name.
+
 ## What is persisted
 
 `~/.config/schist/library.json`: the watched folders, the recent-files
-list the start screen shows, and the thumbnail size. Thumbnail caches
+list the start screen shows, the thumbnail size, the buckets, and the
+people — every named face (hand-made or automatic), every detected
+face waved away, and every "not them". Thumbnail caches
 live under the state directory (`~/.local/state/schist/thumbs`) and can
 be deleted freely.

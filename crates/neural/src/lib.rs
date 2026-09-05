@@ -50,7 +50,7 @@ mod segment;
 mod tile;
 pub use colour::{chroma, recolour};
 pub use depth::depth_map;
-pub use faces::{faces, Face};
+pub use faces::{embed_face, faces, Face, FACE_EMBED_DIM};
 pub use framed::run_framed;
 pub use inpaint::inpaint;
 pub use segment::segment;
@@ -405,7 +405,7 @@ pub const CATALOG: &[ModelSpec] = &[
     },
     ModelSpec {
         id: "face",
-        name: "Faces (Skin Smoothing)",
+        name: "Faces (Detection)",
         file: "face.onnx",
         url: Some("https://github.com/onnx/models/raw/main/validated/vision/body_analysis/ultraface/models/version-RFB-320.onnx"),
         sha256: Some("34cd7e60aeff28744c657de7a3dc64e872d506741de66987f3426f2b79f88017"),
@@ -414,7 +414,28 @@ pub const CATALOG: &[ModelSpec] = &[
         range: Range::Standard { mean: [0.498_039_2; 3], sd: [0.501_960_8; 3] },
         license: "ONNX Model Zoo, MIT",
         note: "Finds faces, so Skin Smoothing can work on skin that is on \
-               one rather than on anything skin-coloured.",
+               one rather than on anything skin-coloured — and so the \
+               gallery can find the people in a photo.",
+    },
+    // Who a face belongs to: SFace (a MobileFaceNet trained with the
+    // SFace loss, from the OpenCV Zoo) maps a 112x112 face crop to 128
+    // numbers whose cosine says whether two crops are the same person.
+    // The gallery's People feature compares every detected face against
+    // the faces already named, and suggests. OpenCV feeds it BGR in
+    // 0..=255; the caller swaps the channels, the range does the scale.
+    ModelSpec {
+        id: "face-embed",
+        name: "Faces (Recognition)",
+        file: "face-embed.onnx",
+        url: Some("https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"),
+        sha256: Some("0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"),
+        bytes: 38_696_353,
+        input: Input::Frame { width: 112, height: 112, fit: Fit::Stretch },
+        range: Range::Byte,
+        license: "OpenCV Zoo SFace (Zhong & Deng), Apache-2.0",
+        note: "Tells faces apart, so the gallery can suggest who a face \
+               is once you have named them elsewhere. Runs on each face \
+               the detector finds, in the background.",
     },
     ModelSpec {
         id: "nsfw",

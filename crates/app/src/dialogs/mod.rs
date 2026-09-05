@@ -222,6 +222,16 @@ pub fn render(ws: &mut Workspace, cx: &mut Context<Workspace>) -> Option<gpui::A
         #[cfg(not(target_arch = "wasm32"))]
         Modal::SearchModels => crate::workspace::search_models_dialog(cx).into_any_element(),
         #[cfg(not(target_arch = "wasm32"))]
+        Modal::PeopleModels => crate::workspace::people_models_dialog(cx).into_any_element(),
+        #[cfg(target_arch = "wasm32")]
+        Modal::PeopleModels => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        Modal::PersonName { index, name } => {
+            crate::workspace::person_name_dialog(ws, index, name, cx).into_any_element()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Modal::PersonName { .. } => return None,
+        #[cfg(not(target_arch = "wasm32"))]
         Modal::SaveImageAs {
             path,
             codec,

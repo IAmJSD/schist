@@ -7,6 +7,9 @@ description = "The photo gallery's on-disk model: watched folders, buckets, the 
 
 [dependencies]
 schist-neural.workspace = true
+# Cutting face crops out of thumbnails, for the recogniser and the
+# People avatars.
+image.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

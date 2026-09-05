@@ -3,6 +3,7 @@
 //! probing thousands of per-photo caches.
 
 use crate::paths::index_snapshot_path;
+use crate::people::{decode_faces_at, encode_faces_body, DetectedFace};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,12 +20,32 @@ pub struct IndexRow {
     pub taken: Option<String>,
     pub place: Option<Option<String>>,
     pub flagged: Option<bool>,
+    /// The faces the detector found — `Some(empty)` for a photo it
+    /// looked at and found none in — each with the recogniser's
+    /// vector when that model was installed at the time.
+    pub faces: Option<Vec<DetectedFace>>,
 }
 
-pub const INDEX_MAGIC: &[u8; 8] = b"SCHIDX1\n";
+impl IndexRow {
+    /// Whether nothing was ever learned about the photo.
+    pub fn is_empty(&self) -> bool {
+        self.embed.is_none()
+            && self.gps.is_none()
+            && self.taken.is_none()
+            && self.place.is_none()
+            && self.flagged.is_none()
+            && self.faces.is_none()
+    }
+}
+
+/// The first format: one presence-flags byte per row.
+pub const INDEX_MAGIC_V1: &[u8; 8] = b"SCHIDX1\n";
+/// The second: a further flags byte per row, for the faces. Written
+/// always; both are read.
+pub const INDEX_MAGIC: &[u8; 8] = b"SCHIDX2\n";
 
 /// Serialize the index rows: magic, a count, then per row the path,
-/// mtime, a presence-flags byte and the present fields, all
+/// mtime, two presence-flags bytes and the present fields, all
 /// little-endian. Hand-rolled because 10 MB of f32s deserves neither
 /// JSON nor a new dependency. Non-UTF-8 paths are skipped — they
 /// cannot round-trip through this file, and re-indexing them is only
@@ -77,6 +98,11 @@ pub fn write_index_snapshot_to(path: &Path, rows: &[IndexRow]) -> anyhow::Result
             }
         }
         out.push(flags);
+        let mut flags2 = 0u8;
+        if row.faces.is_some() {
+            flags2 |= 1;
+        }
+        out.push(flags2);
         if let Some(embed) = &row.embed {
             out.extend_from_slice(&(embed.len() as u16).to_le_bytes());
             for v in embed.iter() {
@@ -92,6 +118,9 @@ pub fn write_index_snapshot_to(path: &Path, rows: &[IndexRow]) -> anyhow::Result
         }
         if let Some(Some(place)) = &row.place {
             put_str(&mut out, place);
+        }
+        if let Some(faces) = &row.faces {
+            out.extend_from_slice(&encode_faces_body(faces));
         }
     }
     // Atomically: a crash mid-write must not leave a torn file.
@@ -115,9 +144,11 @@ pub fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
         *at += n;
         Some(slice)
     };
-    if take(&mut at, 8)? != INDEX_MAGIC {
-        return None;
-    }
+    let version = match take(&mut at, 8)? {
+        m if m == INDEX_MAGIC_V1 => 1,
+        m if m == INDEX_MAGIC => 2,
+        _ => return None,
+    };
     let count = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
     let get_str = |at: &mut usize| -> Option<String> {
         let len = u16::from_le_bytes(take(at, 2)?.try_into().ok()?) as usize;
@@ -130,6 +161,11 @@ pub fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
         let path = PathBuf::from(get_str(&mut at)?);
         let mtime = u64::from_le_bytes(take(&mut at, 8)?.try_into().ok()?);
         let flags = take(&mut at, 1)?[0];
+        let flags2 = if version >= 2 {
+            take(&mut at, 1)?[0]
+        } else {
+            0
+        };
         let embed = if flags & 1 != 0 {
             let dim = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
             let raw = take(&mut at, dim * 4)?;
@@ -168,6 +204,13 @@ pub fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
             None
         };
         let flagged = (flags & 64 != 0).then_some(flags & 128 != 0);
+        let faces = if flags2 & 1 != 0 {
+            let mut faces = Vec::new();
+            decode_faces_at(bytes, &mut at, &mut faces, false)?;
+            Some(faces)
+        } else {
+            None
+        };
         rows.push(IndexRow {
             path,
             mtime,
@@ -176,6 +219,7 @@ pub fn parse_index_snapshot(bytes: &[u8]) -> Option<Vec<IndexRow>> {
             taken,
             place,
             flagged,
+            faces,
         });
     }
     Some(rows)
@@ -196,6 +240,26 @@ mod tests {
                 taken: Some("2026-09-01 12:00:00".into()),
                 place: Some(Some("New York City".into())),
                 flagged: Some(true),
+                faces: Some(vec![
+                    DetectedFace {
+                        rect: crate::people::FaceRect {
+                            x: 0.1,
+                            y: 0.2,
+                            w: 0.3,
+                            h: 0.4,
+                        },
+                        embed: Some(vec![0.5, -0.5]),
+                    },
+                    DetectedFace {
+                        rect: crate::people::FaceRect {
+                            x: 0.6,
+                            y: 0.2,
+                            w: 0.1,
+                            h: 0.1,
+                        },
+                        embed: None,
+                    },
+                ]),
             },
             IndexRow {
                 path: PathBuf::from("/p/bare.jpg"),
@@ -205,6 +269,17 @@ mod tests {
                 taken: None,
                 place: Some(None),
                 flagged: Some(false),
+                faces: Some(Vec::new()),
+            },
+            IndexRow {
+                path: PathBuf::from("/p/unlooked.jpg"),
+                mtime: 11,
+                embed: None,
+                gps: Some(None),
+                taken: None,
+                place: None,
+                flagged: None,
+                faces: None,
             },
             IndexRow {
                 path: PathBuf::from("/p/zero.jpg"),
@@ -214,6 +289,7 @@ mod tests {
                 taken: Some("2026-09-02 12:00:00".into()),
                 place: Some(None),
                 flagged: Some(false),
+                faces: None,
             },
         ];
         let dir = std::env::temp_dir().join(format!("schist-idx-test-{}", std::process::id()));
@@ -223,7 +299,7 @@ mod tests {
         let bytes = std::fs::read(&file).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let back = parse_index_snapshot(&bytes).expect("parses");
-        assert_eq!(back.len(), 3);
+        assert_eq!(back.len(), 4);
         assert_eq!(back[0].path, rows[0].path);
         assert_eq!(back[0].mtime, 7);
         assert_eq!(back[0].embed.as_deref(), Some(&vec![0.25f32, -1.0, 3.5]));
@@ -236,9 +312,33 @@ mod tests {
         assert_eq!(back[1].flagged, Some(false));
         assert_eq!(back[1].embed, None);
         // Still probed, so the loader will not keep re-indexing this photo.
-        assert_eq!(back[2].gps, Some(None));
-        assert_eq!(back[2].taken.as_deref(), Some("2026-09-02 12:00:00"));
+        assert_eq!(back[3].gps, Some(None));
+        assert_eq!(back[3].taken.as_deref(), Some("2026-09-02 12:00:00"));
+        assert_eq!(back[0].faces, rows[0].faces);
+        assert_eq!(back[1].faces, Some(Vec::new()));
+        assert_eq!(back[2].faces, None);
+        assert_eq!(back[3].faces, None);
         assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
         assert!(parse_index_snapshot(b"not an index").is_none());
+    }
+
+    #[test]
+    fn a_first_format_snapshot_still_reads() {
+        // Hand-assembled v1 bytes: one row, position only.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(INDEX_MAGIC_V1);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let path = "/p/old.jpg";
+        bytes.extend_from_slice(&(path.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(path.as_bytes());
+        bytes.extend_from_slice(&5u64.to_le_bytes());
+        bytes.push(2 | 4); // gps probed and present
+        bytes.extend_from_slice(&51.5f64.to_le_bytes());
+        bytes.extend_from_slice(&(-0.1f64).to_le_bytes());
+        let rows = parse_index_snapshot(&bytes).expect("v1 parses");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].gps, Some(Some((51.5, -0.1))));
+        assert_eq!(rows[0].faces, None);
+        assert!(!rows[0].is_empty());
     }
 }

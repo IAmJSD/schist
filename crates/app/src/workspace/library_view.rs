@@ -16,28 +16,28 @@ use gpui::{
 };
 
 /// The gallery's chrome colours for one theme.
-struct GalleryPalette {
+pub(super) struct GalleryPalette {
     /// Behind the thumbnails.
-    grid_bg: u32,
+    pub(super) grid_bg: u32,
     /// The top strip and sidebar.
-    chrome_bg: u32,
-    chrome_edge: u32,
-    tray_bg: u32,
-    sidebar_selected: u32,
+    pub(super) chrome_bg: u32,
+    pub(super) chrome_edge: u32,
+    pub(super) tray_bg: u32,
+    pub(super) sidebar_selected: u32,
     /// Folder headers and the add-folder link — Picasa's blue.
-    header: u32,
-    text: u32,
-    text_dim: u32,
-    cell_edge: u32,
+    pub(super) header: u32,
+    pub(super) text: u32,
+    pub(super) text_dim: u32,
+    pub(super) cell_edge: u32,
     /// Cell border under the pointer.
-    cell_hover: u32,
-    select_border: u32,
-    select_fill: u32,
-    button_bg: u32,
-    button_hover: u32,
+    pub(super) cell_hover: u32,
+    pub(super) select_border: u32,
+    pub(super) select_fill: u32,
+    pub(super) button_bg: u32,
+    pub(super) button_hover: u32,
     /// The green action buttons and the "edited" badge.
-    green: u32,
-    green_hover: u32,
+    pub(super) green: u32,
+    pub(super) green_hover: u32,
 }
 
 /// Picasa: white grid, warm grey chrome.
@@ -80,7 +80,7 @@ const GALLERY_DARK: GalleryPalette = GalleryPalette {
     green_hover: 0x6DB33F,
 };
 
-fn pal() -> &'static GalleryPalette {
+pub(super) fn pal() -> &'static GalleryPalette {
     if crate::ui::is_light() {
         &GALLERY_LIGHT
     } else {
@@ -101,6 +101,8 @@ impl Workspace {
                 .child(sidebar(self, cx))
                 .child(if self.library.map_view {
                     world_map(self, cx).into_any_element()
+                } else if self.library.viewer.is_some() {
+                    super::library_people_view::viewer(self, cx)
                 } else {
                     grid(self, cx).into_any_element()
                 })
@@ -141,7 +143,10 @@ impl Workspace {
                     cx.stop_propagation();
                     return;
                 }
-                if ws.gallery_search_key(ev, cx) || ws.gallery_nav_key(ev, cx) {
+                if ws.gallery_viewer_key(ev, cx)
+                    || ws.gallery_search_key(ev, cx)
+                    || ws.gallery_nav_key(ev, cx)
+                {
                     cx.stop_propagation();
                 }
             }))
@@ -218,7 +223,7 @@ fn drag_out_listener(cx: &mut Context<Workspace>) -> impl IntoElement {
     .size_0()
 }
 
-fn gallery_button(
+pub(super) fn gallery_button(
     label: &'static str,
     green: bool,
     on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
@@ -375,16 +380,30 @@ fn search_slot(ws: &mut Workspace, cx: &mut Context<Workspace>) -> gpui::AnyElem
     if schist_neural::embed::ready() {
         return search_box(ws, cx).into_any_element();
     }
-    if search_models_downloading(ws) {
-        return search_download_progress(ws).into_any_element();
+    let offer = if search_models_downloading(ws) {
+        search_download_progress(ws).into_any_element()
+    } else {
+        gallery_button(
+            "Enable photo search\u{2026}",
+            false,
+            |ws, _w, cx| ws.open_modal(Modal::SearchModels, cx),
+            cx,
+        )
+        .into_any_element()
+    };
+    if ws.library.people.is_empty() {
+        return offer;
     }
-    gallery_button(
-        "Enable photo search\u{2026}",
-        false,
-        |ws, _w, cx| ws.open_modal(Modal::SearchModels, cx),
-        cx,
-    )
-    .into_any_element()
+    // Without the towers the box still searches names and places, so
+    // once anyone has been named it is worth having beside the offer.
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(search_box(ws, cx))
+        .child(offer)
+        .into_any_element()
 }
 
 /// The download of the two Search models, as a bar in the top strip.
@@ -453,7 +472,9 @@ fn search_box(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoEleme
     let active = ws.library.search_active;
     let text = ws.library.search.clone();
     let (indexed, total) = ws.library.index_progress();
-    let placeholder: SharedString = if indexed < total {
+    let placeholder: SharedString = if !schist_neural::embed::ready() {
+        "Search people and places\u{2026}".into()
+    } else if indexed < total {
         format!("Search ({indexed}/{total} indexed)").into()
     } else {
         "Search photos\u{2026}".into()
@@ -878,6 +899,7 @@ fn sidebar(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement 
                 )
                 .child("+ New bucket"),
         )
+        .children(super::library_people_view::people_rows(ws, cx))
 }
 
 /// One bucket in the sidebar: a drop target, a view of its contents on
@@ -1060,6 +1082,9 @@ fn gallery_sections(ws: &Workspace) -> Vec<(String, String, Vec<super::library::
             };
             if let Some(place) = &ws.library.search_place {
                 title.push_str(&format!(" · near {place}"));
+            }
+            if !ws.library.search_people.is_empty() {
+                title.push_str(&format!(" · with {}", ws.library.search_people.join(", ")));
             }
             vec![(title, String::new(), entries)]
         } else {
@@ -1484,6 +1509,10 @@ fn grid(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         Some(_) => {
                             "This bucket is empty. Drag photos onto its row in the sidebar \
                          to add them."
+                        }
+                        None if ws.library.person_filter.is_some() => {
+                            "Nothing here yet. Faces appear as photos are indexed; \
+                         click a photo, then a face, to say who it is."
                         }
                         None if scanning => "Scanning folders\u{2026}",
                         None => {
@@ -1927,6 +1956,16 @@ fn tray(ws: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                 "Edit",
                 true,
                 move |ws, _w, cx| ws.open_from_gallery(open.clone(), cx),
+                cx,
+            )
+        }))
+        .children(selected.as_ref().map(|entry| {
+            // The quick look — the photo big, its faces to name.
+            let view = entry.path.clone();
+            gallery_button(
+                "View",
+                false,
+                move |ws, _w, cx| ws.open_viewer(view.clone(), cx),
                 cx,
             )
         }))
@@ -2819,7 +2858,7 @@ pub(crate) fn search_models_dialog(cx: &mut Context<Workspace>) -> impl IntoElem
 
 /// One text field of the bucket dialog: the layer-name pattern, with a
 /// dimmed placeholder while nothing is typed.
-fn bucket_field(
+pub(super) fn bucket_field(
     id: &'static str,
     value: String,
     placeholder: String,
@@ -3137,6 +3176,15 @@ fn gallery_context_menu(
                         ws.open_from_gallery(open.clone(), cx);
                     }),
                 );
+                let view = path.clone();
+                row(
+                    "View & name people".into(),
+                    &mut rows,
+                    cx,
+                    std::rc::Rc::new(move |ws, _w, cx| {
+                        ws.open_viewer(view.clone(), cx);
+                    }),
+                );
             }
             {
                 let reveal = path.clone();
@@ -3366,6 +3414,44 @@ fn gallery_context_menu(
                 cx,
                 std::rc::Rc::new(move |ws, _w, _cx| {
                     ws.library.delete_bucket(index);
+                }),
+            );
+        }
+        GalleryContext::Person(index) => {
+            let (name, faces) = ws
+                .library
+                .people
+                .get(index)
+                .map(|p| (p.name.clone(), p.faces.len()))
+                .unwrap_or_default();
+            row(
+                format!("Show {name}"),
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, cx| {
+                    ws.show_person(Some(super::library::PersonFilter::Person(index)), cx);
+                }),
+            );
+            row(
+                "Rename\u{2026}".into(),
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, cx| {
+                    ws.rename_person_prompt(index, cx);
+                }),
+            );
+            sep(&mut rows);
+            // The faces go back to unnamed; nothing is deleted.
+            row(
+                if faces == 1 {
+                    "Forget person (1 face)".to_string()
+                } else {
+                    format!("Forget person ({faces} faces)")
+                },
+                &mut rows,
+                cx,
+                std::rc::Rc::new(move |ws, _w, _cx| {
+                    ws.library.delete_person(index);
                 }),
             );
         }

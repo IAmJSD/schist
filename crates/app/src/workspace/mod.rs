@@ -65,6 +65,10 @@ mod library_mcp;
 #[cfg(not(target_arch = "wasm32"))]
 mod library_ops;
 #[cfg(not(target_arch = "wasm32"))]
+mod library_people;
+#[cfg(not(target_arch = "wasm32"))]
+mod library_people_view;
+#[cfg(not(target_arch = "wasm32"))]
 mod library_view;
 mod modals;
 mod notes;
@@ -79,6 +83,8 @@ mod viewport;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_geo::MapSlot;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use library_people_view::{people_models_dialog, person_name_dialog};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_view::map_element;
 #[cfg(not(target_arch = "wasm32"))]
@@ -148,10 +154,7 @@ pub fn schist_folder() -> Option<PathBuf> {
 /// Where view preferences are stored.
 #[cfg(not(target_arch = "wasm32"))]
 fn prefs_path() -> Option<PathBuf> {
-    match schist_folder() {
-        Some(x) => Some(x.join("preferences.json")),
-        None => None,
-    }
+    schist_folder().map(|folder| folder.join("preferences.json"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -449,12 +452,14 @@ impl Workspace {
         }
     }
 
-    /// Whether the gallery's search box is taking typing, for the key
-    /// context. Always false on the web, with the gallery itself.
+    /// Whether the gallery's search box — or the viewer's name field —
+    /// is taking typing, for the key context. Always false on the web,
+    /// with the gallery itself.
     pub fn gallery_typing(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.gallery_search_active()
+                || (self.library.open && self.focused_field == Some("face-name"))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1130,6 +1135,12 @@ pub enum Modal {
     /// The gallery's offer to install the two Search models, with the
     /// licences to agree to first. Desktop-only, like the gallery.
     SearchModels,
+    /// The same offer for the two People models — the face detector
+    /// and the face recogniser.
+    PeopleModels,
+    /// Rename one of the gallery's people (`index` into the people
+    /// list); a name somebody else has merges the two.
+    PersonName { index: usize, name: String },
     /// Save one gallery photo as a flat image: format, quality where the
     /// format takes one, and a scale to shrink it by. `size` is the
     /// source's pixel size when it could be read up front, so the

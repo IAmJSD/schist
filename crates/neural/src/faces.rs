@@ -1,4 +1,5 @@
-//! Face detection, for Skin Smoothing.
+//! Face detection, for Skin Smoothing and the gallery's People — and
+//! face recognition, for telling the gallery's people apart.
 //!
 //! UltraFace is a single-shot detector: it scores a few thousand fixed
 //! boxes at once and hands back all of them, so the work here is choosing
@@ -14,6 +15,9 @@
 use anyhow::{bail, Context as _, Result};
 
 use crate::{frame, Model};
+
+/// Length of the vector [`embed_face`] hands back.
+pub const FACE_EMBED_DIM: usize = 128;
 
 /// A detected face, in image pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,6 +123,38 @@ pub fn faces(model: &Model, rgb: &[f32], width: usize, height: usize) -> Result<
         }
     }
     Ok(kept)
+}
+
+/// Describe a face so it can be compared with others: `rgb` is one
+/// crop, interleaved RGB in 0..=1, sized exactly as the recogniser's
+/// spec says (112x112). The result is unit length, so the dot product
+/// of two is their cosine — above ~0.36 they are the same person, by
+/// the threshold the model's own authors use.
+///
+/// The model was trained on OpenCV images, which are BGR, so the
+/// channels swap on the way in; the caller need not know.
+pub fn embed_face(model: &Model, rgb: &[f32]) -> Result<Vec<f32>> {
+    let (w, h) = model.spec.input.dims();
+    if rgb.len() != w * h * 3 {
+        bail!("expected a {w}x{h} crop, got {} floats", rgb.len());
+    }
+    let bgr: Vec<f32> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|px| [px[2], px[1], px[0]])
+        .collect();
+    let mut out = model.run_scores(&bgr)?;
+    if out.len() != FACE_EMBED_DIM {
+        bail!("expected {FACE_EMBED_DIM} numbers, got {}", out.len());
+    }
+    let norm = out.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for v in &mut out {
+            *v /= norm;
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

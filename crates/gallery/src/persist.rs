@@ -2,6 +2,7 @@
 
 use crate::geo::GeoBounds;
 use crate::paths::library_path;
+use crate::people::{DeniedFace, PersonFile, TaggedFace};
 use std::path::PathBuf;
 
 /// A bucket as `library.json` holds it. Untagged so the shape saved
@@ -48,8 +49,10 @@ impl BucketFile {
 }
 
 /// What `library.json` persists: the watched folders, the recents, the
-/// grid's preferences and the buckets. Everything else — sections,
-/// thumbnails, the index — is derived from the disk.
+/// grid's preferences, the buckets, and the people — every name given
+/// to a face, and every detected face waved away as not one. Everything
+/// else — sections, thumbnails, the index, the detections themselves —
+/// is derived from the disk.
 #[derive(Default, serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct LibraryFile {
     pub folders: Vec<PathBuf>,
@@ -61,6 +64,12 @@ pub struct LibraryFile {
     pub group_by: Option<String>,
     #[serde(default)]
     pub buckets: Vec<BucketFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<PersonFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_faces: Vec<TaggedFace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_faces: Vec<DeniedFace>,
 }
 
 impl LibraryFile {
