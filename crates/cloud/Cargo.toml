@@ -15,7 +15,7 @@ url = "2"
 uuid = { version = "1", features = ["v4", "js"] }
 tokio = { version = "1", features = ["sync", "macros"] }
 futures.workspace = true
-yrs = "0.24"
+schist-document.workspace = true
 schist-core.workspace = true
 schist-color.workspace = true
 schist-codec-psd.workspace = true

@@ -5,10 +5,12 @@
 //! "Background" layer and export flattens through the compositor.
 
 pub use affinity::AffinityCodec;
+mod psd;
 use anyhow::Context as _;
 #[cfg(not(target_arch = "wasm32"))]
 pub use heif::HeifCodec;
 use image::ImageFormat;
+pub use psd::{PsdCodec, PsdPlugin};
 pub use raw::RawCodec;
 use schist_color::Depth;
 use schist_core::{blit_rgba8, blit_rgba_f32, Document, IntRect, Layer};

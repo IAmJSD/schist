@@ -162,3 +162,10 @@ also tests terminated document bindings in the app, then checks the desktop app.
 `make app PROFILE=debug` builds
 the desktop binary. Live provider authentication and server-side persistence
 require a running compatible service and account.
+
+### Shared desktop/provider library
+
+The Yrs image model lives in `schist-document`; `schist-cloud::document` re-exports it
+for compatibility. Desktop, WASM, and the provider use the same model. The provider
+can link the library or run its standalone worker to import built-in formats,
+validate edits, and materialize downloads. See [document-library.md](document-library.md).

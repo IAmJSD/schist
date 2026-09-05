@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 schist-core.workspace = true
+schist-codec-psd.workspace = true
 schist-plugin-api.workspace = true
 schist-codec-affinity.workspace = true
 anyhow.workspace = true

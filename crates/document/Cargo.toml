@@ -1,0 +1,40 @@
+[package]
+name = "schist-document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless Schist codecs and the shared Yjs image model for desktop and cloud"
+
+[lib]
+name = "schist_document"
+
+[[bin]]
+name = "schist-document-worker"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmp-serde = "1"
+serde_bytes = "0.11"
+yrs = "0.24"
+uuid = { version = "1", features = ["v4"] }
+schist-core.workspace = true
+schist-color.workspace = true
+schist-codec-psd.workspace = true
+schist-codecs-common.workspace = true
+schist-plugin-api.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+
+[dependencies.web-time]
+version = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { version = "1", features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

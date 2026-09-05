@@ -230,4 +230,13 @@ check-cloud:
 .PHONY: check-cloud-wasm
 check-cloud-wasm:
 	$(CARGO) check -p schist-app --target wasm32-unknown-unknown
-	CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner $(CARGO) test -p schist-cloud --target wasm32-unknown-unknown --lib
+	CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner $(CARGO) test -p schist-cloud -p schist-document --target wasm32-unknown-unknown --lib
+
+# Shared desktop/cloud document engine; no GPUI or network client.
+.PHONY: document-worker check-document format-document
+document-worker:
+	$(CARGO) build $(PROFILE_FLAG) -p schist-document --bin schist-document-worker
+check-document:
+	$(CARGO) test -p schist-document
+format-document:
+	$(CARGO) fmt -p schist-document -p schist-cloud -p schist-codecs-common

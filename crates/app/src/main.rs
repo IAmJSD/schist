@@ -46,49 +46,13 @@ use gpui::{
     px, size, App, AppContext as _, Application, AsyncApp, Bounds, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions,
 };
-use schist_plugin_api::{CodecPlugin, PluginManifest, PluginRegistry};
+use schist_plugin_api::{PluginManifest, PluginRegistry};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use workspace::Workspace;
 
-/// PSD/PSB import and export via `schist-codec-psd`.
-struct PsdCodec;
-
-impl CodecPlugin for PsdCodec {
-    fn id(&self) -> &'static str {
-        "codec.psd"
-    }
-    fn name(&self) -> &'static str {
-        "Photoshop PSD"
-    }
-    fn extensions(&self) -> &'static [&'static str] {
-        &["psd", "psb"]
-    }
-    fn probe(&self, bytes: &[u8]) -> bool {
-        schist_codec_psd::is_psd(bytes)
-    }
-    fn import(&self, bytes: &[u8]) -> anyhow::Result<schist_core::Document> {
-        Ok(schist_codec_psd::read_psd(bytes)?)
-    }
-    fn can_export(&self) -> bool {
-        true
-    }
-    fn export(&self, doc: &schist_core::Document) -> anyhow::Result<Vec<u8>> {
-        Ok(schist_codec_psd::write_psd(doc)?)
-    }
-}
-
-struct PsdPlugin;
-
-impl PluginManifest for PsdPlugin {
-    fn id(&self) -> &'static str {
-        "schist.codec-psd"
-    }
-    fn register(&self, registry: &mut PluginRegistry) {
-        registry.register_codec(Box::new(PsdCodec));
-    }
-}
+pub use schist_codecs_common::{PsdCodec, PsdPlugin};
 
 /// Whether an opt-in diagnostic is on: the preference, or the environment
 /// variable that overrides it for one run.

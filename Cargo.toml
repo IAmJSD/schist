@@ -5,6 +5,7 @@ exclude = ["examples/plugins/sepia-filter", "examples/plugins/pgm-codec"]
 members = [
     "crates/app",
     "crates/core",
+    "crates/document",
     "crates/layer-fx",
     "crates/neural",
     "crates/psd-descriptor",
@@ -52,6 +53,7 @@ repository = "https://github.com/Infrawrench/schist"
 [workspace.dependencies]
 # internal
 schist-core = { path = "crates/core" }
+schist-document = { path = "crates/document" }
 schist-plugin-api = { path = "crates/plugin-api" }
 schist-pixel-ops = { path = "crates/pixel-ops" }
 schist-compositor = { path = "crates/compositor" }
