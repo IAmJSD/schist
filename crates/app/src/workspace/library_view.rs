@@ -943,7 +943,6 @@ fn bucket_row(
                     Some(index)
                 };
                 ws.library.folder_filter = None;
-                ws.library.person_filter = None;
                 cx.notify();
             }),
         )
@@ -1000,7 +999,6 @@ fn sidebar_row(
             cx.listener(move |ws, _e: &MouseDownEvent, _w, cx| {
                 ws.library.folder_filter = filter.clone();
                 ws.library.bucket_filter = None;
-                ws.library.person_filter = None;
                 cx.notify();
             }),
         )

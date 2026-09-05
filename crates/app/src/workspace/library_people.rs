@@ -448,12 +448,11 @@ impl Workspace {
     }
 
     /// The sidebar's People rows: show a person's photos (or the
-    /// unnamed faces) in the grid, or go back to the folders.
+    /// unnamed faces) in the grid — inside the bucket or folder on
+    /// show, when there is one — or go back to what was there.
     pub fn show_person(&mut self, filter: Option<PersonFilter>, cx: &mut Context<Self>) {
         self.library.person_filter = filter;
         self.library.map_view = false;
-        self.library.folder_filter = None;
-        self.library.bucket_filter = None;
         // A person chosen while a photo is up wants the grid of them.
         if self.library.viewer.is_some() {
             self.close_viewer(cx);

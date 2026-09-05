@@ -1072,18 +1072,24 @@ impl Library {
     pub fn grouped(&self) -> Vec<(String, String, Vec<Entry>)> {
         // A person on show replaces the grouping too: their photos in
         // the order the faces were named.
+        // Inside the bucket or folder on show, when there is one: the
+        // People rows narrow what is already there, and say so.
         if let Some(filter) = self.person_filter {
+            let scope = self
+                .scope_label()
+                .map(|s| format!(" \u{b7} in {s}"))
+                .unwrap_or_default();
             return match filter {
                 PersonFilter::Person(i) => match self.people.get(i) {
                     Some(person) => vec![(
-                        format!("People \u{b7} {}", person.name),
+                        format!("People \u{b7} {}{scope}", person.name),
                         String::new(),
                         self.person_photos(i),
                     )],
                     None => Vec::new(),
                 },
                 PersonFilter::Unnamed => vec![(
-                    "Unnamed faces".to_string(),
+                    format!("Unnamed faces{scope}"),
                     String::new(),
                     self.unnamed_photos(),
                 )],
@@ -1700,8 +1706,40 @@ impl Library {
         }
     }
 
+    /// Whether a photo is inside what the sidebar has narrowed the
+    /// gallery to — the bucket on show, else the folder, else anything
+    /// — and past the map filter. The People rows count and show
+    /// within this, so a person's number is theirs *in this bucket*.
+    pub fn in_scope(&self, path: &Path) -> bool {
+        if !self.passes_map(path) {
+            return false;
+        }
+        if let Some(bucket) = self.bucket_filter.and_then(|i| self.buckets.get(i)) {
+            return bucket.photos.contains(&path.to_path_buf())
+                || bucket.matches.iter().any(|p| p == path);
+        }
+        match &self.folder_filter {
+            Some(root) => path.starts_with(root),
+            None => true,
+        }
+    }
+
+    /// What the scope is called, for the People headers: the bucket's
+    /// name or the folder's, `None` for the whole library.
+    pub fn scope_label(&self) -> Option<String> {
+        if let Some(bucket) = self.bucket_filter.and_then(|i| self.buckets.get(i)) {
+            return Some(bucket.name.clone());
+        }
+        self.folder_filter.as_ref().map(|root| {
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string())
+        })
+    }
+
     /// One person's photos, in the order their faces were named, that
-    /// the scan still knows and the map filter lets through.
+    /// the scan still knows and the scope (bucket, folder, map) lets
+    /// through.
     pub fn person_photos(&self, index: usize) -> Vec<Entry> {
         let Some(person) = self.people.get(index) else {
             return Vec::new();
@@ -1710,16 +1748,17 @@ impl Library {
             .photos()
             .iter()
             .filter_map(|p| self.entry_of(p).cloned())
-            .filter(|e| self.passes_map(&e.path))
+            .filter(|e| self.in_scope(&e.path))
             .collect()
     }
 
     /// Photos with a detected face nobody has named or dismissed, in
-    /// scan order.
+    /// scan order, within the scope.
     pub fn unnamed_photos(&self) -> Vec<Entry> {
-        self.visible_sections()
+        self.sections
+            .iter()
             .flat_map(|s| s.entries.iter())
-            .filter(|e| self.passes_map(&e.path))
+            .filter(|e| self.in_scope(&e.path))
             .filter(|e| self.has_unnamed_face(&e.path))
             .cloned()
             .collect()
@@ -1734,10 +1773,11 @@ impl Library {
         })
     }
 
-    /// How many detected faces are still unnamed, across the library.
+    /// How many detected faces are still unnamed, within the scope.
     pub fn unnamed_face_count(&self) -> usize {
         self.faces
             .iter()
+            .filter(|(path, _)| self.in_scope(path))
             .flat_map(|(path, faces)| faces.iter().map(move |f| (path, f)))
             .filter(|(path, f)| {
                 !self.is_ignored(path, &f.rect)
@@ -4055,6 +4095,36 @@ mod tests {
         assert!(lib
             .detected_faces(Path::new("/p/b.jpg"))
             .is_some_and(|f| f.len() == 2));
+    }
+
+    #[test]
+    fn a_person_on_show_stays_inside_the_bucket_or_folder() {
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"]);
+        lib.faces
+            .insert("/p/c.jpg".into(), vec![found(face_at(0.1), None)]);
+        lib.tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann");
+        lib.tag_face(Path::new("/p/b.jpg"), face_at(0.1), "Ann");
+        lib.person_filter = Some(PersonFilter::Person(0));
+        assert_eq!(lib.person_photos(0).len(), 2);
+        assert_eq!(lib.unnamed_face_count(), 1);
+        // A bucket holding only b: Ann has one photo in it, and the
+        // header says where.
+        lib.buckets.push(Bucket {
+            name: "Trip".into(),
+            photos: vec![PathBuf::from("/p/b.jpg")],
+            query: None,
+            area: None,
+            matches: Vec::new(),
+        });
+        lib.bucket_filter = Some(0);
+        assert_eq!(lib.person_photos(0).len(), 1);
+        assert_eq!(lib.grouped()[0].0, "People \u{b7} Ann \u{b7} in Trip");
+        assert_eq!(lib.unnamed_face_count(), 0, "c is not in the bucket");
+        lib.bucket_filter = None;
+        // A folder that holds nothing of hers.
+        lib.folder_filter = Some(PathBuf::from("/elsewhere"));
+        assert!(lib.person_photos(0).is_empty());
+        assert_eq!(lib.scope_label().as_deref(), Some("elsewhere"));
     }
 
     #[test]

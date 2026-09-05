@@ -482,7 +482,11 @@ the grid. Double-click on a thumbnail still goes straight to the
 editor.
 
 The sidebar lists each person with an avatar, their name and photo
-count; clicking one shows their photos under a "People · Ann" header,
+count; clicking one shows their photos under a "People · Ann" header.
+With a bucket (or folder) on show the People rows work inside it: the
+counts are the person's photos in that bucket, the grid shows only
+those, and the header says so ("People · Ann · in Trip"). Clicking the
+person again lifts the person filter and the bucket is back as it was;
 right-click offers Rename… (renaming to a name somebody else already
 has merges the two) and Forget person (the faces go back to unnamed;
 nothing is deleted). An "Unnamed faces" row gathers every photo with a

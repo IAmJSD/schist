@@ -75,7 +75,10 @@ pub(super) fn people_rows(
             (
                 i,
                 p.name.clone(),
-                p.photos().len(),
+                // Their photos in the bucket or folder on show, not in
+                // the world: the number beside a name answers "how many
+                // of these are hers".
+                ws.library.person_photos(i).len(),
                 p.faces.first().map(|f| (f.photo.clone(), f.rect)),
             )
         })
