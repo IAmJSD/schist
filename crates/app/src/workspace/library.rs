@@ -47,6 +47,12 @@ pub(super) const VIEW_EDGE: u32 = 1600;
 const EMBED_EDGE: u32 = 1024;
 /// Faces smaller than this in the thumbnail are texture, not people.
 const MIN_FACE_PX: f32 = 12.0;
+/// A face at least this wide in the thumbnail is cropped for the
+/// recogniser straight from the thumbnail; smaller ones — a group
+/// photo's — earn a larger decode of the original. The recogniser's
+/// frame is 112 px, so this is a modest upsample at worst, and it
+/// spares a portrait library a second full decode of every photo.
+const EMBED_FROM_THUMB_PX: f32 = 72.0;
 /// The face avatars in the sidebar and the people panel, in pixels.
 pub(super) const AVATAR_PX: u32 = 64;
 
@@ -701,7 +707,7 @@ impl Library {
         let embeds = schist_neural::installed("embed-image");
         let scores = nsfw_installed();
         let detector = schist_neural::installed("face");
-        let recogniser = schist_neural::installed("face-embed");
+        let recogniser = recogniser_ready();
         let jobs: Vec<ThumbJob> = self
             .sections
             .iter()
@@ -719,7 +725,7 @@ impl Library {
                         && self
                             .faces
                             .get(&e.path)
-                            .is_some_and(|f| f.iter().any(|x| x.embed.is_none())))
+                            .is_some_and(|f| f.iter().any(|x| !x.embedded())))
             })
             .take(THUMB_BATCH)
             .map(|e| ThumbJob {
@@ -1405,8 +1411,7 @@ impl Library {
             .get(path)?
             .iter()
             .find(|f| f.rect.same_face(rect))?
-            .embed
-            .as_deref()
+            .vector()
     }
 
     /// One vector per person with any recognised face: the unit mean
@@ -1455,7 +1460,7 @@ impl Library {
             {
                 continue;
             }
-            let suggestion = face.embed.as_deref().and_then(|embed| {
+            let suggestion = face.vector().and_then(|embed| {
                 best_match(embed, centroids.iter().map(|(i, c)| (*i, c.as_slice())))
             });
             views.push(FaceView {
@@ -1533,7 +1538,7 @@ impl Library {
         let mut additions: Vec<(usize, TaggedFace)> = Vec::new();
         for (path, faces) in &self.faces {
             for face in faces {
-                let Some(embed) = face.embed.as_deref() else {
+                let Some(embed) = face.vector() else {
                     continue;
                 };
                 if self.is_ignored(path, &face.rect)
@@ -1950,6 +1955,12 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         }
     }
     let mut needs_heif = false;
+    // A larger decode kept from a thumbnail render, for the recogniser's
+    // crops: one decode of the original serves both, where a second one
+    // per photo with faces was the cost of a fresh library.
+    let mut big: Option<(u32, u32, Vec<u8>)> = None;
+    let recogniser_wanted =
+        schist_neural::installed("face") && schist_neural::installed("face-embed");
     let rgba: Option<(u32, u32, Vec<u8>)> = if let Some(cached) = cache
         .as_ref()
         .and_then(|p| std::fs::read(p).ok())
@@ -1958,15 +1969,27 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         let img = cached.into_rgba8();
         Some((img.width(), img.height(), img.into_raw()))
     } else {
-        match schist_preview::render_file(&job.source, THUMB_EDGE) {
+        let edge = if recogniser_wanted {
+            EMBED_EDGE
+        } else {
+            THUMB_EDGE
+        };
+        match schist_preview::render_file(&job.source, edge) {
             Ok(preview) => {
-                if let (Some(path), Ok(png)) = (&cache, preview.to_png()) {
+                let thumb = if edge == THUMB_EDGE {
+                    preview
+                } else {
+                    let scaled = thumbnail_of(&preview);
+                    big = Some((preview.width, preview.height, preview.rgba));
+                    scaled
+                };
+                if let (Some(path), Ok(png)) = (&cache, thumb.to_png()) {
                     if let Some(dir) = path.parent() {
                         let _ = std::fs::create_dir_all(dir);
                     }
                     let _ = std::fs::write(path, png);
                 }
-                Some((preview.width, preview.height, preview.rgba))
+                Some((thumb.width, thumb.height, thumb.rgba))
             }
             Err(err) => {
                 needs_heif = schist_codecs_common::heif::download_would_help(&err);
@@ -1986,7 +2009,7 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         None => None,
     };
     let faces = match &rgba {
-        Some((w, h, rgba)) => detect_faces(&cache, &job.source, *w, *h, rgba),
+        Some((w, h, rgba)) => detect_faces(&cache, &job.source, *w, *h, rgba, big.as_ref()),
         // Undecodable: nobody in it, as far as anyone can tell.
         None if schist_neural::installed("face") => Some(Vec::new()),
         None => None,
@@ -2010,10 +2033,56 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
 /// already has its vector. Otherwise the photo is looked at again.
 fn faces_settled(cached: Option<&[DetectedFace]>) -> bool {
     match cached {
-        Some(faces) => {
-            !schist_neural::installed("face-embed") || faces.iter().all(|f| f.embed.is_some())
-        }
+        Some(faces) => !recogniser_ready() || faces.iter().all(|f| f.embedded()),
         None => false,
+    }
+}
+
+/// The recogniser is installed but would not load this session (a
+/// damaged file, say). Without this every face would stay "owed a
+/// vector" and the indexer would ask for it on every pass, forever;
+/// with it the recogniser counts as absent until the next launch, when
+/// a repaired file gets its turn. Set by the loader thread that found
+/// out, read wherever "is the recogniser here" is asked — cheaply,
+/// with no model load on the UI thread.
+static RECOGNISER_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the recogniser is installed and not known to be broken.
+fn recogniser_ready() -> bool {
+    schist_neural::installed("face-embed")
+        && !RECOGNISER_BROKEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The recogniser, loaded — or the note that it will not be.
+fn recogniser() -> Option<Arc<schist_neural::Model>> {
+    if !recogniser_ready() {
+        return None;
+    }
+    let model = schist_neural::get("face-embed");
+    if model.is_none() {
+        log::warn!("face recogniser is installed but did not load; faces go unrecognised");
+        RECOGNISER_BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    model
+}
+
+/// The thumbnail-sized version of a larger preview.
+fn thumbnail_of(preview: &schist_preview::Preview) -> schist_preview::Preview {
+    let scale = THUMB_EDGE as f32 / preview.width.max(preview.height).max(1) as f32;
+    let (w, h) = (
+        ((preview.width as f32 * scale).round() as u32).max(1),
+        ((preview.height as f32 * scale).round() as u32).max(1),
+    );
+    let rgba = image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba.clone())
+        .map(|img| {
+            image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle).into_raw()
+        })
+        .unwrap_or_else(|| preview.rgba.clone());
+    schist_preview::Preview {
+        width: w,
+        height: h,
+        rgba,
+        source: preview.source,
     }
 }
 
@@ -2030,11 +2099,13 @@ fn detect_faces(
     width: u32,
     height: u32,
     rgba: &[u8],
+    big: Option<&(u32, u32, Vec<u8>)>,
 ) -> Option<Vec<DetectedFace>> {
     let cached = read_faces_cache(cache);
     if faces_settled(cached.as_deref()) {
         return cached;
     }
+    let had_cache = cached.is_some();
     let detector = match schist_neural::get("face") {
         Some(model) => model,
         // Installed but not loading (a damaged file, say): count the
@@ -2084,22 +2155,45 @@ fn detect_faces(
                 .collect()
         }
     };
-    if !faces.is_empty() {
-        if let Some(model) = schist_neural::get("face-embed") {
-            // A bigger decode for the crops; the thumbnail if that fails.
-            let big = schist_preview::render_file(source, EMBED_EDGE).ok();
-            let (bw, bh, big_rgba): (u32, u32, &[u8]) = match &big {
-                Some(p) => (p.width, p.height, &p.rgba),
+    let owed = faces.iter().any(|f| !f.embedded());
+    if owed {
+        if let Some(model) = recogniser() {
+            let (side, _) = model.spec.input.dims();
+            // Big faces crop fine from the thumbnail. Small ones want a
+            // larger decode: the one kept from rendering the thumbnail
+            // when there is one, else one made now — the only time a
+            // photo is decoded twice — and the thumbnail if that fails.
+            let needs_big = faces
+                .iter()
+                .any(|f| !f.embedded() && (f.rect.w * width as f32) < EMBED_FROM_THUMB_PX);
+            let decoded;
+            let (bw, bh, big_rgba): (u32, u32, &[u8]) = match big {
+                Some((w, h, px)) => (*w, *h, px),
+                None if needs_big => {
+                    decoded = schist_preview::render_file(source, EMBED_EDGE).ok();
+                    match &decoded {
+                        Some(p) => (p.width, p.height, &p.rgba),
+                        None => (width, height, rgba),
+                    }
+                }
                 None => (width, height, rgba),
             };
-            let (side, _) = model.spec.input.dims();
-            for face in faces.iter_mut().filter(|f| f.embed.is_none()) {
-                face.embed = face_crop_rgb(big_rgba, bw, bh, &face.rect, EMBED_GROW, side as u32)
-                    .and_then(|crop| schist_neural::embed_face(&model, &crop).ok());
+            for face in faces.iter_mut().filter(|f| !f.embedded()) {
+                // A failure is recorded as an empty vector: tried, could
+                // not, and not to be asked again every pass.
+                face.embed = Some(
+                    face_crop_rgb(big_rgba, bw, bh, &face.rect, EMBED_GROW, side as u32)
+                        .and_then(|crop| schist_neural::embed_face(&model, &crop).ok())
+                        .unwrap_or_default(),
+                );
             }
         }
     }
-    write_faces_cache(cache, &faces);
+    // Written when something was learned; a cached look that only
+    // waited on a recogniser that is not here is left as it was.
+    if !had_cache || faces.iter().any(|f| f.embedded()) {
+        write_faces_cache(cache, &faces);
+    }
     Some(faces)
 }
 
@@ -2477,8 +2571,13 @@ impl Workspace {
                 this.update(cx, |ws, _| {
                     ws.library.ticker = false;
                     // The loader going idle is "indexing caught up":
-                    // the moment to persist what it learned.
+                    // the moment to persist what it learned, and to
+                    // let the face models go — a hundred megabytes
+                    // between them, reloaded in a third of a second
+                    // when the next photo or named face needs them.
                     ws.library.save_index_snapshot();
+                    schist_neural::release("face");
+                    schist_neural::release("face-embed");
                 })
                 .ok();
                 return;
@@ -4095,6 +4194,31 @@ mod tests {
         assert!(lib
             .detected_faces(Path::new("/p/b.jpg"))
             .is_some_and(|f| f.len() == 2));
+    }
+
+    #[test]
+    fn a_recorded_embedding_failure_is_settled_and_never_a_vector() {
+        let tried = found(face_at(0.1), Some(Vec::new()));
+        assert!(tried.embedded());
+        assert_eq!(tried.vector(), None);
+        let owed = found(face_at(0.1), None);
+        assert!(!owed.embedded());
+        // A photo whose faces all had their turn is never re-queued,
+        // whatever the recogniser's state; one still owed is — while a
+        // recogniser is here to pay it.
+        assert!(faces_settled(Some(std::slice::from_ref(&tried))) || !recogniser_ready());
+        assert!(!faces_settled(None));
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg"]);
+        lib.faces.insert(
+            "/p/a.jpg".into(),
+            vec![found(face_at(0.1), Some(vec![1.0, 0.0]))],
+        );
+        lib.faces.insert("/p/b.jpg".into(), vec![tried]);
+        lib.tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann");
+        // Nothing to compare: no suggestion, no automatic tag.
+        let b = lib.faces_in(Path::new("/p/b.jpg"));
+        assert_eq!(b[0].person, None);
+        assert_eq!(b[0].suggestion, None);
     }
 
     #[test]

@@ -15,7 +15,7 @@ fn rss_mb() -> f64 {
 fn main() {
     let mut last = rss_mb();
     println!("baseline: {last:.0} MB");
-    for id in ["nsfw", "embed-image", "embed-text"] {
+    for id in ["nsfw", "embed-image", "embed-text", "face", "face-embed"] {
         let started = std::time::Instant::now();
         let loaded = schist_neural::get(id).is_some();
         let now = rss_mb();

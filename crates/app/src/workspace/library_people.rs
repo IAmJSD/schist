@@ -266,7 +266,7 @@ impl Workspace {
         let carried = self.library.detected_faces(path).is_some_and(|faces| {
             faces
                 .iter()
-                .any(|f| f.rect.same_face(&rect) && f.embed.is_some())
+                .any(|f| f.rect.same_face(&rect) && f.vector().is_some())
         });
         if carried {
             return;

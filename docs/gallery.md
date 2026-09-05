@@ -443,8 +443,13 @@ loader, and **Faces (Recognition)** — SFace from the OpenCV Zoo,
 38.7 MB, Apache-2.0 — turns each one into 128 numbers whose cosine says
 whether two faces are the same person. Detection runs on the thumbnail
 (the detector's own frame is 320×240, so a thumbnail is already more
-than it looks at); the recogniser crops its faces from a 1024 px
-re-decode, because a face in a 256 px thumbnail is a smudge. Until the
+than it looks at); the recogniser crops big faces from the thumbnail
+and small ones — a group photo's — from a 1024 px decode: the one kept
+from rendering the thumbnail when the models were already installed,
+otherwise one more decode of the original, once. A face the recogniser
+cannot embed is recorded as tried, so no photo is asked again on every
+pass; a recogniser file that is installed but will not load switches
+recognition off for the session rather than leaving every face owed. Until the
 models are installed the sidebar's PEOPLE section offers "+ Find
 faces…", which opens one licence dialog for both.
 

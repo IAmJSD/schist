@@ -103,11 +103,25 @@ impl FaceRect {
 }
 
 /// One face the detector found, with what the recogniser made of it —
-/// `None` when the recogniser was not installed at the time.
+/// `None` when the recogniser was not installed at the time, an empty
+/// vector when it was and could not (so the photo is not asked again).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DetectedFace {
     pub rect: FaceRect,
     pub embed: Option<Vec<f32>>,
+}
+
+impl DetectedFace {
+    /// The recogniser's vector, when there is a real one.
+    pub fn vector(&self) -> Option<&[f32]> {
+        self.embed.as_deref().filter(|v| !v.is_empty())
+    }
+
+    /// Whether the recogniser has had its turn — a vector, or a
+    /// recorded failure.
+    pub fn embedded(&self) -> bool {
+        self.embed.is_some()
+    }
 }
 
 /// A face in a photo, as the user's tags refer to it.
