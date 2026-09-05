@@ -1,5 +1,9 @@
 use rand::RngExt;
-use std::{fs, path::PathBuf, thread, time};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    thread, time,
+};
 
 /// Where the daily ping goes.
 const TELEMETRY_URL: &str = "https://telemetry.schist.app/v1/ping";
@@ -10,7 +14,7 @@ const NO_TELEMETRY_FILE: &str = "no_telemetry";
 
 /// Whether the ping is on, as far as the marker file is concerned. The
 /// SCHIST_NO_TELEMETRY variable can still switch it off on top of this.
-pub fn enabled(schist_folder: &PathBuf) -> bool {
+pub fn enabled(schist_folder: &Path) -> bool {
     !matches!(fs::exists(schist_folder.join(NO_TELEMETRY_FILE)), Ok(true))
 }
 
@@ -40,7 +44,10 @@ fn payload(telemetry_id: &str) -> serde_json::Value {
             .with_cpu(CpuRefreshKind::new())
             .with_memory(MemoryRefreshKind::new().with_ram()),
     );
-    let cpu = system.cpus().first().map(|cpu| cpu.brand().trim().to_string());
+    let cpu = system
+        .cpus()
+        .first()
+        .map(|cpu| cpu.brand().trim().to_string());
     let gpu = crate::workspace::gpu_info().map(|gpu| {
         serde_json::json!({
             "name": gpu.name,
@@ -72,7 +79,7 @@ fn send_telemetry(telemetry_id: &str) -> bool {
         .is_ok()
 }
 
-fn telemetry_turn(schist_folder: &PathBuf) {
+fn telemetry_turn(schist_folder: &Path) {
     // Check if the magic file exists that nukes telemetry.
     if !enabled(schist_folder) {
         return;

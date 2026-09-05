@@ -38,6 +38,17 @@ const THUMB_KEEP_PARKED: usize = 256;
 const SCROLLBAR_INSET: f32 = 4.0;
 /// How many recently opened files the start screen lists.
 const RECENTS_KEPT: usize = 10;
+/// Longest edge the viewer decodes a photo at: enough to fill a
+/// window, little enough to decode in the time a click takes.
+pub(super) const VIEW_EDGE: u32 = 1600;
+/// Longest edge the recogniser's face crops are cut from. A face in a
+/// 256 px thumbnail is twenty pixels wide, which is not a face; the
+/// detector is happy with the thumbnail, the recogniser is not.
+const EMBED_EDGE: u32 = 1024;
+/// Faces smaller than this in the thumbnail are texture, not people.
+const MIN_FACE_PX: f32 = 12.0;
+/// The face avatars in the sidebar and the people panel, in pixels.
+pub(super) const AVATAR_PX: u32 = 64;
 
 /// A thumbnail's place in the pipeline.
 pub enum Thumb {
@@ -117,6 +128,61 @@ pub enum GalleryContext {
     /// Freeze the clicked marker's members independently of selection or zoom.
     MapCluster(Vec<PathBuf>),
     Bucket(usize),
+    Person(usize),
+}
+
+/// What the sidebar's People rows show instead of the folders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersonFilter {
+    /// One person's photos.
+    Person(usize),
+    /// Photos with detected faces nobody has named yet — Picasa's
+    /// "Unnamed" album, where the naming gets done.
+    Unnamed,
+}
+
+/// One face as the viewer shows it: the box, who it is (if anyone),
+/// who it might be, and whether the detector or the user drew it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceView {
+    pub rect: FaceRect,
+    pub person: Option<usize>,
+    /// The recogniser's best guess and its cosine, for an unnamed face.
+    pub suggestion: Option<(usize, f32)>,
+    pub detected: bool,
+}
+
+/// The photo the viewer has decoded, at up to [`VIEW_EDGE`] px: the
+/// pixels stay, for face crops and for the recogniser's look at a
+/// face drawn by hand.
+pub struct ViewImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<Vec<u8>>,
+    pub render: Arc<RenderImage>,
+}
+
+/// The viewer: one photo on show instead of the grid, its faces to
+/// name. Session-only, like the selection.
+pub struct Viewer {
+    pub path: PathBuf,
+    pub image: Option<ViewImage>,
+    pub loading: bool,
+    /// Where the picture landed last paint, in window coordinates —
+    /// what turns a pointer position into a fraction of the photo.
+    pub image_bounds: Bounds<Pixels>,
+    /// The picture's room, recorded each paint so the fit can be
+    /// worked out before the image element is built.
+    pub area: Bounds<Pixels>,
+    /// A box being dragged out: where the press was and where the
+    /// pointer is, as fractions of the photo.
+    pub drawing: Option<((f32, f32), (f32, f32))>,
+    /// The face being named.
+    pub pick: Option<FaceRect>,
+    /// The name field's live text.
+    pub name: String,
+    /// Face crops cut from the decoded picture, by face key.
+    pub crops: FxHashMap<String, Arc<RenderImage>>,
 }
 
 /// A drag of gallery photos, headed for a folder or a bucket.
@@ -221,6 +287,27 @@ pub struct Library {
     /// photo groups under — the other two readings of the same EXIF.
     taken: FxHashMap<PathBuf, String>,
     places: FxHashMap<PathBuf, Option<String>>,
+    /// The faces the detector found per photo, filled by the loader;
+    /// an empty list is a photo it looked at and found nobody in.
+    faces: FxHashMap<PathBuf, Vec<DetectedFace>>,
+    /// The people: every name given to a face. Persisted.
+    pub people: Vec<PersonFile>,
+    /// Detected faces waved away — not a face, or not worth naming —
+    /// so they stop being offered. Persisted.
+    pub ignored_faces: Vec<TaggedFace>,
+    /// Showing one person's photos (or the unnamed faces) instead of
+    /// the folders.
+    pub person_filter: Option<PersonFilter>,
+    /// The photo on show instead of the grid, if any.
+    pub viewer: Option<Viewer>,
+    /// Face avatars for the sidebar and the people panel, by face key;
+    /// `None` while one is being cut, or after the cut failed.
+    avatars: FxHashMap<String, Option<Arc<RenderImage>>>,
+    /// Avatars waiting to be cut out of thumbnails.
+    avatar_queue: Vec<(String, PathBuf, FaceRect)>,
+    avatar_ticker: bool,
+    /// The people the current query named, for the results header.
+    pub search_people: Vec<String>,
     /// How the grid is grouped, persisted. Date by default: a camera
     /// roll is a diary before it is a directory tree.
     pub group_by: GroupBy,
@@ -402,6 +489,15 @@ impl Library {
             positions: FxHashMap::default(),
             taken: FxHashMap::default(),
             places: FxHashMap::default(),
+            faces: FxHashMap::default(),
+            people: file.people,
+            ignored_faces: file.ignored_faces,
+            person_filter: None,
+            viewer: None,
+            avatars: FxHashMap::default(),
+            avatar_queue: Vec::new(),
+            avatar_ticker: false,
+            search_people: Vec::new(),
             group_by: file
                 .group_by
                 .as_deref()
@@ -436,6 +532,11 @@ impl Library {
     }
 
     fn save(&self) {
+        // Unit tests build libraries from thin air; writing them over
+        // the developer's own library.json would be a surprise.
+        if cfg!(test) {
+            return;
+        }
         let file = LibraryFile {
             folders: self.folders.clone(),
             recents: self.recents.clone(),
@@ -451,6 +552,8 @@ impl Library {
                     area: b.area.clone(),
                 })
                 .collect(),
+            people: self.people.clone(),
+            ignored_faces: self.ignored_faces.clone(),
         };
         if let Err(err) = file.save() {
             log::warn!("gallery: library.json not saved: {err:#}");
@@ -571,10 +674,13 @@ impl Library {
     /// Thumbnails shrink to a parked handful — the PNGs are on disk,
     /// so reopening costs a moment of decode, not a rebuild.
     pub(super) fn shed_memory(&mut self) {
-        for id in ["nsfw", "embed-image", "embed-text"] {
+        for id in ["nsfw", "embed-image", "embed-text", "face", "face-embed"] {
             schist_neural::release(id);
         }
         self.engine_warmed = false;
+        // The viewer's decode is the biggest single picture in memory,
+        // and a photo on show in a gallery that has closed is nobody's.
+        self.viewer = None;
         self.evict_thumbs(THUMB_KEEP_PARKED);
         // Leaving the gallery is also a fine moment to persist what
         // indexing learned, in case the loader never went idle.
@@ -587,6 +693,8 @@ impl Library {
     fn refill_index_queue(&mut self) -> bool {
         let embeds = schist_neural::installed("embed-image");
         let scores = nsfw_installed();
+        let detector = schist_neural::installed("face");
+        let recogniser = schist_neural::installed("face-embed");
         let jobs: Vec<ThumbJob> = self
             .sections
             .iter()
@@ -597,6 +705,14 @@ impl Library {
                     // A scorer installed after the position pass ran
                     // still has every photo to see.
                     || (scores && !self.flagged.contains_key(&e.path))
+                    || (detector && !self.faces.contains_key(&e.path))
+                    // Faces found before the recogniser arrived are
+                    // still owed their vectors.
+                    || (recogniser
+                        && self
+                            .faces
+                            .get(&e.path)
+                            .is_some_and(|f| f.iter().any(|x| x.embed.is_none())))
             })
             .take(THUMB_BATCH)
             .map(|e| ThumbJob {
@@ -637,6 +753,26 @@ impl Library {
             "map_filter": self.map_filter_label(),
             "index": {"embedded": indexed, "total": total,
                       "search_models_installed": schist_neural::embed::ready()},
+            "people": self.people_json(),
+            "viewing": self.viewer.as_ref().map(|v| v.path.display().to_string()),
+        })
+    }
+
+    /// The People album as JSON: each name with its counts, the
+    /// unnamed tally, which models are here, and what is on show.
+    pub(super) fn people_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let (looked, total) = self.faces_progress();
+        json!({
+            "people": self.people.iter().enumerate().map(|(i, p)| json!({
+                "index": i, "name": p.name, "photos": p.photos().len(), "faces": p.faces.len(),
+                "viewing": self.person_filter == Some(PersonFilter::Person(i)),
+            })).collect::<Vec<_>>(),
+            "unnamed_faces": self.unnamed_face_count(),
+            "viewing_unnamed": self.person_filter == Some(PersonFilter::Unnamed),
+            "detector_installed": schist_neural::installed("face"),
+            "recogniser_installed": schist_neural::installed("face-embed"),
+            "photos_looked_at": looked, "photos_total": total,
         })
     }
 
@@ -650,6 +786,8 @@ impl Library {
             "edited": entry.edited,
             "selected": self.is_selected(&entry.path),
             "flagged": self.flagged.get(&entry.path).copied(),
+            "people": self.names_in(&entry.path),
+            "unnamed_faces": self.faces_in(&entry.path).iter().filter(|f| f.person.is_none()).count(),
         })
     }
 
@@ -757,13 +895,9 @@ impl Library {
                     taken: self.taken.get(&e.path).cloned(),
                     place: self.places.get(&e.path).cloned(),
                     flagged: self.flagged.get(&e.path).copied(),
+                    faces: self.faces.get(&e.path).cloned(),
                 };
-                let empty = row.embed.is_none()
-                    && row.gps.is_none()
-                    && row.taken.is_none()
-                    && row.place.is_none()
-                    && row.flagged.is_none();
-                (!empty).then_some(row)
+                (!row.is_empty()).then_some(row)
             })
             .collect()
     }
@@ -800,7 +934,10 @@ impl Library {
                 self.places.entry(row.path.clone()).or_insert(place);
             }
             if let Some(flagged) = row.flagged {
-                self.flagged.entry(row.path).or_insert(flagged);
+                self.flagged.entry(row.path.clone()).or_insert(flagged);
+            }
+            if let Some(faces) = row.faces {
+                self.faces.entry(row.path).or_insert(faces);
             }
         }
         self.index_gen += 1;
@@ -923,6 +1060,25 @@ impl Library {
     /// The visible photos grouped the way `group_by` asks:
     /// (title, subtitle, entries) per group.
     pub fn grouped(&self) -> Vec<(String, String, Vec<Entry>)> {
+        // A person on show replaces the grouping too: their photos in
+        // the order the faces were named.
+        if let Some(filter) = self.person_filter {
+            return match filter {
+                PersonFilter::Person(i) => match self.people.get(i) {
+                    Some(person) => vec![(
+                        format!("People \u{b7} {}", person.name),
+                        String::new(),
+                        self.person_photos(i),
+                    )],
+                    None => Vec::new(),
+                },
+                PersonFilter::Unnamed => vec![(
+                    "Unnamed faces".to_string(),
+                    String::new(),
+                    self.unnamed_photos(),
+                )],
+            };
+        }
         // A bucket on show replaces the grouping: the hand-picked
         // photos in the order they were dropped in, then whatever its
         // rule matched, best first.
@@ -1184,6 +1340,399 @@ impl Library {
     }
 }
 
+/// How far above the towers' cosines a named person's photos sit: a
+/// name is not a hint but an answer.
+pub(super) const PERSON_BOOST: f32 = 1.0;
+
+/// The People album: what the detector found, whom the user named.
+impl Library {
+    /// The entry for a photo, if the scan knows it.
+    pub fn entry_of(&self, path: &Path) -> Option<&Entry> {
+        self.sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .find(|e| e.path == path)
+    }
+
+    /// The detector's faces in a photo, if it has been looked at.
+    pub fn detected_faces(&self, path: &Path) -> Option<&[DetectedFace]> {
+        self.faces.get(path).map(Vec::as_slice)
+    }
+
+    /// How many photos the detector has looked at, of how many.
+    pub fn faces_progress(&self) -> (usize, usize) {
+        let total = self.sections.iter().map(|s| s.entries.len()).sum();
+        let looked = self
+            .sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .filter(|e| self.faces.contains_key(&e.path))
+            .count();
+        (looked, total)
+    }
+
+    fn is_ignored(&self, path: &Path, rect: &FaceRect) -> bool {
+        self.ignored_faces
+            .iter()
+            .any(|f| f.photo == path && f.rect.same_face(rect))
+    }
+
+    /// Who a face in a photo is tagged as, if anyone.
+    pub fn person_of(&self, path: &Path, rect: &FaceRect) -> Option<usize> {
+        self.people.iter().position(|p| p.tagged(path, rect))
+    }
+
+    /// The recogniser's vector for a face: that of the detection it
+    /// sits on, when there is one.
+    fn face_embedding(&self, path: &Path, rect: &FaceRect) -> Option<&[f32]> {
+        self.faces
+            .get(path)?
+            .iter()
+            .find(|f| f.rect.same_face(rect))?
+            .embed
+            .as_deref()
+    }
+
+    /// One vector per person with any recognised face: the unit mean
+    /// of their tagged faces' vectors.
+    fn person_centroids(&self) -> Vec<(usize, Vec<f32>)> {
+        self.people
+            .iter()
+            .enumerate()
+            .filter_map(|(i, person)| {
+                let vectors = person
+                    .faces
+                    .iter()
+                    .filter_map(|f| self.face_embedding(&f.photo, &f.rect));
+                Some((i, centroid(vectors)?))
+            })
+            .collect()
+    }
+
+    /// Every face in a photo as the viewer shows it: the tagged ones
+    /// first (the user's word), then the detections nobody has claimed
+    /// or dismissed, each with the recogniser's guess. Left to right.
+    pub fn faces_in(&self, path: &Path) -> Vec<FaceView> {
+        let detected = self.faces.get(path).map(Vec::as_slice).unwrap_or(&[]);
+        let mut views: Vec<FaceView> = Vec::new();
+        for (i, person) in self.people.iter().enumerate() {
+            for face in person.faces.iter().filter(|f| f.photo == path) {
+                if views.iter().any(|v| v.rect.same_face(&face.rect)) {
+                    continue;
+                }
+                views.push(FaceView {
+                    rect: face.rect,
+                    person: Some(i),
+                    suggestion: None,
+                    detected: detected.iter().any(|d| d.rect.same_face(&face.rect)),
+                });
+            }
+        }
+        let centroids = self.person_centroids();
+        for face in detected {
+            if views.iter().any(|v| v.rect.same_face(&face.rect))
+                || self.is_ignored(path, &face.rect)
+            {
+                continue;
+            }
+            let suggestion = face.embed.as_deref().and_then(|embed| {
+                best_match(embed, centroids.iter().map(|(i, c)| (*i, c.as_slice())))
+            });
+            views.push(FaceView {
+                rect: face.rect,
+                person: None,
+                suggestion,
+                detected: true,
+            });
+        }
+        views.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
+        views
+    }
+
+    /// The names tagged in a photo, in tag order.
+    pub fn names_in(&self, path: &Path) -> Vec<String> {
+        self.people
+            .iter()
+            .filter(|p| p.faces.iter().any(|f| f.photo == path))
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    /// Name a face: it joins the person called `name` — created when
+    /// nobody is — leaving whoever had it before, and any dismissal.
+    /// Returns the person's index; `None` for an empty name.
+    pub fn tag_face(&mut self, path: &Path, rect: FaceRect, name: &str) -> Option<usize> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        self.untag_face_quietly(path, &rect);
+        self.ignored_faces
+            .retain(|f| !(f.photo == path && f.rect.same_face(&rect)));
+        let index = match self
+            .people
+            .iter()
+            .position(|p| p.name.eq_ignore_ascii_case(name))
+        {
+            Some(index) => index,
+            None => {
+                self.people.push(PersonFile {
+                    name: name.to_string(),
+                    faces: Vec::new(),
+                });
+                self.people.len() - 1
+            }
+        };
+        self.people[index].faces.push(TaggedFace {
+            photo: path.to_path_buf(),
+            rect,
+        });
+        self.save();
+        Some(index)
+    }
+
+    /// Take the name off a face. A person left with no faces goes too.
+    pub fn untag_face(&mut self, path: &Path, rect: &FaceRect) {
+        if self.untag_face_quietly(path, rect) {
+            self.save();
+        }
+    }
+
+    fn untag_face_quietly(&mut self, path: &Path, rect: &FaceRect) -> bool {
+        let mut changed = false;
+        for person in &mut self.people {
+            let before = person.faces.len();
+            person
+                .faces
+                .retain(|f| !(f.photo == path && f.rect.same_face(rect)));
+            changed |= person.faces.len() != before;
+        }
+        if changed {
+            let mut i = 0;
+            while i < self.people.len() {
+                if self.people[i].faces.is_empty() {
+                    self.remove_person_at(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Dismiss a detected face: not a face, or nobody worth naming.
+    pub fn ignore_face(&mut self, path: &Path, rect: FaceRect) {
+        self.untag_face_quietly(path, &rect);
+        if !self.is_ignored(path, &rect) {
+            self.ignored_faces.push(TaggedFace {
+                photo: path.to_path_buf(),
+                rect,
+            });
+        }
+        self.save();
+    }
+
+    /// Rename a person. Renaming to a name somebody else already has
+    /// merges the two — the usual way "Ann" and "Ann Example" become
+    /// one album.
+    pub fn rename_person(&mut self, index: usize, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || index >= self.people.len() {
+            return;
+        }
+        if let Some(other) = self
+            .people
+            .iter()
+            .position(|p| p.name.eq_ignore_ascii_case(name))
+            .filter(|&other| other != index)
+        {
+            let faces = std::mem::take(&mut self.people[index].faces);
+            self.people[other].faces.extend(faces);
+            let target = if other > index { other - 1 } else { other };
+            let viewing = self.person_filter == Some(PersonFilter::Person(index));
+            self.remove_person_at(index);
+            if viewing {
+                // The sidebar was on the person who just merged away:
+                // follow them into the merged album.
+                self.person_filter = Some(PersonFilter::Person(target));
+            }
+        } else {
+            self.people[index].name = name.to_string();
+        }
+        self.save();
+    }
+
+    /// Forget a person: every face they were tagged in goes back to
+    /// being unnamed.
+    pub fn delete_person(&mut self, index: usize) {
+        if index < self.people.len() {
+            self.remove_person_at(index);
+            self.save();
+        }
+    }
+
+    /// Drop a person and keep the sidebar's choice pointing at the
+    /// same person (or nobody) as the indices shift.
+    fn remove_person_at(&mut self, index: usize) {
+        self.people.remove(index);
+        match self.person_filter {
+            Some(PersonFilter::Person(f)) if f == index => self.person_filter = None,
+            Some(PersonFilter::Person(f)) if f > index => {
+                self.person_filter = Some(PersonFilter::Person(f - 1));
+            }
+            _ => {}
+        }
+    }
+
+    /// One person's photos, in the order their faces were named, that
+    /// the scan still knows and the map filter lets through.
+    pub fn person_photos(&self, index: usize) -> Vec<Entry> {
+        let Some(person) = self.people.get(index) else {
+            return Vec::new();
+        };
+        person
+            .photos()
+            .iter()
+            .filter_map(|p| self.entry_of(p).cloned())
+            .filter(|e| self.passes_map(&e.path))
+            .collect()
+    }
+
+    /// Photos with a detected face nobody has named or dismissed, in
+    /// scan order.
+    pub fn unnamed_photos(&self) -> Vec<Entry> {
+        self.visible_sections()
+            .flat_map(|s| s.entries.iter())
+            .filter(|e| self.passes_map(&e.path))
+            .filter(|e| self.has_unnamed_face(&e.path))
+            .cloned()
+            .collect()
+    }
+
+    fn has_unnamed_face(&self, path: &Path) -> bool {
+        self.faces.get(path).is_some_and(|faces| {
+            faces.iter().any(|f| {
+                !self.is_ignored(path, &f.rect)
+                    && !self.people.iter().any(|p| p.tagged(path, &f.rect))
+            })
+        })
+    }
+
+    /// How many detected faces are still unnamed, across the library.
+    pub fn unnamed_face_count(&self) -> usize {
+        self.faces
+            .iter()
+            .flat_map(|(path, faces)| faces.iter().map(move |f| (path, f)))
+            .filter(|(path, f)| {
+                !self.is_ignored(path, &f.rect)
+                    && !self.people.iter().any(|p| p.tagged(path, &f.rect))
+            })
+            .count()
+    }
+
+    /// The people a search query names, each with their photos.
+    pub fn people_hits(&self, query: &str) -> Vec<(String, Vec<PathBuf>)> {
+        self.people
+            .iter()
+            .filter(|p| name_matches_query(&p.name, query))
+            .map(|p| (p.name.clone(), p.photos()))
+            .collect()
+    }
+
+    /// Names beginning with what has been typed, for the name field's
+    /// completions — everyone, when nothing has.
+    pub fn names_starting(&self, prefix: &str) -> Vec<(usize, String)> {
+        let prefix = prefix.trim().to_lowercase();
+        self.people
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| prefix.is_empty() || p.name.to_lowercase().starts_with(&prefix))
+            .map(|(i, p)| (i, p.name.clone()))
+            .collect()
+    }
+
+    /// Where the sidebar's face avatars stand: `Some(Some)` ready,
+    /// `Some(None)` cutting or failed, `None` never asked for.
+    pub(super) fn avatar_state(&self, key: &str) -> Option<Option<Arc<RenderImage>>> {
+        self.avatars.get(key).cloned()
+    }
+
+    /// Ask for an avatar to be cut from a photo's thumbnail. Returns
+    /// whether it was newly queued.
+    pub(super) fn request_avatar(&mut self, key: String, path: PathBuf, rect: FaceRect) -> bool {
+        if self.avatars.contains_key(&key) {
+            return false;
+        }
+        self.avatars.insert(key.clone(), None);
+        self.avatar_queue.push((key, path, rect));
+        true
+    }
+
+    pub(super) fn forget_avatar(&mut self, key: &str) {
+        self.avatars.remove(key);
+    }
+
+    pub(super) fn take_avatar_jobs(&mut self) -> Vec<(String, PathBuf, FaceRect)> {
+        std::mem::take(&mut self.avatar_queue)
+    }
+
+    pub(super) fn avatar_ticking(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.avatar_ticker, on)
+    }
+
+    pub(super) fn store_avatar(&mut self, key: String, image: Option<Arc<RenderImage>>) {
+        self.avatars.insert(key, image);
+    }
+
+    /// Learn a face's vector from the viewer's own decode: a face drawn
+    /// by hand has no detection to carry one, and without it the
+    /// recogniser cannot suggest the person elsewhere. Appended to the
+    /// photo's detections and cached with them.
+    pub(super) fn learn_face(&mut self, path: &Path, rect: FaceRect, embed: Vec<f32>) {
+        let faces = self.faces.entry(path.to_path_buf()).or_default();
+        match faces.iter_mut().find(|f| f.rect.same_face(&rect)) {
+            Some(face) => face.embed = Some(embed),
+            None => faces.push(DetectedFace {
+                rect,
+                embed: Some(embed),
+            }),
+        }
+        if let Some(entry) = self.entry_of(path).cloned() {
+            let cache = thumb_cache_path(&thumb_source(&entry.path, entry.edited), entry.mtime);
+            write_faces_cache(
+                &cache,
+                self.faces.get(path).map(Vec::as_slice).unwrap_or(&[]),
+            );
+        }
+        self.index_gen += 1;
+    }
+
+    /// Put a photo at the front of the index queue: the viewer wants
+    /// its faces now, not when the loader gets round to it. Returns
+    /// whether anything was queued.
+    pub(super) fn prioritize_index(&mut self, path: &Path) -> bool {
+        if self.faces.contains_key(path) || !schist_neural::installed("face") {
+            return false;
+        }
+        if self.queue.iter().any(|j| j.key == path) {
+            return false;
+        }
+        let Some(entry) = self.entry_of(path).cloned() else {
+            return false;
+        };
+        self.queue.insert(
+            0,
+            ThumbJob {
+                key: entry.path.clone(),
+                source: thumb_source(&entry.path, entry.edited),
+                mtime: entry.mtime,
+                for_index: true,
+            },
+        );
+        true
+    }
+}
+
 /// RGBA straight bytes as the BGRA frame `RenderImage` wants.
 pub(super) fn rgba_to_render_image(
     width: u32,
@@ -1210,6 +1759,9 @@ struct ThumbOutcome {
     embedding: Option<Vec<f32>>,
     /// Position, capture time and grouping city, from the EXIF.
     meta: PhotoMeta,
+    /// The faces the detector found, when the detector is installed
+    /// (or a cached look from when it was).
+    faces: Option<Vec<DetectedFace>>,
     /// The decode failed for want of the HEIC support download.
     needs_heif: bool,
 }
@@ -1225,15 +1777,18 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
     if job.for_index {
         let cached_embed = read_embed_cache(&cache);
         let cached_score = read_score_cache(&cache);
+        let cached_faces = read_faces_cache(&cache);
         let embeds_wanted = schist_neural::installed("embed-image");
         if (cached_embed.is_some() || !embeds_wanted)
             && (cached_score.is_some() || !nsfw_installed())
+            && (faces_settled(cached_faces.as_deref()) || !schist_neural::installed("face"))
         {
             return ThumbOutcome {
                 img: None,
                 score: cached_score,
                 embedding: cached_embed,
                 meta: photo_meta(&cache, &job.key),
+                faces: cached_faces,
                 needs_heif: false,
             };
         }
@@ -1274,6 +1829,12 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         None if schist_neural::installed("embed-image") => Some(Vec::new()),
         None => None,
     };
+    let faces = match &rgba {
+        Some((w, h, rgba)) => detect_faces(&cache, &job.source, *w, *h, rgba),
+        // Undecodable: nobody in it, as far as anyone can tell.
+        None if schist_neural::installed("face") => Some(Vec::new()),
+        None => None,
+    };
     ThumbOutcome {
         img: if job.for_index {
             None
@@ -1283,8 +1844,107 @@ fn load_thumb(job: &ThumbJob) -> ThumbOutcome {
         score,
         embedding,
         meta: photo_meta(&cache, &job.key),
+        faces,
         needs_heif,
     }
+}
+
+/// Whether a cached look at a photo's faces is all it is going to be:
+/// there is one, and either the recogniser is absent or every face
+/// already has its vector. Otherwise the photo is looked at again.
+fn faces_settled(cached: Option<&[DetectedFace]>) -> bool {
+    match cached {
+        Some(faces) => {
+            !schist_neural::installed("face-embed") || faces.iter().all(|f| f.embed.is_some())
+        }
+        None => false,
+    }
+}
+
+/// The faces in a photo, cached beside its thumbnail (`.faces`).
+/// `None` when the detector is not installed and nothing was cached.
+///
+/// Detection runs on the thumbnail — the detector's own frame is
+/// 320x240, so a thumbnail is already more than it looks at. The
+/// recogniser, when installed, gets its crops from a larger decode of
+/// the source instead, since a face in a 256 px thumbnail is a smudge.
+fn detect_faces(
+    cache: &Option<PathBuf>,
+    source: &Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Option<Vec<DetectedFace>> {
+    let cached = read_faces_cache(cache);
+    if faces_settled(cached.as_deref()) {
+        return cached;
+    }
+    let detector = match schist_neural::get("face") {
+        Some(model) => model,
+        // Installed but not loading (a damaged file, say): count the
+        // photo as looked at for this session, so the indexer moves on
+        // instead of asking again every pass — but cache nothing, so
+        // a repaired model gets its turn next launch.
+        None => return cached.or_else(|| Some(Vec::new())),
+    };
+    let mut faces: Vec<DetectedFace> = match cached {
+        // The boxes stand; only the vectors are owed.
+        Some(cached) => cached,
+        None => {
+            let rgb: Vec<f32> = rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|px| {
+                    [
+                        px[0] as f32 / 255.0,
+                        px[1] as f32 / 255.0,
+                        px[2] as f32 / 255.0,
+                    ]
+                })
+                .collect();
+            let found = match schist_neural::faces(&detector, &rgb, width as usize, height as usize)
+            {
+                Ok(found) => found,
+                Err(err) => {
+                    log::warn!("face detection failed for {}: {err:#}", source.display());
+                    return None;
+                }
+            };
+            found
+                .iter()
+                .filter(|f| f.width >= MIN_FACE_PX && f.height >= MIN_FACE_PX)
+                .map(|f| DetectedFace {
+                    rect: FaceRect::from_pixels(
+                        f.x,
+                        f.y,
+                        f.width,
+                        f.height,
+                        width as f32,
+                        height as f32,
+                    ),
+                    embed: None,
+                })
+                .collect()
+        }
+    };
+    if !faces.is_empty() {
+        if let Some(model) = schist_neural::get("face-embed") {
+            // A bigger decode for the crops; the thumbnail if that fails.
+            let big = schist_preview::render_file(source, EMBED_EDGE).ok();
+            let (bw, bh, big_rgba): (u32, u32, &[u8]) = match &big {
+                Some(p) => (p.width, p.height, &p.rgba),
+                None => (width, height, rgba),
+            };
+            let (side, _) = model.spec.input.dims();
+            for face in faces.iter_mut().filter(|f| f.embed.is_none()) {
+                face.embed = face_crop_rgb(big_rgba, bw, bh, &face.rect, EMBED_GROW, side as u32)
+                    .and_then(|crop| schist_neural::embed_face(&model, &crop).ok());
+            }
+        }
+    }
+    write_faces_cache(cache, &faces);
+    Some(faces)
 }
 
 /// The photo's search embedding, cached beside the thumbnail. `None`
@@ -1699,6 +2359,9 @@ impl Workspace {
                         ws.library.taken.insert(key.clone(), taken);
                     }
                     ws.library.places.insert(key.clone(), outcome.meta.place);
+                    if let Some(faces) = outcome.faces {
+                        ws.library.faces.insert(key.clone(), faces);
+                    }
                     if outcome.needs_heif && ws.library.heif_needed.is_none() {
                         ws.library.heif_needed = Some(key.clone());
                     }
@@ -2140,6 +2803,15 @@ impl Workspace {
             // p_2 padding both sides, gap_2 between cells.
             (((width - 16.0 + 8.0) / (cell + 8.0)).floor() as isize).max(1)
         };
+        if ev.keystroke.key == "space" {
+            // Space is the quick look: the lead photo, big, with its
+            // faces to name.
+            let Some(lead) = self.library.lead_selected().cloned() else {
+                return false;
+            };
+            self.open_viewer(lead, cx);
+            return true;
+        }
         let step: isize = match ev.keystroke.key.as_str() {
             "left" => -1,
             "right" => 1,
@@ -2278,6 +2950,7 @@ impl Workspace {
         self.library.search_selected = false;
         self.library.search_results = None;
         self.library.search_place = None;
+        self.library.search_people.clear();
         self.library.search_scoped = None;
         self.library.search_seq += 1;
         cx.notify();
@@ -2298,12 +2971,16 @@ impl Workspace {
         if query.is_empty() {
             self.library.search_results = None;
             self.library.search_place = None;
+            self.library.search_people.clear();
             cx.notify();
             return;
         }
         let cached = self.library.query_cache.get(&query).cloned();
         let scope = self.library.search_scope();
         let snapshot = self.library.search_snapshot();
+        // The third reading of the query: who it names. A person's
+        // photos are pulled in whole, above anything the towers rank.
+        let people_hits = self.library.people_hits(&query);
         cx.spawn(async move |this, cx| {
             let ranked = cx
                 .background_executor()
@@ -2321,7 +2998,7 @@ impl Workspace {
                             },
                         ),
                     };
-                    if answer.text.is_none() && answer.place.is_none() {
+                    if answer.text.is_none() && answer.place.is_none() && people_hits.is_empty() {
                         return None;
                     }
                     // Scores keyed by borrowed path; only what survives
@@ -2330,6 +3007,13 @@ impl Workspace {
                     // of the kept two hundred by the rest of the library.
                     let in_scope = |path: &PathBuf| scope.as_ref().is_none_or(|s| s.contains(path));
                     let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
+                    for (_, paths) in &people_hits {
+                        for path in paths {
+                            if in_scope(path) {
+                                *scored.entry(path).or_insert(0.0) += PERSON_BOOST;
+                            }
+                        }
+                    }
                     if let Some(text) = &answer.text {
                         for (path, v) in snapshot.vectors.iter() {
                             if !in_scope(path) {
@@ -2352,10 +3036,13 @@ impl Workspace {
                     }
                     let floor = if answer.text.is_some() {
                         SEARCH_FLOOR
-                    } else {
+                    } else if answer.place.is_some() {
                         // Location-only search (no text model): being
                         // near the place is the whole of the score.
                         GEO_BOOST * 0.3
+                    } else {
+                        // A name alone: the person's photos, nothing else.
+                        PERSON_BOOST * 0.5
                     };
                     let mut scored: Vec<(&PathBuf, f32)> = scored.into_iter().collect();
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -2366,11 +3053,12 @@ impl Workspace {
                         .map(|(path, score)| (path.clone(), score))
                         .collect();
                     let place_name = answer.place.as_ref().map(|p| p.name.clone());
-                    Some((ranked, place_name, fresh.then_some((query, answer))))
+                    let names: Vec<String> = people_hits.into_iter().map(|(n, _)| n).collect();
+                    Some((ranked, place_name, names, fresh.then_some((query, answer))))
                 })
                 .await;
             this.update(cx, |ws, cx| {
-                let Some((ranked, place_name, fresh)) = ranked else {
+                let Some((ranked, place_name, names, fresh)) = ranked else {
                     return;
                 };
                 if let Some((query, answer)) = fresh {
@@ -2384,6 +3072,7 @@ impl Workspace {
                 if ws.library.search_seq == seq {
                     ws.library.search_results = Some(ranked);
                     ws.library.search_place = place_name;
+                    ws.library.search_people = names;
                     cx.notify();
                 }
             })
@@ -2427,14 +3116,23 @@ impl Workspace {
             }
         };
         let snapshot = self.library.search_snapshot();
+        let people_hits = self.library.people_hits(&query);
         let in_scope = |path: &PathBuf| scope.as_ref().is_none_or(|s| s.contains(path));
         let mut scored: FxHashMap<&PathBuf, f32> = FxHashMap::default();
+        for (_, paths) in &people_hits {
+            for path in paths {
+                if in_scope(path) {
+                    *scored.entry(path).or_insert(0.0) += PERSON_BOOST;
+                }
+            }
+        }
         if let Some(text) = &answer.text {
             for (path, v) in snapshot.vectors.iter() {
                 if !in_scope(path) {
                     continue;
                 }
-                scored.insert(path, v.iter().zip(text.iter()).map(|(a, b)| a * b).sum());
+                *scored.entry(path).or_insert(0.0) +=
+                    v.iter().zip(text.iter()).map(|(a, b)| a * b).sum::<f32>();
             }
         }
         if let Some(place) = &answer.place {
@@ -2450,8 +3148,10 @@ impl Workspace {
         }
         let floor = if answer.text.is_some() {
             SEARCH_FLOOR
-        } else {
+        } else if answer.place.is_some() {
             GEO_BOOST * 0.3
+        } else {
+            PERSON_BOOST * 0.5
         };
         let mut ranked: Vec<(PathBuf, f32)> = scored
             .into_iter()
@@ -2461,6 +3161,7 @@ impl Workspace {
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         ranked.truncate(SEARCH_KEPT);
         self.library.search_place = answer.place.as_ref().map(|p| p.name.clone());
+        self.library.search_people = people_hits.into_iter().map(|(n, _)| n).collect();
         self.library.search_results = Some(ranked.clone());
         cx.notify();
         ranked
@@ -3041,6 +3742,7 @@ mod tests {
                 taken: Some("2026-09-01 12:00:00".into()),
                 place: Some(Some("New York City".into())),
                 flagged: Some(true),
+                faces: None,
             },
             IndexRow {
                 path: PathBuf::from("/p/bare.jpg"),
@@ -3050,6 +3752,7 @@ mod tests {
                 taken: None,
                 place: Some(None),
                 flagged: Some(false),
+                faces: None,
             },
         ];
         let dir = std::env::temp_dir().join(format!("schist-idx-test-{}", std::process::id()));
@@ -3074,6 +3777,155 @@ mod tests {
         // A torn file is a miss, not a crash.
         assert!(parse_index_snapshot(&bytes[..bytes.len() - 3]).is_none());
         assert!(parse_index_snapshot(b"not an index").is_none());
+    }
+
+    fn library_with(photos: &[&str]) -> Library {
+        let mut lib = Library::load();
+        lib.people.clear();
+        lib.ignored_faces.clear();
+        lib.sections = vec![Section {
+            dir: PathBuf::from("/p"),
+            entries: photos
+                .iter()
+                .map(|p| Entry {
+                    path: PathBuf::from(p),
+                    mtime: 1,
+                    edited: false,
+                })
+                .collect(),
+        }];
+        lib
+    }
+
+    fn face_at(x: f32) -> FaceRect {
+        FaceRect {
+            x,
+            y: 0.2,
+            w: 0.2,
+            h: 0.2,
+        }
+    }
+
+    fn found(rect: FaceRect, embed: Option<Vec<f32>>) -> DetectedFace {
+        DetectedFace { rect, embed }
+    }
+
+    #[test]
+    fn naming_a_face_makes_a_person_and_a_face_has_one_name_at_a_time() {
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg"]);
+        let a = Path::new("/p/a.jpg");
+        lib.faces.insert(
+            a.to_path_buf(),
+            vec![found(face_at(0.1), None), found(face_at(0.6), None)],
+        );
+        assert_eq!(lib.unnamed_face_count(), 2);
+        let ann = lib.tag_face(a, face_at(0.1), "Ann").expect("named");
+        assert_eq!(lib.people[ann].name, "Ann");
+        assert_eq!(lib.unnamed_face_count(), 1);
+        assert_eq!(
+            lib.tag_face(a, face_at(0.1), "   "),
+            None,
+            "blank names are nothing"
+        );
+        // A box drawn a hair off the detection is the same face, and
+        // renaming it moves it: Ann is left with no faces and goes.
+        let bob = lib.tag_face(a, face_at(0.11), "bob").expect("named");
+        assert_eq!(lib.people.len(), 1);
+        assert_eq!(lib.people[bob].name, "bob");
+        // The tag comes first, then the unclaimed detection.
+        let views = lib.faces_in(a);
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].person, Some(bob));
+        assert!(views[0].detected);
+        assert_eq!(views[1].person, None);
+        assert_eq!(lib.names_in(a), vec!["bob".to_string()]);
+        // Waving the other away stops it being offered.
+        lib.ignore_face(a, face_at(0.6));
+        assert_eq!(lib.faces_in(a).len(), 1);
+        assert_eq!(lib.unnamed_face_count(), 0);
+        // Naming an ignored face un-ignores it; names match any case.
+        lib.tag_face(a, face_at(0.6), "BOB");
+        assert!(lib.ignored_faces.is_empty());
+        assert_eq!(lib.people.len(), 1);
+        assert_eq!(lib.people[0].faces.len(), 2);
+        assert_eq!(lib.person_photos(0).len(), 1, "one photo, two faces");
+        lib.untag_face(a, &face_at(0.6));
+        assert_eq!(lib.people[0].faces.len(), 1);
+    }
+
+    #[test]
+    fn renaming_to_an_existing_name_merges_and_the_filter_follows() {
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg"]);
+        lib.tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann");
+        lib.tag_face(Path::new("/p/b.jpg"), face_at(0.1), "Annie");
+        lib.person_filter = Some(PersonFilter::Person(1));
+        lib.rename_person(1, "ann");
+        assert_eq!(lib.people.len(), 1);
+        assert_eq!(lib.people[0].faces.len(), 2);
+        assert_eq!(lib.person_filter, Some(PersonFilter::Person(0)));
+        let groups = lib.grouped();
+        assert_eq!(groups[0].0, "People \u{b7} Ann");
+        assert_eq!(groups[0].2.len(), 2);
+        lib.rename_person(0, "Ann Example");
+        assert_eq!(lib.people[0].name, "Ann Example");
+        lib.delete_person(0);
+        assert!(lib.people.is_empty());
+        assert_eq!(lib.person_filter, None);
+    }
+
+    #[test]
+    fn the_unnamed_album_and_a_name_search_read_the_same_tags() {
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"]);
+        lib.faces
+            .insert("/p/a.jpg".into(), vec![found(face_at(0.1), None)]);
+        lib.faces
+            .insert("/p/b.jpg".into(), vec![found(face_at(0.1), None)]);
+        lib.faces.insert("/p/c.jpg".into(), Vec::new());
+        lib.person_filter = Some(PersonFilter::Unnamed);
+        assert_eq!(lib.grouped()[0].2.len(), 2);
+        lib.tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann Example");
+        assert_eq!(lib.grouped()[0].2.len(), 1);
+        let hits = lib.people_hits("ann");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, vec![PathBuf::from("/p/a.jpg")]);
+        assert!(lib.people_hits("beach").is_empty());
+        assert_eq!(lib.names_starting("an").len(), 1);
+        assert_eq!(lib.names_starting("").len(), 1);
+        assert!(lib.names_starting("zed").is_empty());
+        assert_eq!(lib.faces_progress(), (3, 3));
+    }
+
+    #[test]
+    fn a_recognised_face_is_suggested_from_the_named_ones() {
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg"]);
+        lib.faces.insert(
+            "/p/a.jpg".into(),
+            vec![found(face_at(0.1), Some(vec![1.0, 0.0]))],
+        );
+        lib.faces.insert(
+            "/p/b.jpg".into(),
+            vec![
+                found(face_at(0.1), Some(vec![0.9, 0.436])),
+                found(face_at(0.6), Some(vec![0.0, -1.0])),
+            ],
+        );
+        // Nobody named yet: nothing to suggest.
+        assert!(lib
+            .faces_in(Path::new("/p/b.jpg"))
+            .iter()
+            .all(|f| f.suggestion.is_none()));
+        lib.tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann");
+        let views = lib.faces_in(Path::new("/p/b.jpg"));
+        assert_eq!(views[0].suggestion.map(|(i, _)| i), Some(0));
+        assert_eq!(views[1].suggestion, None);
+        // A face learned by hand joins the detections and the centroid.
+        lib.learn_face(Path::new("/p/b.jpg"), face_at(0.6), vec![0.0, -1.0]);
+        lib.tag_face(Path::new("/p/b.jpg"), face_at(0.6), "Bob");
+        let views = lib.faces_in(Path::new("/p/b.jpg"));
+        assert_eq!(views.iter().filter(|v| v.person.is_some()).count(), 1);
+        assert!(lib
+            .detected_faces(Path::new("/p/b.jpg"))
+            .is_some_and(|f| f.len() == 2));
     }
 
     #[test]

@@ -245,7 +245,9 @@ impl Workspace {
         let textual = id == "layer-name"
             || id == "new-doc-name"
             || id == "bucket-name"
-            || id == "bucket-query";
+            || id == "bucket-query"
+            || id == "face-name"
+            || id == "person-name";
         let hex = id == "cp-hex";
         // The caret belongs to the textual fields; keep it on the rails
         // in case the buffer changed underneath it.
@@ -352,6 +354,23 @@ impl Workspace {
         if id == "new-doc-name" {
             self.update_modal(|m| {
                 if let Modal::NewDocument { name, .. } = m {
+                    *name = buffer;
+                }
+            });
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if id == "face-name" {
+            // The viewer's name field: the live text rides on the
+            // viewer, so the panel can offer completions as it grows.
+            if let Some(viewer) = &mut self.library.viewer {
+                viewer.name = buffer;
+            }
+            return;
+        }
+        if id == "person-name" {
+            self.update_modal(|m| {
+                if let Modal::PersonName { name, .. } = m {
                     *name = buffer;
                 }
             });
@@ -472,6 +491,8 @@ impl Workspace {
             | Modal::NewFilePicker
             | Modal::MapFilter
             | Modal::SearchModels
+            | Modal::PeopleModels
+            | Modal::PersonName { .. }
             | Modal::SaveImageAs { .. }
             | Modal::BatchProcess { .. }
             // Handled above, before the numeric parse, like the other

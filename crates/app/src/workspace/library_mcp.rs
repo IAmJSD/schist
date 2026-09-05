@@ -124,6 +124,19 @@ pub(super) fn tool_defs() -> Vec<Value> {
             &[],
         ),
         def(
+            "gallery_people",
+            "The People album: every named person with their photo and face counts, how many \
+             detected faces are still unnamed, and whether the face models are installed. Given \
+             a name, lists that person's photos instead (and shows them in the grid). Faces are \
+             named in the app: View a photo, click a face, type a name.",
+            json!({
+                "person": {"type": "string", "description": "A person's name, for their photos."},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+            }),
+            &[],
+        ),
+        def(
             "gallery_open",
             "Open a photo in the editor (its edit sidecar if it has one). The document tools \
              then apply to it; the gallery is Cmd/Ctrl+Shift+G away.",
@@ -322,6 +335,37 @@ impl Workspace {
                     "photos": self.library.buckets[index].contents().len(),
                 })))
             }
+            "gallery_people" => match str_arg(args, "person") {
+                Some(name) => {
+                    let index = self
+                        .library
+                        .people
+                        .iter()
+                        .position(|p| p.name.eq_ignore_ascii_case(name.trim()))
+                        .ok_or_else(|| anyhow::anyhow!("nobody named {name:?}"))?;
+                    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(50)
+                        .clamp(1, 500) as usize;
+                    self.show_person(Some(super::library::PersonFilter::Person(index)), cx);
+                    let entries = self.library.person_photos(index);
+                    let rows: Vec<Value> = entries
+                        .iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(|e| self.library.entry_json(e))
+                        .collect();
+                    Ok(text(json!({
+                        "person": self.library.people[index].name,
+                        "total": entries.len(),
+                        "offset": offset,
+                        "photos": rows,
+                    })))
+                }
+                None => Ok(text(self.library.people_json())),
+            },
             "gallery_group_by" => {
                 let by = str_arg(args, "by").ok_or_else(|| anyhow::anyhow!("by is required"))?;
                 let group = GroupBy::from_key(by)

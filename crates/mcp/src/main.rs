@@ -76,6 +76,14 @@ mod gallery {
                  matching once it runs. The app reads the file at launch.",
                 json!({"name": {"type": "string"}, "query": {"type": "string"}, "paths": paths}),
                 &["name"]),
+            def("gallery_people",
+                "The People album: every named person with their photo and face counts, and how \
+                 many detected faces are still unnamed. Given a name, lists that person's photos \
+                 instead. Names are given in the app by clicking a face in a photo.",
+                json!({"person": {"type": "string", "description": "A person's name, for their photos."},
+                       "offset": {"type": "integer", "minimum": 0, "default": 0},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}}),
+                &[]),
             def("gallery_bucket_add",
                 "Add photos to a bucket by name, in the library file.",
                 json!({"bucket": {"type": "string"}, "paths": paths}), &["bucket", "paths"]),
@@ -236,6 +244,24 @@ mod gallery {
                 let count = gallery.add_to_bucket(name, &paths_arg(args, "paths"))?;
                 text(json!({"bucket": name, "photos": count}))
             }
+            "gallery_people" => match args.get("person").and_then(|v| v.as_str()) {
+                Some(person) => {
+                    let (offset, limit) = page(args);
+                    let entries = gallery
+                        .person_photos(person)
+                        .ok_or_else(|| anyhow!("nobody named {person:?}"))?;
+                    let rows: Vec<Value> = entries
+                        .iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(|e| gallery.entry_json(e))
+                        .collect();
+                    text(
+                        json!({"person": person, "total": entries.len(), "offset": offset, "photos": rows}),
+                    )
+                }
+                None => text(gallery.people_json()),
+            },
             other => bail!("unknown gallery tool {other:?}"),
         }
     }

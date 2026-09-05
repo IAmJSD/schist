@@ -753,10 +753,11 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &CancelGesture, _w, cx| {
-                // Escape leaves the gallery's search before anything
-                // else — it is the innermost thing open.
+                // Escape leaves the gallery's search, a face being
+                // named, or the viewer before anything else — they are
+                // the innermost things open.
                 #[cfg(not(target_arch = "wasm32"))]
-                if ws.gallery_open() && ws.gallery_search_clear(cx) {
+                if ws.gallery_open() && ws.gallery_escape(cx) {
                     return;
                 }
                 ws.cancel_gesture(cx);

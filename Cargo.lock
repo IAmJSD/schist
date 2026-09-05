@@ -6381,6 +6381,7 @@ name = "schist-gallery"
 version = "0.11.0"
 dependencies = [
  "anyhow",
+ "image",
  "kamadak-exif",
  "schist-neural",
  "serde",

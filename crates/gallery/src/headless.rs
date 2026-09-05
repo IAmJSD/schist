@@ -105,8 +105,56 @@ impl Gallery {
                 "content_model_installed": crate::scores::nsfw_installed(),
             },
             "content": {"flagged": count("flagged"), "clean": count("clean"), "unscored": count("unscored")},
+            "people": self.people_json(),
             "note": "Read from the gallery's files on disk; the app is what indexes. Selection and grouping belong to the app's window.",
         })
+    }
+
+    /// The people album: each name with how many photos and faces
+    /// carry it, plus how many detected faces nobody has named.
+    pub fn people_json(&self) -> Value {
+        let people: Vec<Value> = self
+            .file
+            .people
+            .iter()
+            .map(|p| json!({"name": p.name, "photos": p.photos().len(), "faces": p.faces.len()}))
+            .collect();
+        let unnamed = self
+            .index
+            .values()
+            .filter_map(|row| Some((row.path.as_path(), row.faces.as_ref()?)))
+            .flat_map(|(path, faces)| faces.iter().map(move |f| (path, f)))
+            .filter(|(path, face)| {
+                !self.file.people.iter().any(|p| p.tagged(path, &face.rect))
+                    && !self
+                        .file
+                        .ignored_faces
+                        .iter()
+                        .any(|i| i.photo == *path && i.rect.same_face(&face.rect))
+            })
+            .count();
+        json!({
+            "people": people,
+            "unnamed_faces": unnamed,
+            "detector_installed": schist_neural::installed("face"),
+            "recogniser_installed": schist_neural::installed("face-embed"),
+        })
+    }
+
+    /// One person's photos, in tag order.
+    pub fn person_photos(&self, name: &str) -> Option<Vec<Entry>> {
+        let person = self
+            .file
+            .people
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name.trim()))?;
+        Some(
+            person
+                .photos()
+                .iter()
+                .filter_map(|p| self.entry(p).cloned())
+                .collect(),
+        )
     }
 
     /// Photos in scan order — the lot, one folder, or one bucket.
