@@ -115,6 +115,21 @@ pub struct DetectedFace {
 pub struct TaggedFace {
     pub photo: PathBuf,
     pub rect: FaceRect,
+    /// Put here by the recogniser rather than by hand. Automatic tags
+    /// count as the person everywhere but in their own mean vector —
+    /// one wrong guess must not pull the next guess after it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
+}
+
+/// A face the user said is *not* this person: the recogniser will not
+/// put it back. Kept by name, so the same face may still be offered
+/// as somebody else.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeniedFace {
+    pub photo: PathBuf,
+    pub rect: FaceRect,
+    pub name: String,
 }
 
 /// A named person and every face tagged as them, as `library.json`
@@ -151,6 +166,13 @@ impl PersonFile {
 pub const EMBED_GROW: f32 = 1.1;
 /// The avatars' grow factor — a portrait, not a passport photo.
 pub const AVATAR_GROW: f32 = 1.5;
+
+/// The recogniser's cosine above which an unnamed face is put with the
+/// person outright, as an automatic tag. Between [`SUGGEST_COSINE`] and
+/// this it is only offered. On the test portraits the same person's
+/// weakest pair scored 0.48 — that one becomes a question, the rest
+/// are answered.
+pub const AUTO_COSINE: f32 = 0.5;
 
 /// The recogniser's cosine above which two faces are suggested to be
 /// the same person. SFace's authors publish 0.363 for aligned crops;
@@ -501,14 +523,17 @@ mod tests {
                 TaggedFace {
                     photo: "/a.jpg".into(),
                     rect: rect(0.1, 0.1, 0.1, 0.1),
+                    auto: false,
                 },
                 TaggedFace {
                     photo: "/b.jpg".into(),
                     rect: rect(0.1, 0.1, 0.1, 0.1),
+                    auto: true,
                 },
                 TaggedFace {
                     photo: "/a.jpg".into(),
                     rect: rect(0.5, 0.5, 0.1, 0.1),
+                    auto: false,
                 },
             ],
         };

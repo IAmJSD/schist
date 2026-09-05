@@ -461,13 +461,21 @@ beside it with a crop per face. Click a face (in either place), type a
 name, Enter. Names already known complete as you type; a face the
 detector missed is added by dragging a box round it on the photo; a
 detection that is not a face — or not anyone worth naming — is waved
-away with "Not a face". Once someone has a few named faces the
-recogniser starts offering "Is this Ann?" on unnamed faces that land
-above a 0.45 cosine of the person's mean vector (SFace's authors use
-0.363 on aligned crops; ours are plain squares round the detector's
-box, which spreads the scores, so the bar sits above where different
-people landed in testing). Yes tags it; a face drawn by hand gets its
-vector from the viewer's decode on the spot, so it counts too. Arrows
+away with "Not a face". Naming a face teaches the recogniser: every
+unnamed face in the library that lands above a 0.5 cosine of the
+person's mean vector is put with them at once, as an *automatic* tag
+(the tray says how many followed), and photos indexed later get the
+same treatment as their faces arrive. Between 0.45 and 0.5 a face is
+only offered — "Is this Ann?" with a Yes button — rather than taken
+(SFace's authors use 0.363 on aligned crops; ours are plain squares
+round the detector's box, which spreads the scores, so the bars sit
+above where different people landed in testing). Automatic tags are
+marked "auto" in the panel and on their box, with a "Not them" button;
+saying no remembers that this face is not that person, so the
+recogniser does not put it back — and only hand-named faces feed a
+person's mean vector, so one wrong guess cannot steer the next. A
+face drawn by hand gets its vector from the viewer's decode on the
+spot, so it counts too. Arrows
 walk to the next photo, Escape leaves the name field, then the viewer;
 Enter with nothing focused opens the photo in the editor, as it does in
 the grid. Double-click on a thumbnail still goes straight to the
@@ -490,6 +498,7 @@ person's photos by name.
 
 `~/.config/schist/library.json`: the watched folders, the recent-files
 list the start screen shows, the thumbnail size, the buckets, and the
-people — every named face and every detected face waved away. Thumbnail caches
+people — every named face (hand-made or automatic), every detected
+face waved away, and every "not them". Thumbnail caches
 live under the state directory (`~/.local/state/schist/thumbs`) and can
 be deleted freely.

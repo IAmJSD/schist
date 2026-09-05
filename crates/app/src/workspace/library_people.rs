@@ -199,10 +199,26 @@ impl Workspace {
         };
         if !typed.trim().is_empty() {
             self.learn_face_if_needed(&path, rect);
-            self.library.tag_face(&path, rect, &typed);
+            if let Some((index, followed)) = self.library.tag_face(&path, rect, &typed) {
+                self.report_tag(index, followed);
+            }
         }
         self.viewer_unpick();
         cx.notify();
+    }
+
+    /// Say what a name did in the tray: who, and how many other faces
+    /// the recogniser put with them on the strength of it.
+    fn report_tag(&mut self, index: usize, followed: usize) {
+        let Some(name) = self.library.people.get(index).map(|p| p.name.clone()) else {
+            return;
+        };
+        self.status = match followed {
+            0 => format!("Named {name}"),
+            1 => format!("Named {name} \u{b7} 1 more face matched automatically"),
+            n => format!("Named {name} \u{b7} {n} more faces matched automatically"),
+        }
+        .into();
     }
 
     /// Name a face as an existing person — a completion or a "yes" to
@@ -215,7 +231,9 @@ impl Workspace {
             return;
         };
         self.learn_face_if_needed(&path, rect);
-        self.library.tag_face(&path, rect, &name);
+        if let Some((index, followed)) = self.library.tag_face(&path, rect, &name) {
+            self.report_tag(index, followed);
+        }
         self.viewer_unpick();
         cx.notify();
     }

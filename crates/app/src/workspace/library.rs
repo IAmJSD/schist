@@ -147,6 +147,8 @@ pub enum PersonFilter {
 pub struct FaceView {
     pub rect: FaceRect,
     pub person: Option<usize>,
+    /// The recogniser put it with this person, nobody confirmed it.
+    pub auto: bool,
     /// The recogniser's best guess and its cosine, for an unnamed face.
     pub suggestion: Option<(usize, f32)>,
     pub detected: bool,
@@ -295,6 +297,9 @@ pub struct Library {
     /// Detected faces waved away — not a face, or not worth naming —
     /// so they stop being offered. Persisted.
     pub ignored_faces: Vec<TaggedFace>,
+    /// Faces the user said are not the person the recogniser (or an
+    /// earlier tag) made them, so they are not put back. Persisted.
+    pub denied_faces: Vec<DeniedFace>,
     /// Showing one person's photos (or the unnamed faces) instead of
     /// the folders.
     pub person_filter: Option<PersonFilter>,
@@ -492,6 +497,7 @@ impl Library {
             faces: FxHashMap::default(),
             people: file.people,
             ignored_faces: file.ignored_faces,
+            denied_faces: file.denied_faces,
             person_filter: None,
             viewer: None,
             avatars: FxHashMap::default(),
@@ -554,6 +560,7 @@ impl Library {
                 .collect(),
             people: self.people.clone(),
             ignored_faces: self.ignored_faces.clone(),
+            denied_faces: self.denied_faces.clone(),
         };
         if let Err(err) = file.save() {
             log::warn!("gallery: library.json not saved: {err:#}");
@@ -766,6 +773,7 @@ impl Library {
         json!({
             "people": self.people.iter().enumerate().map(|(i, p)| json!({
                 "index": i, "name": p.name, "photos": p.photos().len(), "faces": p.faces.len(),
+                "auto_faces": p.faces.iter().filter(|f| f.auto).count(),
                 "viewing": self.person_filter == Some(PersonFilter::Person(i)),
             })).collect::<Vec<_>>(),
             "unnamed_faces": self.unnamed_face_count(),
@@ -941,6 +949,8 @@ impl Library {
             }
         }
         self.index_gen += 1;
+        // Restored detections may match people named since.
+        self.auto_tag_and_save();
     }
 
     /// Write the index to its snapshot file (on a plain thread — pure
@@ -1400,9 +1410,12 @@ impl Library {
             .iter()
             .enumerate()
             .filter_map(|(i, person)| {
+                // Hand-named faces only: an automatic tag that is
+                // wrong must not steer the next guess.
                 let vectors = person
                     .faces
                     .iter()
+                    .filter(|f| !f.auto)
                     .filter_map(|f| self.face_embedding(&f.photo, &f.rect));
                 Some((i, centroid(vectors)?))
             })
@@ -1423,6 +1436,7 @@ impl Library {
                 views.push(FaceView {
                     rect: face.rect,
                     person: Some(i),
+                    auto: face.auto,
                     suggestion: None,
                     detected: detected.iter().any(|d| d.rect.same_face(&face.rect)),
                 });
@@ -1441,6 +1455,7 @@ impl Library {
             views.push(FaceView {
                 rect: face.rect,
                 person: None,
+                auto: false,
                 suggestion,
                 detected: true,
             });
@@ -1458,17 +1473,24 @@ impl Library {
             .collect()
     }
 
-    /// Name a face: it joins the person called `name` — created when
-    /// nobody is — leaving whoever had it before, and any dismissal.
-    /// Returns the person's index; `None` for an empty name.
-    pub fn tag_face(&mut self, path: &Path, rect: FaceRect, name: &str) -> Option<usize> {
+    /// Name a face by hand: it joins the person called `name` — created
+    /// when nobody is — leaving whoever had it before, and any dismissal
+    /// or denial of this name. Then the recogniser learns from it: every
+    /// unnamed face in the library that now matches the person closely
+    /// enough is put with them too, as an automatic tag. Returns the
+    /// person's index and how many faces followed; `None` for an empty
+    /// name.
+    pub fn tag_face(&mut self, path: &Path, rect: FaceRect, name: &str) -> Option<(usize, usize)> {
         let name = name.trim();
         if name.is_empty() {
             return None;
         }
-        self.untag_face_quietly(path, &rect);
+        self.untag_face_quietly(path, &rect, false);
         self.ignored_faces
             .retain(|f| !(f.photo == path && f.rect.same_face(&rect)));
+        self.denied_faces.retain(|d| {
+            !(d.photo == path && d.rect.same_face(&rect) && d.name.eq_ignore_ascii_case(name))
+        });
         let index = match self
             .people
             .iter()
@@ -1486,26 +1508,104 @@ impl Library {
         self.people[index].faces.push(TaggedFace {
             photo: path.to_path_buf(),
             rect,
+            auto: false,
         });
+        let followed = self.auto_tag_all();
         self.save();
-        Some(index)
+        Some((index, followed))
     }
 
-    /// Take the name off a face. A person left with no faces goes too.
-    pub fn untag_face(&mut self, path: &Path, rect: &FaceRect) {
-        if self.untag_face_quietly(path, rect) {
+    /// Put every unnamed face that closely matches a named person with
+    /// them, as automatic tags — skipping faces the user has dismissed
+    /// or denied that name. Returns how many were added. Called after a
+    /// hand-made tag and whenever detections arrive.
+    pub fn auto_tag_all(&mut self) -> usize {
+        let centroids = self.person_centroids();
+        if centroids.is_empty() {
+            return 0;
+        }
+        let mut additions: Vec<(usize, TaggedFace)> = Vec::new();
+        for (path, faces) in &self.faces {
+            for face in faces {
+                let Some(embed) = face.embed.as_deref() else {
+                    continue;
+                };
+                if self.is_ignored(path, &face.rect)
+                    || self.people.iter().any(|p| p.tagged(path, &face.rect))
+                {
+                    continue;
+                }
+                let Some((index, cosine)) =
+                    best_match(embed, centroids.iter().map(|(i, c)| (*i, c.as_slice())))
+                else {
+                    continue;
+                };
+                if cosine < AUTO_COSINE
+                    || self.is_denied(path, &face.rect, &self.people[index].name)
+                {
+                    continue;
+                }
+                additions.push((
+                    index,
+                    TaggedFace {
+                        photo: path.clone(),
+                        rect: face.rect,
+                        auto: true,
+                    },
+                ));
+            }
+        }
+        let count = additions.len();
+        for (index, tag) in additions {
+            self.people[index].faces.push(tag);
+        }
+        count
+    }
+
+    /// The auto-tag pass, persisted when it changed anything.
+    pub(super) fn auto_tag_and_save(&mut self) {
+        if self.auto_tag_all() > 0 {
             self.save();
         }
     }
 
-    fn untag_face_quietly(&mut self, path: &Path, rect: &FaceRect) -> bool {
+    fn is_denied(&self, path: &Path, rect: &FaceRect, name: &str) -> bool {
+        self.denied_faces
+            .iter()
+            .any(|d| d.photo == path && d.rect.same_face(rect) && d.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Take the name off a face, and remember that it is not that
+    /// person, so the recogniser does not put it straight back. A
+    /// person left with no faces goes too.
+    pub fn untag_face(&mut self, path: &Path, rect: &FaceRect) {
+        if self.untag_face_quietly(path, rect, true) {
+            self.save();
+        }
+    }
+
+    fn untag_face_quietly(&mut self, path: &Path, rect: &FaceRect, deny: bool) -> bool {
         let mut changed = false;
+        let mut denied: Vec<DeniedFace> = Vec::new();
         for person in &mut self.people {
             let before = person.faces.len();
-            person
-                .faces
-                .retain(|f| !(f.photo == path && f.rect.same_face(rect)));
+            person.faces.retain(|f| {
+                let hit = f.photo == path && f.rect.same_face(rect);
+                if hit && deny {
+                    denied.push(DeniedFace {
+                        photo: path.to_path_buf(),
+                        rect: *rect,
+                        name: person.name.clone(),
+                    });
+                }
+                !hit
+            });
             changed |= person.faces.len() != before;
+        }
+        for d in denied {
+            if !self.is_denied(&d.photo, &d.rect, &d.name) {
+                self.denied_faces.push(d);
+            }
         }
         if changed {
             let mut i = 0;
@@ -1522,11 +1622,12 @@ impl Library {
 
     /// Dismiss a detected face: not a face, or nobody worth naming.
     pub fn ignore_face(&mut self, path: &Path, rect: FaceRect) {
-        self.untag_face_quietly(path, &rect);
+        self.untag_face_quietly(path, &rect, false);
         if !self.is_ignored(path, &rect) {
             self.ignored_faces.push(TaggedFace {
                 photo: path.to_path_buf(),
                 rect,
+                auto: false,
             });
         }
         self.save();
@@ -1548,6 +1649,16 @@ impl Library {
         {
             let faces = std::mem::take(&mut self.people[index].faces);
             self.people[other].faces.extend(faces);
+            // Denials of the old name now mean the merged one.
+            let (old, new) = (
+                self.people[index].name.clone(),
+                self.people[other].name.clone(),
+            );
+            for d in &mut self.denied_faces {
+                if d.name.eq_ignore_ascii_case(&old) {
+                    d.name = new.clone();
+                }
+            }
             let target = if other > index { other - 1 } else { other };
             let viewing = self.person_filter == Some(PersonFilter::Person(index));
             self.remove_person_at(index);
@@ -1557,7 +1668,12 @@ impl Library {
                 self.person_filter = Some(PersonFilter::Person(target));
             }
         } else {
-            self.people[index].name = name.to_string();
+            let old = std::mem::replace(&mut self.people[index].name, name.to_string());
+            for d in &mut self.denied_faces {
+                if d.name.eq_ignore_ascii_case(&old) {
+                    d.name = name.to_string();
+                }
+            }
         }
         self.save();
     }
@@ -2347,6 +2463,7 @@ impl Workspace {
             let keep = this.update(cx, |ws, cx| {
                 ws.library.index_gen += 1;
                 let visible_work = results.iter().any(|(_, _, for_index, _)| !for_index);
+                let mut new_faces = false;
                 for (key, mtime, for_index, outcome) in results {
                     if let Some(score) = outcome.score {
                         ws.library.flagged.insert(key.clone(), is_explicit(score));
@@ -2361,6 +2478,7 @@ impl Workspace {
                     ws.library.places.insert(key.clone(), outcome.meta.place);
                     if let Some(faces) = outcome.faces {
                         ws.library.faces.insert(key.clone(), faces);
+                        new_faces = true;
                     }
                     if outcome.needs_heif && ws.library.heif_needed.is_none() {
                         ws.library.heif_needed = Some(key.clone());
@@ -2374,6 +2492,11 @@ impl Workspace {
                         };
                         ws.library.thumbs.insert(key, (mtime, state));
                     }
+                }
+                // Faces just found may belong to people already named:
+                // put them there, as Picasa filled its albums.
+                if new_faces {
+                    ws.library.auto_tag_and_save();
                 }
                 // The batch may have pushed the map over budget; shed
                 // whatever scrolled away longest ago.
@@ -3783,6 +3906,7 @@ mod tests {
         let mut lib = Library::load();
         lib.people.clear();
         lib.ignored_faces.clear();
+        lib.denied_faces.clear();
         lib.sections = vec![Section {
             dir: PathBuf::from("/p"),
             entries: photos
@@ -3819,8 +3943,9 @@ mod tests {
             vec![found(face_at(0.1), None), found(face_at(0.6), None)],
         );
         assert_eq!(lib.unnamed_face_count(), 2);
-        let ann = lib.tag_face(a, face_at(0.1), "Ann").expect("named");
+        let (ann, followed) = lib.tag_face(a, face_at(0.1), "Ann").expect("named");
         assert_eq!(lib.people[ann].name, "Ann");
+        assert_eq!(followed, 0, "no vectors, nothing to learn from");
         assert_eq!(lib.unnamed_face_count(), 1);
         assert_eq!(
             lib.tag_face(a, face_at(0.1), "   "),
@@ -3829,7 +3954,7 @@ mod tests {
         );
         // A box drawn a hair off the detection is the same face, and
         // renaming it moves it: Ann is left with no faces and goes.
-        let bob = lib.tag_face(a, face_at(0.11), "bob").expect("named");
+        let (bob, _) = lib.tag_face(a, face_at(0.11), "bob").expect("named");
         assert_eq!(lib.people.len(), 1);
         assert_eq!(lib.people[bob].name, "bob");
         // The tag comes first, then the unclaimed detection.
@@ -3915,17 +4040,82 @@ mod tests {
             .iter()
             .all(|f| f.suggestion.is_none()));
         lib.tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann");
+        // The close match (cosine 0.9) was taken outright as an automatic
+        // tag; the face at 0.6 points the other way and is nobody's.
         let views = lib.faces_in(Path::new("/p/b.jpg"));
-        assert_eq!(views[0].suggestion.map(|(i, _)| i), Some(0));
+        assert_eq!(views[0].person, Some(0));
+        assert!(views[0].auto);
+        assert_eq!(views[1].person, None);
         assert_eq!(views[1].suggestion, None);
         // A face learned by hand joins the detections and the centroid.
         lib.learn_face(Path::new("/p/b.jpg"), face_at(0.6), vec![0.0, -1.0]);
         lib.tag_face(Path::new("/p/b.jpg"), face_at(0.6), "Bob");
         let views = lib.faces_in(Path::new("/p/b.jpg"));
-        assert_eq!(views.iter().filter(|v| v.person.is_some()).count(), 1);
+        assert_eq!(views.iter().filter(|v| v.person.is_some()).count(), 2);
         assert!(lib
             .detected_faces(Path::new("/p/b.jpg"))
             .is_some_and(|f| f.len() == 2));
+    }
+
+    #[test]
+    fn naming_a_face_teaches_the_recogniser_and_denials_stick() {
+        let mut lib = library_with(&["/p/a.jpg", "/p/b.jpg", "/p/c.jpg", "/p/d.jpg"]);
+        // a: Ann's face. b: a close match (0.95). c: a weak match (0.47,
+        // a question rather than an answer). d: somebody else entirely.
+        lib.faces.insert(
+            "/p/a.jpg".into(),
+            vec![found(face_at(0.1), Some(vec![1.0, 0.0]))],
+        );
+        lib.faces.insert(
+            "/p/b.jpg".into(),
+            vec![found(face_at(0.1), Some(vec![0.95, 0.312]))],
+        );
+        lib.faces.insert(
+            "/p/c.jpg".into(),
+            vec![found(face_at(0.1), Some(vec![0.47, 0.883]))],
+        );
+        lib.faces.insert(
+            "/p/d.jpg".into(),
+            vec![found(face_at(0.1), Some(vec![-1.0, 0.0]))],
+        );
+        let (ann, followed) = lib
+            .tag_face(Path::new("/p/a.jpg"), face_at(0.1), "Ann")
+            .unwrap();
+        assert_eq!(followed, 1, "b followed, c is only a question, d is nobody");
+        assert_eq!(lib.person_photos(ann).len(), 2);
+        let b = lib.faces_in(Path::new("/p/b.jpg"));
+        assert_eq!(b[0].person, Some(ann));
+        assert!(b[0].auto);
+        let c = lib.faces_in(Path::new("/p/c.jpg"));
+        assert_eq!(c[0].person, None);
+        assert_eq!(c[0].suggestion.map(|(i, _)| i), Some(ann));
+        // The automatic tag does not steer the mean: still Ann's own vector.
+        assert_eq!(lib.person_centroids()[0].1, vec![1.0, 0.0]);
+        // "Not them": the face leaves and stays out, even after another
+        // pass — but can still be named by hand, which clears the denial.
+        lib.untag_face(Path::new("/p/b.jpg"), &face_at(0.1));
+        assert_eq!(lib.person_photos(ann).len(), 1);
+        assert_eq!(lib.auto_tag_all(), 0);
+        assert_eq!(lib.denied_faces.len(), 1);
+        lib.tag_face(Path::new("/p/b.jpg"), face_at(0.1), "ann");
+        assert!(lib.denied_faces.is_empty());
+        let b_tag = lib.people[ann]
+            .faces
+            .iter()
+            .find(|f| f.photo == Path::new("/p/b.jpg"))
+            .expect("b is Ann's again");
+        assert!(!b_tag.auto, "named by hand this time");
+        // With two hand-named faces Ann's mean moved towards c, which
+        // now clears the bar and follows automatically.
+        assert!(lib.people[ann]
+            .faces
+            .iter()
+            .any(|f| f.auto && f.photo == Path::new("/p/c.jpg")));
+        // Renaming carries the denials along.
+        lib.untag_face(Path::new("/p/b.jpg"), &face_at(0.1));
+        lib.rename_person(ann, "Ann Example");
+        assert_eq!(lib.denied_faces[0].name, "Ann Example");
+        assert_eq!(lib.auto_tag_all(), 0);
     }
 
     #[test]

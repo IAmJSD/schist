@@ -444,6 +444,7 @@ fn picture_element(
         let picked = pick.is_some_and(|p| p.same_face(&face.rect));
         let color = box_color(face, picked);
         let label = match (face.person, face.suggestion) {
+            (Some(i), _) if face.auto => names.get(i).map(|n| format!("{n} \u{b7} auto")),
             (Some(i), _) => names.get(i).cloned(),
             (None, Some((i, _))) => names.get(i).map(|n| format!("{n}?")),
             (None, None) => None,
@@ -587,6 +588,7 @@ fn people_panel(
         let fresh = FaceView {
             rect,
             person: None,
+            auto: false,
             suggestion: None,
             detected: false,
         };
@@ -732,7 +734,7 @@ fn face_row(
             ));
         if named.is_some() {
             actions = actions.child(small_button(
-                "Remove name",
+                if face.auto { "Not them" } else { "Remove name" },
                 false,
                 move |ws, cx| ws.viewer_untag(rect, cx),
                 cx,
@@ -766,6 +768,23 @@ fn face_row(
                         .text_color(gpui::rgb(pal().text))
                         .child(SharedString::from(name)),
                 );
+                if face.auto {
+                    // The recogniser's doing: say so, and offer the
+                    // one-click "no" a guess deserves.
+                    top = top
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(gpui::rgb(pal().text_dim))
+                                .child("auto"),
+                        )
+                        .child(small_button(
+                            "Not them",
+                            false,
+                            move |ws, cx| ws.viewer_untag(rect, cx),
+                            cx,
+                        ));
+                }
             }
             (None, Some((index, name))) => {
                 top = top.child(

@@ -2,7 +2,7 @@
 
 use crate::geo::GeoBounds;
 use crate::paths::library_path;
-use crate::people::{PersonFile, TaggedFace};
+use crate::people::{DeniedFace, PersonFile, TaggedFace};
 use std::path::PathBuf;
 
 /// A bucket as `library.json` holds it. Untagged so the shape saved
@@ -68,6 +68,8 @@ pub struct LibraryFile {
     pub people: Vec<PersonFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_faces: Vec<TaggedFace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_faces: Vec<DeniedFace>,
 }
 
 impl LibraryFile {
