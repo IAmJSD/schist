@@ -40,6 +40,9 @@ mod vulkan;
 #[cfg(target_arch = "wasm32")]
 mod web;
 mod workspace;
+// Telemetry handling for desktop OS's
+#[cfg(not(target_arch = "wasm32"))]
+mod telemetry;
 
 use actions::{HideApp, HideOthers, Quit, ShowAll};
 use gpui::{
@@ -289,6 +292,10 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     crash::install_handler(opted_in(options.crash_reports, "SCHIST_CRASH_REPORTS"));
     workspace::init_compositor_backend(options.gpu_compositing);
+    // Starts the opt-out telemetry handler. After the compositor, so the
+    // first ping can say which adapter it settled on.
+    #[cfg(not(target_arch = "wasm32"))]
+    telemetry::start(workspace::schist_folder());
     #[cfg(not(target_arch = "wasm32"))]
     let (registry, plugin_manager, photoshop_plugins) = build_registry();
     #[cfg(target_arch = "wasm32")]

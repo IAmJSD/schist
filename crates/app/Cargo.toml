@@ -79,6 +79,9 @@ schist-preview.workspace = true
 # behind the PNG codec, so this adds no download.
 crc32fast.workspace = true
 flate2 = "1"
+# The daily ping: its dedup ID, and the CPU model and RAM it reports.
+rand = "0.10"
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
 # ImageCaptureCore for the gallery's iPhone/PTP-camera import: those
 # devices never mount as filesystems on macOS. Same objc2 idiom as the

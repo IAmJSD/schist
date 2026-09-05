@@ -130,9 +130,10 @@ const PREFETCH_TICK_MS: u64 = 30;
 /// is 256 KiB (twice that when colour-managed), so 2048 tiles bounds the
 /// prefetch at roughly 0.5-1 GiB -- a ~134 MP document end to end.
 const PREFETCH_TILE_BUDGET: usize = 2048;
-/// Where view preferences are stored.
+
+/// Where Schist's folder is
 #[cfg(not(target_arch = "wasm32"))]
-fn prefs_path() -> Option<PathBuf> {
+pub fn schist_folder() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
@@ -141,7 +142,16 @@ fn prefs_path() -> Option<PathBuf> {
                 .ok()
                 .map(|h| PathBuf::from(h).join(".config"))
         })?;
-    Some(base.join("schist/preferences.json"))
+    Some(base.join("schist"))
+}
+
+/// Where view preferences are stored.
+#[cfg(not(target_arch = "wasm32"))]
+fn prefs_path() -> Option<PathBuf> {
+    match schist_folder() {
+        Some(x) => Some(x.join("preferences.json")),
+        None => None,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -863,12 +873,42 @@ pub fn init_compositor_backend(prefer_gpu: bool) {
         match schist_compositor_gpu::GpuCompositor::new() {
             Ok(gpu) => {
                 log::info!("GPU compositing and filter kernels on ({})", gpu.describe());
+                let info = gpu.context().adapter_info();
+                let _ = GPU_INFO.set(GpuInfo {
+                    name: info.name.clone(),
+                    backend: format!("{:?}", info.backend).to_lowercase(),
+                    driver: format!("{} {}", info.driver, info.driver_info)
+                        .trim()
+                        .to_string(),
+                });
                 schist_fx::set_backend(Arc::new(gpu.fx()));
                 schist_compositor::set_backend(Arc::new(gpu));
             }
             Err(err) => log::warn!("GPU compositing unavailable, staying on the CPU: {err}"),
         }
     }
+}
+
+/// The adapter the GPU compositor opened, as recorded by
+/// [`init_compositor_backend`]. `None` while compositing is on the CPU.
+#[cfg(not(target_arch = "wasm32"))]
+static GPU_INFO: std::sync::OnceLock<GpuInfo> = std::sync::OnceLock::new();
+
+/// What the GPU compositor is running on.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    /// The adapter's name, as the driver reports it: "NVIDIA RTX 4070".
+    pub name: String,
+    /// "vulkan", "metal", "dx12"...
+    pub backend: String,
+    /// The driver's name and version, whichever of the two it gives.
+    pub driver: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn gpu_info() -> Option<&'static GpuInfo> {
+    GPU_INFO.get()
 }
 
 /// A traced selection boundary: runs of document-space points.

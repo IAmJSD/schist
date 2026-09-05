@@ -120,9 +120,9 @@ pub fn is_newer(current: &str, candidate: &str) -> bool {
 
 /// Ask GitHub for the latest release. Blocking — call it off the UI thread.
 ///
-/// One of the three requests Schist makes over the network — the others
-/// fetch a missing font and a Neural Filters model — and, like them, only
-/// when the user asks.
+/// One of the requests Schist makes over the network only when the user
+/// asks — the others fetch a missing font and a Neural Filters model. The
+/// daily ping in `telemetry.rs` is the one that is on until turned off.
 pub fn check() -> UpdateStatus {
     let response = ureq::get(RELEASES_API)
         .header("User-Agent", "schist-update-check")

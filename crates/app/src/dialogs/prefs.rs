@@ -151,6 +151,7 @@ pub(super) fn preferences(
                 ),
             )
         }))
+        .children(telemetry_row(cx))
         .child(
             div()
                 .text_size(px(11.0))
@@ -205,6 +206,36 @@ pub(super) fn preferences(
             cx,
         ));
     ui::modal_frame("Preferences", 400.0, body, actions)
+}
+
+/// The daily-ping switch. The preference is a marker file in the config
+/// folder rather than a field in preferences.json, so that a user (or a
+/// package) can opt out without ever launching the app; the switch just
+/// creates and removes that file. Without a config folder there is
+/// nowhere to keep it and no ping is sent, so no switch is offered.
+#[cfg(not(target_arch = "wasm32"))]
+fn telemetry_row(cx: &mut Context<Workspace>) -> Option<impl IntoElement> {
+    let folder = crate::workspace::schist_folder()?;
+    let enabled = crate::telemetry::enabled(&folder);
+    Some(ui::field_row(
+        "",
+        ui::checkbox(
+            "Send an anonymous daily ping",
+            enabled,
+            move |_ws, _cx| {
+                if let Err(err) = crate::telemetry::set_enabled(&folder, !enabled) {
+                    log::warn!("could not change the telemetry opt-out: {err}");
+                }
+            },
+            cx,
+        ),
+    ))
+}
+
+/// The web build has no config folder and sends no ping.
+#[cfg(target_arch = "wasm32")]
+fn telemetry_row(_cx: &mut Context<Workspace>) -> Option<gpui::Div> {
+    None
 }
 
 /// The gallery's content-filter row. The switch only works once the

@@ -294,9 +294,21 @@ Remap anything in `~/.config/schist/keymap.json`:
 
 ## Diagnostics
 
-Schist does not phone home. There are three things it can send over the
-network and each is off until you turn it on: **Check for Updates**, the
-on-demand font and model downloads, and crash reporting.
+Schist sends one thing without being asked: a daily ping, so we know
+roughly how many people run it and on what. It carries a random ID (for
+counting the same machine once — it is tied to nothing else), the Schist
+version, OS and architecture, the CPU model and core count, the GPU
+adapter and driver the compositor opened, and the amount of RAM. No
+hostname, no username, no paths, nothing about what you are working on.
+
+Turn it off with the tick in **Preferences ▸ Diagnostics**, or — without
+launching the app — by creating an empty file named `no_telemetry` in
+the config folder (`~/.config/schist/`, or `$XDG_CONFIG_HOME/schist/`).
+`SCHIST_NO_TELEMETRY=1` in the environment turns it off for one run.
+
+Everything else it can send over the network is off until you turn it
+on: **Check for Updates**, the on-demand font and model downloads, and
+crash reporting.
 
 Crash reporting is two separate ticks in **Preferences ▸ Diagnostics**.
 The first writes a report next to the crash-recovery snapshot in
